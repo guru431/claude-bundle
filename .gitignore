@@ -15,3 +15,15 @@ desktop.ini
 
 # Local overrides (user-specific examples, not part of the bundle)
 local/
+
+# Env files — only the .example template is committed
+.env
+.env.*
+!.env.example
+
+# Local sanitization patterns — see CLAUDE.md § Sanitization checklist.
+# This file itself is the leak it tries to prevent — never commit.
+.sanitize-patterns
+
+# A Claude Code workspace inside the bundle dir — local test artifacts only
+.claude/

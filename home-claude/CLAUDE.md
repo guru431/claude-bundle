@@ -173,3 +173,66 @@ and applies anti-AI rules on top.
 See `~/.claude/skills/personal-voice/SKILL.md` for the template. Profile
 locations are configurable — adapt the paths inside the skill to wherever
 you store your own voice profiles.
+
+## Error / alert handling
+
+On ANY error, alert, or unexpected behavior — before launching a fresh
+investigation, search for prior work in this order:
+
+1. **Project-level incident pages** — if you use the wiki pipeline from
+   this bundle, look under `~/.claude/wiki/projects/<current-project>/`
+   for `incident-*`, `solution-*`, or `_troubles-*` pages. They contain
+   prior symptom → cause → fix breakdowns.
+2. **Global incident index** — a compact list of past incidents across
+   all your projects. Typical location:
+   `~/.claude/memory/incidents.md` (build it up over time; the wiki
+   pipeline can append one-line entries automatically).
+3. **Re-investigate from scratch** — only if neither source has a match.
+
+After you resolve a new incident, write it up as an atomic page
+(symptom → cause → fix, at least 2 `[[wikilinks]]` to related pages) in
+`wiki/projects/<name>/incident-<topic>-YYYY-MM-DD.md`. Add a one-line
+entry to the global index too. This is how the wiki accumulates
+institutional knowledge — see `<bundle>/docs/wiki-method.md`.
+
+## Secrets / tokens / .env
+
+Before asking the user for a token or key for any external service —
+**check `<bundle-root>/.env` first**. The list of variables the bundle
+itself reads is in `config/llm-providers.example.env`.
+
+Workflow:
+- **Need a key for a new project** → look for it in `<bundle-root>/.env`
+  first → if present, copy that line into the project's local `.env`.
+  Do NOT symlink `.env` and do NOT source it from app code directly.
+- **A key exists but is stale / 401s** → tell the user which name in
+  `.env` is being read and ask them to refresh it. Don't silently ask
+  for a new one as if it's missing.
+- **A key really isn't in `.env`** → THEN ask the user. After they
+  paste it, write it to `.env` under a canonical name and tell them.
+
+`.env` never gets committed (it's in `.gitignore`). The template
+`config/llm-providers.example.env` is committed — it lists names only,
+no values.
+
+## Windows Task Scheduler
+
+If you use the cron pipeline from this bundle (`<bundle>/home-claude/cron/`),
+**all scheduled tasks are managed via `cron/registry.yaml` + the
+syncer** — never via direct `schtasks /Create`, `Register-ScheduledTask`,
+or the `taskschd.msc` GUI. Direct manipulation causes silent drift from
+the registry and nobody remembers what runs and why.
+
+Two policies matter for correctness, both detailed in
+`<bundle>/docs/cron-architecture.md`:
+
+- **LogonType** — default is `password` (task fires before user login;
+  survives overnight reboots). Requires `cron/admin/save-cred.cmd` to
+  have stashed a DPAPI-encrypted password.
+- **`script:` paths** — for Password-mode tasks, ALWAYS UNC
+  (`\\<host>\<share>\...`) or local `C:\...`. **Never a mapped drive**
+  (mapped drives don't exist in session 0 where Password tasks fire —
+  silent exit 127, no log, hours of debugging).
+
+To add a new task: edit `cron/registry.yaml`, run `cron/admin/sync.cmd`,
+verify with `schtasks /query /tn <name> /fo list /v`.

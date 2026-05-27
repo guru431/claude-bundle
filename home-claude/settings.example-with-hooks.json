@@ -1,0 +1,62 @@
+{
+  "_comment": "Example settings.json with hooks enabled. Replace <user> and the Python path with your real values, then copy contents (without this _comment field) over settings.json.",
+
+  "env": {},
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Bash(git *)",
+      "Bash(npm *)",
+      "Bash(pnpm *)",
+      "Bash(yarn *)",
+      "Bash(pip *)",
+      "Bash(poetry *)",
+      "Bash(composer *)",
+      "Bash(cmd.exe *)",
+      "Bash(powershell.exe *)",
+      "Bash(python3:*)",
+      "Bash(curl:*)",
+      "Bash(where:*)",
+      "WebFetch",
+      "WebFetch(domain:*)",
+      "Read",
+      "Write",
+      "Edit",
+      "MultiEdit",
+      "LS",
+      "Glob",
+      "Grep"
+    ],
+    "deny": []
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Program Files\\Python314\\python.exe\" \"C:/Users/<user>/.claude/hooks/block-iptables-save-to-rules.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Program Files\\Python314\\python.exe\" \"C:/Users/<user>/.claude/hooks/md2pdf-on-edit.py\"",
+            "timeout": 130
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "context7@claude-plugins-official": true
+  },
+  "language": "ru"
+}

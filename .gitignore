@@ -1,0 +1,17 @@
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Backups created by install
+*.bak
+*.bak-*
+
+# Local overrides (user-specific examples, not part of the bundle)
+local/

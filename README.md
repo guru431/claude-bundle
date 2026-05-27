@@ -1,129 +1,205 @@
 # claude-bundle
 
-A portable, sanitized starter pack for [Claude Code](https://docs.claude.com/claude-code)
-that you can drop onto a new machine in a few minutes.
+A portable Claude Code starter pack with two tiers of ambition. Pick one,
+or stack them.
 
-It is **not** a plugin and **not** a framework. It's the bare files that
-sit in `~/.claude/` — global rules, sane permissions defaults, a couple of
-optional hooks, and two example skill/command templates — extracted from a
-real working setup, with all personal data, hosts, tokens, and project
-paths stripped out.
+**Minimal tier** (~5 minutes): drop a sanitized `CLAUDE.md` and
+`settings.json` into `~/.claude/`, install the `superpowers` and
+`context7` plugins, get a consistent coding discipline across machines.
 
-## What you get
+**Full tier** (~30–60 minutes): on top of the minimal tier, add a
+Karpathy-style wiki vault, a registry-driven Windows Task Scheduler
+automation, an LLM provider switcher (`claude-switch.ps1`), an
+`AGENTS.md` mirror for Codex CLI, and ~9 scheduled tasks that flush
+Claude Code sessions into the wiki overnight.
+
+Both tiers were extracted from a real working setup, then sanitized of
+all private hosts, paths, tokens, and project names.
+
+## Layout
 
 ```
-home-claude/
-├── CLAUDE.md                              global rules (Karpathy + tool
-│                                          selection + encoding + workflow)
-├── settings.json                          permissions, plugins, language
-├── settings.example-with-hooks.json       same, with the two example hooks
-│                                          wired in (copy-paste reference)
-├── hooks/
-│   ├── block-iptables-save-to-rules.py    PreToolUse — forbid a specific
-│   │                                      dangerous iptables pattern
-│   ├── md2pdf-on-edit.py                  PostToolUse — keep <name>.pdf in
-│   │                                      sync with <name>.md
-│   └── README.md
-├── skills/
-│   ├── code-review-external/SKILL.md      template — second-opinion review
-│   │                                      via a different LLM
-│   ├── personal-voice/SKILL.md            template — write text as you, by
-│   │                                      register (email/chat/technical)
-│   └── README.md
-└── commands/
-    ├── code-review-ext.md                 template slash wrapper for the
-    │                                      code-review-external skill
-    └── README.md
+claude-bundle/
+├── README.md           ← you are here
+├── INSTALL.md          ← step-by-step (minimal + full tier)
+├── AGENT-INSTRUCTIONS.md ← same but addressed to Claude for self-deploy
+├── CHANGELOG.md
+├── LICENSE             ← MIT
+├── .gitignore, .gitattributes
+│
+├── home-claude/                       ← copied into ~/.claude/
+│   ├── CLAUDE.md                       Karpathy rules + tool selection + encoding
+│   ├── settings.json                   permissions + plugins + language
+│   ├── settings.example-with-hooks.json reference with the two example hooks wired in
+│   ├── hooks/                          user-level hooks
+│   │   ├── block-iptables-save-to-rules.py
+│   │   ├── md2pdf-on-edit.py
+│   │   └── README.md
+│   ├── skills/                         user-level skill templates
+│   │   ├── code-review-external/SKILL.md
+│   │   ├── personal-voice/SKILL.md
+│   │   └── README.md
+│   ├── commands/code-review-ext.md     user-level slash command
+│   ├── wiki/                           empty Karpathy-style vault skeleton
+│   │   ├── index.md
+│   │   ├── projects/<your-slugs>/      atomic pages (incident/solution/...)
+│   │   ├── kb/{concepts,tools,people}/ external knowledge
+│   │   └── daily/.pending/             staging area
+│   └── cron/                           cron foundation + wiki pipeline + 9 tasks
+│       ├── hooks/utils.py              shared LLM_call, JSONL parsing, wiki utils
+│       ├── hooks/session-{start,end}.py  inject wiki context / dump session
+│       ├── hooks/pre-compact.py        LLM-summarized handoff before compaction
+│       ├── llm-call.py                 CLI wrapper for utils.py::llm_call
+│       ├── telegram-send.sh            Bot API helper (env-driven)
+│       ├── wiki/wiki-*.py              5 compilers (flush/compile/build-index/lint)
+│       ├── claude-task-monitor.sh      alert on failed Task Scheduler jobs
+│       ├── claude-git-push-all.sh      auto-push project repos
+│       ├── claude-healthcheck.sh       morning self-check
+│       ├── memory-update.py            JSONL → memory MD
+│       ├── registry.yaml               9 tasks declared here
+│       └── admin/                      idempotent sync + DPAPI cred saver
+│           ├── sync.cmd, sync-tasks.ps1
+│           └── save-cred.cmd, save-cred.ps1
+│
+├── codex/
+│   ├── AGENTS.md                      universal mirror for Codex CLI (~/.codex/)
+│   └── AGENTS-per-project.template.md per-project router template
+│
+├── scripts/
+│   └── claude-switch.ps1              switch session backend (Claude/DS/MM/OCG/CCR)
+│
+├── config/
+│   └── llm-providers.example.env      env template (copy to <bundle-root>/.env)
+│
+└── docs/
+    ├── wiki-method.md                 how the Karpathy wiki pipeline works
+    ├── cron-architecture.md           Task Scheduler + registry.yaml policies
+    └── llm-routing.md                 claude-switch vs utils.py::llm_call
 ```
 
-Plus install docs:
+## What you actually get
 
-- [`INSTALL.md`](INSTALL.md) — step-by-step for a human
-- [`AGENT-INSTRUCTIONS.md`](AGENT-INSTRUCTIONS.md) — same, but written for
-  Claude Code to follow if you let it self-deploy on a new machine
-- [`CHANGELOG.md`](CHANGELOG.md)
+### Minimal tier — `~/.claude/` contents
 
-## What's actually in `CLAUDE.md`
-
-A compact rule-set the assistant should follow in every project on this
-machine. Highlights:
-
-- **Karpathy coding discipline** — think before coding, simplicity first,
-  surgical changes, goal-driven execution with explicit verify steps
-- **Tool selection** — dedicated tools (Glob, Grep, Read, Edit, Write) over
-  Bash when one fits; explicit list of cases where Bash is appropriate
-- **Bash sandbox quirks on Windows + VS Code** — which commands silently
-  fail and what to use instead
-- **File encoding** — BOM rules for `.ps1` / `.sh` / `.cmd` on Windows
-  (a real source of bugs when an LLM writes Cyrillic into a PowerShell
-  script without BOM)
-- **Findings pattern** — capture side observations during work without
-  derailing the current task
-- **Working methodology** — `/brainstorm` → `/writing-plans` →
-  `/subagent-driven-development` via the `superpowers` plugin, plus
-  `/systematic-debugging` for bugs, `/verification-before-completion`
-  before declaring done
-- **Codex CLI coexistence** — how to keep `~/.codex/AGENTS.md` in sync if
-  you also run Codex CLI
-
-## What's deliberately NOT here
-
-| Not included | Why |
+| File | What it gives |
 |---|---|
-| `.credentials.json` | personal — `claude /login` creates its own |
-| `.openclaude-profile.json` | personal API keys |
-| `memory/` | personal facts, infra notes, incident history |
-| `projects/` | session history, possibly sensitive |
-| Hooks pinned to a specific project path | they won't resolve on your machine |
-| MCP permissions for internal infrastructure | each entry is a private host |
-| `Bash(<absolute drive path>/*)` | path of the source machine |
-| Plugins binaries / cache | re-installed via `/plugin install` |
+| `CLAUDE.md` | Karpathy coding discipline (Think/Simplicity/Surgical/Goal-driven), tool-selection rules (Glob/Grep/Read/Edit over Bash), Windows file-encoding rules (BOM for `.ps1`, no BOM for `.sh`), Findings pattern, Superpowers workflow, Codex coexistence note |
+| `settings.json` | Permissions allow-list, `enabledPlugins` for `superpowers` and `context7`, `language: ru` (change to your preference) |
+| `hooks/*.py` | Optional: block dangerous `iptables-save`, regenerate `.pdf` when paired `.md` is edited |
+| `skills/*/SKILL.md` | Optional: `code-review-external` template (second-opinion review), `personal-voice` template (write text in your voice by register) |
+| `commands/code-review-ext.md` | Optional: `/code-review-ext` slash wrapper |
+
+After install: `/plugin install superpowers context7` gives you ~130
+built-in skills and slash commands like `/brainstorm`, `/writing-plans`,
+`/systematic-debugging`, `/subagent-driven-development`,
+`/verification-before-completion`.
+
+### Full tier — `~/.claude/wiki/` and `~/.claude/cron/`
+
+A **Karpathy-style file-based personal knowledge base** that gets filled
+from your real Claude Code sessions:
+
+- Hooks dump each session's tail to `wiki/daily/.pending/`
+- Cron tasks at night call an LLM to compile pending sessions into
+  atomic project pages (`incident-*`, `solution-*`, `feedback-*`,
+  `architecture-*`) with `[[wikilinks]]` for navigation — no RAG, no
+  embeddings
+- A build-index script regenerates `wiki/index.md` and per-project logs
+- A lint script catches broken links, orphan pages, missing frontmatter
+
+A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 9
+scheduled jobs. One UAC-elevated `sync.cmd` syncs your registry into
+real `Register-ScheduledTask` calls — idempotent, marked, hidden
+windows, Password-mode by default (runs before login → survives
+overnight reboots).
+
+LLM calls go through `utils.py::llm_call()` with a configurable fallback
+chain: **DeepSeek V4-Flash → OpenCode Go → None**. Claude is opt-in
+only — cron jobs will never silently burn your subscription.
+
+### Companion artifacts
+
+- **`scripts/claude-switch.ps1`** — interactive menu (and CLI mode) to
+  switch the active Claude Code session between Anthropic, DeepSeek,
+  MiniMax, OpenCode Go, and CCR (Claude Code Router). Writes to
+  `<project>/.claude/settings.local.json`.
+- **`codex/AGENTS.md`** — drop into `~/.codex/AGENTS.md` so Codex CLI
+  picks up the same universal rules as Claude Code (Claude-specific
+  sections like slash commands and hooks are omitted from this mirror).
+- **`config/llm-providers.example.env`** — env template listing every
+  key the bundle reads, where to get it, and which component uses it.
 
 ## Quick start
 
-1. Install [Claude Code](https://docs.claude.com/claude-code/quickstart),
-   sign in.
-2. Copy the contents of `home-claude/` into `~/.claude/` (Windows:
-   `C:\Users\<you>\.claude\`).
-3. In a Claude chat:
-   ```
-   /plugin marketplace add anthropics/claude-plugins-official
-   /plugin install superpowers
-   /plugin install context7
-   ```
-4. Reload the window.
+### If you only want the minimal tier
 
-Full step-by-step (with Windows path examples and verification checks) in
-[`INSTALL.md`](INSTALL.md).
+```powershell
+# Windows PowerShell
+$src = "<path-to-this-bundle>\home-claude"
+$dst = "$env:USERPROFILE\.claude"
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+Copy-Item "$src\CLAUDE.md"     $dst -Force
+Copy-Item "$src\settings.json" $dst -Force
+```
 
-## Customizing
+Then in a Claude Code chat:
+```
+/plugin marketplace add anthropics/claude-plugins-official
+/plugin install superpowers
+/plugin install context7
+```
 
-- **Change the language.** Edit `settings.json` → `"language": "ru"` to
-  whatever you prefer (or remove the key for English default).
-- **Wire the hooks.** Copy the `hooks` block from
-  `settings.example-with-hooks.json` into `settings.json`, then update the
-  Python path and `<user>` placeholder for your machine.
-- **Use the skill templates.** Both `code-review-external` and
-  `personal-voice` need a couple of paths filled in before they're useful —
-  see their `SKILL.md` files. They're written as patterns, not as drop-in
-  utilities.
+Reload the window. Done.
 
-## Provenance
+### If you want the full tier too
 
-This bundle was extracted from a real working `~/.claude/` and an internal
-meta-repo on one developer machine. The sanitization rules:
+See [`INSTALL.md`](INSTALL.md) — ~15 steps, includes:
+- Setting up `.env` with LLM provider keys (DeepSeek and/or OpenCode Go)
+- Copying `wiki/` and `cron/` into `~/.claude/`
+- Running `cron/admin/save-cred.cmd` to DPAPI-stash your Windows password
+- Editing `registry.yaml` placeholders (`<bundle-install-path>`, `<user>`)
+- Running `cron/admin/sync.cmd` to register all 9 tasks
+- Adapting `codex/AGENTS.md` if you also run Codex CLI
 
-- No hostnames, IPs, domain names, or absolute drive paths from the source
-- No real tokens or passwords (the source `env` block had several values
-  — all stripped)
-- No project-specific MCP servers — each entry pointed at a private host
-- No hooks pointing at the source meta-repo's automation scripts (those
-  are workflow plumbing for one specific setup, not general-purpose)
-- Skills and the slash command come with personal paths replaced by
-  `<placeholders>` and a "Setup" section explaining what you provide
+## What's deliberately NOT in the bundle
 
-If something still looks personal, please [open an issue](../../issues).
+| Not included | Why |
+|---|---|
+| Real tokens, keys, passwords | obvious |
+| Hostnames, IPs, domain names from the source machine | personal |
+| The wiki's actual contents | personal knowledge, often sensitive |
+| The full list of the source's projects | personal |
+| Project-specific MCP servers (Zabbix, n8n, Mikrotik, ...) | private infra |
+| YouTube KB pipeline (kb_news/) | requires channel config + content rights |
+| OpenClaw monitoring, SearXNG-powered research tasks | private servers |
+| Personal Telegram bots | personal |
+
+## Requirements
+
+**Minimal tier:**
+- VS Code + Claude Code extension
+- Claude account (subscription or API key)
+
+**Full tier (adds):**
+- Windows 10/11 (Task Scheduler + DPAPI for the Password-mode tasks)
+- Git for Windows (Git Bash)
+- Python 3.10+
+- At least one LLM provider key:
+  - DeepSeek (PAYG, cheapest reliable option), OR
+  - OpenCode Go (flat-rate subscription)
+  - Claude can be used but is **opt-in** for cron — see [`docs/llm-routing.md`](docs/llm-routing.md)
+- Telegram bot + chat_id (optional, for alerts)
+
+Linux / macOS for the full tier needs cron + LaunchAgent equivalents
+(not bundled — adapt the scripts; the Python and Bash parts are
+portable).
 
 ## License
 
 [MIT](LICENSE).
+
+## Provenance
+
+Extracted from one developer's `~/.claude/` and meta-repo. Sanitization
+checklist in [`CHANGELOG.md`](CHANGELOG.md). If something still looks
+personal, please [open an issue](../../issues).

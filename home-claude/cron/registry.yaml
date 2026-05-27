@@ -1,0 +1,171 @@
+# Cron Task Registry — single source of truth for Windows Task Scheduler.
+# Edit this file by hand, then apply with cron/admin/sync.cmd (one UAC prompt).
+#
+# ── LogonType policy (default: Password) ───────────────────────────────────
+#   Password (default) — task fires BEFORE the user logs in. Critical: without
+#   this, every Daily/Weekly trigger that lands while the user isn't logged in
+#   is silently skipped. For Password, the sync script reads a DPAPI-encrypted
+#   password from %LOCALAPPDATA%\boss-task-cred.dat (created one-time by
+#   cron/admin/save-cred.cmd, non-elevated).
+#
+#   Interactive — only sensible for AtLogOn triggers, where the logon event
+#   IS the trigger. Set explicitly via `logon_type: interactive`.
+#
+# ── Script path policy (CRITICAL for Password tasks) ───────────────────────
+#   For logon_type: password → ALWAYS use a UNC path (\\server\share\...)
+#   or a LOCAL drive (C:\...). NEVER use a mapped drive (S:\, M:\, etc.).
+#   Mapped drives only exist inside a user session; Password tasks fire in
+#   session 0 (before logon), so a mapped-drive path resolves to nothing and
+#   the launcher exits 127 with NO log file. (ClaudeTaskMonitor enforces this
+#   by alerting if any Password task has a mapped-drive path in its Action.)
+#
+#   Mapped-drive paths are only acceptable for logon_type: interactive +
+#   trigger: AtLogOn (the drive is mapped by the time the task fires).
+#
+# ── BUNDLE_ROOT in scripts ─────────────────────────────────────────────────
+#   Every script that derives BUNDLE_ROOT via `cd "$(dirname "$0")/.."` must
+#   have the correct number of `/..` for its depth.
+#     cron/<file>.sh        → /..       (1 level)
+#     cron/<dir>/<file>.sh  → /../..    (2 levels)
+#   Python equivalent: Path(__file__).resolve().parents[1] vs parents[2].
+#   A mismatch causes silent rc=1/rc=2 even when the path is correct.
+#
+# ── Supported `kind` values ────────────────────────────────────────────────
+#   bash | python | cmd  — via the local _run-hidden.vbs launcher (hidden window)
+#   vbs                  — direct `wscript.exe <script.vbs>` (already hidden)
+#   python_local         — direct `python.exe <script.py>` for local C:\ scripts
+#                          (used for logon-time bootstrap tasks)
+#   exec                 — arbitrary executable: needs `execute:` + `script:` +
+#                          optional `script_args:`. Used for service-style tasks.
+#
+# ── Supported `trigger` values ─────────────────────────────────────────────
+#   Daily HH:MM | Weekly <DOW> HH:MM | AtLogOn | AtStartup
+#   Monthly day=N HH:MM  — uses Register-ScheduledTask -Xml internally.
+#
+# ── settings ───────────────────────────────────────────────────────────────
+#   All tasks are registered with StartWhenAvailable=True — if a trigger is
+#   missed (machine off / asleep / not present), Task Scheduler catches up at
+#   the next opportunity.
+
+version: 1
+managed_marker: managed-by-registry
+launcher: <bundle-install-path>\bin\_run-hidden.vbs
+
+tasks:
+
+  - name: ClaudeMemoryUpdate
+    project: main
+    description: Nightly update of ~/.claude/memory/USER.md and cross-project-notes.md from today's JSONL sessions.
+    script: <bundle-install-path>\cron\memory-update.py
+    kind: python
+    trigger: Daily 02:00
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: true
+    timeout_hours: 72
+
+  - name: ClaudeWikiFlush
+    project: main
+    description: Daily wiki flush — JSONL sessions → daily/YYYY-MM-DD.md (phase 1).
+    script: <bundle-install-path>\cron\wiki\wiki-flush-sessions.sh
+    kind: bash
+    trigger: Daily 02:30
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: true
+    timeout_hours: 72
+
+  - name: ClaudeWikiCompileKB
+    project: main
+    description: Compile knowledge-news → wiki/kb/ (concepts/tools/people).
+    script: <bundle-install-path>\cron\wiki\wiki-compile-kb.sh
+    kind: bash
+    trigger: Daily 03:30
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: true
+    timeout_hours: 72
+
+  - name: ClaudeWikiCompileSessions
+    project: main
+    description: Compile daily logs → wiki/projects/ (phase 2).
+    script: <bundle-install-path>\cron\wiki\wiki-compile-sessions.sh
+    kind: bash
+    trigger: Daily 04:00
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: true
+    timeout_hours: 72
+
+  - name: ClaudeWikiBuildIndex
+    project: main
+    description: Rebuild wiki/projects/index.md and wiki/kb/index.md.
+    script: <bundle-install-path>\cron\wiki\wiki-build-index.py
+    kind: python
+    trigger: Daily 04:05
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: true
+    timeout_hours: 72
+
+  - name: ClaudeGitPushAll
+    project: main
+    description: Auto-commit + push every git repo under the projects root.
+    script: <bundle-install-path>\cron\git-push-all.sh
+    kind: bash
+    trigger: Daily 07:00
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: true
+    timeout_hours: 72
+
+  - name: ClaudeHealthcheck
+    project: main
+    description: Daily Claude Code healthcheck — LLM-based analysis of disk/memory/services.
+    script: <bundle-install-path>\cron\claude-healthcheck.sh
+    kind: bash
+    trigger: Daily 09:00
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: true
+    timeout_hours: 72
+
+  - name: ClaudeTaskMonitor
+    project: main
+    description: Check all managed tasks for failures + Password+mapped-drive policy violations; alerts to Telegram.
+    script: <bundle-install-path>\cron\claude-task-monitor.sh
+    kind: bash
+    trigger: Daily 09:30
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: true
+    timeout_hours: 72
+
+  - name: ClaudeWikiLint
+    project: main
+    description: Weekly wiki health check (broken links, orphan pages, duplicates).
+    script: <bundle-install-path>\cron\wiki\wiki-lint.sh
+    kind: bash
+    trigger: Weekly Sunday 02:00
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: true
+    timeout_hours: 72

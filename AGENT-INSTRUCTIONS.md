@@ -1,48 +1,41 @@
 # AGENT-INSTRUCTIONS — for Claude Code
 
-This file is addressed to you, Claude Code. When the user gives you access
-to a new machine (via VS Code Claude Code, or via SSH/WinRM from another
-machine) and asks you to deploy the base config from this bundle —
-execute the steps below in order.
+Addressed to you, Claude Code. The user has given you access to a new
+machine and wants you to deploy the bundle. Execute in order.
 
-## Context
+The bundle has two tiers — figure out which one the user wants:
+- **Tier 1** (minimal): `~/.claude/` config only (CLAUDE.md, settings.json,
+  optional hooks/skills/commands)
+- **Tier 2** (full): Tier 1 + wiki vault + cron pipeline + claude-switch
+  + AGENTS.md mirror
 
-- The bundle lives at `claude-bundle/` (or wherever the user pointed you to)
-- Goal: in one pass, apply the sanitized rules, plugins, and optional
-  hooks/skills on a new machine
-- Personal data (memory, incidents, tokens, server lists) must NOT be
-  carried over — the user will start "from a clean slate" on this machine
+If the user said "minimal" or just "set up Claude Code" — do Tier 1
+only. If they said "wiki", "cron", "the full thing", "Karpathy", or
+"all of it" — do Tier 2.
 
-## Sequence
+---
 
-### 0. Identify which machine you're on
+## 0. Identify the machine
 
 ```bash
-# In Bash:
 echo "USER=$USER  USERPROFILE=$USERPROFILE  HOST=$(hostname 2>/dev/null || echo unknown)"
 test -d "$USERPROFILE/.claude" && echo "claude-dir-exists" || echo "claude-dir-missing"
 ```
 
-If `~/.claude/` already exists and is non-empty — **STOP**. Ask the user:
+If `~/.claude/` already exists and is non-empty — **STOP**. Ask:
 > This machine already has Claude Code config in `~/.claude/`. Should I
 > overwrite `CLAUDE.md` + `settings.json`? Memory (`memory/`), session
 > history (`projects/`), and credentials (`.credentials.json`) will NOT
 > be touched regardless.
 
-### 1. Copy the configs
+---
 
-Target paths (Windows):
-- `C:\Users\<user>\.claude\CLAUDE.md` ← `home-claude/CLAUDE.md`
-- `C:\Users\<user>\.claude\settings.json` ← `home-claude/settings.json`
+## Tier 1 — minimal
 
-Optional folders to copy:
-- `C:\Users\<user>\.claude\hooks\` ← `home-claude/hooks/`
-- `C:\Users\<user>\.claude\skills\` ← `home-claude/skills/`
-- `C:\Users\<user>\.claude\commands\` ← `home-claude/commands/`
+### 1. Copy configs
 
 ```bash
-# Bash (Git Bash, Windows):
-SRC="<absolute-path-to-claude-bundle>/home-claude"
+SRC="<abs-path-to-bundle>/home-claude"
 DST="$USERPROFILE/.claude"
 mkdir -p "$DST"
 cp "$SRC/CLAUDE.md"     "$DST/CLAUDE.md"
@@ -53,133 +46,219 @@ cp -r "$SRC/skills"   "$DST/" 2>/dev/null
 cp -r "$SRC/commands" "$DST/" 2>/dev/null
 ```
 
-**IMPORTANT:** do not Edit/Write the files in `~/.claude/` directly through
-the assistant tools — prefer `cp`. That keeps existing user hooks and
-permissions intact if any.
+Don't Edit/Write `~/.claude/*` directly via your tools — use `cp`.
+If the user explicitly asks to "merge, not replace": read existing
+`settings.json`, union `permissions.allow` and `enabledPlugins`,
+preserve their `hooks` and `env`, write back.
 
-If the user explicitly asks to "merge, not replace": read the existing
-`settings.json`, union the `permissions.allow` lists and `enabledPlugins`,
-preserve their `hooks` and `env`, then write back. Otherwise — replace.
+### 2. Ask the user to reload Claude Code
 
-### 2. Reload Claude Code
+> Reload Claude Code (Ctrl+Shift+P → Developer: Reload Window) so the
+> new `CLAUDE.md` and `settings.json` are picked up.
 
-Tell the user:
-> Reload Claude Code in VS Code (`Ctrl+Shift+P` → `Developer: Reload Window`),
-> or close/reopen the chat, so the new `CLAUDE.md` and `settings.json` are
-> picked up.
+### 3. Plugins
 
-### 3. Install plugins
-
-#### Option A — user runs in the chat on the new machine
+User runs in the chat:
 ```
 /plugin marketplace add anthropics/claude-plugins-official
 /plugin install superpowers
 /plugin install context7
 ```
 
-You can't invoke `/plugin` yourself — these are interactive shell commands.
-
-#### Option B — clone from an already-configured donor (faster, offline)
-
-If you have SSH/WinRM access to a donor machine **AND** usernames in
-`~/.claude/plugins/installed_plugins.json` match (e.g. both are
-`<same-username>`), the cached `installPath` values will line up:
-
-```bash
-# Donor: <SRC_HOST>, new machine: <DST_HOST>, same username on both
-scp -i <key> -P <port> -r \
-  "<SRC>/plugins" \
-  "<SRC>/skills" \
-  user@<DST_HOST>:"<DST_HOME>/.claude/"
-```
-
-After this, the new `~/.claude/` will have:
-- `plugins/installed_plugins.json`
-- `plugins/marketplaces/claude-plugins-official/` (git clone of the marketplace)
-- `plugins/cache/claude-plugins-official/<plugin>/<version>/` (plugin payload)
-- `skills/` (user-level skill files)
-
-On first launch Claude Code picks up the existing state without
-reinstalling.
-
-**When Option B WON'T work:**
-- Different usernames (paths in `installPath` won't resolve)
-- Significantly different Claude Code versions
-  (`installed_plugins.json` schema may have changed)
-- Donor has private / homemade plugins you don't want to transfer
+You can't invoke `/plugin` yourself — it's an interactive shell command.
 
 ### 4. Verify
 
 ```bash
-# 4.1 Files are in place and have plausible sizes
 test -f "$USERPROFILE/.claude/CLAUDE.md" && wc -c "$USERPROFILE/.claude/CLAUDE.md"
-test -f "$USERPROFILE/.claude/settings.json" && cat "$USERPROFILE/.claude/settings.json" \
-  | python -c "import sys,json; print('json-ok' if json.load(sys.stdin) else 'json-bad')"
-```
-
-```bash
-# 4.2 Plugins installed (if Option A was used)
-test -d "$USERPROFILE/.claude/plugins/cache/claude-plugins-official/superpowers" \
-  && echo "superpowers-ok"
-test -d "$USERPROFILE/.claude/plugins/cache/claude-plugins-official/context7" \
-  && echo "context7-ok"
+test -f "$USERPROFILE/.claude/settings.json" \
+  && cat "$USERPROFILE/.claude/settings.json" | python -c "import sys,json; print('json-ok' if json.load(sys.stdin) else 'json-bad')"
 ```
 
 Then ask the user:
 > Type `/skills` in the chat and confirm the list contains `brainstorming`,
-> `systematic-debugging`, `writing-plans`. If it does — install succeeded.
+> `systematic-debugging`, `writing-plans`. If yes — Tier 1 done.
 
-### 5. What NOT to do
+---
 
-- ❌ Do NOT copy `~/.claude/memory/` from the source machine — personal
+## Tier 2 — wiki + cron + companions
+
+Only proceed after Tier 1 is verified.
+
+### 5. Copy the additional components
+
+```bash
+SRC="<abs-path-to-bundle>"
+DST="$USERPROFILE/.claude"
+cp -r "$SRC/home-claude/wiki" "$DST/"
+cp -r "$SRC/home-claude/cron" "$DST/"
+```
+
+### 6. Create `.env` and ask for keys
+
+```bash
+cp "$SRC/config/llm-providers.example.env" "$SRC/.env"
+```
+
+Ask the user (use AskUserQuestion):
+> Which LLM provider should the wiki + cron pipeline use?
+>   1) DeepSeek (cheapest reliable, PAYG)
+>   2) OpenCode Go (flat subscription, more model variety)
+>   3) Claude (consumes your subscription — opt-in only)
+
+Get the relevant key from the user. Write it into `<bundle-root>/.env`:
+- DeepSeek: `DEEPSEEK_KEY=sk-...`
+- OpenCode Go: `OPENCODE_GO_API_KEY=sk-...`
+- Claude opt-in: `WIKI_LLM_PROVIDER=claude` (uses claude CLI directly)
+
+Also ask about Telegram (optional):
+> Do you want Telegram alerts on cron failures? If yes — paste your
+> bot token and chat_id. If no — skip and the cron tasks just log
+> failures without alerting.
+
+Write `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` if provided.
+
+### 7. Stash the Windows password (DPAPI)
+
+```cmd
+"<abs-path-to-bundle>\home-claude\cron\admin\save-cred.cmd"
+```
+
+This is **interactive** — the user must type their Windows password.
+You can't bypass that. Tell them:
+> Run this command in a regular CMD window (non-elevated):
+> `<path-to-bundle>\home-claude\cron\admin\save-cred.cmd`
+> It will ask for your Windows login password and DPAPI-encrypt it
+> for Password-mode scheduled tasks.
+
+If the user wants to skip and use Interactive-mode only — edit
+`cron/registry.yaml` and change every `logon_type: password` to
+`interactive`. Warn them tasks won't run before they log in.
+
+### 8. Populate project map
+
+Read `home-claude/cron/hooks/utils.py`. Find `PROJECT_MAP = {}` and
+`KNOWN_PROJECTS = []`.
+
+Ask the user:
+> List the project slugs you want in the wiki — one short slug per
+> repo you care about (e.g. `myapp`, `infra`, `docs-site`). I'll
+> wire `PROJECT_MAP` and `KNOWN_PROJECTS` for you.
+
+Then look at `~/.claude/projects/` to see the actual directory names
+Claude Code uses for those projects (they look like
+`C--Users-user-projects-myapp`). Fill in `PROJECT_MAP` mapping each
+real directory name to the user's chosen slug, and put the slug list
+into `KNOWN_PROJECTS`.
+
+### 9. Edit `registry.yaml` placeholders
+
+Read `~/.claude/cron/registry.yaml`. Replace:
+- `<bundle-install-path>` → the absolute install path. **Must be**
+  UNC (`\\<host>\<share>\...`) or local (`C:\...`). NOT a mapped
+  drive (mapped drives don't exist in session 0 where Password-mode
+  tasks fire).
+- `<user>` → user's Windows username (from `echo $USER` earlier)
+
+### 10. Run the syncer
+
+```cmd
+"<abs-path-to-bundle>\home-claude\cron\admin\sync.cmd"
+```
+
+It auto-elevates to UAC once for the whole batch. Watch
+`%TEMP%\sync-tasks_latest.log` for errors.
+
+### 11. Verify
+
+```cmd
+schtasks /query /tn ClaudeTaskMonitor /fo list /v
+schtasks /query /tn ClaudeWikiFlush  /fo list /v
+```
+
+Both should show `Status: Ready`. Force a test run:
+```cmd
+schtasks /run /tn ClaudeTaskMonitor
+```
+
+Then check `~/.claude/cron/logs/claude-task-monitor_<today>.log` for
+success.
+
+### 12. (Optional) claude-switch
+
+Ask the user if they want the provider switcher wired:
+> Should I make `claude-switch.ps1` easy to invoke? Options:
+>   1) Leave as-is in `scripts/claude-switch.ps1` — invoke by full path
+>   2) Add a PowerShell alias to your profile (`switch-claude`)
+>   3) Skip — you don't need it
+
+For option 2:
+```powershell
+Add-Content $PROFILE @"
+function switch-claude { & "<bundle-root>\scripts\claude-switch.ps1" @args }
+"@
+```
+
+### 13. (Optional) Codex CLI mirror
+
+If Codex CLI is installed (`Test-Path "$env:USERPROFILE\.codex"`):
+```bash
+cp "$SRC/codex/AGENTS.md" "$USERPROFILE/.codex/AGENTS.md"
+```
+
+For per-project AGENTS.md, ask the user which projects they want.
+
+---
+
+## What NOT to do
+
+- ❌ Do NOT copy `~/.claude/memory/` from any other machine — personal
   facts, infra notes, incident history
-- ❌ Do NOT copy `~/.claude/projects/` — session history, may contain
-  sensitive material
-- ❌ Do NOT copy `.credentials.json` / `.openclaude-profile.json` — tokens;
-  user re-authenticates
-- ❌ Do NOT copy the `hooks` block from a donor `settings.json` blindly —
-  it likely points at the donor's project-specific scripts. Use the
-  bundle's `hooks/` folder + `settings.example-with-hooks.json` instead
-- ❌ Do NOT copy MCP permissions like `mcp__<service>__*` if the underlying
-  MCP server isn't installed on the new machine — they'll just create
-  noise in `/permissions`
-- ❌ Do NOT copy absolute drive paths from the donor's
-  `permissions.allow` (e.g. `Bash(s:/some-path/*)`) — they're specific
-  to one machine
+- ❌ Do NOT copy `~/.claude/projects/` — session history, may be sensitive
+- ❌ Do NOT copy `.credentials.json` / `.openclaude-profile.json` — tokens
+- ❌ Do NOT carry hooks pointing at another machine's `cron/hooks/`
+- ❌ Do NOT carry MCP permissions for services the new machine doesn't
+  expose (zabbix, n8n, mikrotik, custom MCPs from the source)
+- ❌ Do NOT use a mapped drive (`S:\`, `Z:\`, ...) in `registry.yaml`
+  `script:` paths for Password-mode tasks — silent failure in session 0
+- ❌ Do NOT set `WIKI_LLM_PROVIDER=claude` as the default if the user
+  has a paid Claude subscription — cron jobs will eat the budget
+- ❌ Do NOT run `codex init` if Codex CLI is installed — it overwrites
+  `AGENTS.md` and discards the split with `CLAUDE.md`
 
-### 6. Report to the user
+## Report at the end
 
-End with a short summary:
-> Deployed on this machine: `CLAUDE.md` (Karpathy + tool selection +
-> encoding rules), `settings.json` (permissions + plugins + language),
-> optional hooks/skills/commands (X of Y).
-> Memory, tokens, session history — untouched, will accumulate fresh.
-> What next? (e.g. wire the hooks into settings.json, populate
-> personal-voice profiles, hook up extra MCP servers.)
+```
+Tier 1: deployed CLAUDE.md, settings.json,
+        optional hooks (X/Y enabled), skills (templates — paths still
+        need filling), commands (1 wired).
+Tier 2: deployed wiki/ skeleton, cron/ pipeline. Registered N/9 tasks
+        with Task Scheduler. LLM provider: <provider>. Telegram alerts:
+        <yes/no>.
+Open items: <list of placeholders that still need real values, e.g.
+        "PROJECT_MAP in utils.py still empty — add your slugs">.
+```
 
 ## Edge cases
 
-### No Git Bash on the target machine
-Use `powershell.exe` to copy:
+### No Git Bash on the target
+PowerShell substitute for the `cp` commands:
 ```powershell
-Copy-Item "<src>\home-claude\CLAUDE.md"     "$env:USERPROFILE\.claude\CLAUDE.md" -Force
-Copy-Item "<src>\home-claude\settings.json" "$env:USERPROFILE\.claude\settings.json" -Force
-Copy-Item -Recurse "<src>\home-claude\hooks"    "$env:USERPROFILE\.claude\hooks"    -Force
-Copy-Item -Recurse "<src>\home-claude\skills"   "$env:USERPROFILE\.claude\skills"   -Force
-Copy-Item -Recurse "<src>\home-claude\commands" "$env:USERPROFILE\.claude\commands" -Force
+Copy-Item -Recurse "<src>\home-claude\<sub>" "$env:USERPROFILE\.claude\" -Force
 ```
 
 ### `~/.claude/CLAUDE.md` already modified by the user
 Back up first: `cp ~/.claude/CLAUDE.md ~/.claude/CLAUDE.md.bak-YYYY-MM-DD`.
-Tell the user.
-
-### Remote deployment via SSH / WinRM
-If you're deploying from this machine to another via SSH / WinRM — use the
-right transport (`scp` / `Invoke-Command -ToSession`). First push the
-bundle itself, then run steps 1–4 remotely.
+Tell the user before overwriting.
 
 ### Linux / macOS target
-Paths change: `~/.claude/` instead of `$USERPROFILE`. Steps are the same.
-The "File Encoding — BOM Rules" section in `CLAUDE.md` is Windows-specific
-and harmless on Linux / macOS — you can leave it, or delete that block
-locally if it bothers the user.
+- Tier 1 works as-is (use `~/.claude/` instead of `$USERPROFILE`).
+- Tier 2 needs crontab/LaunchAgent adaptation — the bundle's
+  Task Scheduler bits are Windows-only. Translate `registry.yaml`
+  entries to crontab manually. The Python compilers and Bash hooks
+  are portable.
+
+### Remote deployment via SSH/WinRM
+Push the bundle (`scp` / `Copy-Item -ToSession`), then run steps 1–11
+remotely. The user still needs to type the password locally for
+`save-cred.cmd`.

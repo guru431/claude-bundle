@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Compile external knowledge source into wiki/kb/.
+
+Reads articles / plans / proposals from a knowledge-news directory, calls the
+configured LLM (via utils.llm_call) to extract entities, creates/updates wiki
+pages.
+
+Schedule: daily at 03:30 (after KB Update at 03:00).
+"""
+
+import json
+import os
+import re
+import sys
+import time
+
+# Windows CP1251 → UTF-8
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+from utils import (  # noqa: E402
+    add_source_to_frontmatter,
+    llm_call,
+    normalize_wiki_path,
+    read_page,
+    source_hash,
+    source_already_processed,
+    write_page,
+)
+
+# Allow nested Claude CLI invocation
+for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
+    os.environ.pop(env_key, None)
+
+# Script lives under cron/wiki/<file>.py → 2 levels up to bundle root.
+BUNDLE_ROOT = Path(__file__).resolve().parents[2]
+WIKI_ROOT = BUNDLE_ROOT / "wiki"
+KB_DIR = WIKI_ROOT / "kb"
+LOG_MD = WIKI_ROOT / "log.md"
+KBNEWS_DIR = BUNDLE_ROOT / "kb_news"
+PROMPT_PATH = BUNDLE_ROOT / "cron" / "prompts" / "wiki-compile-kb.md"
+CRON_LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
+
+DATE = datetime.now().strftime("%Y-%m-%d")
+
+
+def get_processed_files() -> set[str]:
+    """Read log.md and return set of already-processed files (excluding ERROR)."""
+    processed = set()
+    if LOG_MD.exists():
+        for line in LOG_MD.read_text(encoding="utf-8").split("\n"):
+            if "(ERROR)" in line:
+                continue
+            match = re.search(r'processed:\s*(.+?)(?:\s*→|$)', line)
+            if match:
+                processed.add(match.group(1).strip())
+    return processed
+
+
+def find_new_files(processed: set[str]) -> list[Path]:
+    """Find new/unprocessed files in the knowledge-news directory."""
+    sources = []
+    for subdir in ["articles", "plans", "proposals"]:
+        src_dir = KBNEWS_DIR / subdir
+        if not src_dir.exists():
+            continue
+        for f in sorted(src_dir.glob("*.md")):
+            rel = f"{subdir}/{f.name}"
+            if rel not in processed:
+                sources.append(f)
+    return sources
+
+
+def read_existing_pages() -> dict[str, str]:
+    """Read existing wiki pages for context."""
+    pages = {}
+    for subdir in ["concepts", "tools", "people"]:
+        d = KB_DIR / subdir
+        if not d.exists():
+            continue
+        for f in d.glob("*.md"):
+            pages[f.stem] = f.read_text(encoding="utf-8")
+    return pages
+
+
+def compile_article(article_path: Path, existing_pages: dict[str, str]) -> dict | None:
+    """Call the LLM to compile one article into wiki pages."""
+    prompt = PROMPT_PATH.read_text(encoding="utf-8")
+    article_text = article_path.read_text(encoding="utf-8")
+
+    existing_list = ", ".join(sorted(existing_pages.keys())[:100])
+
+    full_prompt = f"""{prompt}
+
+---
+
+## Existing pages (check before creating new ones):
+{existing_list}
+
+## Article to process:
+File: {article_path.relative_to(KBNEWS_DIR)}
+
+{article_text}
+
+---
+
+Answer STRICTLY in JSON format (array of objects):
+[
+  {{
+    "path": "kb/concepts/Name.md",
+    "action": "create" or "append",
+    "content": "full page text (if create) or appendable text (if append)"
+  }}
+]
+
+JSON only, no markdown wrapper, no commentary."""
+
+    output = llm_call(full_prompt, timeout=600)
+    if not output:
+        return None
+    try:
+        json_match = re.search(r'\[[\s\S]*\]', output)
+        if json_match:
+            return json.loads(json_match.group())
+        return None
+    except json.JSONDecodeError as e:
+        print(f"  ERROR: {e}", file=sys.stderr)
+        return None
+
+
+def apply_changes(changes: list[dict], existing_pages: dict[str, str], article_rel: str, article_hash: str) -> list[str]:
+    """Apply changes: handle frontmatter + source tracking for create/update/append."""
+    created = []
+    for change in changes:
+        rel_path = normalize_wiki_path(change.get("path", ""))
+        action = change.get("action", "create")
+        content = change.get("content", "")
+
+        if not rel_path or not content:
+            continue
+
+        full_path = WIKI_ROOT / rel_path
+
+        if content.lstrip().startswith("---\n"):
+            m = re.match(r"^\s*---\n.*?\n---\n", content, re.DOTALL)
+            if m:
+                content = content[m.end():]
+
+        existing_fm, existing_body = read_page(full_path)
+
+        if full_path.exists():
+            if action == "append":
+                if content.strip() not in existing_body:
+                    final_body = existing_body.rstrip() + "\n\n" + content
+                    label = "appended"
+                else:
+                    final_body = existing_body
+                    label = "skipped"
+            else:
+                final_body = content
+                label = "updated"
+        else:
+            final_body = content
+            label = "created"
+
+        new_fm = add_source_to_frontmatter(
+            existing_fm,
+            src_path=article_rel,
+            src_hash=article_hash,
+        )
+        write_page(full_path, new_fm, final_body)
+        created.append(f"{label}: {rel_path}")
+
+        page_name = Path(rel_path).stem
+        existing_pages[page_name] = final_body
+
+    return created
+
+
+def update_log(article_rel: str, changes: list[str]):
+    """Record processed items in log.md."""
+    entry = f"- [compile-kb] processed: {article_rel} → {', '.join(changes)}\n"
+    with open(LOG_MD, "a", encoding="utf-8") as f:
+        f.write(entry)
+
+
+def update_kb_index():
+    """Update wiki/kb/index.md with the current page list."""
+    sections = {"concepts": [], "tools": [], "people": []}
+    for subdir, pages in sections.items():
+        d = KB_DIR / subdir
+        if d.exists():
+            for f in sorted(d.glob("*.md")):
+                pages.append(f.stem)
+
+    lines = [
+        "# External knowledge (kb/)",
+        "",
+        "Knowledge compiled from external sources (e.g. video reviews).",
+        "",
+        f"Sources: `kb_news/articles/`, `kb_news/plans/`, `kb_news/proposals/`",
+        "",
+        f"## Concepts ({len(sections['concepts'])})",
+        "",
+    ]
+    for name in sections["concepts"]:
+        lines.append(f"- [[{name}]]")
+    lines += ["", f"## Tools ({len(sections['tools'])})", ""]
+    for name in sections["tools"]:
+        lines.append(f"- [[{name}]]")
+    lines += ["", f"## People ({len(sections['people'])})", ""]
+    for name in sections["people"]:
+        lines.append(f"- [[{name}]]")
+    lines += ["", "---", "Back: [[index|Main index]]", ""]
+
+    (KB_DIR / "index.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def main():
+    CRON_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = CRON_LOG_DIR / f"wiki-compile-kb_{DATE}.log"
+
+    def log(msg):
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}"
+        print(line)
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+    log(f"=== Wiki Compile KB {DATE} ===")
+
+    processed = get_processed_files()
+    log(f"Already processed: {len(processed)} files")
+
+    new_files = find_new_files(processed)
+    log(f"New files: {len(new_files)}")
+
+    if not new_files:
+        log("Nothing to process. Exiting.")
+        return
+
+    existing_pages = read_existing_pages()
+    log(f"Existing wiki pages: {len(existing_pages)}")
+
+    total_created = 0
+    for i, article_path in enumerate(new_files):
+        rel = str(article_path.relative_to(KBNEWS_DIR)).replace("\\", "/")
+        log(f"[{i+1}/{len(new_files)}] Processing: {rel}")
+
+        article_hash = source_hash(article_path)
+        changes = compile_article(article_path, existing_pages)
+        if changes:
+            applied = apply_changes(changes, existing_pages, f"kb_news/{rel}", article_hash)
+            update_log(rel, applied)
+            total_created += len(applied)
+            log(f"  → {len(applied)} changes")
+        else:
+            log(f"  → ERROR: compile failed")
+            update_log(rel, ["ERROR"])
+
+        if i < len(new_files) - 1:
+            time.sleep(5)
+
+    update_kb_index()
+    log(f"=== Total: {total_created} changes across {len(new_files)} files ===")
+
+
+if __name__ == "__main__":
+    main()

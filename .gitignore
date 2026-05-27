@@ -27,3 +27,7 @@ local/
 
 # A Claude Code workspace inside the bundle dir — local test artifacts only
 .claude/
+
+# Python bytecode
+__pycache__/
+*.pyc

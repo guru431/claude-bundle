@@ -39,13 +39,27 @@ SKIP_JSONL_PROJECTS: set[str] = set()
 def dir_to_project(dirname: str) -> str:
     """Convert a Claude projects directory name into a wiki project name.
 
-    Example: '--encoded--path--myproject' -> 'myproject'.
+    Claude Code encodes the project cwd into the directory name by replacing
+    `\\`, `/`, and `:` with `-`. So `C:\\Users\\me\\projects\\myapp` becomes
+    `C--Users-me-projects-myapp`. There's no general way to recover the
+    original last segment if the project name itself contains `-` — so we
+    rely on PROJECT_MAP for accuracy and use the trailing segment as a
+    best-effort fallback.
+
+    Resolution order:
+      1. PROJECT_MAP[dirname] — exact match on the full encoded name
+      2. last `-`-segment of dirname as a fallback (works for slugs without
+         `-` in them: 'myapp', 'infra', ...)
+      3. 'main' for empty input
+
+    Example: dir_to_project('C--Users-me-projects-myapp') -> 'myapp'
+             (assuming PROJECT_MAP is empty or has no entry).
     """
-    match = re.search(r"--[A-Za-z]+-[_-]?(.+)$", dirname)
-    if match:
-        raw = match.group(1)
-        return PROJECT_MAP.get(raw, raw)
-    return "unknown"
+    if not dirname:
+        return "main"
+    if dirname in PROJECT_MAP:
+        return PROJECT_MAP[dirname]
+    return dirname.rsplit("-", 1)[-1] or dirname
 
 
 def is_subagent_jsonl(jsonl_path: str) -> bool:
@@ -659,10 +673,19 @@ def parse_llm_json(raw: str) -> list[dict]:
         pass
 
     fixed = json_str
-    for _ in range(200):
+    prev_state: tuple[int, str] | None = None
+    for _ in range(50):
         try:
             return json.loads(fixed)
         except json.JSONDecodeError as e:
+            # Progress guard: bail if the (pos, error) tuple repeats — that
+            # means our patch didn't move us toward a valid parse.
+            state = (e.pos, str(e)[:60])
+            if state == prev_state:
+                print(f"  JSON loop stuck at pos {e.pos}: {state[1]}", file=sys.stderr)
+                return []
+            prev_state = state
+
             if "Invalid \\escape" in str(e):
                 pos = e.pos
                 if pos > 0 and fixed[pos-1] == '\\':
@@ -705,7 +728,8 @@ def parse_llm_json(raw: str) -> list[dict]:
             else:
                 raise e
 
-    return json.loads(fixed)
+    print(f"  JSON parse: 50 iterations exhausted, giving up", file=sys.stderr)
+    return []
 
 
 def llm_call(prompt: str, timeout: int = 600) -> str | None:

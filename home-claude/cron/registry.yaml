@@ -5,7 +5,7 @@
 #   Password (default) — task fires BEFORE the user logs in. Critical: without
 #   this, every Daily/Weekly trigger that lands while the user isn't logged in
 #   is silently skipped. For Password, the sync script reads a DPAPI-encrypted
-#   password from %LOCALAPPDATA%\boss-task-cred.dat (created one-time by
+#   password from %LOCALAPPDATA%\claude-bundle-cred.dat (created one-time by
 #   cron/admin/save-cred.cmd, non-elevated).
 #
 #   Interactive — only sensible for AtLogOn triggers, where the logon event
@@ -69,8 +69,8 @@ tasks:
   - name: ClaudeWikiFlush
     project: main
     description: Daily wiki flush — JSONL sessions → daily/YYYY-MM-DD.md (phase 1).
-    script: <bundle-install-path>\cron\wiki\wiki-flush-sessions.sh
-    kind: bash
+    script: <bundle-install-path>\cron\wiki\wiki-flush-sessions.py
+    kind: python
     trigger: Daily 02:30
     user: <user>
     logon_type: password
@@ -81,9 +81,9 @@ tasks:
 
   - name: ClaudeWikiCompileKB
     project: main
-    description: Compile knowledge-news → wiki/kb/ (concepts/tools/people).
-    script: <bundle-install-path>\cron\wiki\wiki-compile-kb.sh
-    kind: bash
+    description: Compile knowledge-news → wiki/kb/ (concepts/tools/people). Disabled by default — enable after you wire up a kb_news/ source directory.
+    script: <bundle-install-path>\cron\wiki\wiki-compile-kb.py
+    kind: python
     trigger: Daily 03:30
     user: <user>
     logon_type: password
@@ -91,12 +91,13 @@ tasks:
     hidden: true
     notify_telegram: true
     timeout_hours: 72
+    enabled: false
 
   - name: ClaudeWikiCompileSessions
     project: main
     description: Compile daily logs → wiki/projects/ (phase 2).
-    script: <bundle-install-path>\cron\wiki\wiki-compile-sessions.sh
-    kind: bash
+    script: <bundle-install-path>\cron\wiki\wiki-compile-sessions.py
+    kind: python
     trigger: Daily 04:00
     user: <user>
     logon_type: password
@@ -160,8 +161,8 @@ tasks:
   - name: ClaudeWikiLint
     project: main
     description: Weekly wiki health check (broken links, orphan pages, duplicates).
-    script: <bundle-install-path>\cron\wiki\wiki-lint.sh
-    kind: bash
+    script: <bundle-install-path>\cron\wiki\wiki-lint.py
+    kind: python
     trigger: Weekly Sunday 02:00
     user: <user>
     logon_type: password

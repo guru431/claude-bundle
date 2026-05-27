@@ -1,6 +1,4 @@
 {
-  "_comment": "Example settings.json with hooks enabled. Replace <user> and the Python path with your real values, then copy contents (without this _comment field) over settings.json.",
-
   "env": {},
   "permissions": {
     "allow": [
@@ -36,7 +34,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"C:\\Program Files\\Python314\\python.exe\" \"C:/Users/<user>/.claude/hooks/block-iptables-save-to-rules.py\""
+            "command": "\"<python-exe>\" \"C:/Users/<user>/.claude/hooks/block-iptables-save-to-rules.py\""
           }
         ]
       }
@@ -47,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"C:\\Program Files\\Python314\\python.exe\" \"C:/Users/<user>/.claude/hooks/md2pdf-on-edit.py\"",
+            "command": "\"<python-exe>\" \"C:/Users/<user>/.claude/hooks/md2pdf-on-edit.py\"",
             "timeout": 130
           }
         ]

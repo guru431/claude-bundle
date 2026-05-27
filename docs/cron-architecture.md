@@ -61,9 +61,11 @@ not mapped drives.
 | `python_local`| direct `python.exe <script>` for local `C:\` scripts (logon-time bootstrap) |
 | `exec`        | arbitrary executable + args (service-style tasks like long-running daemons) |
 
-The launcher (`_run-hidden.vbs`) sits on local `C:\`, not on a mapped
-drive. It calls bash/python/cmd with `WScript.Shell.Run(cmd, 0, True)` —
-window-style 0 = hidden, so cron-tasks don't flash console windows.
+The launcher (`bin/_run-hidden.vbs`, shipped in the bundle) calls
+bash/python/cmd with `WScript.Shell.Run(cmd, 0, True)` — window-style 0 =
+hidden, so cron-tasks don't flash console windows. The launcher itself
+should sit on a path Task Scheduler can resolve in session 0 — UNC or
+local `C:\`, never a mapped drive.
 
 ## Trigger formats
 

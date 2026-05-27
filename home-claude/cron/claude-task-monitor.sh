@@ -104,7 +104,9 @@ Get-ScheduledTask | Where-Object {
     $_.Principal.LogonType -eq 'Password'
 } | ForEach-Object {
     $args = ($_.Actions | Select-Object -First 1).Arguments
-    if ($args -match '\s[A-Za-z]:\\') {
+    # Drive letter anywhere in the args: after a space, after a quote, or at
+    # the very start of the string. (Single-letter drive + `:\` is the minimum.)
+    if ($args -match '(^|[\s\"])[A-Za-z]:\\') {
         [PSCustomObject]@{ Name = $_.TaskName; Args = $args }
     }
 } | ConvertTo-Json -Compress
@@ -220,7 +222,7 @@ echo "Size check: logs=${LOGS_MB:-?}MB wiki=${WIKI_MB:-?}MB wiki.git=${WIKIGIT_M
 if [ -n "$SIZE_WARNINGS" ]; then
     FAILURES="${FAILURES}
 SizeWatch: growth thresholds exceeded
-$(printf "$SIZE_WARNINGS")"
+$(printf '%s' "$SIZE_WARNINGS")"
 fi
 
 # --- Alert to Telegram if failures found ---

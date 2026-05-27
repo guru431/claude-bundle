@@ -57,7 +57,16 @@ for dir in "$REPOS_DIR"/*/; do
     fi
 
     if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-        git add -A >> "$LOG_FILE" 2>&1
+        # Safety: exclude any path matching .env / .env.* / **/.env*  via pathspec
+        # so a file that appears between status and add can never sneak in.
+        # If you actually want this repo to track .env*, gitignore it explicitly
+        # or stage the file by hand once.
+        git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
+        if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
+            echo "[$repo] nothing to commit after .env exclusion" >> "$LOG_FILE"
+            skipped=$((skipped + 1))
+            continue
+        fi
         git commit -m "Auto-commit: $(date +%Y-%m-%d)" >> "$LOG_FILE" 2>&1
         echo "[$repo] auto-committed changes" >> "$LOG_FILE"
     fi
@@ -89,9 +98,14 @@ if [ -d "$WIKI_DIR/.git" ]; then
         branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
         if [ -n "$branch" ]; then
             if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-                git add -A >> "$LOG_FILE" 2>&1
-                git commit -m "wiki: auto-commit $(date +%Y-%m-%d)" >> "$LOG_FILE" 2>&1
-                echo "[wiki] auto-committed changes" >> "$LOG_FILE"
+                git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
+                if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
+                    echo "[wiki] nothing to commit after .env exclusion" >> "$LOG_FILE"
+                    skipped=$((skipped + 1))
+                else
+                    git commit -m "wiki: auto-commit $(date +%Y-%m-%d)" >> "$LOG_FILE" 2>&1
+                    echo "[wiki] auto-committed changes" >> "$LOG_FILE"
+                fi
             fi
             local_hash=$(git rev-parse "$branch" 2>/dev/null)
             remote_hash=$(git rev-parse "origin/$branch" 2>/dev/null)

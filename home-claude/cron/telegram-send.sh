@@ -8,7 +8,31 @@
 #   TELEGRAM_CHAT_ID    — numeric chat id (use @userinfobot to discover)
 #
 # Set these in a .env file at the bundle root (see config/llm-providers.example.env)
-# or export them in your shell profile.
+# or export them in your shell profile. Task Scheduler in session 0 has no
+# user env, so we read .env explicitly when running under cron.
+
+BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ENV_FILE="$BUNDLE_ROOT/.env"
+if [ -f "$ENV_FILE" ]; then
+    # Safe parser: extract only well-formed KEY=VALUE lines, no `source` (which
+    # would execute arbitrary bash if .env ever contains $(...) / `...` / `;`).
+    # Strips surrounding quotes from VALUE. Ignores comments and blank lines.
+    while IFS= read -r raw || [ -n "$raw" ]; do
+        line="${raw%$'\r'}"
+        case "$line" in
+            ''|\#*) continue ;;
+            export\ *) line="${line#export }" ;;
+        esac
+        key="${line%%=*}"
+        case "$key" in
+            *[!A-Za-z0-9_]*|'') continue ;;
+        esac
+        val="${line#*=}"
+        val="${val%\"}"; val="${val#\"}"
+        val="${val%\'}"; val="${val#\'}"
+        export "$key=$val"
+    done < "$ENV_FILE"
+fi
 
 if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
     echo "ERROR: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set" >&2

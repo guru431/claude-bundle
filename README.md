@@ -10,7 +10,7 @@ or stack them.
 **Full tier** (~30–60 minutes): on top of the minimal tier, add a
 Karpathy-style wiki vault, a registry-driven Windows Task Scheduler
 automation, an LLM provider switcher (`claude-switch.ps1`), an
-`AGENTS.md` mirror for Codex CLI, and ~9 scheduled tasks that flush
+`AGENTS.md` mirror for Codex CLI, and 9 scheduled tasks that flush
 Claude Code sessions into the wiki overnight.
 
 Both tiers were extracted from a real working setup, then sanitized of

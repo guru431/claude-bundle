@@ -82,9 +82,13 @@ def find_recent_jsonls(processed: set[str], max_age_hours: int = 48) -> dict[str
         for jsonl in proj_dir.glob("*.jsonl"):
             if jsonl.name in processed:
                 continue
-            if jsonl.stat().st_mtime < cutoff:
+            try:
+                st = jsonl.stat()
+            except OSError:
                 continue
-            if jsonl.stat().st_size < 10240:  # < 10KB — too short
+            if st.st_mtime < cutoff:
+                continue
+            if st.st_size < 10240:  # < 10KB — too short
                 continue
             by_project.setdefault(project, []).append(jsonl)
 
@@ -112,9 +116,13 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20) -> dict[str, l
         for jsonl in proj_dir.glob("*.jsonl"):
             if jsonl.name in processed:
                 continue
-            if jsonl.stat().st_size < 10240:
+            try:
+                st = jsonl.stat()
+            except OSError:
                 continue
-            all_candidates.append((jsonl.stat().st_mtime, project, jsonl))
+            if st.st_size < 10240:
+                continue
+            all_candidates.append((st.st_mtime, project, jsonl))
 
     all_candidates.sort(key=lambda x: -x[0])
     for _, project, jsonl in all_candidates[:max_files]:

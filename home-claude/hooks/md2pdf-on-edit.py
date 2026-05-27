@@ -14,8 +14,6 @@ issue is not silently swallowed.
 Requires: ~/.claude/bin/md2pdf.py (a small wrapper around any MD->PDF
 converter — pandoc, weasyprint, mdpdf, etc.). If you don't use the
 md+pdf pairing pattern, you can simply delete this hook from settings.json.
-
-Adjust the PYTHON constant below to your local Python interpreter path.
 """
 from __future__ import annotations
 
@@ -25,8 +23,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Adjust to your local Python interpreter path.
-PYTHON = os.environ.get("CLAUDE_HOOK_PYTHON") or r"C:\Program Files\Python314\python.exe"
+# Python interpreter. Override via $CLAUDE_HOOK_PYTHON if you need a specific
+# install; otherwise reuse the interpreter the hook itself was launched with.
+PYTHON = os.environ.get("CLAUDE_HOOK_PYTHON") or sys.executable
 MD2PDF = Path.home() / ".claude" / "bin" / "md2pdf.py"
 
 

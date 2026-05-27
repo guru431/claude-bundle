@@ -1,4 +1,4 @@
-# claude-switch.ps1 — switch the Claude Code backend between five modes:
+﻿# claude-switch.ps1 — switch the Claude Code backend between five modes:
 #   anthropic — Claude (default — no env override)
 #   deepseek  — DeepSeek direct via api.deepseek.com/anthropic (V4-Flash / V4-Pro)
 #   minimax   — MiniMax direct via api.minimax.io/anthropic
@@ -80,10 +80,12 @@ $ccrPort = if ($ccrParts.Count -ge 2) { [int]$ccrParts[1] } else { 3456 }
 
 if ($ProjectPath) {
     $settingsDir = Join-Path $ProjectPath ".claude"
-    if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null }
 } else {
-    $settingsDir = $PSScriptRoot
+    # Default: write into <cwd>/.claude/ — the project the user is currently
+    # working in. Matches the documented behavior (README / INSTALL).
+    $settingsDir = Join-Path (Get-Location).Path ".claude"
 }
+if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null }
 $settingsPath = Join-Path $settingsDir "settings.local.json"
 
 # Standard permissions block (stable across all modes)

@@ -30,9 +30,19 @@ hook is a silent no-op.
 Failure reports are surfaced in the UI via `systemMessage` so a stale PDF
 doesn't slip through unnoticed.
 
+## Wiring them up
+
+`settings.example-with-hooks.json` shows the `hooks` block to merge into
+your `settings.json`. Replace the placeholders before pasting:
+
+- `<python-exe>` — absolute path to your Python interpreter
+  (e.g. `C:/Program Files/Python312/python.exe`). Or set
+  `CLAUDE_HOOK_PYTHON` in your environment and leave the command alone.
+- `<user>` — your Windows username.
+
 ## Adjusting
 
-- Python path inside the hooks: edit the `PYTHON` constant at the top of each
-  file, or set `CLAUDE_HOOK_PYTHON` in your environment.
+- The `md2pdf-on-edit.py` script picks up `$CLAUDE_HOOK_PYTHON` first, then
+  falls back to `sys.executable` (the interpreter running the hook).
 - Both hooks read JSON from stdin per the Claude Code hook protocol and emit
   JSON to stdout. They never raise on malformed input — they pass through.

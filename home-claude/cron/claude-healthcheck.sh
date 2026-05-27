@@ -43,10 +43,12 @@ REMOTE_SCRIPT
 fi
 
 # --- Optional: remote Windows server via WinRM ---
-# Set WIN_REMOTE_HOST to enable. Must be in TrustedHosts.
+# Set WIN_REMOTE_HOST to enable. Must be in TrustedHosts. Wrapped in single
+# quotes inside the PowerShell string so any whitespace or special character
+# in the variable is treated as a literal hostname (no PS injection).
 WIN_DATA=""
 if [ -n "$WIN_REMOTE_HOST" ]; then
-    WIN_DATA=$(powershell.exe -Command "Invoke-Command -ComputerName $WIN_REMOTE_HOST -ScriptBlock {
+    WIN_DATA=$(powershell.exe -Command "Invoke-Command -ComputerName '$WIN_REMOTE_HOST' -ScriptBlock {
         Write-Output '=== Remote Windows host ==='
         Write-Output '--- disk ---'
         Get-PSDrive C | Format-Table @{N='UsedGB';E={[math]::Round(\$_.Used/1GB)}}, @{N='FreeGB';E={[math]::Round(\$_.Free/1GB)}} -AutoSize | Out-String

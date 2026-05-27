@@ -1,4 +1,4 @@
-# save-cred.ps1 — one-time save of the current Windows user's password for
+﻿# save-cred.ps1 — one-time save of the current Windows user's password for
 # Task Scheduler (LogonType=Password).
 #
 # Why: Register-ScheduledTask with LogonType=Password needs the user's
@@ -10,7 +10,7 @@
 # What it does:
 #   - Prompts for the password interactively (Read-Host -AsSecureString)
 #   - Encrypts via Windows DPAPI (CurrentUser scope)
-#   - Writes %LOCALAPPDATA%\boss-task-cred.dat
+#   - Writes %LOCALAPPDATA%\claude-bundle-cred.dat
 #
 # Security:
 #   - The DPAPI key is bound to the Windows user + machine. Copying the file
@@ -32,7 +32,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$target = Join-Path $env:LOCALAPPDATA 'boss-task-cred.dat'
+$target = Join-Path $env:LOCALAPPDATA 'claude-bundle-cred.dat'
 
 Write-Host ""
 Write-Host "=== save-cred.ps1 ===" -ForegroundColor Cyan
@@ -46,17 +46,17 @@ if (Test-Path $target) {
     if ($confirm -ne 'yes') { Write-Host "Cancelled." -ForegroundColor DarkGray; return }
 }
 
-$pwd = Read-Host -Prompt "Password for $env:USERDOMAIN\$User" -AsSecureString
-if ($pwd.Length -eq 0) { Write-Host "Empty password. Cancelled." -ForegroundColor Red; exit 1 }
+$securePwd = Read-Host -Prompt "Password for $env:USERDOMAIN\$User" -AsSecureString
+if ($securePwd.Length -eq 0) { Write-Host "Empty password. Cancelled." -ForegroundColor Red; exit 1 }
 
 # DPAPI scope = CurrentUser (default for ConvertFrom-SecureString without -Key).
-$encrypted = ConvertFrom-SecureString -SecureString $pwd
+$encrypted = ConvertFrom-SecureString -SecureString $securePwd
 $encrypted | Out-File -FilePath $target -Encoding utf8 -NoNewline
 
 # Quick self-test: decrypt back and compare lengths
 $back = (Get-Content $target | ConvertTo-SecureString)
-if ($back.Length -ne $pwd.Length) {
-    Write-Host "WARNING: round-trip length mismatch (saved $($pwd.Length), read back $($back.Length))" -ForegroundColor Yellow
+if ($back.Length -ne $securePwd.Length) {
+    Write-Host "WARNING: round-trip length mismatch (saved $($securePwd.Length), read back $($back.Length))" -ForegroundColor Yellow
 }
 
 Write-Host ""

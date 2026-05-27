@@ -234,6 +234,13 @@ def main():
 
     log(f"=== Wiki Compile KB {DATE} ===")
 
+    # Source dir is optional — the bundle ships without kb_news/ (the
+    # YouTube-transcript pipeline isn't included). If you don't wire up your
+    # own source, just keep this task disabled in registry.yaml.
+    if not KBNEWS_DIR.exists():
+        log(f"No source directory at {KBNEWS_DIR} — nothing to compile, exiting.")
+        return
+
     processed = get_processed_files()
     log(f"Already processed: {len(processed)} files")
 

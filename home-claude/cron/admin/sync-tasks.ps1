@@ -1,4 +1,4 @@
-# sync-tasks.ps1 — idempotent syncer from registry.yaml → Windows Task Scheduler.
+﻿# sync-tasks.ps1 — idempotent syncer from registry.yaml → Windows Task Scheduler.
 #
 # Must run ELEVATED. Direct invocation without admin fails on Set-ScheduledTask.
 # Use sync.cmd as a convenience wrapper (it self-elevates via -Verb RunAs).
@@ -58,7 +58,7 @@ if (-not $isAdmin -and -not $DryRun) {
 $script:_cachedPassword = $null
 function Get-StoredPassword() {
     if ($null -ne $script:_cachedPassword) { return $script:_cachedPassword }
-    $credFile = Join-Path $env:LOCALAPPDATA 'boss-task-cred.dat'
+    $credFile = Join-Path $env:LOCALAPPDATA 'claude-bundle-cred.dat'
     if (-not (Test-Path $credFile)) {
         throw "Password file not found: $credFile`nRun save-cred.cmd first (non-elevated)."
     }
@@ -158,7 +158,23 @@ function Build-XmlTrigger([string]$spec) {
 "@
     }
     if ($spec -match '^Weekly\s+(\w+)\s+(\d{1,2}):(\d{2})$') {
-        $dow = $Matches[1]; $h = [int]$Matches[2]; $m = [int]$Matches[3]
+        $dowRaw = $Matches[1]; $h = [int]$Matches[2]; $m = [int]$Matches[3]
+        # Normalize day-of-week: accept full names ('Monday') and 3-letter
+        # short forms ('Mon'), case-insensitive. Anything else is a typo —
+        # fail loud here, not with a cryptic Register-ScheduledTask error.
+        $dowMap = @{
+            'mon' = 'Monday';    'monday'    = 'Monday'
+            'tue' = 'Tuesday';   'tuesday'   = 'Tuesday'
+            'wed' = 'Wednesday'; 'wednesday' = 'Wednesday'
+            'thu' = 'Thursday';  'thursday'  = 'Thursday'
+            'fri' = 'Friday';    'friday'    = 'Friday'
+            'sat' = 'Saturday';  'saturday'  = 'Saturday'
+            'sun' = 'Sunday';    'sunday'    = 'Sunday'
+        }
+        $dow = $dowMap[$dowRaw.ToLower()]
+        if (-not $dow) {
+            throw "Unknown day-of-week '$dowRaw' in trigger '$spec' (expected Mon/Tue/Wed/Thu/Fri/Sat/Sun or full names)"
+        }
         $start = (Get-Date).Date.AddHours($h).AddMinutes($m).ToString('s')
         return @"
 <CalendarTrigger>

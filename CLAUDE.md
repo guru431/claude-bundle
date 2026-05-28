@@ -14,6 +14,12 @@ A portable, sanitized Claude Code starter pack with two tiers:
   (Windows Task Scheduler + LLM-driven session-to-wiki compilers),
   `claude-switch.ps1` backend switcher, `codex/AGENTS.md` mirror.
 
+User-facing docs (README, INSTALL, AGENT-INSTRUCTIONS) also frame these
+as two **profiles**: **lite** (config only, no extra software — Tier 1
+*minus* the Python hooks) and **full** (Tier 1 + Tier 2). "lite/full"
+are synonyms layered on top of the tier names, not a third structure —
+keep the Tier 1 / Tier 2 split as the canonical one when editing.
+
 Maintained on a private Forgejo + Gitea pair; planned for GitHub
 publication. MIT license.
 

@@ -8,6 +8,31 @@ macOS notes at the bottom.
 
 ---
 
+## Lite vs Full — pick a profile
+
+The two tiers map onto two install **profiles**. They are not a separate
+structure — just friendlier names you'll see in the README and the
+agent instructions.
+
+| Profile | What you get | Extra software needed | Maps to |
+|---|---|---|---|
+| **Lite** | `CLAUDE.md`, `settings.json`, skill templates, slash command — config only | **None** beyond VS Code + the Claude Code extension | Tier 1 *minus* the optional Python hooks |
+| **Full** | Lite + Python hooks + Karpathy wiki vault + cron pipeline + `claude-switch.ps1` + Codex `AGENTS.md` mirror | Python 3.10+, Git for Windows, ≥1 LLM provider key, (optional) Telegram bot + your Windows password | Tier 1 + Tier 2 |
+
+- Choose **Lite** if you just want consistent rules, permissions, and
+  plugins across machines and don't want to install anything. It is the
+  whole of Tier 1 except step 4 (the example hooks are Python scripts,
+  so they belong to Full).
+- Choose **Full** if you also want the overnight session→wiki pipeline
+  and scheduled automation. It needs the prerequisites listed under
+  Tier 2 below.
+
+In the step-by-step sections the **Tier 1 / Tier 2** names stay.
+Lite = Tier 1 steps 1–3, 5, 6 (skip the hooks in step 4).
+Full = all of Tier 1 + all of Tier 2.
+
+---
+
 # Tier 1 — minimal `~/.claude/` config
 
 ## Prerequisites

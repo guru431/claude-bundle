@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-05-28 — Lite / Full install profiles
+
+Added a **lite vs full** framing on top of the existing Tier 1 / Tier 2
+structure. No renames — they're synonyms, and Tier 1 / Tier 2 stay the
+canonical split.
+
+- **Lite** = config only, zero extra software (CLAUDE.md, settings.json,
+  skill templates, slash command). Tier 1 *minus* the optional Python
+  hooks. Deployable on a machine with no Python/Git/Node.
+- **Full** = lite + Python hooks + wiki + cron pipeline + companions.
+  Tier 1 + Tier 2.
+
+Docs touched:
+- **`INSTALL.md`** — new "Lite vs Full — pick a profile" decision table
+  near the top, mapping each profile to tiers, steps, and prerequisites.
+- **`README.md`** — intro reworked to lead with lite/full; states that
+  lite needs nothing beyond VS Code + the Claude Code extension.
+- **`AGENT-INSTRUCTIONS.md`** — intro now picks lite vs full and checks
+  target prerequisites (`git`/`python`, incl. the Windows Store stub
+  trap) before Full; the copy step separates the Python `hooks/`
+  (full-only) from the markdown skills/commands (lite); report template
+  updated.
+- **`CLAUDE.md`** — maintainer note that lite/full are synonyms over the
+  tier names.
+
 ## 2026-05-27 — GLM-5.1 external review fixes
 
 Findings accepted from a second-opinion review by GLM-5.1 (3× P1 → P2

@@ -3,15 +3,27 @@
 Addressed to you, Claude Code. The user has given you access to a new
 machine and wants you to deploy the bundle. Execute in order.
 
-The bundle has two tiers — figure out which one the user wants:
-- **Tier 1** (minimal): `~/.claude/` config only (CLAUDE.md, settings.json,
-  optional hooks/skills/commands)
-- **Tier 2** (full): Tier 1 + wiki vault + cron pipeline + claude-switch
-  + AGENTS.md mirror
+The bundle has two install profiles — figure out which one the user wants:
+- **Lite** (config only, *no extra software*): CLAUDE.md, settings.json,
+  skill templates, slash command. = Tier 1 below **minus** the Python
+  hooks. Deployable on a machine with no Python/Git/Node.
+- **Full**: Lite + Python hooks + wiki vault + cron pipeline +
+  claude-switch + AGENTS.md mirror. = Tier 1 + Tier 2. Needs Python
+  3.10+, Git, and ≥1 LLM provider key.
 
-If the user said "minimal" or just "set up Claude Code" — do Tier 1
-only. If they said "wiki", "cron", "the full thing", "Karpathy", or
-"all of it" — do Tier 2.
+If the user said "lite", "minimal", "just the config", "no software", or
+just "set up Claude Code" — do **Lite** (Tier 1, but skip copying
+`hooks/` in step 1). If they said "wiki", "cron", "the full thing",
+"Karpathy", or "all of it" — do **Full** (all of Tier 1 + Tier 2).
+
+Before committing to Full, confirm the target has the prerequisites:
+```bash
+command -v git; command -v python; python --version 2>&1
+```
+If Git or a real Python are missing (on Windows, a `python` that resolves
+to `...\WindowsApps\python.exe` is the Microsoft Store stub, **not** a
+real Python) — Full can't run. Deploy Lite and tell the user exactly
+what to install before Full is possible.
 
 ---
 
@@ -40,10 +52,11 @@ DST="$USERPROFILE/.claude"
 mkdir -p "$DST"
 cp "$SRC/CLAUDE.md"     "$DST/CLAUDE.md"
 cp "$SRC/settings.json" "$DST/settings.json"
-# Optional:
-cp -r "$SRC/hooks"    "$DST/" 2>/dev/null
+# Lite — skills + commands are markdown only, safe with no extra software:
 cp -r "$SRC/skills"   "$DST/" 2>/dev/null
 cp -r "$SRC/commands" "$DST/" 2>/dev/null
+# Full only — hooks are Python scripts; they need a real Python on PATH:
+cp -r "$SRC/hooks"    "$DST/" 2>/dev/null
 ```
 
 Don't Edit/Write `~/.claude/*` directly via your tools — use `cp`.
@@ -229,12 +242,13 @@ For per-project AGENTS.md, ask the user which projects they want.
 ## Report at the end
 
 ```
-Tier 1: deployed CLAUDE.md, settings.json,
-        optional hooks (X/Y enabled), skills (templates — paths still
-        need filling), commands (1 wired).
-Tier 2: deployed wiki/ skeleton, cron/ pipeline. Registered N/9 tasks
+Profile: <lite | full>
+Lite:   deployed CLAUDE.md, settings.json, skills (templates — paths
+        still need filling), commands (1 wired). Hooks: <skipped / X-of-Y
+        enabled>.
+Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/9 tasks
         with Task Scheduler. LLM provider: <provider>. Telegram alerts:
-        <yes/no>.
+        <yes/no>.   (omit this line for a lite-only deploy)
 Open items: <list of placeholders that still need real values, e.g.
         "PROJECT_MAP in utils.py still empty — add your slugs">.
 ```

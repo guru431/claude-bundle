@@ -1,27 +1,34 @@
 # claude-bundle
 
-A portable Claude Code starter pack with two tiers of ambition. Pick one,
-or stack them.
+A portable Claude Code starter pack with two install profiles — **lite**
+and **full**. Pick one, or start lite and grow into full.
 
-**Minimal tier** (~5 minutes): drop a sanitized `CLAUDE.md` and
-`settings.json` into `~/.claude/`, install the `superpowers` and
-`context7` plugins, get a consistent coding discipline across machines.
+**Lite** (~5 minutes, *no extra software*): drop a sanitized `CLAUDE.md`
+and `settings.json` into `~/.claude/`, add the skill templates and the
+slash command, install the `superpowers` and `context7` plugins. Needs
+nothing beyond VS Code + the Claude Code extension — get a consistent
+coding discipline across machines. (This is Tier 1 below, minus the
+optional Python hooks.)
 
-**Full tier** (~30–60 minutes): on top of the minimal tier, add a
+**Full** (~30–60 minutes): on top of lite, add the Python hooks, a
 Karpathy-style wiki vault, a registry-driven Windows Task Scheduler
 automation, an LLM provider switcher (`claude-switch.ps1`), an
 `AGENTS.md` mirror for Codex CLI, and 9 scheduled tasks that flush
-Claude Code sessions into the wiki overnight.
+Claude Code sessions into the wiki overnight. Needs Python 3.10+, Git,
+and at least one LLM provider key. (Tier 1 + Tier 2 below.)
 
-Both tiers were extracted from a real working setup, then sanitized of
-all private hosts, paths, tokens, and project names.
+Both profiles were extracted from a real working setup, then sanitized
+of all private hosts, paths, tokens, and project names.
+
+See [INSTALL.md](INSTALL.md) for the lite-vs-full decision table and
+step-by-step instructions.
 
 ## Layout
 
 ```
 claude-bundle/
 ├── README.md           ← you are here
-├── INSTALL.md          ← step-by-step (minimal + full tier)
+├── INSTALL.md          ← step-by-step (lite + full, with decision table)
 ├── AGENT-INSTRUCTIONS.md ← same but addressed to Claude for self-deploy
 ├── CHANGELOG.md
 ├── LICENSE             ← MIT

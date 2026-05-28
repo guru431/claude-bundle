@@ -104,6 +104,19 @@ Run this before every commit. Zero matches is mandatory:
 git diff --cached | grep -iEf .sanitize-patterns
 ```
 
+This grep is now **automated** by the `pre-commit` hook at
+[`.githooks/pre-commit`](.githooks/pre-commit) — it runs the denylist
+grep plus a generic scan for key/token formats (PEM, `ghp_`,
+`github_pat_`, `AKIA`, `sk-…`, JWT, Telegram bot tokens) and blocks
+commits of sensitive filenames (`.env`, `*.pem`, `id_rsa`, …). Activate
+it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+A confirmed false positive can be bypassed with `git commit --no-verify`.
+
 If you don't yet have a `.sanitize-patterns` file: bootstrap one from
 your real environment. Suggested classes of regexes to include:
 

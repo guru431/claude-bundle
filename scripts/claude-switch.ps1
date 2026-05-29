@@ -88,7 +88,11 @@ if ($ProjectPath) {
 if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null }
 $settingsPath = Join-Path $settingsDir "settings.local.json"
 
-# Standard permissions block (stable across all modes)
+# Standard permissions block (stable across all modes).
+# WARNING: "Bash(*)" / "PowerShell(*)" allow arbitrary command execution with
+# no prompt. This is convenient on a single-user trusted machine but is a
+# footgun on shared or public setups — narrow this allowlist (and add a deny
+# list) before reusing it elsewhere.
 $STANDARD_PERMISSIONS = [pscustomobject]@{
     allow = @(
         "Bash",

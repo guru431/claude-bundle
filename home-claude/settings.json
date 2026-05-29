@@ -2,7 +2,6 @@
   "env": {},
   "permissions": {
     "allow": [
-      "Bash",
       "Bash(git *)",
       "Bash(npm *)",
       "Bash(pnpm *)",
@@ -15,11 +14,6 @@
       "Bash(python3:*)",
       "Bash(curl:*)",
       "Bash(where:*)",
-      "Bash(while read file)",
-      "Bash(for *)",
-      "Bash(do *)",
-      "Bash(done)",
-      "Bash(__NEW_LINE_*)",
       "Bash(yt-dlp:*)",
       "WebFetch",
       "WebFetch(domain:*)",

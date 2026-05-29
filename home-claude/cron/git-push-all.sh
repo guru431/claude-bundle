@@ -21,7 +21,9 @@ echo "Scanning: $REPOS_DIR" >> "$LOG_FILE"
 # Optional: wait for long-running batch jobs to finish before pushing.
 # Useful when this runs after a nightly KB pipeline. Disabled by default —
 # enable by setting WAIT_FOR_PATTERN to a process-name pattern.
-if [ -n "$WAIT_FOR_PATTERN" ]; then
+# NOTE: process polling uses tasklist.exe and is therefore Windows-only;
+# on Linux/macOS the wait is skipped (logged below).
+if [ -n "$WAIT_FOR_PATTERN" ] && command -v tasklist.exe >/dev/null 2>&1; then
     waited=0
     while tasklist.exe 2>/dev/null | grep -qiE "$WAIT_FOR_PATTERN"; do
         if [ $waited -eq 0 ]; then
@@ -37,6 +39,8 @@ if [ -n "$WAIT_FOR_PATTERN" ]; then
     if [ $waited -gt 0 ] && [ $waited -lt 30 ]; then
         echo "Processes finished after ${waited} min wait" >> "$LOG_FILE"
     fi
+elif [ -n "$WAIT_FOR_PATTERN" ]; then
+    echo "WAIT_FOR_PATTERN set but tasklist.exe not found (Windows-only feature); skipping wait" >> "$LOG_FILE"
 fi
 
 pushed=0

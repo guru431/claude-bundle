@@ -53,8 +53,10 @@ if ($securePwd.Length -eq 0) { Write-Host "Empty password. Cancelled." -Foregrou
 $encrypted = ConvertFrom-SecureString -SecureString $securePwd
 $encrypted | Out-File -FilePath $target -Encoding utf8 -NoNewline
 
-# Quick self-test: decrypt back and compare lengths
-$back = (Get-Content $target | ConvertTo-SecureString)
+# Quick self-test: decrypt back and compare lengths.
+# -Raw matches how sync-tasks.ps1 reads the blob; a line-array read could
+# corrupt a DPAPI string that contains embedded newlines.
+$back = (Get-Content $target -Raw | ConvertTo-SecureString)
 if ($back.Length -ne $securePwd.Length) {
     Write-Host "WARNING: round-trip length mismatch (saved $($securePwd.Length), read back $($back.Length))" -ForegroundColor Yellow
 }

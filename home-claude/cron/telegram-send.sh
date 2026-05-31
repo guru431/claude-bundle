@@ -46,9 +46,17 @@ if [ -z "$MSG" ]; then
     exit 1
 fi
 
-# Escape JSON special chars (force UTF-8 for stdin on Windows)
-MSG_ESCAPED=$(echo "$MSG" | PYTHONIOENCODING=utf-8 python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))")
+# Escape JSON special chars (force UTF-8 for stdin on Windows).
+# ${PYTHON_EXE:-python}: 'python3' is not created by the Windows installer.
+MSG_ESCAPED=$(echo "$MSG" | PYTHONIOENCODING=utf-8 "${PYTHON_EXE:-python}" -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))")
 
-curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+# Feed the token-bearing URL through a curl config on stdin (-K -) so the bot
+# token never appears in the process arg list (ps / tasklist) or shell history.
+# Telegram Bot API only accepts the token in the URL path (no header auth),
+# so keeping the URL out of argv is the way to hide it.
+curl -s -X POST \
   -H "Content-Type: application/json; charset=utf-8" \
-  --data-binary "{\"chat_id\": ${TELEGRAM_CHAT_ID}, \"text\": ${MSG_ESCAPED}}" 2>&1
+  --data-binary "{\"chat_id\": ${TELEGRAM_CHAT_ID}, \"text\": ${MSG_ESCAPED}}" \
+  -K - <<CURL_CFG 2>&1
+url = "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+CURL_CFG

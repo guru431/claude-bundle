@@ -33,9 +33,15 @@ DATE = datetime.now().strftime("%Y-%m-%d")
 ENABLE_TELEGRAM_ALERTS = False
 
 
-def find_all_pages() -> dict[str, Path]:
-    """Find every .md file in the wiki (except auxiliary ones)."""
-    pages = {}
+def find_all_pages() -> dict[str, list[Path]]:
+    """Find every .md file in the wiki (except auxiliary ones).
+
+    Keyed by stem → list of paths. Two files sharing a stem in different
+    folders are both kept (instead of one silently overwriting the other, which
+    made content checks run against incomplete data); check_ambiguous_names
+    reports such collisions.
+    """
+    pages: dict[str, list[Path]] = {}
     skip = {".obsidian", "daily", ".pending"}
     for f in WIKI_ROOT.rglob("*.md"):
         parts = f.relative_to(WIKI_ROOT).parts
@@ -43,7 +49,7 @@ def find_all_pages() -> dict[str, Path]:
             continue
         if f.name in ("index.md", "CLAUDE.md", "log.md"):
             continue
-        pages[f.stem] = f
+        pages.setdefault(f.stem, []).append(f)
     return pages
 
 
@@ -57,23 +63,24 @@ def extract_wikilinks(text: str) -> list[str]:
     return links
 
 
-def check_broken_links(pages: dict[str, Path]) -> list[str]:
+def check_broken_links(pages: dict[str, list[Path]]) -> list[str]:
     """Check 1: broken [[wikilinks]]."""
     errors = []
     all_names = set(pages.keys())
     all_names.update(["index", "CLAUDE", "log"])
 
-    for name, path in pages.items():
-        text = path.read_text(encoding="utf-8")
-        links = extract_wikilinks(text)
-        for link in links:
-            if link not in all_names:
-                errors.append(f"ERROR: broken link [[{link}]] in {path.relative_to(WIKI_ROOT)}")
+    for name, paths in pages.items():
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            links = extract_wikilinks(text)
+            for link in links:
+                if link not in all_names:
+                    errors.append(f"ERROR: broken link [[{link}]] in {path.relative_to(WIKI_ROOT)}")
 
     return errors
 
 
-def check_orphan_pages(pages: dict[str, Path]) -> list[str]:
+def check_orphan_pages(pages: dict[str, list[Path]]) -> list[str]:
     """Check 2: orphan pages (no one links to them)."""
     warnings = []
     all_links: set[str] = set()
@@ -92,15 +99,26 @@ def check_orphan_pages(pages: dict[str, Path]) -> list[str]:
     return warnings
 
 
-def check_empty_pages(pages: dict[str, Path]) -> list[str]:
+def check_empty_pages(pages: dict[str, list[Path]]) -> list[str]:
     """Check 3: empty pages (< 100 words)."""
     warnings = []
-    for name, path in pages.items():
-        text = path.read_text(encoding="utf-8")
-        words = len(text.split())
-        if words < 100:
-            warnings.append(f"WARN: thin content ({words} words): {name}")
+    for name, paths in pages.items():
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            words = len(text.split())
+            if words < 100:
+                warnings.append(f"WARN: thin content ({words} words): {path.relative_to(WIKI_ROOT)}")
     return warnings
+
+
+def check_ambiguous_names(pages: dict[str, list[Path]]) -> list[str]:
+    """Check 8: same stem in multiple folders — wikilink target is ambiguous."""
+    errors = []
+    for name, paths in pages.items():
+        if len(paths) > 1:
+            locs = ", ".join(str(p.relative_to(WIKI_ROOT)) for p in paths)
+            errors.append(f"ERROR: ambiguous page name '{name}' → {len(paths)} files: {locs}")
+    return errors
 
 
 def check_unprocessed_articles() -> list[str]:
@@ -121,7 +139,7 @@ def check_unprocessed_articles() -> list[str]:
     return infos
 
 
-def check_index_sync(pages: dict[str, Path]) -> list[str]:
+def check_index_sync(pages: dict[str, list[Path]]) -> list[str]:
     """Check 7: index out of sync with files."""
     errors = []
 
@@ -140,7 +158,7 @@ def check_index_sync(pages: dict[str, Path]) -> list[str]:
     return errors
 
 
-def check_duplicate_names(pages: dict[str, Path]) -> list[str]:
+def check_duplicate_names(pages: dict[str, list[Path]]) -> list[str]:
     """Check 6: duplicate names (fuzzy match)."""
     warnings = []
     names = list(pages.keys())
@@ -195,6 +213,7 @@ def main():
         ("Empty pages", check_empty_pages, pages),
         ("Unprocessed articles", check_unprocessed_articles, None),
         ("Duplicates", check_duplicate_names, pages),
+        ("Ambiguous names", check_ambiguous_names, pages),
         ("Index out of sync", check_index_sync, pages),
     ]
 

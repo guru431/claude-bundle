@@ -214,6 +214,7 @@ function Build-TaskXml([hashtable]$task, [string]$wantedExec, [string]$wantedArg
     $escDesc = [System.Security.SecurityElement]::Escape($description)
     $escArgs = [System.Security.SecurityElement]::Escape($wantedArgs)
     $escExec = [System.Security.SecurityElement]::Escape($wantedExec)
+    $escUser = [System.Security.SecurityElement]::Escape($task.user)
     $execLimit = "PT$([int]$task.timeout_hours)H"
     return @"
 <?xml version="1.0" encoding="UTF-16"?>
@@ -226,7 +227,7 @@ function Build-TaskXml([hashtable]$task, [string]$wantedExec, [string]$wantedArg
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <UserId>$($task.user)</UserId>
+      <UserId>$escUser</UserId>
       <LogonType>$xmlLogonType</LogonType>
       <RunLevel>$runlevel</RunLevel>
     </Principal>
@@ -298,6 +299,7 @@ function Get-CurrentSummary([string]$name) {
         enabled = $t.Settings.Enabled
         hidden = $t.Settings.Hidden
         startWhenAvailable = $t.Settings.StartWhenAvailable
+        executionTimeLimit = $t.Settings.ExecutionTimeLimit
     }
 }
 
@@ -341,19 +343,38 @@ foreach ($task in $reg.tasks) {
     $current = Get-CurrentSummary $task.name
     $action_needs_change = $true
     $enabled_needs_change = $false
-    $marker_needs_change = $false
+    $desc_needs_change = $false
     $logontype_needs_change = $false
     $swa_needs_change = $false
+    $runlevel_needs_change = $false
+    $hidden_needs_change = $false
+    $timeout_needs_change = $false
+    $trigger_needs_change = $false
     if ($current) {
         $action_needs_change = ($current.execute -ne $wantedExec) -or ($current.args -ne $wantedArgs)
         $enabled_needs_change = ([bool]$current.enabled -ne [bool]$task.enabled)
-        $marker_needs_change = ([string]$current.description -notlike "$marker*")
-        $wantedLogonName = $logonType
-        $logontype_needs_change = ($current.logonType -ne $wantedLogonName)
+        # Full description compare (covers both the marker and the description text).
+        $desc_needs_change = ([string]$current.description -ne $description)
+        $logontype_needs_change = ($current.logonType -ne $logonType)
         $swa_needs_change = (-not [bool]$current.startWhenAvailable)
+        $wantedRunLevel = if ($task.runlevel -eq 'highest') { 'Highest' } else { 'Limited' }
+        $runlevel_needs_change = ("$($current.runLevel)" -ne $wantedRunLevel)
+        $hidden_needs_change = ([bool]$current.hidden -ne [bool]$task.hidden)
+        $timeout_needs_change = ("$($current.executionTimeLimit)" -ne "PT$([int]$task.timeout_hours)H")
+        # Compare time-of-day for calendar triggers (Daily/Weekly/Monthly HH:MM).
+        # AtLogOn/AtStartup have no time component — rely on -Force to re-register
+        # if a trigger TYPE change ever needs to be pushed.
+        if ($task.trigger -match '(\d{1,2}):(\d{2})\s*$') {
+            $wantedTime = '{0:D2}:{1}' -f [int]$Matches[1], $Matches[2]
+            $currentTime = $null
+            if ($current.startBoundary) {
+                try { $currentTime = ([datetime]$current.startBoundary).ToString('HH:mm') } catch {}
+            }
+            if ($currentTime) { $trigger_needs_change = ($currentTime -ne $wantedTime) }
+        }
     }
     $verb = if ($current) {
-        if ($Force -or $action_needs_change -or $enabled_needs_change -or $marker_needs_change -or $logontype_needs_change -or $swa_needs_change) { 'updated' } else { 'unchanged' }
+        if ($Force -or $action_needs_change -or $enabled_needs_change -or $desc_needs_change -or $logontype_needs_change -or $swa_needs_change -or $runlevel_needs_change -or $hidden_needs_change -or $timeout_needs_change -or $trigger_needs_change) { 'updated' } else { 'unchanged' }
     } else { 'created' }
 
     Write-Host ("[{0,-9}] {1}" -f $verb, $task.name) -ForegroundColor (

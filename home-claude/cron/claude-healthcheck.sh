@@ -48,11 +48,17 @@ fi
 # in the variable is treated as a literal hostname (no PS injection).
 WIN_DATA=""
 if [ -n "$WIN_REMOTE_HOST" ]; then
-    WIN_DATA=$(powershell.exe -Command "Invoke-Command -ComputerName '$WIN_REMOTE_HOST' -ScriptBlock {
-        Write-Output '=== Remote Windows host ==='
-        Write-Output '--- disk ---'
-        Get-PSDrive C | Format-Table @{N='UsedGB';E={[math]::Round(\$_.Used/1GB)}}, @{N='FreeGB';E={[math]::Round(\$_.Free/1GB)}} -AutoSize | Out-String
-    }" 2>&1)
+    # Pass the host via env var and read it inside PowerShell as
+    # $env:WIN_REMOTE_HOST instead of interpolating it into the -Command
+    # string. Interpolating allowed PS injection — a value with a single quote
+    # could break out of the '...' and run arbitrary code. The -Command body is
+    # bash-single-quoted, so $env: / $_ are literal to PowerShell.
+    WIN_DATA=$(WIN_REMOTE_HOST="$WIN_REMOTE_HOST" powershell.exe -Command '
+        Invoke-Command -ComputerName $env:WIN_REMOTE_HOST -ScriptBlock {
+            Write-Output "=== Remote Windows host ==="
+            Write-Output "--- disk ---"
+            Get-PSDrive C | Format-Table @{N="UsedGB";E={[math]::Round($_.Used/1GB)}}, @{N="FreeGB";E={[math]::Round($_.Free/1GB)}} -AutoSize | Out-String
+        }' 2>&1)
 fi
 
 METRICS="$LOCAL_DATA

@@ -222,11 +222,12 @@ def run_incident_extract() -> None:
         log("incident-extract.py not present — skipping Phase 2")
         return
     log("=== Incident Extract Phase ===")
-    rc = subprocess.run(
-        [sys.executable, str(extract)],
-        stdout=open(LOG_FILE, "a", encoding="utf-8"),
-        stderr=subprocess.STDOUT,
-    ).returncode
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        rc = subprocess.run(
+            [sys.executable, str(extract)],
+            stdout=f,
+            stderr=subprocess.STDOUT,
+        ).returncode
     log(f"=== End Incident Extract (rc={rc}) ===")
 
 

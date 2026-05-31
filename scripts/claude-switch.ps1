@@ -261,7 +261,7 @@ function Set-Minimax($obj, [string]$modelName) {
         DISABLE_COST_WARNINGS                    = "true"
         API_TIMEOUT_MS                           = "3000000"
     }
-    Write-Host "Mode: MiniMax-direct → $modelName (api.minimax.io/anthropic, key=...$($key.Substring($key.Length-6)))" -ForegroundColor Green
+    Write-Host "Mode: MiniMax-direct → $modelName (api.minimax.io/anthropic, key=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
     return Set-Env $obj $envObj
 }
 
@@ -282,7 +282,7 @@ function Set-OpencodeDirect($obj) {
         DISABLE_COST_WARNINGS                    = "true"
         API_TIMEOUT_MS                           = "3000000"
     }
-    Write-Host "Mode: OpenCode-direct → minimax-m2.7 (opencode.ai/zen/go/v1, key=...$($key.Substring($key.Length-6)))" -ForegroundColor Green
+    Write-Host "Mode: OpenCode-direct → minimax-m2.7 (opencode.ai/zen/go/v1, key=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
     return Set-Env $obj $envObj
 }
 
@@ -308,7 +308,7 @@ function Set-DeepseekDirect($obj, [string]$modelName) {
         DISABLE_COST_WARNINGS                    = "true"
         API_TIMEOUT_MS                           = "3000000"
     }
-    Write-Host "Mode: DeepSeek-direct → $modelName (api.deepseek.com/anthropic, key=...$($key.Substring($key.Length-6)))" -ForegroundColor Green
+    Write-Host "Mode: DeepSeek-direct → $modelName (api.deepseek.com/anthropic, key=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
     return Set-Env $obj $envObj
 }
 
@@ -355,7 +355,7 @@ function Set-CCR($obj, [string]$modelName) {
         DISABLE_COST_WARNINGS                    = "true"
         API_TIMEOUT_MS                           = "3000000"
     }
-    Write-Host "Mode: ccr → $modelName ($ccrUrl, APIKEY=...$($key.Substring($key.Length-6)))" -ForegroundColor Green
+    Write-Host "Mode: ccr → $modelName ($ccrUrl, APIKEY=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
     return Set-Env $obj $envObj
 }
 

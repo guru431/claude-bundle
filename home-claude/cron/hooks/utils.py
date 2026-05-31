@@ -277,7 +277,11 @@ def _load_dotenv() -> None:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        if key and key not in os.environ:
+        # Only accept alphanumeric/underscore keys, matching the bash .env
+        # parser in telegram-send.sh (rejects e.g. 'PATH=/evil'-style lines).
+        if not key or any(not (c.isalnum() or c == "_") for c in key):
+            continue
+        if key not in os.environ:
             os.environ[key] = value.strip().strip('"').strip("'")
 
 

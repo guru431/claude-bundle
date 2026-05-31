@@ -131,20 +131,26 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20) -> dict[str, l
     return by_project
 
 
-def collect_pending() -> dict[str, list[str]]:
-    """Collect data from .pending/ (left by PreCompact/SessionEnd hooks)."""
+def collect_pending() -> tuple[dict[str, list[str]], list[Path]]:
+    """Collect data from .pending/ (left by PreCompact/SessionEnd hooks).
+
+    Returns (data_by_project, consumed_files). Files are NOT deleted here —
+    the caller deletes them only after the daily log is written, so a crash or
+    LLM failure mid-run can't lose pending data (it's reprocessed next run).
+    """
     by_project: dict[str, list[str]] = {}
+    consumed: list[Path] = []
     if not PENDING_DIR.exists():
-        return by_project
+        return by_project, consumed
 
     for f in PENDING_DIR.glob("*.md"):
         text = f.read_text(encoding="utf-8")
         match = re.search(r'^Project:\s*(.+)$', text, re.MULTILINE)
         project = match.group(1).strip() if match else "unknown"
         by_project.setdefault(project, []).append(text)
-        f.unlink()
+        consumed.append(f)
 
-    return by_project
+    return by_project, consumed
 
 
 def collect_feedback_files() -> dict[str, list[str]]:
@@ -322,7 +328,7 @@ def main():
     log(f"Source E (incidents/sessions): {sum(len(v) for v in incidents.values())} files")
 
     # Hook-provided pending
-    pending = collect_pending()
+    pending, pending_files = collect_pending()
     log(f"Pending (hooks): {sum(len(v) for v in pending.values())} files")
 
     all_projects: dict[str, list[str]] = {}
@@ -379,6 +385,14 @@ def main():
 
     daily_path.write_text("\n".join(daily_lines), encoding="utf-8")
     log(f"Daily log: {daily_path}")
+
+    # Pending files are deleted only now that the daily log is safely written —
+    # protects against data loss on crash / LLM failure mid-run.
+    for pf in pending_files:
+        try:
+            pf.unlink()
+        except OSError:
+            pass
 
     with open(LOG_MD, "a", encoding="utf-8") as f:
         for project, files in jsonls.items():

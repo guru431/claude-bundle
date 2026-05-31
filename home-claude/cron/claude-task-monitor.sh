@@ -106,7 +106,11 @@ Get-ScheduledTask | Where-Object {
     $args = ($_.Actions | Select-Object -First 1).Arguments
     # Drive letter anywhere in the args: after a space, after a quote, or at
     # the very start of the string. (Single-letter drive + `:\` is the minimum.)
-    if ($args -match '(^|[\s\"])[A-Za-z]:\\') {
+    # C:\ is excluded: it's the system drive and always exists in session 0,
+    # so a Password task referencing C:\ is fine — the policy is about mapped
+    # drives (S:\, etc) that are absent before logon. Add other fixed local
+    # drive letters to the lookahead if your machine has them.
+    if ($args -match '(^|[\s\"])(?![Cc]:\\)[A-Za-z]:\\') {
         [PSCustomObject]@{ Name = $_.TaskName; Args = $args }
     }
 } | ConvertTo-Json -Compress

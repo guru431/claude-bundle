@@ -1,10 +1,28 @@
 @echo off
-REM Self-elevating wrapper around sync-tasks.ps1 (which requires admin for
-REM Set-ScheduledTask). If not already elevated, relaunch this .cmd via
-REM PowerShell Start-Process -Verb RunAs, then run the syncer.
+REM Self-elevating wrapper around sync-tasks.ps1 (needs admin for Set-ScheduledTask).
+REM If not elevated, relaunch this .cmd via PowerShell Start-Process -Verb RunAs.
+REM
+REM Arguments reach the elevated instance through a temp file, NOT by
+REM interpolating cmd's %* into the PowerShell -Command string. The old form
+REM (-Command "... '%*' ...") was injectable: an argument containing a single
+REM quote could break out of the PS string and run arbitrary code as admin.
+REM The only value interpolated into -Command now is the constant marker
+REM '--from-relaunch', so there is nothing user-controlled to inject. The
+REM elevated run uses -File (args are parsed as script parameters, not code).
+set "ARGS_FILE=%TEMP%\sync-tasks-args.txt"
+
 net session >nul 2>&1
-if %errorlevel% neq 0 (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs"
-    exit /b
+if %errorlevel% equ 0 goto :elevated
+
+>"%ARGS_FILE%" echo(%*
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -ArgumentList '--from-relaunch' -Verb RunAs"
+exit /b
+
+:elevated
+set "PASSARGS=%*"
+if "%~1"=="--from-relaunch" (
+    set "PASSARGS="
+    if exist "%ARGS_FILE%" set /p PASSARGS=<"%ARGS_FILE%"
 )
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0sync-tasks.ps1" %*
+if exist "%ARGS_FILE%" del "%ARGS_FILE%" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0sync-tasks.ps1" %PASSARGS%

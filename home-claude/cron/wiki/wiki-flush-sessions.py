@@ -131,15 +131,18 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20) -> dict[str, l
     return by_project
 
 
-def collect_pending() -> tuple[dict[str, list[str]], list[Path]]:
+def collect_pending() -> tuple[dict[str, list[str]], list[tuple[Path, str]]]:
     """Collect data from .pending/ (left by PreCompact/SessionEnd hooks).
 
-    Returns (data_by_project, consumed_files). Files are NOT deleted here —
-    the caller deletes them only after the daily log is written, so a crash or
-    LLM failure mid-run can't lose pending data (it's reprocessed next run).
+    Returns (data_by_project, consumed_files). Each consumed entry is a
+    (path, project) pair so the caller can keep files belonging to a project
+    whose extraction failed. Files are NOT deleted here — the caller deletes
+    them only after the daily log is written and only for projects that
+    extracted successfully, so a crash or LLM failure mid-run can't lose
+    pending data (it's reprocessed next run).
     """
     by_project: dict[str, list[str]] = {}
-    consumed: list[Path] = []
+    consumed: list[tuple[Path, str]] = []
     if not PENDING_DIR.exists():
         return by_project, consumed
 
@@ -148,7 +151,7 @@ def collect_pending() -> tuple[dict[str, list[str]], list[Path]]:
         match = re.search(r'^Project:\s*(.+)$', text, re.MULTILINE)
         project = match.group(1).strip() if match else "unknown"
         by_project.setdefault(project, []).append(text)
-        consumed.append(f)
+        consumed.append((f, project))
 
     return by_project, consumed
 
@@ -365,6 +368,7 @@ def main():
 
     daily_path = DAILY_DIR / f"{DATE}.md"
     daily_lines = [f"# {DATE}", ""]
+    failed_projects: set[str] = set()
 
     for i, (project, chunks) in enumerate(sorted(all_projects.items())):
         log(f"[{i+1}/{len(all_projects)}] Flush: {project} ({len(chunks)} chunks)")
@@ -375,6 +379,7 @@ def main():
             daily_lines.append("")
             log(f"  → OK")
         else:
+            failed_projects.add(project)
             daily_lines.append(f"## {project}")
             daily_lines.append("- (extraction failed)")
             daily_lines.append("")
@@ -386,19 +391,30 @@ def main():
     daily_path.write_text("\n".join(daily_lines), encoding="utf-8")
     log(f"Daily log: {daily_path}")
 
-    # Pending files are deleted only now that the daily log is safely written —
-    # protects against data loss on crash / LLM failure mid-run.
-    for pf in pending_files:
+    # Pending files are deleted only now that the daily log is safely written,
+    # and only for projects whose extraction succeeded — a transient LLM /
+    # network failure must not permanently drop a project's session content.
+    for pf, project in pending_files:
+        if project in failed_projects:
+            continue
         try:
             pf.unlink()
         except OSError:
             pass
 
+    # JSONLs are logged as processed only for projects that extracted OK, so a
+    # failed project's sessions are re-collected (not skipped) on the next run.
     with open(LOG_MD, "a", encoding="utf-8") as f:
         for project, files in jsonls.items():
+            if project in failed_projects:
+                continue
             for jf in files:
                 f.write(f"- [flush] processed: {jf.name} (project: {project})\n")
         f.write(f"- [flush] daily log: {DATE}.md ({len(all_projects)} projects)\n")
+
+    if failed_projects:
+        log(f"Kept pending/JSONLs for {len(failed_projects)} failed project(s): "
+            f"{', '.join(sorted(failed_projects))}")
 
     activity = parse_history_activity()
     if activity:

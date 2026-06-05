@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-06-05 — Reliability & public-repo contract fixes
+
+Three review findings addressed:
+
+- **P1 — wiki flush could lose data after a transient LLM failure.** In
+  `home-claude/cron/wiki/wiki-flush-sessions.py`, a failed extraction still
+  deleted that project's `.pending/` files and logged its JSONLs as
+  processed, so provider/network blips permanently skipped session content.
+  Now `collect_pending()` returns each consumed file paired with its project,
+  the flush loop tracks `failed_projects`, and pending deletion / processed
+  logging skip those projects so their data is reprocessed next run.
+- **P2 — committed env template violated the "all values empty" rule.**
+  `config/llm-providers.example.env` had `CCR_HOST=127.0.0.1:3456` and
+  `WIKI_LLM_PROVIDER=deepseek`; both are now empty with the default moved
+  into the comment. `home-claude/cron/hooks/utils.py` now falls back to
+  `deepseek` when `WIKI_LLM_PROVIDER` is set-but-empty (matching how
+  `claude-switch.ps1` already treats an empty `CCR_HOST`).
+- **P2 — memory-update crashed on a fresh install.**
+  `home-claude/cron/memory-update.py` iterated `~/.claude/projects` without
+  checking it exists; on a new machine the scheduled task died with
+  `FileNotFoundError`. `main()` now guards the missing dir and logs
+  "nothing to process".
+
 ## 2026-05-28 — Lite / Full install profiles
 
 Added a **lite vs full** framing on top of the existing Tier 1 / Tier 2

@@ -233,6 +233,9 @@ def run_incident_extract() -> None:
 
 def main() -> int:
     log(f"=== Memory Update {DATE} ===")
+    if not PROJECTS_DIR.is_dir():
+        log(f"No projects dir at {PROJECTS_DIR} — nothing to process.")
+        return 0
     msgs = collect_today_user_messages(hours=24)
     log(f"Collected user messages from {len(msgs)} projects")
     update_user_md(msgs)

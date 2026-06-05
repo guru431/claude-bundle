@@ -291,7 +291,9 @@ _load_dotenv()
 #   "deepseek" — DeepSeek V4-Flash via direct API (cheap, OpenAI-compatible).
 #   "claude"   — fallback to claude CLI (sonnet) for manual / opt-in runs.
 #   "opencode" — OpenCode Go gateway (mimo-v2.5-pro) — alternative cheap provider.
-LLM_PROVIDER = os.environ.get("WIKI_LLM_PROVIDER", "deepseek")
+# `or "deepseek"` so an empty WIKI_LLM_PROVIDER= line in .env (as shipped in
+# the example template) falls back to the default instead of an empty string.
+LLM_PROVIDER = os.environ.get("WIKI_LLM_PROVIDER", "deepseek") or "deepseek"
 
 # DeepSeek (primary). Endpoint is OpenAI-compatible.
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_KEY", "")

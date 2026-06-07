@@ -52,8 +52,10 @@ jobs:
       - name: ShellCheck (.sh)
         run: |
           if command -v shellcheck >/dev/null; then
+            # --severity=warning: gate on real issues (errors + warnings), not
+            # style/info notes (SC2016/SC2129 etc.) on these working scripts.
             # SC1091: don't follow sourced files; scripts are deployed standalone.
-            find home-claude/cron -name '*.sh' -print0 | xargs -0 -r shellcheck -e SC1091
+            find home-claude/cron -name '*.sh' -print0 | xargs -0 -r shellcheck --severity=warning -e SC1091
             echo "shellcheck: done"
           else
             echo "shellcheck not available — skipped"

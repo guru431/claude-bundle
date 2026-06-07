@@ -25,6 +25,12 @@ backend switcher, `codex/AGENTS.md` mirror. Public on GitHub
 commit, run the grep sanity check from `CLAUDE.md` § Sanitization
 checklist. Zero matches is mandatory.
 
+This check is **already automated** by [`.githooks/pre-commit`](.githooks/pre-commit)
+(denylist grep against an untracked `.sanitize-patterns` + a generic
+key/token-format scan). Don't re-implement it by hand — just activate it
+once per clone: `git config core.hooksPath .githooks`. Bypass a confirmed
+false positive with `git commit --no-verify`.
+
 ## Project-specific gotchas
 
 - The bundle has two tiers (minimal `~/.claude/` config vs full
@@ -51,6 +57,7 @@ checklist. Zero matches is mandatory.
 | How to deploy (user perspective) | [`INSTALL.md`](INSTALL.md) |
 | How to deploy (agent self-deploy) | [`AGENT-INSTRUCTIONS.md`](AGENT-INSTRUCTIONS.md) |
 | Sanitization checklist | [`CLAUDE.md`](CLAUDE.md) § Sanitization |
+| Automated secret-guard (pre-commit) | [`.githooks/pre-commit`](.githooks/pre-commit) — activate: `git config core.hooksPath .githooks` |
 | What changes when adding X also requires touching Y | [`CLAUDE.md`](CLAUDE.md) § Cross-link table |
 | Wiki pipeline details | [`docs/wiki-method.md`](docs/wiki-method.md) |
 | Cron / Task Scheduler details | [`docs/cron-architecture.md`](docs/cron-architecture.md) |

@@ -160,7 +160,7 @@ tasks:
 
   - name: ClaudeWikiLint
     project: main
-    description: Weekly wiki health check (broken links, orphan pages, duplicates).
+    description: Weekly wiki health check (broken links, orphan pages, duplicates, project-collapse).
     script: <bundle-install-path>\cron\wiki\wiki-lint.py
     kind: python
     trigger: Weekly Sunday 02:00
@@ -170,3 +170,16 @@ tasks:
     hidden: true
     notify_telegram: true
     timeout_hours: 72
+
+  - name: ClaudeLogRetention
+    project: main
+    description: Weekly prune of cron/logs/*.log older than WIKI_LOG_RETENTION_DAYS (default 30).
+    script: <bundle-install-path>\cron\log-retention.py
+    kind: python
+    trigger: Weekly Sunday 03:00
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: false
+    timeout_hours: 1

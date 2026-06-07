@@ -1,5 +1,67 @@
 # Changelog
 
+## 2026-06-07 — Review fixes + package-quality pass
+
+### Bug fixes (from an external review)
+
+- **KB compiler never retried failed files.** `wiki-compile-kb.py` logged
+  failures as `ERROR` while the dedup reader skipped only `(ERROR)` (with
+  parens), so a failed source was treated as done. Dedup now lives in a JSON
+  state file (below), and failures are simply never recorded → retried.
+- **`claude-switch.ps1 status` had a side effect.** It created `.claude/`
+  before the `status` branch returned; the dir is now created lazily only
+  when a write will happen, so `status` is truly read-only.
+- **`sync-tasks.ps1 -DryRun` crashed on the template.** `Test-Path` choked on
+  the `<bundle-install-path>` placeholder's `<`/`>`. A placeholder guard now
+  prints "replace placeholders" and exits cleanly.
+- **All projects collapsed into `main`.** `normalize_project_name()` returned
+  `main` for any heading when `KNOWN_PROJECTS` was empty (the template
+  default). It now derives a clean ASCII slug from the heading (incl. the
+  `Project — extracted facts (slug)` and backtick forms), falling back to
+  `main` only for unparseable/non-ASCII headings. Fixed a latent
+  `lstrip("project:")` bug in the same function.
+- **JSONL dedup keyed by bare filename.** Flush now keys processed sessions by
+  `project/name` (legacy bare-name keys still accepted on read).
+- **Failed flush wrote `(extraction failed)` into the daily log**, feeding
+  noise to the compiler. Failed projects' sections are no longer written; their
+  JSONLs stay unprocessed and are re-collected next run (no data loss).
+- **OpenCode key name.** `OPENCODE_GO_KEY` is now accepted as an alias of
+  `OPENCODE_GO_API_KEY` (the latter wins) in `utils.py` and `claude-switch.ps1`.
+
+### Package-quality improvements
+
+- **Processed-state moved to `.processed.json`** (`utils.py` `load_state` /
+  `state_get` / `state_add`), replacing fragile regex-parsing of `log.md`.
+  `log.md` is kept as a human journal; `_migrated_state_from_log()` seeds the
+  JSON from an existing `log.md` so upgrades don't reprocess history. Under
+  `--dry-run` that migration is computed in memory but **not persisted**
+  (honouring "no state changes"). The state file is gitignored.
+- **Single LLM-provider source of truth.** A `PROVIDERS` table in `utils.py`
+  now declares every cron provider's env names / endpoint / default model;
+  the module constants derive from it. Mirror table added to
+  `docs/llm-routing.md`; pointers added to `.env` template and
+  `claude-switch.ps1`.
+- **`--dry-run` / `--no-llm` flags** for the wiki scripts: collect and report
+  sources without any LLM call, network, or writes.
+- **`scripts/self-test.ps1`** — one-command offline check (JSON, compileall,
+  YAML, hook smoke, `claude-switch status` side-effect-free, `sync-tasks
+  -DryRun`, placeholder report).
+- **`scripts/bootstrap-registry.ps1`** — substitutes `<bundle-install-path>` /
+  `<user>` in `registry.yaml` and validates the Password-mode path policy
+  (warns on mapped drives). When `-InstallPath` is given, it targets the
+  registry **under** that path (the deployed copy) by default, not the bundle
+  source.
+- **`.github/workflows/ci.yml`** — ubuntu (compileall, JSON, YAML, secret-guard
+  reusing the pre-commit token patterns, shellcheck) + windows (`.ps1`
+  parse-check).
+- **Log retention.** New `cron/log-retention.py` + `ClaudeLogRetention` weekly
+  task prune `cron/logs/*.log` older than `WIKI_LOG_RETENTION_DAYS` (30d).
+- **wiki-lint project-collapse check** — warns when `projects/main` holds ≥80%
+  of pages (early-warning for broken project normalization).
+- Docs/counters updated (9 → 10 tasks) across `README.md`, `INSTALL.md`,
+  `docs/cron-architecture.md`, plus new troubleshooting tables in
+  `README.md` and `INSTALL.md`.
+
 ## 2026-06-05 — Reliability & public-repo contract fixes
 
 Three review findings addressed:

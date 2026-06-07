@@ -52,18 +52,19 @@ claude-bundle/
 │   │   ├── projects/<your-slugs>/      atomic pages (incident/solution/...)
 │   │   ├── kb/{concepts,tools,people}/ external knowledge
 │   │   └── daily/.pending/             staging area
-│   └── cron/                           cron foundation + wiki pipeline + 9 tasks
+│   └── cron/                           cron foundation + wiki pipeline + 10 tasks
 │       ├── hooks/utils.py              shared LLM_call, JSONL parsing, wiki utils
 │       ├── hooks/session-{start,end}.py  inject wiki context / dump session
 │       ├── hooks/pre-compact.py        LLM-summarized handoff before compaction
 │       ├── llm-call.py                 CLI wrapper for utils.py::llm_call
 │       ├── telegram-send.sh            Bot API helper (env-driven)
 │       ├── wiki/wiki-*.py              5 compilers (flush/compile/build-index/lint)
+│       ├── log-retention.py            prune old cron/logs/*.log
 │       ├── claude-task-monitor.sh      alert on failed Task Scheduler jobs
 │       ├── claude-git-push-all.sh      auto-push project repos
 │       ├── claude-healthcheck.sh       morning self-check
 │       ├── memory-update.py            JSONL → memory MD
-│       ├── registry.yaml               9 tasks declared here
+│       ├── registry.yaml               10 tasks declared here
 │       └── admin/                      idempotent sync + DPAPI cred saver
 │           ├── sync.cmd, sync-tasks.ps1
 │           └── save-cred.cmd, save-cred.ps1
@@ -73,10 +74,14 @@ claude-bundle/
 │   └── AGENTS-per-project.template.md per-project router template
 │
 ├── scripts/
-│   └── claude-switch.ps1              switch session backend (Claude/DS/MM/OCG/CCR)
+│   ├── claude-switch.ps1              switch session backend (Claude/DS/MM/OCG/CCR)
+│   ├── self-test.ps1                  one-command offline sanity check
+│   └── bootstrap-registry.ps1         fill registry.yaml placeholders + path policy
 │
 ├── config/
 │   └── llm-providers.example.env      env template (copy to <bundle-root>/.env)
+│
+├── .github/workflows/ci.yml           lint + secret-guard + shellcheck CI
 │
 └── docs/
     ├── wiki-method.md                 how the Karpathy wiki pipeline works
@@ -164,9 +169,14 @@ See [`INSTALL.md`](INSTALL.md) — ~15 steps, includes:
 - Setting up `.env` with LLM provider keys (DeepSeek and/or OpenCode Go)
 - Copying `wiki/` and `cron/` into `~/.claude/`
 - Running `cron/admin/save-cred.cmd` to DPAPI-stash your Windows password
-- Editing `registry.yaml` placeholders (`<bundle-install-path>`, `<user>`)
-- Running `cron/admin/sync.cmd` to register all 9 tasks
+- Filling `registry.yaml` placeholders (`<bundle-install-path>`, `<user>`)
+  — automatable via `scripts/bootstrap-registry.ps1`
+- Running `cron/admin/sync.cmd` to register all 10 tasks
 - Adapting `codex/AGENTS.md` if you also run Codex CLI
+
+Before deploying, run `pwsh -File scripts/self-test.ps1` for a quick
+offline check (JSON/YAML validity, Python compiles, hooks, placeholder
+status).
 
 ## What's deliberately NOT in the bundle
 
@@ -200,6 +210,18 @@ See [`INSTALL.md`](INSTALL.md) — ~15 steps, includes:
 Linux / macOS for the full tier needs cron + LaunchAgent equivalents
 (not bundled — adapt the scripts; the Python and Bash parts are
 portable).
+
+## Troubleshooting — common first failures
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `sync-tasks` aborts with "registry still contains placeholders" | `registry.yaml` not bootstrapped | run `scripts/bootstrap-registry.ps1`, or replace `<bundle-install-path>`/`<user>` by hand |
+| Cron LLM call logs `DEEPSEEK_KEY env var not set` | no `.env` (or wrong key name) | copy `config/llm-providers.example.env` → `<bundle-root>/.env`, fill a key |
+| `self-test.ps1` warns "Python not found" / skips checks | Python not on PATH | install Python 3.10+, or set `$env:CLAUDE_HOOK_PYTHON` |
+| Password-mode task exits 127, no log | `script:` on a mapped drive (absent in session 0) | use a UNC `\\host\share\...` or local `C:\...` path; `bootstrap-registry.ps1` warns about this |
+| All wiki pages land in `projects/main` | `KNOWN_PROJECTS` empty / headings non-ASCII | populate `KNOWN_PROJECTS` in `utils.py`; `wiki-lint` flags this as "project-collapse" |
+
+More detail in [`INSTALL.md` § Troubleshooting](INSTALL.md).
 
 ## License
 

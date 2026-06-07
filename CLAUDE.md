@@ -60,9 +60,12 @@ preserve that discipline.
 │   ├── AGENTS.md                       universal-rules mirror for Codex CLI
 │   └── AGENTS-per-project.template.md
 ├── scripts/
-│   └── claude-switch.ps1               env-driven provider switcher
+│   ├── claude-switch.ps1               env-driven provider switcher
+│   ├── self-test.ps1                   offline sanity check (one command)
+│   └── bootstrap-registry.ps1          fill registry.yaml placeholders
 ├── config/
 │   └── llm-providers.example.env       env template (committed; no values)
+├── .github/workflows/ci.yml            lint + secret-guard + shellcheck CI
 ├── docs/                               long-form docs referenced from
 │   ├── wiki-method.md                  rules files and INSTALL
 │   ├── cron-architecture.md
@@ -78,8 +81,10 @@ preserve that discipline.
 | New rule in `home-claude/CLAUDE.md` | If universal (file-ops, encoding, error recovery, findings, secrets, Task Scheduler) — also mirror into `codex/AGENTS.md`. Claude-specific rules (slash commands, hooks, skills, plugin workflow) stay in `home-claude/CLAUDE.md` only. |
 | New skill in `home-claude/skills/` | Update `home-claude/skills/README.md`. If the skill ships a slash command, also add it to `home-claude/commands/`. |
 | New hook in `home-claude/hooks/` | Update `home-claude/hooks/README.md`. Update `home-claude/settings.example-with-hooks.json` to show how to wire it. Do NOT add it to the default `home-claude/settings.json` — hooks are opt-in. |
-| New cron task in `home-claude/cron/registry.yaml` | The script itself goes under `home-claude/cron/<name>.{sh,py}`. Document the task briefly in `README.md` and `docs/cron-architecture.md` (the table of shipped tasks). |
+| New cron task in `home-claude/cron/registry.yaml` | The script itself goes under `home-claude/cron/<name>.{sh,py}`. Document the task briefly in `README.md` and `docs/cron-architecture.md` (the table of shipped tasks — keep its count in sync). |
+| New LLM provider for cron | Add it to the `PROVIDERS` table in `home-claude/cron/hooks/utils.py` (single source of truth), wire an `_llm_<name>()` caller, add the key to `config/llm-providers.example.env`, add a row to `docs/llm-routing.md`. |
 | New LLM provider in `scripts/claude-switch.ps1` | Add env var name to `config/llm-providers.example.env`. Document in `docs/llm-routing.md`. |
+| New offline check | Add it to `scripts/self-test.ps1` and, if it runs on Linux, to `.github/workflows/ci.yml`. |
 | New file structure section | Update the layout block in `README.md` AND in this file. |
 | Sanitization rule clarified | Add to "Sanitization checklist" below AND to `CHANGELOG.md`. |
 

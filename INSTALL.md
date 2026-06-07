@@ -180,6 +180,16 @@ for the trade-offs.
 
 ### 11. Edit `registry.yaml` placeholders
 
+The fast path — let the bootstrap script substitute and validate:
+
+```powershell
+& "<path-to-bundle>\scripts\bootstrap-registry.ps1" -InstallPath "$dst" -User $env:USERNAME -DryRun
+# review the diff, then run without -DryRun to write (it keeps a .bak)
+```
+
+It also warns if `InstallPath` is on a mapped drive (unsafe for
+Password-mode tasks). Or do it by hand:
+
 ```powershell
 notepad "$dst\cron\registry.yaml"
 ```
@@ -213,8 +223,12 @@ Edit `home-claude/cron/hooks/utils.py`:
 - `KNOWN_PROJECTS = []` — same slugs again, used by the wiki path
   normalizer to resolve ambiguous LLM-emitted paths.
 
-You can leave these empty initially — sessions for unmapped projects
-land in `wiki/projects/main/` by default.
+You can leave these empty initially — the normalizer derives a clean
+slug from each session heading, so distinct projects still get distinct
+folders. Only headings it can't parse to an ASCII slug fall back to
+`wiki/projects/main/`. If you later notice most pages piling up in
+`main/`, `wiki-lint` flags it as a "project-collapse" warning — that's
+the cue to populate `KNOWN_PROJECTS`.
 
 ### 13. Run the syncer
 
@@ -223,10 +237,18 @@ land in `wiki/projects/main/` by default.
 ```
 
 This auto-elevates to UAC once for the whole batch, then idempotently
-registers (or updates) all 9 tasks from `registry.yaml`. Output goes
+registers (or updates) all 10 tasks from `registry.yaml`. Output goes
 to `%TEMP%\sync-tasks_latest.log`.
 
 ### 14. Verify
+
+First, the offline self-test (no scheduler, no LLM):
+
+```powershell
+pwsh -File "<path-to-bundle>\scripts\self-test.ps1"
+```
+
+Then the registered tasks:
 
 ```cmd
 schtasks /query /tn ClaudeTaskMonitor /fo list /v
@@ -274,6 +296,17 @@ For each of your projects you also want Codex to recognize, copy
 
 ## Troubleshooting
 
+Quick reference for the failures people hit first. Running
+`pwsh -File scripts/self-test.ps1` catches most of these before deploy.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `sync` / `sync-tasks` aborts: "registry still contains placeholders" | step 11 skipped | run `scripts/bootstrap-registry.ps1` (or substitute by hand) |
+| Cron log: `DEEPSEEK_KEY env var not set` / 402 | `.env` missing or unfunded key | step 9 — copy the template, fill a working key |
+| `self-test.ps1`: "Python not found", checks skipped | Python not on PATH | install Python 3.10+ or set `$env:CLAUDE_HOOK_PYTHON` |
+| Password-mode task: `Last Result` 127, no log | `script:` on a mapped drive (no session 0) | use UNC `\\host\share\...` or local `C:\...`; bootstrap warns about this |
+| Wiki pages all land in `projects/main` | `KNOWN_PROJECTS` empty / non-ASCII headings | populate `KNOWN_PROJECTS`; `wiki-lint` flags it as "project-collapse" |
+
 ### "Login required" when running cron tasks
 You skipped step 10 (`save-cred.cmd`). Password-mode tasks need the
 DPAPI-encrypted password.
@@ -295,6 +328,9 @@ The pipeline only writes pages from sessions it knows about. Check:
 - Their LLM calls need a working key — check
   `~/.claude/cron/logs/claude-wiki-*.log` for `DEEPSEEK_KEY env var not
   set` or 402 insufficient balance
+- To check source collection **without** spending tokens or hitting the
+  network, run a script with `--dry-run` (alias `--no-llm`), e.g.
+  `python ~/.claude/cron/wiki/wiki-flush-sessions.py --dry-run`
 
 ### `block-iptables-save` blocks a legitimate command
 Edit `~/.claude/hooks/block-iptables-save-to-rules.py` and add an

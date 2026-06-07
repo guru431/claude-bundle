@@ -29,6 +29,9 @@ from utils import (  # noqa: E402
     normalize_wiki_path,
     parse_llm_json,
     read_page,
+    state_add,
+    state_get,
+    is_dry_run,
     write_page,
 )
 
@@ -49,13 +52,8 @@ DATE = datetime.now().strftime("%Y-%m-%d")
 
 
 def get_compiled_dailies() -> set[str]:
-    """Read log.md → set of already-compiled daily logs."""
-    compiled = set()
-    if LOG_MD.exists():
-        text = LOG_MD.read_text(encoding="utf-8")
-        for match in re.finditer(r'\[compile-sessions\].*?(\d{4}-\d{2}-\d{2})\.md', text):
-            compiled.add(match.group(1))
-    return compiled
+    """Return the set of already-compiled daily dates from .processed.json."""
+    return state_get("compile_sessions", "compiled_dailies")
 
 
 def find_uncompiled_dailies(compiled: set[str]) -> list[Path]:
@@ -248,6 +246,15 @@ def main():
         log("Nothing to compile. Exiting.")
         return
 
+    if is_dry_run():
+        log("DRY RUN — dailies that WOULD be compiled (no LLM, no writes):")
+        for daily_path in dailies:
+            raw = parse_daily_by_project(daily_path)
+            projects = sorted({normalize_project_name(k) for k in raw})
+            log(f"  {daily_path.name}: {len(raw)} section(s) → projects {projects}")
+        log("DRY RUN — no pages written, no state changes.")
+        return
+
     total_changes = 0
     for daily_path in dailies:
         log(f"Processing: {daily_path.name}")
@@ -278,6 +285,7 @@ def main():
 
             time.sleep(5)
 
+        state_add("compile_sessions", "compiled_dailies", [daily_path.stem])
         with open(LOG_MD, "a", encoding="utf-8") as f:
             f.write(f"- [compile-sessions] compiled: {daily_path.stem}.md ({len(by_project)} projects)\n")
 

@@ -32,7 +32,8 @@ for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
     os.environ.pop(env_key, None)
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-from utils import dir_to_project, parse_jsonl_messages, is_subagent_jsonl, llm_call, SKIP_DIRS, SKIP_JSONL_PROJECTS
+from utils import (dir_to_project, parse_jsonl_messages, is_subagent_jsonl, llm_call,
+                   state_get, state_add, is_dry_run, SKIP_DIRS, SKIP_JSONL_PROJECTS)
 
 # BUNDLE_ROOT derived from script location — works regardless of where the
 # bundle is installed (network share, local disk, etc).
@@ -56,13 +57,12 @@ DEFAULT_PROJECT = "main"
 
 
 def get_processed_sessions() -> set[str]:
-    """Read log.md → set of already-processed JSONL files."""
-    processed = set()
-    if LOG_MD.exists():
-        text = LOG_MD.read_text(encoding="utf-8")
-        for match in re.finditer(r'flush.*?:\s*(.+\.jsonl)', text):
-            processed.add(match.group(1).strip())
-    return processed
+    """Return the set of already-processed JSONL keys from .processed.json.
+
+    Keys are "project/name.jsonl" (current) or bare "name.jsonl" (legacy /
+    migrated). Callers check both forms.
+    """
+    return state_get("flush", "processed_jsonls")
 
 
 def find_recent_jsonls(processed: set[str], max_age_hours: int = 48) -> dict[str, list[Path]]:
@@ -80,7 +80,9 @@ def find_recent_jsonls(processed: set[str], max_age_hours: int = 48) -> dict[str
         if project in SKIP_JSONL_PROJECTS:
             continue
         for jsonl in proj_dir.glob("*.jsonl"):
-            if jsonl.name in processed:
+            # Accept the legacy bare-name key too, so JSONLs already logged
+            # before the project/name format switch aren't reprocessed.
+            if f"{project}/{jsonl.name}" in processed or jsonl.name in processed:
                 continue
             try:
                 st = jsonl.stat()
@@ -114,7 +116,8 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20) -> dict[str, l
         if project in SKIP_JSONL_PROJECTS:
             continue
         for jsonl in proj_dir.glob("*.jsonl"):
-            if jsonl.name in processed:
+            # Accept the legacy bare-name key too (see find_recent_jsonls).
+            if f"{project}/{jsonl.name}" in processed or jsonl.name in processed:
                 continue
             try:
                 st = jsonl.stat()
@@ -366,6 +369,13 @@ def main():
         log("Nothing to process. Exiting.")
         return
 
+    if is_dry_run():
+        log("DRY RUN — collected sources per project (no LLM, no writes):")
+        for project in sorted(all_projects):
+            log(f"  {project}: {len(all_projects[project])} chunk(s)")
+        log("DRY RUN — no daily log written, no state changes.")
+        return
+
     daily_path = DAILY_DIR / f"{DATE}.md"
     daily_lines = [f"# {DATE}", ""]
     failed_projects: set[str] = set()
@@ -379,10 +389,11 @@ def main():
             daily_lines.append("")
             log(f"  → OK")
         else:
+            # Do NOT write a placeholder section to the daily log: its JSONLs
+            # are kept unprocessed (below) and re-collected next run, so the
+            # real content lands in a later daily. Writing "(extraction failed)"
+            # would only feed noise to compile-sessions.
             failed_projects.add(project)
-            daily_lines.append(f"## {project}")
-            daily_lines.append("- (extraction failed)")
-            daily_lines.append("")
             log(f"  → ERROR")
 
         if i < len(all_projects) - 1:
@@ -402,14 +413,19 @@ def main():
         except OSError:
             pass
 
-    # JSONLs are logged as processed only for projects that extracted OK, so a
+    # JSONLs are recorded as processed only for projects that extracted OK, so a
     # failed project's sessions are re-collected (not skipped) on the next run.
+    # State (.processed.json) is the source of truth for dedup; log.md is kept
+    # as a human-readable journal only. Key by project/name (not bare name) so
+    # identically-named JSONLs in different project dirs are tracked separately.
+    keys = [f"{project}/{jf.name}"
+            for project, files in jsonls.items() if project not in failed_projects
+            for jf in files]
+    state_add("flush", "processed_jsonls", keys)
     with open(LOG_MD, "a", encoding="utf-8") as f:
-        for project, files in jsonls.items():
-            if project in failed_projects:
-                continue
-            for jf in files:
-                f.write(f"- [flush] processed: {jf.name} (project: {project})\n")
+        for key in keys:
+            project = key.split("/", 1)[0]
+            f.write(f"- [flush] processed: {key} (project: {project})\n")
         f.write(f"- [flush] daily log: {DATE}.md ({len(all_projects)} projects)\n")
 
     if failed_projects:

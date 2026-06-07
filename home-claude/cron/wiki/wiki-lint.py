@@ -174,6 +174,31 @@ def check_duplicate_names(pages: dict[str, list[Path]]) -> list[str]:
     return warnings
 
 
+def check_project_collapse() -> list[str]:
+    """Check 9: early-warning that projects are collapsing into projects/main.
+
+    If KNOWN_PROJECTS is unset (or normalize_project_name fails to extract a
+    clean slug), most pages land in projects/main. A dominant main folder is a
+    strong signal that project normalization needs attention.
+    """
+    projects_dir = WIKI_ROOT / "projects"
+    if not projects_dir.exists():
+        return []
+    counts: dict[str, int] = {}
+    for sub in projects_dir.iterdir():
+        if sub.is_dir():
+            n = sum(1 for _ in sub.rglob("*.md"))
+            if n:
+                counts[sub.name] = n
+    total = sum(counts.values())
+    main_n = counts.get("main", 0)
+    # Only meaningful past a small floor, to avoid noise on fresh/tiny vaults.
+    if total >= 10 and main_n / total >= 0.8:
+        return [f"WARN: project-collapse — projects/main holds {main_n}/{total} pages "
+                f"({main_n/total:.0%}); check KNOWN_PROJECTS / normalize_project_name"]
+    return []
+
+
 def send_telegram_alert(message: str):
     """Send an alert to Telegram on errors."""
     if not ENABLE_TELEGRAM_ALERTS:
@@ -215,6 +240,7 @@ def main():
         ("Duplicates", check_duplicate_names, pages),
         ("Ambiguous names", check_ambiguous_names, pages),
         ("Index out of sync", check_index_sync, pages),
+        ("Project collapse", check_project_collapse, None),
     ]
 
     for name, func, arg in checks:

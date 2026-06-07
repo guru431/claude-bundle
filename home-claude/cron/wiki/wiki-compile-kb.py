@@ -30,6 +30,9 @@ from utils import (  # noqa: E402
     read_page,
     source_hash,
     source_already_processed,
+    state_add,
+    state_get,
+    is_dry_run,
     write_page,
 )
 
@@ -50,16 +53,12 @@ DATE = datetime.now().strftime("%Y-%m-%d")
 
 
 def get_processed_files() -> set[str]:
-    """Read log.md and return set of already-processed files (excluding ERROR)."""
-    processed = set()
-    if LOG_MD.exists():
-        for line in LOG_MD.read_text(encoding="utf-8").split("\n"):
-            if "(ERROR)" in line:
-                continue
-            match = re.search(r'processed:\s*(.+?)(?:\s*→|$)', line)
-            if match:
-                processed.add(match.group(1).strip())
-    return processed
+    """Return the set of already-processed KB source files from .processed.json.
+
+    Failed files are simply never recorded (no (ERROR) marker needed anymore),
+    so they are retried on the next run.
+    """
+    return state_get("compile_kb", "processed")
 
 
 def find_new_files(processed: set[str]) -> list[Path]:
@@ -251,6 +250,13 @@ def main():
         log("Nothing to process. Exiting.")
         return
 
+    if is_dry_run():
+        log("DRY RUN — files that WOULD be compiled (no LLM, no writes):")
+        for f in new_files:
+            log(f"  {str(f.relative_to(KBNEWS_DIR)).replace(chr(92), '/')}")
+        log(f"DRY RUN — {len(new_files)} file(s), no state changes.")
+        return
+
     existing_pages = read_existing_pages()
     log(f"Existing wiki pages: {len(existing_pages)}")
 
@@ -263,12 +269,16 @@ def main():
         changes = compile_article(article_path, existing_pages)
         if changes:
             applied = apply_changes(changes, existing_pages, f"kb_news/{rel}", article_hash)
+            # State (.processed.json) is the dedup source of truth; update_log
+            # keeps the human-readable journal in log.md.
+            state_add("compile_kb", "processed", [rel])
             update_log(rel, applied)
             total_created += len(applied)
             log(f"  → {len(applied)} changes")
         else:
+            # Not recorded in state → retried next run. Journal the failure only.
             log(f"  → ERROR: compile failed")
-            update_log(rel, ["ERROR"])
+            update_log(rel, ["(ERROR)"])
 
         if i < len(new_files) - 1:
             time.sleep(5)

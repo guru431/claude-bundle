@@ -8,6 +8,11 @@
 # Writes the env block into <project>/.claude/settings.local.json. The
 # permissions block is stable across modes; only `env` changes.
 #
+# This switches the *interactive Claude Code session*, a separate layer from
+# the cron pipeline (home-claude/cron/hooks/utils.py::PROVIDERS). They only
+# share key NAMES — both documented in config/llm-providers.example.env and
+# docs/llm-routing.md.
+#
 # Usage:
 #   .\claude-switch.ps1                      # interactive menu
 #   .\claude-switch.ps1 anthropic            # Claude default
@@ -85,8 +90,10 @@ if ($ProjectPath) {
     # working in. Matches the documented behavior (README / INSTALL).
     $settingsDir = Join-Path (Get-Location).Path ".claude"
 }
-if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null }
 $settingsPath = Join-Path $settingsDir "settings.local.json"
+# NOTE: $settingsDir is created lazily, only once we know we will write
+# (after the "status" branch returns). Reading the current mode tolerates a
+# missing dir/file, so "status" stays a true read-only, no-side-effect command.
 
 # Standard permissions block (stable across all modes).
 # WARNING: "Bash(*)" / "PowerShell(*)" allow arbitrary command execution with
@@ -226,15 +233,17 @@ function Clear-Env($obj) {
     return $obj
 }
 
-function Require-Key($name) {
-    $k = Get-EnvVar $name
-    if (-not $k) {
-        Write-Host "ERROR: env var '$name' not set." -ForegroundColor Red
-        Write-Host "Set it in your environment or in <bundle-root>/.env" -ForegroundColor DarkYellow
-        Write-Host "See config/llm-providers.example.env for the full list." -ForegroundColor DarkYellow
-        exit 2
+function Require-Key([string[]]$names) {
+    # Accept one or more env var names (first non-empty wins) so callers can
+    # support aliases, e.g. OPENCODE_GO_API_KEY / OPENCODE_GO_KEY.
+    foreach ($n in $names) {
+        $k = Get-EnvVar $n
+        if ($k) { return $k }
     }
-    return $k
+    Write-Host "ERROR: env var '$($names -join ' / ')' not set." -ForegroundColor Red
+    Write-Host "Set it in your environment or in <bundle-root>/.env" -ForegroundColor DarkYellow
+    Write-Host "See config/llm-providers.example.env for the full list." -ForegroundColor DarkYellow
+    exit 2
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,7 +275,7 @@ function Set-Minimax($obj, [string]$modelName) {
 }
 
 function Set-OpencodeDirect($obj) {
-    $key = Require-Key "OPENCODE_GO_API_KEY"
+    $key = Require-Key @("OPENCODE_GO_API_KEY", "OPENCODE_GO_KEY")
     # OpenCode Go Anthropic endpoint expects x-api-key (ANTHROPIC_API_KEY), not Bearer.
     # Only minimax-m2.7 / minimax-m2.5 are reachable via /v1/messages.
     $envObj = [pscustomobject]@{
@@ -479,6 +488,10 @@ if ($Mode -eq "status") {
     Write-Host "(no changes; pass 'anthropic'/'deepseek'/'minimax'/'opencode'/'ccr' to switch)" -ForegroundColor DarkGray
     return
 }
+
+# We are going to write — create the target dir now (not earlier, so "status"
+# has no side effects).
+if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null }
 
 # CCR / DeepSeek / MiniMax need a model — either from $Model arg or interactive
 if ($Mode -eq "ccr" -and [string]::IsNullOrWhiteSpace($Model)) {

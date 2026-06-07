@@ -308,6 +308,14 @@ $reg = Parse-RegistryYaml $RegistryPath
 $launcher = $reg.launcher
 $marker   = $reg.managed_marker
 if (-not $launcher) { Write-Host "ERROR: launcher not set in registry" -ForegroundColor Red; exit 1 }
+# Catch the shipped template placeholders before Test-Path chokes on the
+# illegal '<' / '>' path characters (which would otherwise emit a cryptic
+# error and abort even a -DryRun). Tell the user to substitute them.
+if ($launcher -match '<[^>]+>') {
+    Write-Host "ERROR: registry still contains placeholders (e.g. '$launcher')." -ForegroundColor Red
+    Write-Host "       Replace <bundle-install-path> / <user> in $RegistryPath before running." -ForegroundColor Red
+    exit 1
+}
 if (-not (Test-Path $launcher)) {
     Write-Host "ERROR: launcher missing at $launcher" -ForegroundColor Red; exit 1
 }

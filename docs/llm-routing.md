@@ -69,6 +69,23 @@ chain returns `None` (and the calling script logs an error) rather than
 silently chew through your Claude subscription. If a wiki compile fails
 because DeepSeek is down, that's a Telegram alert, not a $5 surprise.
 
+### Provider registry — the single source of truth (cron side)
+
+All cron-side provider config lives in **one** table,
+`utils.py::PROVIDERS`. The module-level constants (`DEEPSEEK_*`,
+`MINIMAX_*`) are derived from it, so there is exactly one place that lists
+env-var names, endpoints and default models. This table below mirrors it —
+keep the two in sync (and the `.env` template too):
+
+| Provider key | Key env (first non-empty wins) | Base URL | Default model | Model override env |
+|---|---|---|---|---|
+| `deepseek` | `DEEPSEEK_KEY` | `https://api.deepseek.com/v1` (`DEEPSEEK_BASE_URL`) | `deepseek-v4-flash` | `DEEPSEEK_MODEL` |
+| `opencode` | `OPENCODE_GO_API_KEY`, `OPENCODE_GO_KEY` | `https://opencode.ai/zen/go/v1` | `mimo-v2.5-pro` | `OPENCODE_GO_MODEL` |
+
+To add a provider for cron use: add a row to `PROVIDERS`, wire an
+`_llm_<name>()` caller into `llm_call()`, add the key name to
+`config/llm-providers.example.env`, and add a row here.
+
 If you want claude as a one-off — `WIKI_LLM_PROVIDER=claude python ...`.
 Don't make it the cron default.
 

@@ -102,16 +102,18 @@ changes the second time.
 
 ## What ships in the bundle
 
-9 tasks, all marked `enabled: true` by default. Edit `registry.yaml` to
-disable any you don't want before running `sync.cmd` the first time.
+10 tasks (one, `ClaudeWikiCompileKB`, ships `enabled: false`). Edit
+`registry.yaml` to disable any others you don't want before running
+`sync.cmd` the first time.
 
 | Task | Trigger | What it does |
 |---|---|---|
 | `ClaudeWikiFlush` | Daily 02:30 | drain `.pending/` → daily log |
-| `ClaudeWikiCompileKB` | Daily 03:30 | compile KB sources → `kb/*` |
+| `ClaudeWikiCompileKB` | Daily 03:30 | compile KB sources → `kb/*` (off by default) |
 | `ClaudeWikiCompileSessions` | Daily 04:00 | compile sessions → `projects/<slug>/*` |
 | `ClaudeWikiBuildIndex` | Daily 04:05 | regenerate `wiki/index.md` |
-| `ClaudeWikiLint` | Weekly Sun 02:00 | broken-link / orphan check |
+| `ClaudeWikiLint` | Weekly Sun 02:00 | broken-link / orphan / project-collapse check |
+| `ClaudeLogRetention` | Weekly Sun 03:00 | prune `cron/logs/*.log` older than 30 days |
 | `ClaudeMemoryUpdate` | Daily 02:00 | JSONL → memory MD |
 | `ClaudeGitPushAll` | Daily 07:00 | auto-push your project repos |
 | `ClaudeHealthcheck` | Daily 09:00 | morning self-check |

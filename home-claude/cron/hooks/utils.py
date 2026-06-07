@@ -36,6 +36,94 @@ SKIP_DIRS: set[str] = set()
 SKIP_JSONL_PROJECTS: set[str] = set()
 
 
+# ── Processed-state tracking ─────────────────────────────────────────────────
+# Single source of truth for "what the wiki pipeline has already processed".
+# A small JSON file replaces fragile regex-parsing of the human-readable
+# log.md. log.md is still written as a journal — it is just never parsed for
+# dedup anymore.
+STATE_PATH = WIKI_ROOT / ".processed.json"
+LOG_MD = WIKI_ROOT / "log.md"
+
+
+def load_state() -> dict:
+    """Load the processed-state JSON.
+
+    If the state file is absent but a legacy log.md exists, build the state
+    from it. That migration is persisted on a normal run, but NOT during a dry
+    run (--dry-run / --no-llm promise "no state changes") — there it is
+    returned in memory only, so dedup is still accurate without writing a file.
+    """
+    if STATE_PATH.exists():
+        try:
+            return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    migrated = _migrated_state_from_log()
+    if migrated is None:
+        return {}
+    if not is_dry_run():
+        save_state(migrated)
+    return migrated
+
+
+def save_state(state: dict) -> None:
+    """Atomically write the processed-state JSON (temp file + replace)."""
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_PATH.with_name(STATE_PATH.name + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(STATE_PATH)
+
+
+def state_get(section: str, key: str) -> set[str]:
+    """Return the recorded items for state[section][key] as a set."""
+    return set(load_state().get(section, {}).get(key, []))
+
+
+def state_add(section: str, key: str, items) -> None:
+    """Append new items to state[section][key] (order-preserving, deduped)."""
+    items = list(items)
+    if not items:
+        return
+    state = load_state()
+    bucket = state.setdefault(section, {}).setdefault(key, [])
+    seen = set(bucket)
+    for it in items:
+        if it not in seen:
+            bucket.append(it)
+            seen.add(it)
+    save_state(state)
+
+
+def _migrated_state_from_log() -> dict | None:
+    """Build a state dict from a pre-existing log.md (or None if absent).
+
+    Pure: reads log.md and returns the equivalent state, without writing
+    anything. load_state() decides whether to persist it (skipped in dry-run).
+    """
+    if not LOG_MD.exists():
+        return None
+    try:
+        text = LOG_MD.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    flush = [m.group(1).strip()
+             for m in re.finditer(r"\[flush\][^\n]*?processed:\s*(\S+\.jsonl)", text)]
+    dailies = [m.group(1)
+               for m in re.finditer(r"\[compile-sessions\][^\n]*?(\d{4}-\d{2}-\d{2})\.md", text)]
+    kb = []
+    for line in text.split("\n"):
+        if "(ERROR)" in line:
+            continue
+        m = re.search(r"\[compile-kb\][^\n]*?processed:\s*(.+?)(?:\s*→|$)", line)
+        if m:
+            kb.append(m.group(1).strip())
+    return {
+        "flush": {"processed_jsonls": flush},
+        "compile_sessions": {"compiled_dailies": dailies},
+        "compile_kb": {"processed": kb},
+    }
+
+
 def dir_to_project(dirname: str) -> str:
     """Convert a Claude projects directory name into a wiki project name.
 
@@ -287,23 +375,74 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-# Default LLM provider for wiki/memory scripts.
-#   "deepseek" — DeepSeek V4-Flash via direct API (cheap, OpenAI-compatible).
-#   "claude"   — fallback to claude CLI (sonnet) for manual / opt-in runs.
-#   "opencode" — OpenCode Go gateway (mimo-v2.5-pro) — alternative cheap provider.
-# `or "deepseek"` so an empty WIKI_LLM_PROVIDER= line in .env (as shipped in
-# the example template) falls back to the default instead of an empty string.
+# ── LLM provider registry — SINGLE SOURCE OF TRUTH ───────────────────────────
+# Every provider's env-var names, endpoint and default model live here, in one
+# table, so the four places that used to drift no longer can. When you change
+# this table, mirror it in:
+#   - config/llm-providers.example.env   (env var names users fill in)
+#   - docs/llm-routing.md                (the human-readable table)
+# claude-switch.ps1 is a SEPARATE layer (it switches the Claude Code CLI
+# backend, not this pipeline) — it only shares key names, listed in the same
+# .env template.
+#
+# `key_env` is a list: the first non-empty env var wins (supports aliases, e.g.
+# OPENCODE_GO_API_KEY / OPENCODE_GO_KEY).
+PROVIDERS: dict[str, dict] = {
+    "deepseek": {  # primary: DeepSeek V4-Flash, OpenAI-compatible, cheapest
+        "key_env": ["DEEPSEEK_KEY"],
+        "base_url_env": "DEEPSEEK_BASE_URL",
+        "base_url_default": "https://api.deepseek.com/v1",
+        "model_env": "DEEPSEEK_MODEL",
+        "model_default": "deepseek-v4-flash",
+    },
+    "opencode": {  # fallback: OpenCode Go gateway (mimo-v2.5-pro)
+        "key_env": ["OPENCODE_GO_API_KEY", "OPENCODE_GO_KEY"],
+        "base_url_env": None,
+        "base_url_default": "https://opencode.ai/zen/go/v1",
+        "model_env": "OPENCODE_GO_MODEL",
+        "model_default": "mimo-v2.5-pro",
+    },
+    # "claude" has no entry: it shells out to the `claude` CLI (manual/opt-in
+    # mode only) and needs no key/url/model here.
+}
+
+
+def _env_first(names: list[str], default: str = "") -> str:
+    """Return the first non-empty value among the given env var names."""
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    return default
+
+
+def _provider_cfg(name: str) -> tuple[str, str, str]:
+    """Resolve (api_key, base_url, model) for a registry provider."""
+    p = PROVIDERS[name]
+    key = _env_first(p["key_env"])
+    base = os.environ.get(p["base_url_env"], p["base_url_default"]) if p["base_url_env"] else p["base_url_default"]
+    model = os.environ.get(p["model_env"], p["model_default"])
+    return key, base, model
+
+
+# Default provider for wiki/memory scripts. `or "deepseek"` so an empty
+# WIKI_LLM_PROVIDER= line in .env falls back to the default, not "".
 LLM_PROVIDER = os.environ.get("WIKI_LLM_PROVIDER", "deepseek") or "deepseek"
 
-# DeepSeek (primary). Endpoint is OpenAI-compatible.
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_KEY", "")
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+# Derived constants (names kept for the _llm_* callers below).
+DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL = _provider_cfg("deepseek")
+MINIMAX_API_KEY, MINIMAX_BASE_URL, MINIMAX_MODEL = _provider_cfg("opencode")
 
-# OpenCode Go (legacy fallback). Subscription may be cancelled.
-MINIMAX_API_KEY = os.environ.get("OPENCODE_GO_API_KEY", "")
-MINIMAX_BASE_URL = "https://opencode.ai/zen/go/v1"
-MINIMAX_MODEL = os.environ.get("OPENCODE_GO_MODEL", "mimo-v2.5-pro")
+
+def is_dry_run(argv: list[str] | None = None) -> bool:
+    """True when --dry-run / --no-llm is passed.
+
+    Lets the wiki scripts collect and report their input sources without making
+    any LLM call, hitting the network, or mutating the wiki / state — handy for
+    verifying source collection cheaply.
+    """
+    args = sys.argv[1:] if argv is None else argv
+    return any(a in ("--dry-run", "--no-llm") for a in args)
 
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
@@ -527,16 +666,48 @@ def find_existing_page_by_name(folder: Path, filename: str) -> Path | None:
 KNOWN_PROJECTS: list[str] = []
 
 
-def normalize_project_name(raw: str) -> str:
-    """Collapse a free-form daily-log section name to a known project name.
+def _slugify_project(raw: str) -> str:
+    """Best-effort ASCII project slug from a free-form daily-log heading.
 
-    Falls back to "main" if no known project matches.
+    Returns "" when nothing clean can be extracted (e.g. a non-ASCII heading),
+    so the caller can fall back to "main".
     """
-    low = raw.strip().lower().lstrip("project:").strip()
+    s = raw.strip()
+    # Prefer text inside the first `backticks` (e.g. "Project `finance` (...)").
+    m = re.search(r"`([^`]+)`", s)
+    if m:
+        cand = m.group(1)
+    else:
+        # Drop a leading "project" label, then take the first token up to a
+        # separator (space, em-dash, paren, colon, backtick). A plain hyphen is
+        # NOT a separator — it is common inside project names (e.g. claude-bundle).
+        s2 = re.sub(r"^project\b[:\s]*", "", s, flags=re.IGNORECASE)
+        cand = re.split(r"[\s(—`:]", s2, 1)[0].strip()
+        if not cand:
+            # The prefix was empty / a bare label (e.g. the
+            # "Project — extracted facts (claude-bundle)" form) — fall back to
+            # the first parenthesised group, which carries the real name.
+            p = re.search(r"\(([^)]+)\)", s)
+            cand = p.group(1).strip() if p else ""
+    slug = re.sub(r"[^a-z0-9]+", "-", cand.lower()).strip("-")
+    if not slug or len(slug) > 40:
+        return ""
+    return slug
+
+
+def normalize_project_name(raw: str) -> str:
+    """Collapse a free-form daily-log section name to a project key.
+
+    Matches the configured KNOWN_PROJECTS first; if none match, derives a clean
+    ASCII slug from the heading so distinct projects keep distinct wiki folders
+    even with an empty KNOWN_PROJECTS (the shipped template default). Falls back
+    to "main" only when no usable name can be extracted.
+    """
+    low = re.sub(r"^project:\s*", "", raw.strip().lower()).strip()
     for proj in sorted(KNOWN_PROJECTS, key=len, reverse=True):
         if low == proj or low.startswith(proj + " ") or low.startswith(proj + "—") or low.startswith(proj + "-") or low.startswith(proj + "("):
             return proj
-    return "main"
+    return _slugify_project(raw) or "main"
 
 
 def normalize_wiki_path(path: str) -> str:

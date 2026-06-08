@@ -2,7 +2,7 @@
 #   anthropic — Claude (default — no env override)
 #   deepseek  — DeepSeek direct via api.deepseek.com/anthropic (V4-Flash / V4-Pro)
 #   minimax   — MiniMax direct via api.minimax.io/anthropic (M3 / M2.7)
-#   opencode  — OpenCode Go (minimax-m3 only) via opencode.ai/zen/go/v1
+#   opencode  — OpenCode Go direct (minimax-m3 / qwen3.7-max) via opencode.ai/zen/go/v1
 #   ollama    — local/LAN Ollama via the Anthropic-native /v1/messages API
 #   ccr       — any OpenCode Go model via a local Claude Code Router proxy
 #
@@ -19,7 +19,8 @@
 #   .\claude-switch.ps1 anthropic            # Claude default
 #   .\claude-switch.ps1 deepseek flash       # DeepSeek V4-Flash
 #   .\claude-switch.ps1 minimax m3           # MiniMax-M3
-#   .\claude-switch.ps1 opencode             # OpenCode Go (minimax-m3)
+#   .\claude-switch.ps1 opencode             # OpenCode Go direct (picker: minimax-m3 / qwen3.7-max)
+#   .\claude-switch.ps1 opencode qwen3.7-max # OpenCode Go direct, specific model
 #   .\claude-switch.ps1 ollama qwen3.5:9b    # Ollama + specific model
 #   .\claude-switch.ps1 ccr glm-5.1          # CCR + specific model
 #   .\claude-switch.ps1 status               # show current mode without changing
@@ -139,12 +140,15 @@ $CCR_MODELS = @(
     "glm-5.1",
     "kimi-k2.6",
     "mimo-v2.5-pro", "mimo-v2.5",
-    "qwen3.7-plus", "qwen3.7-max"
+    "qwen3.7-plus"
 )
 
 $DEEPSEEK_MODELS = @("deepseek-v4-flash", "deepseek-v4-pro")
 # --- MiniMax direct (api.minimax.io/anthropic) — M3 current, M2.7 legacy ---
 $MINIMAX_DIRECT_MODELS = @("MiniMax-M3", "MiniMax-M2.7")
+
+# --- OpenCode Go direct (Anthropic /v1/messages surface) — messages-reachable models ---
+$OPENCODE_DIRECT_MODELS = @("minimax-m3", "qwen3.7-max")
 
 # Ollama (local or LAN). Host:port from OLLAMA_HOST env (default 127.0.0.1:11434).
 # Ollama serves the Anthropic /v1/messages API natively, so Claude Code talks to
@@ -299,24 +303,26 @@ function Set-Minimax($obj, [string]$modelName) {
     return Set-Env $obj $envObj
 }
 
-function Set-OpencodeDirect($obj) {
+function Set-OpencodeDirect($obj, [string]$modelName) {
     $key = Require-Key @("OPENCODE_GO_API_KEY", "OPENCODE_GO_KEY")
     # OpenCode Go Anthropic endpoint expects x-api-key (ANTHROPIC_API_KEY), not Bearer.
-    # Only minimax-m3 / minimax-m2.5 are reachable via /v1/messages.
+    # Reachable via /v1/messages (Anthropic surface): minimax-m3, qwen3.7-max.
+    # NOTE: qwen3.7-max is messages-only on OCG — it 401s on the OpenAI-compat
+    # /chat/completions (oa-compat), so it works HERE but not via CCR.
     $envObj = [pscustomobject]@{
         ANTHROPIC_API_KEY                        = $key
         ANTHROPIC_BASE_URL                       = "https://opencode.ai/zen/go/v1"
-        ANTHROPIC_MODEL                          = "minimax-m3"
-        ANTHROPIC_SMALL_FAST_MODEL               = "minimax-m3"
-        ANTHROPIC_DEFAULT_SONNET_MODEL           = "minimax-m3"
-        ANTHROPIC_DEFAULT_OPUS_MODEL             = "minimax-m3"
-        ANTHROPIC_DEFAULT_HAIKU_MODEL            = "minimax-m3"
+        ANTHROPIC_MODEL                          = $modelName
+        ANTHROPIC_SMALL_FAST_MODEL               = $modelName
+        ANTHROPIC_DEFAULT_SONNET_MODEL           = $modelName
+        ANTHROPIC_DEFAULT_OPUS_MODEL             = $modelName
+        ANTHROPIC_DEFAULT_HAIKU_MODEL            = $modelName
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
         DISABLE_TELEMETRY                        = "true"
         DISABLE_COST_WARNINGS                    = "true"
         API_TIMEOUT_MS                           = "3000000"
     }
-    Write-Host "Mode: OpenCode-direct → minimax-m3 (opencode.ai/zen/go/v1, key=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
+    Write-Host "Mode: OpenCode-direct → $modelName (opencode.ai/zen/go/v1, key=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
     return Set-Env $obj $envObj
 }
 
@@ -452,7 +458,7 @@ function Show-Menu($currentMode) {
     Write-Host "  1) Anthropic           — Claude (no env override)" -ForegroundColor Green
     Write-Host "  2) DeepSeek direct     — V4-Flash + V4-Pro via api.deepseek.com/anthropic" -ForegroundColor Green
     Write-Host "  3) MiniMax direct      — M3 + M2.7 via api.minimax.io/anthropic" -ForegroundColor Green
-    Write-Host "  4) OpenCode Go direct  — minimax-m3 via opencode.ai/zen/go/v1" -ForegroundColor Green
+    Write-Host "  4) OpenCode Go direct  — minimax-m3 / qwen3.7-max via opencode.ai/zen/go/v1" -ForegroundColor Green
     Write-Host "  5) Ollama local        — local/LAN models via ${ollamaHost}:${ollamaPort} (Anthropic-native)" -ForegroundColor Green
     Write-Host "  6) CCR                 — any model via local proxy ${ccrHost}:${ccrPort}" -ForegroundColor Green
     Write-Host "  0) Exit" -ForegroundColor DarkGray
@@ -605,6 +611,17 @@ if ($Mode -eq "minimax") {
     }
 }
 
+if ($Mode -eq "opencode") {
+    if ([string]::IsNullOrWhiteSpace($Model)) {
+        $Model = Read-ModelFromMenu $OPENCODE_DIRECT_MODELS "OpenCode Go direct: pick a model" $null
+        if (-not $Model) { Write-Host "Exit without changes." -ForegroundColor DarkGray; return }
+    }
+    if (-not ($OPENCODE_DIRECT_MODELS -contains $Model)) {
+        Write-Host "Unknown opencode model: '$Model'. Available: $($OPENCODE_DIRECT_MODELS -join ', ')" -ForegroundColor Red
+        return
+    }
+}
+
 if ($Mode -eq "ollama") {
     if ([string]::IsNullOrWhiteSpace($Model)) {
         $Model = Read-ModelFromMenu $OLLAMA_MODELS "Ollama local: pick a model" $null
@@ -624,7 +641,7 @@ switch ($Mode) {
     "anthropic" { $cfg = Set-Anthropic $cfg }
     "deepseek"  { $cfg = Set-DeepseekDirect $cfg $Model }
     "minimax"   { $cfg = Set-Minimax $cfg $Model }
-    "opencode"  { $cfg = Set-OpencodeDirect $cfg }
+    "opencode"  { $cfg = Set-OpencodeDirect $cfg $Model }
     "ollama"    { $cfg = Set-Ollama $cfg $Model }
     "ccr"       { $cfg = Set-CCR $cfg $Model }
 }

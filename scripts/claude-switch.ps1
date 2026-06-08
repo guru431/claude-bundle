@@ -154,7 +154,7 @@ if (-not $ollamaHostPort) { $ollamaHostPort = "127.0.0.1:11434" }
 $ollamaParts = $ollamaHostPort.Split(":")
 $ollamaHost = $ollamaParts[0]
 $ollamaPort = if ($ollamaParts.Count -ge 2) { [int]$ollamaParts[1] } else { 11434 }
-$OLLAMA_MODELS = @("gemma4:e4b", "qwen3.5:9b", "gpt-oss:20b")
+$OLLAMA_MODELS = @("gemma4:e4b", "qwen3.5:9b", "qwen3.6:35b-a3b-q4_K_M", "gpt-oss:20b")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # JSON helpers (PS 5.1 ConvertTo-Json mis-indents — roll our own)

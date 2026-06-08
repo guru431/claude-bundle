@@ -1,41 +1,39 @@
-﻿# claude-switch.ps1 — switch the Claude Code backend between five modes:
+﻿# claude-switch.ps1 — switch the Claude Code backend between six modes:
 #   anthropic — Claude (default — no env override)
 #   deepseek  — DeepSeek direct via api.deepseek.com/anthropic (V4-Flash / V4-Pro)
-#   minimax   — MiniMax direct via api.minimax.io/anthropic
-#   opencode  — OpenCode Go (minimax-m2.7 only) via opencode.ai/zen/go/v1
-#   ccr       — any of 12 OpenCode Go models via a local Claude Code Router proxy
+#   minimax   — MiniMax direct via api.minimax.io/anthropic (M3 / M2.7)
+#   opencode  — OpenCode Go (minimax-m3 only) via opencode.ai/zen/go/v1
+#   ollama    — local/LAN Ollama via the Anthropic-native /v1/messages API
+#   ccr       — any OpenCode Go model via a local Claude Code Router proxy
 #
 # Writes the env block into <project>/.claude/settings.local.json. The
 # permissions block is stable across modes; only `env` changes.
 #
-# This switches the *interactive Claude Code session*, a separate layer from
-# the cron pipeline (home-claude/cron/hooks/utils.py::PROVIDERS). They only
-# share key NAMES — both documented in config/llm-providers.example.env and
-# docs/llm-routing.md.
+# Keys and host:port values are NOT hardcoded — they are read from process/user
+# env or from a `.env` file sitting next to this script (e.g. .claude/.env). That
+# .env is the ONLY difference between the public copy (ships with .env.example)
+# and a private deployment (ships a real, gitignored .env). The script is identical.
 #
 # Usage:
 #   .\claude-switch.ps1                      # interactive menu
 #   .\claude-switch.ps1 anthropic            # Claude default
-#   .\claude-switch.ps1 deepseek             # DeepSeek + interactive model picker
 #   .\claude-switch.ps1 deepseek flash       # DeepSeek V4-Flash
-#   .\claude-switch.ps1 deepseek pro         # DeepSeek V4-Pro
-#   .\claude-switch.ps1 minimax m27          # MiniMax M2.7
-#   .\claude-switch.ps1 opencode             # OpenCode Go (minimax-m2.7)
+#   .\claude-switch.ps1 minimax m3           # MiniMax-M3
+#   .\claude-switch.ps1 opencode             # OpenCode Go (minimax-m3)
+#   .\claude-switch.ps1 ollama qwen3.5:9b    # Ollama + specific model
 #   .\claude-switch.ps1 ccr glm-5.1          # CCR + specific model
 #   .\claude-switch.ps1 status               # show current mode without changing
 #
 # Optional parameter:
-#   -ProjectPath <path>   # path to the project (default: sibling settings.local.json)
+#   -ProjectPath <path>   # path to the project (default: this .claude/ or cwd/.claude)
 #
-# Required env vars (set in env or in <bundle-root>/.env):
-#   ANTHROPIC_API_KEY      — Anthropic key (default mode doesn't need this if
-#                            you're signed in via OAuth, but mode "anthropic"
-#                            just clears the override)
+# Config (set in process/user env or in the .env next to this script):
 #   DEEPSEEK_KEY           — DeepSeek direct (PAYG, https://platform.deepseek.com)
 #   MINIMAX_API_KEY        — MiniMax direct (https://api.minimax.io)
 #   OPENCODE_GO_API_KEY    — OpenCode Go subscription
 #   CCR_API_KEY            — Claude Code Router shared secret (if you use CCR)
 #   CCR_HOST               — host:port of your CCR proxy (default 127.0.0.1:3456)
+#   OLLAMA_HOST            — host:port of your Ollama server (default 127.0.0.1:11434)
 #
 # After switching: reload the VS Code window
 #   Ctrl+Shift+P → Developer: Reload Window
@@ -43,7 +41,7 @@
 
 param(
     [Parameter(Position=0)]
-    [ValidateSet("menu","status","anthropic","minimax","opencode","deepseek","ccr")]
+    [ValidateSet("menu","status","anthropic","minimax","opencode","ollama","deepseek","ccr")]
     [string]$Mode = "menu",
 
     [Parameter(Position=1)]
@@ -55,15 +53,15 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Env loader — supports .env in the bundle root for one-stop config.
-# Order: process env > user env > bundle-root/.env
+# Env loader — reads keys/hosts from a .env next to this script for one-stop
+# config. Order: process env > user env > <script-dir>/.env
 # ─────────────────────────────────────────────────────────────────────────────
 function Get-EnvVar($name) {
     $v = [Environment]::GetEnvironmentVariable($name, "Process")
     if (-not $v) { $v = [Environment]::GetEnvironmentVariable($name, "User") }
     if (-not $v) {
-        # Try .env in the parent of this script's directory (bundle root)
-        $envFile = Join-Path (Split-Path -Parent $PSScriptRoot) ".env"
+        # Try .env next to this script (e.g. <project>/.claude/.env)
+        $envFile = Join-Path $PSScriptRoot ".env"
         if (Test-Path $envFile) {
             $line = Get-Content $envFile -Encoding UTF8 | Where-Object { $_ -match "^\s*$name\s*=" } | Select-Object -First 1
             if ($line) {
@@ -85,9 +83,12 @@ $ccrPort = if ($ccrParts.Count -ge 2) { [int]$ccrParts[1] } else { 3456 }
 
 if ($ProjectPath) {
     $settingsDir = Join-Path $ProjectPath ".claude"
+} elseif ((Split-Path -Leaf $PSScriptRoot) -eq ".claude") {
+    # Per-project deployment: this script lives in <project>/.claude/ and
+    # switches its own project's settings.local.json (sitting next to it).
+    $settingsDir = $PSScriptRoot
 } else {
-    # Default: write into <cwd>/.claude/ — the project the user is currently
-    # working in. Matches the documented behavior (README / INSTALL).
+    # Otherwise write into <cwd>/.claude/ — the project the user is working in.
     $settingsDir = Join-Path (Get-Location).Path ".claude"
 }
 $settingsPath = Join-Path $settingsDir "settings.local.json"
@@ -116,22 +117,44 @@ $STANDARD_PERMISSIONS = [pscustomobject]@{
         "LS",
         "Glob",
         "Grep",
-        "Skill(superpowers:*)"
+        "mcp__plugin_context7_context7__resolve-library-id",
+        "mcp__plugin_context7_context7__query-docs",
+        "mcp__exa__web_search_exa",
+        "mcp__exa__crawling_exa",
+        "mcp__exa__web_fetch_exa",
+        "Skill(systematic-debugging)",
+        "Skill(systematic-debugging:*)",
+        "Skill(superpowers:*)",
+        "Skill(executing-plans)",
+        "Skill(executing-plans:*)",
+        "Skill(code-review-ext)",
+        "Skill(code-review-ext:*)"
     )
 }
 
 # CCR-routable models (order ≈ reliability + quality; adapt to your routes)
 $CCR_MODELS = @(
     "deepseek-v4-flash", "deepseek-v4-pro",
-    "minimax-m2.7", "minimax-m2.5",
-    "glm-5.1", "glm-5",
-    "kimi-k2.5", "kimi-k2.6",
+    "minimax-m3",
+    "glm-5.1",
+    "kimi-k2.6",
     "mimo-v2.5-pro", "mimo-v2.5",
-    "qwen3.6-plus", "qwen3.5-plus"
+    "qwen3.7-plus", "qwen3.7-max"
 )
 
 $DEEPSEEK_MODELS = @("deepseek-v4-flash", "deepseek-v4-pro")
-$MINIMAX_DIRECT_MODELS = @("MiniMax-M2.7", "MiniMax-M2.5")
+# --- MiniMax direct (api.minimax.io/anthropic) — M3 current, M2.7 legacy ---
+$MINIMAX_DIRECT_MODELS = @("MiniMax-M3", "MiniMax-M2.7")
+
+# Ollama (local or LAN). Host:port from OLLAMA_HOST env (default 127.0.0.1:11434).
+# Ollama serves the Anthropic /v1/messages API natively, so Claude Code talks to
+# it directly — no proxy needed. Adjust OLLAMA_MODELS to the models you've pulled.
+$ollamaHostPort = Get-EnvVar "OLLAMA_HOST"
+if (-not $ollamaHostPort) { $ollamaHostPort = "127.0.0.1:11434" }
+$ollamaParts = $ollamaHostPort.Split(":")
+$ollamaHost = $ollamaParts[0]
+$ollamaPort = if ($ollamaParts.Count -ge 2) { [int]$ollamaParts[1] } else { 11434 }
+$OLLAMA_MODELS = @("gemma4:e4b", "qwen3.5:9b", "gpt-oss:20b")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # JSON helpers (PS 5.1 ConvertTo-Json mis-indents — roll our own)
@@ -201,7 +224,9 @@ function Get-CurrentMode($obj) {
         $modelStr = " → $($envObj.ANTHROPIC_MODEL)"
     }
     $ccrPattern = "127\.0\.0\.1:$ccrPort|localhost:$ccrPort|$([regex]::Escape($ccrHost)):$ccrPort"
+    $ollamaPattern = "$([regex]::Escape($ollamaHost)):$ollamaPort"
     if ($url -match $ccrPattern) { return "ccr$modelStr  ($url)" }
+    if ($url -match $ollamaPattern) { return "ollama-local$modelStr  ($url)" }
     if ($url -match "opencode\.ai")         { return "opencode-direct$modelStr  ($url)" }
     if ($url -match "minimax\.io|minimaxi") { return "minimax-direct$modelStr  ($url)" }
     if ($url -match "api\.deepseek\.com")   { return "deepseek-direct$modelStr  ($url)" }
@@ -277,21 +302,21 @@ function Set-Minimax($obj, [string]$modelName) {
 function Set-OpencodeDirect($obj) {
     $key = Require-Key @("OPENCODE_GO_API_KEY", "OPENCODE_GO_KEY")
     # OpenCode Go Anthropic endpoint expects x-api-key (ANTHROPIC_API_KEY), not Bearer.
-    # Only minimax-m2.7 / minimax-m2.5 are reachable via /v1/messages.
+    # Only minimax-m3 / minimax-m2.5 are reachable via /v1/messages.
     $envObj = [pscustomobject]@{
         ANTHROPIC_API_KEY                        = $key
         ANTHROPIC_BASE_URL                       = "https://opencode.ai/zen/go/v1"
-        ANTHROPIC_MODEL                          = "minimax-m2.7"
-        ANTHROPIC_SMALL_FAST_MODEL               = "minimax-m2.7"
-        ANTHROPIC_DEFAULT_SONNET_MODEL           = "minimax-m2.7"
-        ANTHROPIC_DEFAULT_OPUS_MODEL             = "minimax-m2.7"
-        ANTHROPIC_DEFAULT_HAIKU_MODEL            = "minimax-m2.7"
+        ANTHROPIC_MODEL                          = "minimax-m3"
+        ANTHROPIC_SMALL_FAST_MODEL               = "minimax-m3"
+        ANTHROPIC_DEFAULT_SONNET_MODEL           = "minimax-m3"
+        ANTHROPIC_DEFAULT_OPUS_MODEL             = "minimax-m3"
+        ANTHROPIC_DEFAULT_HAIKU_MODEL            = "minimax-m3"
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
         DISABLE_TELEMETRY                        = "true"
         DISABLE_COST_WARNINGS                    = "true"
         API_TIMEOUT_MS                           = "3000000"
     }
-    Write-Host "Mode: OpenCode-direct → minimax-m2.7 (opencode.ai/zen/go/v1, key=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
+    Write-Host "Mode: OpenCode-direct → minimax-m3 (opencode.ai/zen/go/v1, key=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
     return Set-Env $obj $envObj
 }
 
@@ -321,6 +346,48 @@ function Set-DeepseekDirect($obj, [string]$modelName) {
     return Set-Env $obj $envObj
 }
 
+function Set-Ollama($obj, [string]$modelName) {
+    # Ollama speaks the Anthropic /v1/messages API natively — direct, no proxy.
+    # No key needed for a local Ollama, but Claude Code prefers a stored OAuth
+    # session over env; a dummy ANTHROPIC_AUTH_TOKEN (Bearer) overrides it.
+    $ollamaUrl = "http://${ollamaHost}:${ollamaPort}"
+
+    # Probe — is Ollama actually reachable?
+    $ollamaUp = $false
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $iar = $tcp.BeginConnect($ollamaHost, $ollamaPort, $null, $null)
+        if ($iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tcp.Connected) {
+            $ollamaUp = $true
+            $tcp.EndConnect($iar)
+        }
+        $tcp.Close()
+    } catch { }
+
+    if (-not $ollamaUp) {
+        Write-Host "WARN: Ollama not reachable at $ollamaUrl" -ForegroundColor Yellow
+        Write-Host "Start Ollama ('ollama serve') or set OLLAMA_HOST to your host:port." -ForegroundColor Yellow
+        Write-Host "Config NOT changed (ollama mode not activated)." -ForegroundColor Red
+        return $null
+    }
+
+    $envObj = [pscustomobject]@{
+        ANTHROPIC_AUTH_TOKEN                     = "ollama-local"
+        ANTHROPIC_BASE_URL                       = $ollamaUrl
+        ANTHROPIC_MODEL                          = $modelName
+        ANTHROPIC_SMALL_FAST_MODEL               = $modelName
+        ANTHROPIC_DEFAULT_SONNET_MODEL           = $modelName
+        ANTHROPIC_DEFAULT_OPUS_MODEL             = $modelName
+        ANTHROPIC_DEFAULT_HAIKU_MODEL            = $modelName
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+        DISABLE_TELEMETRY                        = "true"
+        DISABLE_COST_WARNINGS                    = "true"
+        API_TIMEOUT_MS                           = "3000000"
+    }
+    Write-Host "Mode: Ollama-local -> $modelName ($ollamaUrl)" -ForegroundColor Green
+    return Set-Env $obj $envObj
+}
+
 function Set-CCR($obj, [string]$modelName) {
     $key = Require-Key "CCR_API_KEY"
     $ccrUrl  = "http://${ccrHost}:${ccrPort}"
@@ -347,6 +414,8 @@ function Set-CCR($obj, [string]$modelName) {
             Start-Sleep -Seconds 4
         } else {
             Write-Host "Either start ccr manually, or set CCR_HOST to point at your proxy host." -ForegroundColor Yellow
+            Write-Host "Config NOT changed (ccr mode not activated)." -ForegroundColor Red
+            return $null
         }
     }
 
@@ -382,15 +451,16 @@ function Show-Menu($currentMode) {
     Write-Host ""
     Write-Host "  1) Anthropic           — Claude (no env override)" -ForegroundColor Green
     Write-Host "  2) DeepSeek direct     — V4-Flash + V4-Pro via api.deepseek.com/anthropic" -ForegroundColor Green
-    Write-Host "  3) MiniMax direct      — M2.7 + M2.5 via api.minimax.io/anthropic" -ForegroundColor Green
-    Write-Host "  4) OpenCode Go direct  — minimax-m2.7 via opencode.ai/zen/go/v1" -ForegroundColor Green
-    Write-Host "  5) CCR                 — any model via local proxy ${ccrHost}:${ccrPort}" -ForegroundColor Green
+    Write-Host "  3) MiniMax direct      — M3 + M2.7 via api.minimax.io/anthropic" -ForegroundColor Green
+    Write-Host "  4) OpenCode Go direct  — minimax-m3 via opencode.ai/zen/go/v1" -ForegroundColor Green
+    Write-Host "  5) Ollama local        — local/LAN models via ${ollamaHost}:${ollamaPort} (Anthropic-native)" -ForegroundColor Green
+    Write-Host "  6) CCR                 — any model via local proxy ${ccrHost}:${ccrPort}" -ForegroundColor Green
     Write-Host "  0) Exit" -ForegroundColor DarkGray
     Write-Host ""
 }
 
 function Read-Choice {
-    $choice = (Read-Host "Choice [1/2/3/4/5/0]").Trim().ToLower()
+    $choice = (Read-Host "Choice [1/2/3/4/5/6/0]").Trim().ToLower()
     switch ($choice) {
         "1"          { return "anthropic" }
         "anthropic"  { return "anthropic" }
@@ -404,7 +474,10 @@ function Read-Choice {
         "4"          { return "opencode" }
         "opencode"   { return "opencode" }
         "o"          { return "opencode" }
-        "5"          { return "ccr" }
+        "5"          { return "ollama" }
+        "ollama"     { return "ollama" }
+        "l"          { return "ollama" }
+        "6"          { return "ccr" }
         "ccr"        { return "ccr" }
         "c"          { return "ccr" }
         "0"          { return "exit" }
@@ -460,7 +533,7 @@ function Read-ModelFromMenu([string[]]$modelList, [string]$title, [hashtable]$al
 }
 
 $DEEPSEEK_ALIASES = @{ "flash" = "deepseek-v4-flash"; "pro" = "deepseek-v4-pro"; "f" = "deepseek-v4-flash"; "p" = "deepseek-v4-pro" }
-$MINIMAX_ALIASES  = @{ "m27" = "MiniMax-M2.7"; "m25" = "MiniMax-M2.5"; "2.7" = "MiniMax-M2.7"; "2.5" = "MiniMax-M2.5" }
+$MINIMAX_ALIASES  = @{ "m3" = "MiniMax-M3"; "m27" = "MiniMax-M2.7"; "3" = "MiniMax-M3"; "2.7" = "MiniMax-M2.7" }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # main
@@ -485,7 +558,7 @@ if ($Mode -eq "menu") {
 
 if ($Mode -eq "status") {
     Write-Host ""
-    Write-Host "(no changes; pass 'anthropic'/'deepseek'/'minimax'/'opencode'/'ccr' to switch)" -ForegroundColor DarkGray
+    Write-Host "(no changes; pass 'anthropic'/'deepseek'/'minimax'/'opencode'/'ollama'/'ccr' to switch)" -ForegroundColor DarkGray
     return
 }
 
@@ -527,7 +600,18 @@ if ($Mode -eq "minimax") {
         $Model = $MINIMAX_ALIASES[$Model.ToLower()]
     }
     if (-not ($MINIMAX_DIRECT_MODELS -contains $Model)) {
-        Write-Host "Unknown minimax model: '$Model'. Available: $($MINIMAX_DIRECT_MODELS -join ', ') (aliases: m27, m25)" -ForegroundColor Red
+        Write-Host "Unknown minimax model: '$Model'. Available: $($MINIMAX_DIRECT_MODELS -join ', ') (aliases: m3, m27)" -ForegroundColor Red
+        return
+    }
+}
+
+if ($Mode -eq "ollama") {
+    if ([string]::IsNullOrWhiteSpace($Model)) {
+        $Model = Read-ModelFromMenu $OLLAMA_MODELS "Ollama local: pick a model" $null
+        if (-not $Model) { Write-Host "Exit without changes." -ForegroundColor DarkGray; return }
+    }
+    if (-not ($OLLAMA_MODELS -contains $Model)) {
+        Write-Host "Unknown ollama model: '$Model'. Available: $($OLLAMA_MODELS -join ', ')" -ForegroundColor Red
         return
     }
 }
@@ -541,8 +625,13 @@ switch ($Mode) {
     "deepseek"  { $cfg = Set-DeepseekDirect $cfg $Model }
     "minimax"   { $cfg = Set-Minimax $cfg $Model }
     "opencode"  { $cfg = Set-OpencodeDirect $cfg }
+    "ollama"    { $cfg = Set-Ollama $cfg $Model }
     "ccr"       { $cfg = Set-CCR $cfg $Model }
 }
+
+# Set-CCR / Set-Ollama return $null when the backend is unreachable and can't be
+# activated — don't write the config then (Claude Code would fail every request).
+if ($null -eq $cfg) { return }
 
 Save-Settings $cfg
 $after = Get-CurrentMode (Read-Settings)

@@ -22,7 +22,7 @@ if sys.platform == "win32":
     sys.stderr.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
-from utils import llm_call, parse_jsonl_messages  # noqa: E402
+from utils import llm_call, parse_jsonl_messages, dir_to_project  # noqa: E402
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 USER_MD = Path.home() / ".claude" / "memory" / "USER.md"
@@ -57,11 +57,9 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
     for proj_dir in PROJECTS_DIR.iterdir():
         if not proj_dir.is_dir():
             continue
-        # Strip a common encoded prefix if your dir names follow one, otherwise
-        # fall back to the raw directory name.
-        proj_name = proj_dir.name
-        if "--" in proj_name:
-            proj_name = proj_name.rsplit("--", 1)[-1] or proj_name
+        # Same project-name derivation as the wiki pipeline (PROJECT_MAP →
+        # trailing segment) so both pipelines key the same project identically.
+        proj_name = dir_to_project(proj_dir.name)
 
         bits: list[str] = []
         for jsonl in proj_dir.glob("*.jsonl"):
@@ -79,10 +77,15 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
                 if m["role"] != "user":
                     continue
                 txt = m["text"].strip()
-                # Skip tool results and system reminders.
+                # System reminders are separate text blocks glued INTO real
+                # user messages — strip the block, don't drop the message.
+                txt = re.sub(r"<system-reminder>[\s\S]*?</system-reminder>", "", txt).strip()
+                if not txt:
+                    continue
+                # Skip tool results and hook-injected pseudo-messages.
                 if txt.startswith("<") and txt.endswith(">"):
                     continue
-                if "session-end-hook" in txt or "system-reminder" in txt:
+                if "session-end-hook" in txt:
                     continue
                 bits.append(txt)
 
@@ -156,9 +159,14 @@ JSON only, no markdown wrapper, no commentary."""
 
 
 def update_cross_notes(proj_messages: dict[str, str]) -> None:
+    # OPT-IN: this phase only runs when something has produced
+    # cron/scan-results/scan_<date>.json (a daily project-scan summary; the
+    # bundle does not ship such a generator). Without that file the phase is
+    # skipped — wire up your own scanner or ignore the skip message.
     scan_file = SCAN_DIR / f"scan_{DATE}.json"
     if not scan_file.exists():
-        log("cross-notes: no scan_*.json — skipping (run after ProjectScan)")
+        log(f"cross-notes: no {scan_file.name} — skipping "
+            "(opt-in: provide cron/scan-results/scan_<date>.json to enable)")
         return
     if len(proj_messages) < 2:
         log("cross-notes: fewer than 2 active projects — skipping")

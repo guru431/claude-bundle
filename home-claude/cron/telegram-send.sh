@@ -46,9 +46,14 @@ if [ -z "$MSG" ]; then
     exit 1
 fi
 
-# Escape JSON special chars (force UTF-8 for stdin on Windows).
+# Build the whole JSON body in Python (force UTF-8 for stdin on Windows):
+# - chat_id goes through json.dumps too — "@channelname" or stray quotes in
+#   .env must not break the body (Bot API accepts a string chat_id);
+# - text is truncated to 4000 chars (API limit is 4096; an oversized body
+#   gets HTTP 400 and the alert silently disappears).
 # ${PYTHON_EXE:-python}: 'python3' is not created by the Windows installer.
-MSG_ESCAPED=$(echo "$MSG" | PYTHONIOENCODING=utf-8 "${PYTHON_EXE:-python}" -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))")
+PAYLOAD=$(printf '%s' "$MSG" | PYTHONIOENCODING=utf-8 TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID" \
+  "${PYTHON_EXE:-python}" -c "import sys,json,os; print(json.dumps({'chat_id': os.environ['TELEGRAM_CHAT_ID'], 'text': sys.stdin.read().strip()[:4000]}))")
 
 # Feed the token-bearing URL through a curl config on stdin (-K -) so the bot
 # token never appears in the process arg list (ps / tasklist) or shell history.
@@ -56,7 +61,7 @@ MSG_ESCAPED=$(echo "$MSG" | PYTHONIOENCODING=utf-8 "${PYTHON_EXE:-python}" -c "i
 # so keeping the URL out of argv is the way to hide it.
 curl -s -X POST \
   -H "Content-Type: application/json; charset=utf-8" \
-  --data-binary "{\"chat_id\": ${TELEGRAM_CHAT_ID}, \"text\": ${MSG_ESCAPED}}" \
+  --data-binary "$PAYLOAD" \
   -K - <<CURL_CFG 2>&1
 url = "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
 CURL_CFG

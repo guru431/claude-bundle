@@ -76,9 +76,10 @@ pipeline; just the compiler that turns prepared text into `kb/*` pages.
 
 ### Phase 4 — build index (`wiki-build-index.py`)
 
-Reads every page in `wiki/`, regenerates the auto-sections of
-`wiki/index.md` (lists of projects + KB concepts/tools/people), and
-updates per-project `_log.md` feeds.
+Reads every page in `wiki/`, rebuilds `projects/index.md` and
+`kb/index.md` (categorized page lists), and refreshes the stats table
+in `wiki/index.md`. Per-project `_log.md` feeds are written by
+compile-sessions as it applies page changes, not by this script.
 
 Optionally run `wiki-lint.py` periodically to find broken `[[wikilinks]]`,
 orphan pages, missing frontmatter, etc.

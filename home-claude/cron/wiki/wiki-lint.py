@@ -2,7 +2,8 @@
 """Wiki Lint — vault health check.
 
 No LLM — pure Python markdown parsing. Fast (seconds), free.
-On errors, sends a Telegram alert.
+On errors, optionally sends a Telegram alert (opt-in via
+ENABLE_TELEGRAM_ALERTS below).
 
 Schedule: Sunday at 02:00.
 """
@@ -19,10 +20,9 @@ if hasattr(sys.stderr, "reconfigure"):
 from datetime import datetime
 from pathlib import Path
 
-# Script lives under cron/wiki/<file>.py → 2 levels up to bundle root.
-BUNDLE_ROOT = Path(__file__).resolve().parents[2]
-WIKI_ROOT = BUNDLE_ROOT / "wiki"
-LOG_MD = WIKI_ROOT / "log.md"
+sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+from utils import BUNDLE_ROOT, WIKI_ROOT, LOG_MD  # noqa: E402
+
 KBNEWS_DIR = BUNDLE_ROOT / "kb_news"
 TELEGRAM_SCRIPT = BUNDLE_ROOT / "cron" / "telegram-send.sh"
 CRON_LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
@@ -47,7 +47,10 @@ def find_all_pages() -> dict[str, list[Path]]:
         parts = f.relative_to(WIKI_ROOT).parts
         if any(p in skip for p in parts):
             continue
-        if f.name in ("index.md", "CLAUDE.md", "log.md"):
+        # _log.md is the script-managed per-project activity feed — every
+        # project has one, so it would trip the ambiguous-name and
+        # thin-content checks with pure noise.
+        if f.name in ("index.md", "CLAUDE.md", "log.md", "_log.md"):
             continue
         pages.setdefault(f.stem, []).append(f)
     return pages
@@ -263,8 +266,13 @@ def main():
     for issue in all_issues:
         log(f"  {issue}")
 
-    # Telegram alerts are opt-in via ENABLE_TELEGRAM_ALERTS at the top of this file —
-    # broken links in compiled kb pages tend to produce weekly noise.
+    # Opt-in via ENABLE_TELEGRAM_ALERTS at the top of this file — broken
+    # links in compiled kb pages tend to produce weekly noise.
+    if stats["errors"] > 0:
+        send_telegram_alert(
+            f"wiki-lint {DATE}: {stats['errors']} errors, "
+            f"{stats['warnings']} warnings ({stats['pages']} pages)"
+        )
 
     log(f"=== Lint complete ===")
 

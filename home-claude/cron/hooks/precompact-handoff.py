@@ -20,7 +20,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import llm_call, parse_jsonl_messages  # noqa: E402
 
-HANDOFF_MAX_BYTES = 60000
+# Character budget for the transcript tail fed to the LLM. The slice keeps
+# the END of the conversation — the freshest messages matter most for handoff.
+HANDOFF_MAX_CHARS = 60000
 
 
 def main() -> int:
@@ -38,7 +40,7 @@ def main() -> int:
 
     body = "\n\n".join(
         f"**{m['role']}**: {m['text']}" for m in messages
-    )[:HANDOFF_MAX_BYTES]
+    )[-HANDOFF_MAX_CHARS:]
 
     prompt = (
         "You are about to be compacted. Write a handoff document for the "

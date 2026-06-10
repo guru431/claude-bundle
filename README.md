@@ -13,8 +13,8 @@ optional Python hooks.)
 **Full** (~30–60 minutes): on top of lite, add the Python hooks, a
 Karpathy-style wiki vault, a registry-driven Windows Task Scheduler
 automation, an LLM provider switcher (`claude-switch.ps1`), an
-`AGENTS.md` mirror for Codex CLI, and 9 scheduled tasks that flush
-Claude Code sessions into the wiki overnight. Needs Python 3.10+, Git,
+`AGENTS.md` mirror for Codex CLI, and 10 scheduled tasks (one disabled
+by default) that flush Claude Code sessions into the wiki overnight. Needs Python 3.10+, Git,
 and at least one LLM provider key. (Tier 1 + Tier 2 below.)
 
 Both profiles were extracted from a real working setup, then sanitized
@@ -52,16 +52,19 @@ claude-bundle/
 │   │   ├── projects/<your-slugs>/      atomic pages (incident/solution/...)
 │   │   ├── kb/{concepts,tools,people}/ external knowledge
 │   │   └── daily/.pending/             staging area
+│   ├── bin/_run-hidden.vbs             hidden-window launcher for Task Scheduler
 │   └── cron/                           cron foundation + wiki pipeline + 10 tasks
 │       ├── hooks/utils.py              shared LLM_call, JSONL parsing, wiki utils
 │       ├── hooks/session-{start,end}.py  inject wiki context / dump session
 │       ├── hooks/pre-compact.py        LLM-summarized handoff before compaction
+│       ├── hooks/precompact-handoff.py background handoff writer (spawned by pre-compact)
 │       ├── llm-call.py                 CLI wrapper for utils.py::llm_call
 │       ├── telegram-send.sh            Bot API helper (env-driven)
+│       ├── prompts/                    LLM prompts (flush/compile/healthcheck)
 │       ├── wiki/wiki-*.py              5 compilers (flush/compile/build-index/lint)
 │       ├── log-retention.py            prune old cron/logs/*.log
 │       ├── claude-task-monitor.sh      alert on failed Task Scheduler jobs
-│       ├── claude-git-push-all.sh      auto-push project repos
+│       ├── git-push-all.sh             auto-push project repos
 │       ├── claude-healthcheck.sh       morning self-check
 │       ├── memory-update.py            JSONL → memory MD
 │       ├── registry.yaml               10 tasks declared here
@@ -74,13 +77,14 @@ claude-bundle/
 │   └── AGENTS-per-project.template.md per-project router template
 │
 ├── scripts/
-│   ├── claude-switch.ps1              switch session backend (Claude/DS/MM/OCG/CCR)
+│   ├── claude-switch.ps1              switch session backend (Claude/DS/MM/OCG/Ollama/CCR)
 │   ├── self-test.ps1                  one-command offline sanity check
 │   └── bootstrap-registry.ps1         fill registry.yaml placeholders + path policy
 │
 ├── config/
-│   └── llm-providers.example.env      env template (copy to <bundle-root>/.env)
+│   └── llm-providers.example.env      env template (copy to ~/.claude/.env)
 │
+├── .githooks/pre-commit               secret-guard hook (activate: git config core.hooksPath .githooks)
 ├── .github/workflows/ci.yml           lint + secret-guard + shellcheck CI
 │
 └── docs/
@@ -116,11 +120,12 @@ from your real Claude Code sessions:
   atomic project pages (`incident-*`, `solution-*`, `feedback-*`,
   `architecture-*`) with `[[wikilinks]]` for navigation — no RAG, no
   embeddings
-- A build-index script regenerates `wiki/index.md` and per-project logs
+- A build-index script rebuilds `projects/index.md` and `kb/index.md`
+  and refreshes the stats table in `wiki/index.md`
 - A lint script catches broken links, orphan pages, missing frontmatter
 
-A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 9
-scheduled jobs. One UAC-elevated `sync.cmd` syncs your registry into
+A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 10
+scheduled jobs (one disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
 real `Register-ScheduledTask` calls — idempotent, marked, hidden
 windows, Password-mode by default (runs before login → survives
 overnight reboots).
@@ -133,8 +138,8 @@ only — cron jobs will never silently burn your subscription.
 
 - **`scripts/claude-switch.ps1`** — interactive menu (and CLI mode) to
   switch the active Claude Code session between Anthropic, DeepSeek,
-  MiniMax, OpenCode Go, and CCR (Claude Code Router). Writes to
-  `<project>/.claude/settings.local.json`.
+  MiniMax, OpenCode Go, local/LAN Ollama, and CCR (Claude Code Router).
+  Writes to `<project>/.claude/settings.local.json`.
 - **`codex/AGENTS.md`** — drop into `~/.codex/AGENTS.md` so Codex CLI
   picks up the same universal rules as Claude Code (Claude-specific
   sections like slash commands and hooks are omitted from this mirror).
@@ -216,7 +221,7 @@ portable).
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `sync-tasks` aborts with "registry still contains placeholders" | `registry.yaml` not bootstrapped | run `scripts/bootstrap-registry.ps1`, or replace `<bundle-install-path>`/`<user>` by hand |
-| Cron LLM call logs `DEEPSEEK_KEY env var not set` | no `.env` (or wrong key name) | copy `config/llm-providers.example.env` → `<bundle-root>/.env`, fill a key |
+| Cron LLM call logs `DEEPSEEK_KEY env var not set` | no `.env` (or wrong key name) | copy `config/llm-providers.example.env` → `~/.claude/.env`, fill a key |
 | `self-test.ps1` warns "Python not found" / skips checks | Python not on PATH | install Python 3.10+, or set `$env:CLAUDE_HOOK_PYTHON` |
 | Password-mode task exits 127, no log | `script:` on a mapped drive (absent in session 0) | use a UNC `\\host\share\...` or local `C:\...` path; `bootstrap-registry.ps1` warns about this |
 | All wiki pages land in `projects/main` | `KNOWN_PROJECTS` empty / headings non-ASCII | populate `KNOWN_PROJECTS` in `utils.py`; `wiki-lint` flags this as "project-collapse" |

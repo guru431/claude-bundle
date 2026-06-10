@@ -47,6 +47,8 @@ def main() -> None:
         payload = json.load(sys.stdin)
     except Exception:
         emit()  # malformed input -> silent no-op, never block the user
+    if not isinstance(payload, dict):
+        emit()  # valid JSON but not an object (list/string) -> same no-op
 
     ti = payload.get("tool_input") or {}
     tr = payload.get("tool_response") or {}

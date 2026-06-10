@@ -27,24 +27,23 @@ from utils import (  # noqa: E402
     add_source_to_frontmatter,
     llm_call,
     normalize_wiki_path,
+    parse_llm_json,
     read_page,
     source_hash,
-    source_already_processed,
     state_add,
     state_get,
     is_dry_run,
     write_page,
+    BUNDLE_ROOT,
+    WIKI_ROOT,
+    LOG_MD,
 )
 
 # Allow nested Claude CLI invocation
 for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
     os.environ.pop(env_key, None)
 
-# Script lives under cron/wiki/<file>.py → 2 levels up to bundle root.
-BUNDLE_ROOT = Path(__file__).resolve().parents[2]
-WIKI_ROOT = BUNDLE_ROOT / "wiki"
 KB_DIR = WIKI_ROOT / "kb"
-LOG_MD = WIKI_ROOT / "log.md"
 KBNEWS_DIR = BUNDLE_ROOT / "kb_news"
 PROMPT_PATH = BUNDLE_ROOT / "cron" / "prompts" / "wiki-compile-kb.md"
 CRON_LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
@@ -87,7 +86,7 @@ def read_existing_pages() -> dict[str, str]:
     return pages
 
 
-def compile_article(article_path: Path, existing_pages: dict[str, str]) -> dict | None:
+def compile_article(article_path: Path, existing_pages: dict[str, str]) -> list[dict] | None:
     """Call the LLM to compile one article into wiki pages."""
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
     article_text = article_path.read_text(encoding="utf-8")
@@ -122,14 +121,10 @@ JSON only, no markdown wrapper, no commentary."""
     output = llm_call(full_prompt, timeout=600)
     if not output:
         return None
-    try:
-        json_match = re.search(r'\[[\s\S]*\]', output)
-        if json_match:
-            return json.loads(json_match.group())
-        return None
-    except json.JSONDecodeError as e:
-        print(f"  ERROR: {e}", file=sys.stderr)
-        return None
+    # parse_llm_json handles fenced output, broken escapes and truncation —
+    # a greedy regex + bare json.loads choked on trailing commentary here.
+    result = parse_llm_json(output)
+    return result or None
 
 
 def apply_changes(changes: list[dict], existing_pages: dict[str, str], article_rel: str, article_hash: str) -> list[str]:
@@ -186,38 +181,6 @@ def update_log(article_rel: str, changes: list[str]):
     entry = f"- [compile-kb] processed: {article_rel} → {', '.join(changes)}\n"
     with open(LOG_MD, "a", encoding="utf-8") as f:
         f.write(entry)
-
-
-def update_kb_index():
-    """Update wiki/kb/index.md with the current page list."""
-    sections = {"concepts": [], "tools": [], "people": []}
-    for subdir, pages in sections.items():
-        d = KB_DIR / subdir
-        if d.exists():
-            for f in sorted(d.glob("*.md")):
-                pages.append(f.stem)
-
-    lines = [
-        "# External knowledge (kb/)",
-        "",
-        "Knowledge compiled from external sources (e.g. video reviews).",
-        "",
-        f"Sources: `kb_news/articles/`, `kb_news/plans/`, `kb_news/proposals/`",
-        "",
-        f"## Concepts ({len(sections['concepts'])})",
-        "",
-    ]
-    for name in sections["concepts"]:
-        lines.append(f"- [[{name}]]")
-    lines += ["", f"## Tools ({len(sections['tools'])})", ""]
-    for name in sections["tools"]:
-        lines.append(f"- [[{name}]]")
-    lines += ["", f"## People ({len(sections['people'])})", ""]
-    for name in sections["people"]:
-        lines.append(f"- [[{name}]]")
-    lines += ["", "---", "Back: [[index|Main index]]", ""]
-
-    (KB_DIR / "index.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def main():
@@ -283,7 +246,8 @@ def main():
         if i < len(new_files) - 1:
             time.sleep(5)
 
-    update_kb_index()
+    # kb/index.md is rebuilt by wiki-build-index.py, scheduled after the
+    # compile tasks — no duplicate index writer here.
     log(f"=== Total: {total_created} changes across {len(new_files)} files ===")
 
 

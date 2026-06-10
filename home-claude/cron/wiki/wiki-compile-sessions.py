@@ -33,22 +33,26 @@ from utils import (  # noqa: E402
     state_get,
     is_dry_run,
     write_page,
+    BUNDLE_ROOT,
+    WIKI_ROOT,
+    DAILY_DIR,
+    LOG_MD,
 )
 
 # Allow nested Claude CLI invocation
 for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
     os.environ.pop(env_key, None)
 
-# Script lives under cron/wiki/<file>.py → 2 levels up to bundle root.
-BUNDLE_ROOT = Path(__file__).resolve().parents[2]
-WIKI_ROOT = BUNDLE_ROOT / "wiki"
 PROJECTS_DIR = WIKI_ROOT / "projects"
-DAILY_DIR = WIKI_ROOT / "daily"
-LOG_MD = WIKI_ROOT / "log.md"
 PROMPT_PATH = BUNDLE_ROOT / "cron" / "prompts" / "wiki-compile-sessions.md"
 CRON_LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 
 DATE = datetime.now().strftime("%Y-%m-%d")
+
+# With more than this many existing pages, the LLM sees page NAMES only —
+# its "update" then rewrites a body it never read. apply_changes() switches
+# to append semantics in that case.
+MAX_PAGES_WITH_CONTENT = 30
 
 
 def get_compiled_dailies() -> set[str]:
@@ -105,8 +109,7 @@ def compile_project_data(project: str, data: str, existing_pages: dict[str, str]
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
     # Guard against context overflow (e.g. 128K-token providers): if there
-    # are many pages, send only the names. Full content fits up to ~30 pages.
-    MAX_PAGES_WITH_CONTENT = 30
+    # are many pages, send only the names (see MAX_PAGES_WITH_CONTENT above).
     MAX_CONTENT_BYTES = 40000
 
     existing_list = "\n".join(f"- {name}" for name in sorted(existing_pages.keys()))
@@ -162,14 +165,20 @@ JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
     return result
 
 
-def apply_changes(changes: list[dict], source_daily: str, project: str) -> list[str]:
-    """Apply changes: preserve frontmatter, record source, update _log.md."""
+def apply_changes(changes: list[dict], source_daily: str, project: str,
+                  blind_update: bool = False) -> list[str]:
+    """Apply changes: preserve frontmatter, record source, update _log.md.
+
+    blind_update=True means the LLM saw only page names (too many pages for
+    full content) — overwriting an existing page would destroy a body the
+    model never read, so new content is APPENDED instead (skipped if already
+    present, which keeps retries idempotent).
+    """
     applied = []
     log_entries: list[str] = []
     for change in changes:
         rel_path = normalize_wiki_path(change.get("path", ""))
         content = change.get("content", "")
-        action = change.get("action", "create")
 
         if not rel_path or not content:
             continue
@@ -181,8 +190,13 @@ def apply_changes(changes: list[dict], source_daily: str, project: str) -> list[
             if m:
                 content = content[m.end():]
 
-        existing_fm, _ = read_page(full_path)
+        existing_fm, existing_body = read_page(full_path)
         action_label = "updated" if full_path.exists() else "created"
+        if blind_update and full_path.exists():
+            if content.strip() in existing_body:
+                continue  # nothing new — keeps a retried daily idempotent
+            content = existing_body.rstrip() + f"\n\n## Update ({DATE})\n\n" + content.strip() + "\n"
+            action_label = "appended"
 
         new_fm = add_source_to_frontmatter(
             existing_fm,
@@ -197,30 +211,6 @@ def apply_changes(changes: list[dict], source_daily: str, project: str) -> list[
         append_per_project_log(project, log_entries)
 
     return applied
-
-
-def update_projects_index():
-    """Update wiki/projects/index.md with the current page list."""
-    lines = [
-        "# Projects (projects/)",
-        "",
-        "Knowledge captured from Claude Code work sessions across all projects.",
-        "",
-    ]
-
-    for proj_dir in sorted(PROJECTS_DIR.iterdir()):
-        if not proj_dir.is_dir():
-            continue
-        project = proj_dir.name
-        pages = list(proj_dir.glob("*.md"))
-        if pages:
-            lines.append(f"## [[projects/{project}/|{project}]] ({len(pages)} pages)")
-            for p in sorted(pages):
-                lines.append(f"- [[{p.stem}]]")
-            lines.append("")
-
-    lines += ["---", "Back: [[index|Main index]]", ""]
-    (PROJECTS_DIR / "index.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def main():
@@ -271,25 +261,38 @@ def main():
                 by_project[norm] = data
         log(f"  Projects (after normalization): {len(by_project)} from {len(raw_by_project)} sections")
 
+        failed = 0
         for project, data in by_project.items():
             existing = get_existing_project_pages(project)
             log(f"  [{project}] existing pages: {len(existing)}, data: {len(data)} chars")
 
             changes = compile_project_data(project, data, existing)
             if changes:
-                applied = apply_changes(changes, source_daily=daily_path.name, project=project)
+                applied = apply_changes(changes, source_daily=daily_path.name,
+                                        project=project,
+                                        blind_update=len(existing) > MAX_PAGES_WITH_CONTENT)
                 total_changes += len(applied)
                 log(f"  [{project}] → {len(applied)} changes")
             else:
                 log(f"  [{project}] → ERROR")
+                failed += 1
 
             time.sleep(5)
 
-        state_add("compile_sessions", "compiled_dailies", [daily_path.stem])
-        with open(LOG_MD, "a", encoding="utf-8") as f:
-            f.write(f"- [compile-sessions] compiled: {daily_path.stem}.md ({len(by_project)} projects)\n")
+        # Mark the daily compiled only when every project succeeded — an
+        # LLM-provider outage must not permanently drop this daily's content.
+        # On retry, append-dedup in apply_changes keeps succeeded projects
+        # from duplicating their pages.
+        if failed:
+            log(f"  {failed}/{len(by_project)} project(s) failed — "
+                f"{daily_path.name} left uncompiled for retry")
+        else:
+            state_add("compile_sessions", "compiled_dailies", [daily_path.stem])
+            with open(LOG_MD, "a", encoding="utf-8") as f:
+                f.write(f"- [compile-sessions] compiled: {daily_path.stem}.md ({len(by_project)} projects)\n")
 
-    update_projects_index()
+    # projects/index.md is rebuilt by wiki-build-index.py, scheduled right
+    # after this task — no duplicate index writer here.
     log(f"=== Total: {total_changes} changes across {len(dailies)} daily logs ===")
 
 

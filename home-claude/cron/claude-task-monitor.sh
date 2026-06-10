@@ -19,6 +19,28 @@ fi
 
 CRON_DIR="$BUNDLE_ROOT/cron"
 LOG_DIR="$CRON_DIR/logs"
+
+# Session 0 has no user env — read the bundle .env (PYTHON_EXE, PROJECTS_ROOT)
+# with the same safe parser as telegram-send.sh.
+ENV_FILE="$BUNDLE_ROOT/.env"
+if [ -f "$ENV_FILE" ]; then
+    while IFS= read -r raw || [ -n "$raw" ]; do
+        line="${raw%$'\r'}"
+        case "$line" in
+            ''|\#*) continue ;;
+            export\ *) line="${line#export }" ;;
+        esac
+        key="${line%%=*}"
+        case "$key" in
+            *[!A-Za-z0-9_]*|'') continue ;;
+        esac
+        val="${line#*=}"
+        val="${val%\"}"; val="${val#\"}"
+        val="${val%\'}"; val="${val#\'}"
+        export "$key=$val"
+    done < "$ENV_FILE"
+fi
+
 PYTHON="${PYTHON_EXE:-python}"
 
 mkdir -p "$LOG_DIR"
@@ -31,7 +53,7 @@ echo "TRACE: BUNDLE_ROOT=$BUNDLE_ROOT" >> "$LOG_FILE"
 
 # --- Collect task statuses via PowerShell ---
 echo "TRACE: stage=tasks $(date '+%H:%M:%S')" >> "$LOG_FILE"
-FAILURES=$("$PYTHON" - 2>>"$LOG_FILE" <<'PYSCRIPT'
+TASK_STATUS=$("$PYTHON" - 2>>"$LOG_FILE" <<'PYSCRIPT'
 import subprocess, sys, json
 
 ps_cmd = r"""
@@ -89,7 +111,19 @@ else:
 PYSCRIPT
 )
 
-echo "$FAILURES" >> "$LOG_FILE"
+echo "$TASK_STATUS" >> "$LOG_FILE"
+
+# Triage the collection result. ALERTS accumulates everything worth sending;
+# a broken monitor is itself alert-worthy — "monitor down, nobody noticed" is
+# exactly the failure mode this script exists to prevent.
+ALERTS=""
+TASK_FAIL_COUNT=0
+if [ -z "$TASK_STATUS" ] || printf '%s\n' "$TASK_STATUS" | head -1 | grep -q '^ERROR'; then
+    ALERTS="task-monitor: task-status collection FAILED (${TASK_STATUS:-python produced no output}) — the monitor itself may be broken, check cron/logs/task-monitor_${DATE}.log"
+elif [ "$TASK_STATUS" != "OK" ]; then
+    TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | wc -l)
+    ALERTS="$TASK_STATUS"
+fi
 
 # --- Policy check: no Password-task may use a mapped-drive (S:\, etc) ---
 # Mapped drives don't exist in session 0 (before user logon). A Password
@@ -103,15 +137,15 @@ Get-ScheduledTask | Where-Object {
     $_.Description -like '*managed-by-registry*' -and
     $_.Principal.LogonType -eq 'Password'
 } | ForEach-Object {
-    $args = ($_.Actions | Select-Object -First 1).Arguments
+    $taskArgs = ($_.Actions | Select-Object -First 1).Arguments
     # Drive letter anywhere in the args: after a space, after a quote, or at
     # the very start of the string. (Single-letter drive + `:\` is the minimum.)
     # C:\ is excluded: it's the system drive and always exists in session 0,
     # so a Password task referencing C:\ is fine — the policy is about mapped
     # drives (S:\, etc) that are absent before logon. Add other fixed local
     # drive letters to the lookahead if your machine has them.
-    if ($args -match '(^|[\s\"])(?![Cc]:\\)[A-Za-z]:\\') {
-        [PSCustomObject]@{ Name = $_.TaskName; Args = $args }
+    if ($taskArgs -match '(^|[\s\"])(?![Cc]:\\)[A-Za-z]:\\') {
+        [PSCustomObject]@{ Name = $_.TaskName; Args = $taskArgs }
     }
 } | ConvertTo-Json -Compress
 """
@@ -134,8 +168,8 @@ PYSCRIPT
 
 if [ -n "$POLICY_VIOL" ]; then
     echo "$POLICY_VIOL" >> "$LOG_FILE"
-    FAILURES="${FAILURES}
-$POLICY_VIOL"
+    ALERTS="${ALERTS:+$ALERTS
+}$POLICY_VIOL"
 fi
 
 # --- Findings watch (stale >90 days, new P1 surge) ---
@@ -146,10 +180,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# BUNDLE_ROOT passed via argv[1]; PROJECTS_ROOT is the parent dir (a workspace
-# of multiple projects, each with optional FINDINGS.md).
+# BUNDLE_ROOT passed via argv[1]. PROJECTS_ROOT env var (e.g. from the bundle
+# .env) overrides the default of "parent dir" — when the bundle is deployed to
+# ~/.claude, the parent is the user profile, not a projects workspace.
+import os
 BUNDLE_ROOT = Path(sys.argv[1])
-PROJECTS_ROOT = BUNDLE_ROOT.parent
+PROJECTS_ROOT = Path(os.environ.get("PROJECTS_ROOT") or BUNDLE_ROOT.parent)
 STALE_DAYS = 90
 NEW_P1_WINDOW = 7
 NEW_P1_LIMIT = 5
@@ -204,41 +240,46 @@ PYSCRIPT
 
 if [ -n "$FINDINGS_ALERT" ]; then
     echo "Findings check: $FINDINGS_ALERT" >> "$LOG_FILE"
-    FAILURES="${FAILURES}
-$FINDINGS_ALERT"
+    ALERTS="${ALERTS:+$ALERTS
+}$FINDINGS_ALERT"
 fi
 
 # --- Size watch for logs/wiki (warn on growth, not auto-cleanup) ---
 echo "TRACE: stage=sizes $(date '+%H:%M:%S')" >> "$LOG_FILE"
 SIZE_WARNINGS=""
+NL=$'\n'
 # cron/logs/ → 100 MB
 LOGS_MB=$(du -sm "$BUNDLE_ROOT/cron/logs" 2>/dev/null | awk '{print $1}')
-[ -n "$LOGS_MB" ] && [ "$LOGS_MB" -gt 100 ] && SIZE_WARNINGS+="cron/logs/ = ${LOGS_MB} MB (>100 MB)\n"
+[ -n "$LOGS_MB" ] && [ "$LOGS_MB" -gt 100 ] && SIZE_WARNINGS+="cron/logs/ = ${LOGS_MB} MB (>100 MB)${NL}"
 # wiki/ → 200 MB
 WIKI_MB=$(du -sm "$BUNDLE_ROOT/wiki" --exclude=".git" 2>/dev/null | awk '{print $1}')
-[ -n "$WIKI_MB" ] && [ "$WIKI_MB" -gt 200 ] && SIZE_WARNINGS+="wiki/ = ${WIKI_MB} MB (>200 MB)\n"
+[ -n "$WIKI_MB" ] && [ "$WIKI_MB" -gt 200 ] && SIZE_WARNINGS+="wiki/ = ${WIKI_MB} MB (>200 MB)${NL}"
 # wiki/.git → 100 MB (binary bloat warning)
 WIKIGIT_MB=$(du -sm "$BUNDLE_ROOT/wiki/.git" 2>/dev/null | awk '{print $1}')
-[ -n "$WIKIGIT_MB" ] && [ "$WIKIGIT_MB" -gt 100 ] && SIZE_WARNINGS+="wiki/.git = ${WIKIGIT_MB} MB (>100 MB — binary bloat?)\n"
+[ -n "$WIKIGIT_MB" ] && [ "$WIKIGIT_MB" -gt 100 ] && SIZE_WARNINGS+="wiki/.git = ${WIKIGIT_MB} MB (>100 MB — binary bloat?)${NL}"
 
 echo "Size check: logs=${LOGS_MB:-?}MB wiki=${WIKI_MB:-?}MB wiki.git=${WIKIGIT_MB:-?}MB" >> "$LOG_FILE"
 
 if [ -n "$SIZE_WARNINGS" ]; then
-    FAILURES="${FAILURES}
-SizeWatch: growth thresholds exceeded
+    ALERTS="${ALERTS:+$ALERTS
+}SizeWatch: growth thresholds exceeded
 $(printf '%s' "$SIZE_WARNINGS")"
 fi
 
-# --- Alert to Telegram if failures found ---
+# --- Alert to Telegram if anything accumulated ---
 echo "TRACE: stage=alert $(date '+%H:%M:%S')" >> "$LOG_FILE"
-if [ "$FAILURES" != "OK" ] && [ -n "$FAILURES" ] && ! echo "$FAILURES" | grep -q "^ERROR"; then
-    FAIL_COUNT=$(echo "$FAILURES" | wc -l)
-    echo "Found $FAIL_COUNT failed task(s), sending alert..." >> "$LOG_FILE"
+if [ -n "$ALERTS" ]; then
+    if [ "$TASK_FAIL_COUNT" -gt 0 ]; then
+        HEADER="Task Scheduler: $TASK_FAIL_COUNT failed task(s)"
+    else
+        HEADER="Task Scheduler monitor: attention needed"
+    fi
+    echo "Sending alert ($TASK_FAIL_COUNT failed tasks)..." >> "$LOG_FILE"
 
     ALERT_MSG=$(cat <<EOF
-Task Scheduler: $FAIL_COUNT task(s) failed
+$HEADER
 
-$FAILURES
+$ALERTS
 
 Check logs: cron/logs/
 EOF

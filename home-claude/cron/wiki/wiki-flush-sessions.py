@@ -33,17 +33,9 @@ for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (dir_to_project, parse_jsonl_messages, is_subagent_jsonl, llm_call,
-                   state_get, state_add, is_dry_run, SKIP_DIRS, SKIP_JSONL_PROJECTS)
+                   state_get, state_add, is_dry_run, SKIP_DIRS, SKIP_JSONL_PROJECTS,
+                   BUNDLE_ROOT, WIKI_ROOT, DAILY_DIR, PENDING_DIR, LOG_MD, PROJECTS_BASE)
 
-# BUNDLE_ROOT derived from script location — works regardless of where the
-# bundle is installed (network share, local disk, etc).
-# Script lives under cron/wiki/<file>.py → 2 levels up to bundle root.
-BUNDLE_ROOT = Path(__file__).resolve().parents[2]
-WIKI_ROOT = BUNDLE_ROOT / "wiki"
-DAILY_DIR = WIKI_ROOT / "daily"
-PENDING_DIR = DAILY_DIR / ".pending"
-LOG_MD = WIKI_ROOT / "log.md"
-PROJECTS_BASE = Path.home() / ".claude" / "projects"
 PLANS_DIR = Path.home() / ".claude" / "plans"
 HISTORY_JSONL = Path.home() / ".claude" / "history.jsonl"
 PROMPT_PATH = BUNDLE_ROOT / "cron" / "prompts" / "wiki-flush-sessions.md"
@@ -54,6 +46,27 @@ YESTERDAY = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 # Default project bucket for items that don't match a known project name.
 DEFAULT_PROJECT = "main"
+
+# Sources B/C/E are re-read every night; without an age filter the same text
+# would be fed to the LLM (and land in a new daily) again and again.
+SOURCE_MAX_AGE_HOURS = 48
+
+
+def _is_fresh(path: Path, max_age_hours: int = SOURCE_MAX_AGE_HOURS) -> bool:
+    try:
+        return path.stat().st_mtime >= time.time() - max_age_hours * 3600
+    except OSError:
+        return False
+
+
+def _read_text_safe(path: Path) -> str | None:
+    """Read a collector source; one broken/mid-write file must not kill the
+    whole nightly flush."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        print(f"  WARN: cannot read {path}: {e}", file=sys.stderr)
+        return None
 
 
 def get_processed_sessions() -> set[str]:
@@ -97,14 +110,19 @@ def find_recent_jsonls(processed: set[str], max_age_hours: int = 48) -> dict[str
     return by_project
 
 
-def find_backlog_jsonls(processed: set[str], max_files: int = 20) -> dict[str, list[Path]]:
+def find_backlog_jsonls(processed: set[str], max_files: int = 20,
+                        exclude: set[Path] | None = None) -> dict[str, list[Path]]:
     """Find unprocessed older JSONL files (backlog) — one slice per night.
 
     Each night we process the max_files freshest unprocessed entries.
-    Spreads coverage of historical sessions over many nights.
+    Spreads coverage of historical sessions over many nights. `exclude` holds
+    files already picked by find_recent_jsonls — without it the freshest
+    sessions would be collected twice (double LLM payload, duplicate daily
+    content).
     """
     by_project: dict[str, list[Path]] = {}
     all_candidates = []
+    exclude = exclude or set()
 
     if not PROJECTS_BASE.exists():
         return by_project
@@ -118,6 +136,8 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20) -> dict[str, l
         for jsonl in proj_dir.glob("*.jsonl"):
             # Accept the legacy bare-name key too (see find_recent_jsonls).
             if f"{project}/{jsonl.name}" in processed or jsonl.name in processed:
+                continue
+            if jsonl in exclude:
                 continue
             try:
                 st = jsonl.stat()
@@ -150,7 +170,9 @@ def collect_pending() -> tuple[dict[str, list[str]], list[tuple[Path, str]]]:
         return by_project, consumed
 
     for f in PENDING_DIR.glob("*.md"):
-        text = f.read_text(encoding="utf-8")
+        text = _read_text_safe(f)
+        if text is None:
+            continue
         match = re.search(r'^Project:\s*(.+)$', text, re.MULTILINE)
         project = match.group(1).strip() if match else "unknown"
         by_project.setdefault(project, []).append(text)
@@ -160,7 +182,7 @@ def collect_pending() -> tuple[dict[str, list[str]], list[tuple[Path, str]]]:
 
 
 def collect_feedback_files() -> dict[str, list[str]]:
-    """Collect feedback_*.md files from each project's memory/."""
+    """Collect recently-modified feedback_*.md files from each project's memory/."""
     by_project: dict[str, list[str]] = {}
     if not PROJECTS_BASE.exists():
         return by_project
@@ -171,7 +193,11 @@ def collect_feedback_files() -> dict[str, list[str]]:
             continue
         project = dir_to_project(proj_dir.name)
         for fb in mem_dir.glob("feedback_*.md"):
-            text = fb.read_text(encoding="utf-8")
+            if not _is_fresh(fb):
+                continue
+            text = _read_text_safe(fb)
+            if text is None:
+                continue
             by_project.setdefault(project, []).append(
                 f"### Feedback: {fb.name}\n{text}"
             )
@@ -180,17 +206,21 @@ def collect_feedback_files() -> dict[str, list[str]]:
 
 
 def collect_plans() -> list[str]:
-    """Collect plans from ~/.claude/plans/."""
+    """Collect recently-modified plans from ~/.claude/plans/."""
     plans = []
     if PLANS_DIR.exists():
         for f in sorted(PLANS_DIR.glob("*.md")):
-            text = f.read_text(encoding="utf-8")
+            if not _is_fresh(f):
+                continue
+            text = _read_text_safe(f)
+            if text is None:
+                continue
             plans.append(f"### Plan: {f.name}\n{text}")
     return plans
 
 
 def collect_incidents_sessions() -> dict[str, list[str]]:
-    """Collect incidents.md and sessions.md per project."""
+    """Collect recently-modified incidents.md and sessions.md per project."""
     by_project: dict[str, list[str]] = {}
     if not PROJECTS_BASE.exists():
         return by_project
@@ -202,8 +232,10 @@ def collect_incidents_sessions() -> dict[str, list[str]]:
         project = dir_to_project(proj_dir.name)
         for fname in ["incidents.md", "sessions.md"]:
             f = mem_dir / fname
-            if f.exists():
-                text = f.read_text(encoding="utf-8")
+            if f.exists() and _is_fresh(f):
+                text = _read_text_safe(f)
+                if text is None:
+                    continue
                 # Take only the last 3000 chars (recent entries at the bottom).
                 by_project.setdefault(project, []).append(
                     f"### {fname}\n{text[-3000:]}"
@@ -315,7 +347,9 @@ def main():
     log(f"Source A (JSONL 48h): {total_jsonls} files across {len(jsonls)} projects")
 
     # Source A+: backlog — 50 older unprocessed JSONLs per night
-    backlog = find_backlog_jsonls(processed, max_files=50)
+    # (excluding files Source A already picked, to avoid double processing)
+    already_picked = {p for files in jsonls.values() for p in files}
+    backlog = find_backlog_jsonls(processed, max_files=50, exclude=already_picked)
     backlog_count = sum(len(v) for v in backlog.values())
     log(f"Source A+ (backlog): {backlog_count} files")
     for project, files in backlog.items():
@@ -379,6 +413,7 @@ def main():
     daily_path = DAILY_DIR / f"{DATE}.md"
     daily_lines = [f"# {DATE}", ""]
     failed_projects: set[str] = set()
+    ok_sections = 0
 
     for i, (project, chunks) in enumerate(sorted(all_projects.items())):
         log(f"[{i+1}/{len(all_projects)}] Flush: {project} ({len(chunks)} chunks)")
@@ -387,6 +422,7 @@ def main():
             daily_lines.append(f"## {project}")
             daily_lines.append(extracted)
             daily_lines.append("")
+            ok_sections += 1
             log(f"  → OK")
         else:
             # Do NOT write a placeholder section to the daily log: its JSONLs
@@ -399,8 +435,23 @@ def main():
         if i < len(all_projects) - 1:
             time.sleep(5)
 
-    daily_path.write_text("\n".join(daily_lines), encoding="utf-8")
-    log(f"Daily log: {daily_path}")
+    if ok_sections == 0:
+        log("No project extracted successfully — daily log not written.")
+    elif daily_path.exists():
+        # Second run the same day (manual retry after a partial failure):
+        # APPEND the new sections — overwriting would lose the first run's
+        # content, whose JSONLs are already marked processed.
+        existing = daily_path.read_text(encoding="utf-8", errors="replace").rstrip()
+        new_sections = "\n".join(daily_lines[2:]).strip()
+        daily_path.write_text(existing + "\n\n" + new_sections + "\n", encoding="utf-8")
+        log(f"Daily log: {daily_path} (appended to existing)")
+        if DATE in state_get("compile_sessions", "compiled_dailies"):
+            log(f"WARNING: {DATE}.md is already marked compiled — the appended "
+                f"sections will NOT be picked up by compile-sessions. Remove the "
+                f"date from .processed.json to recompile.")
+    else:
+        daily_path.write_text("\n".join(daily_lines), encoding="utf-8")
+        log(f"Daily log: {daily_path}")
 
     # Pending files are deleted only now that the daily log is safely written,
     # and only for projects whose extraction succeeded — a transient LLM /

@@ -1,7 +1,7 @@
 # Global Instructions (all projects) — AGENTS.md
 
 > Mirror of the universal blocks of `~/.claude/CLAUDE.md`, addressed to
-> [Codex CLI](https://github.com/openai/codex-cli) and any other LLM coding
+> [Codex CLI](https://github.com/openai/codex) and any other LLM coding
 > assistant that consumes `AGENTS.md`. Drop this into `~/.codex/AGENTS.md`.
 >
 > Claude-specific sections (slash commands, plugin workflow, hook protocol,
@@ -113,6 +113,48 @@ do NOT solve it inline, but do NOT lose it either:
 - **CMD/BAT (.cmd, .bat)** — save as CP1251 (Windows ANSI) for Cyrillic;
   UTF-8 only if `@chcp 65001` is at the top
 - **RULE**: after writing any `.ps1` with Cyrillic content — immediately add BOM
+
+## Secrets / tokens / .env
+
+Before asking the user for a token or key for any external service —
+**check `~/.claude/.env` first**. The list of variables the bundle
+itself reads is in `config/llm-providers.example.env` (in the bundle
+repository).
+
+Workflow:
+- **Need a key for a new project** → look for it in `~/.claude/.env`
+  first → if present, copy that line into the project's local `.env`.
+  Do NOT symlink `.env` and do NOT source it from app code directly.
+- **A key exists but is stale / 401s** → tell the user which name in
+  `.env` is being read and ask them to refresh it. Don't silently ask
+  for a new one as if it's missing.
+- **A key really isn't in `.env`** → THEN ask the user. After they
+  paste it, write it to `.env` under a canonical name and tell them.
+
+`.env` never gets committed (it's in `.gitignore`). Only templates with
+empty values are committed.
+
+## Windows Task Scheduler
+
+If the machine uses the cron pipeline from this bundle
+(`~/.claude/cron/`), **all scheduled tasks are managed via
+`cron/registry.yaml` + the syncer** — never via direct
+`schtasks /Create`, `Register-ScheduledTask`, or the `taskschd.msc`
+GUI. Direct manipulation causes silent drift from the registry.
+
+Two policies matter for correctness (details in
+`docs/cron-architecture.md` in the bundle repository):
+
+- **LogonType** — default is `password` (task fires before user login;
+  survives overnight reboots). Requires `cron/admin/save-cred.cmd` to
+  have stashed a DPAPI-encrypted password.
+- **`script:` paths** — for Password-mode tasks, ALWAYS UNC
+  (`\\<host>\<share>\...`) or local `C:\...`. **Never a mapped drive**
+  (mapped drives don't exist in session 0 where Password tasks fire —
+  silent exit 127, no log).
+
+To add a new task: edit `cron/registry.yaml`, run `cron/admin/sync.cmd`,
+verify with `schtasks /query /tn <name> /fo list /v`.
 
 ## Codex CLI specifics
 

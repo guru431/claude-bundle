@@ -109,8 +109,12 @@ cp -r "$SRC/home-claude/cron" "$DST/"
 
 ### 6. Create `.env` and ask for keys
 
+The pipeline reads `.env` from the DEPLOYED location — `$DST/.env`
+(i.e. `~/.claude/.env`, next to the copied `cron/`), not from the
+bundle repository root:
+
 ```bash
-cp "$SRC/config/llm-providers.example.env" "$SRC/.env"
+cp "$SRC/config/llm-providers.example.env" "$DST/.env"
 ```
 
 Ask the user (use AskUserQuestion):
@@ -119,7 +123,7 @@ Ask the user (use AskUserQuestion):
 >   2) OpenCode Go (flat subscription, more model variety)
 >   3) Claude (consumes your subscription — opt-in only)
 
-Get the relevant key from the user. Write it into `<bundle-root>/.env`:
+Get the relevant key from the user. Write it into `~/.claude/.env`:
 - DeepSeek: `DEEPSEEK_KEY=sk-...`
 - OpenCode Go: `OPENCODE_GO_API_KEY=sk-...`
 - Claude opt-in: `WIKI_LLM_PROVIDER=claude` (uses claude CLI directly)
@@ -180,7 +184,7 @@ Read `~/.claude/cron/registry.yaml`. Replace:
 ```
 
 It auto-elevates to UAC once for the whole batch. Watch
-`%TEMP%\sync-tasks_latest.log` for errors.
+`%TEMP%\sync-tasks_<timestamp>.log` for errors.
 
 ### 11. Verify
 
@@ -194,7 +198,7 @@ Both should show `Status: Ready`. Force a test run:
 schtasks /run /tn ClaudeTaskMonitor
 ```
 
-Then check `~/.claude/cron/logs/claude-task-monitor_<today>.log` for
+Then check `~/.claude/cron/logs/task-monitor_<today>.log` for
 success.
 
 ### 12. (Optional) claude-switch
@@ -246,7 +250,7 @@ Profile: <lite | full>
 Lite:   deployed CLAUDE.md, settings.json, skills (templates — paths
         still need filling), commands (1 wired). Hooks: <skipped / X-of-Y
         enabled>.
-Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/9 tasks
+Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/10 tasks
         with Task Scheduler. LLM provider: <provider>. Telegram alerts:
         <yes/no>.   (omit this line for a lite-only deploy)
 Open items: <list of placeholders that still need real values, e.g.

@@ -198,11 +198,12 @@ institutional knowledge — see `<bundle>/docs/wiki-method.md`.
 ## Secrets / tokens / .env
 
 Before asking the user for a token or key for any external service —
-**check `<bundle-root>/.env` first**. The list of variables the bundle
-itself reads is in `config/llm-providers.example.env`.
+**check `~/.claude/.env` first** (the one .env the bundle's pipeline
+reads). The list of variables the bundle itself reads is in
+`config/llm-providers.example.env` in the bundle repository.
 
 Workflow:
-- **Need a key for a new project** → look for it in `<bundle-root>/.env`
+- **Need a key for a new project** → look for it in `~/.claude/.env`
   first → if present, copy that line into the project's local `.env`.
   Do NOT symlink `.env` and do NOT source it from app code directly.
 - **A key exists but is stale / 401s** → tell the user which name in
@@ -211,9 +212,9 @@ Workflow:
 - **A key really isn't in `.env`** → THEN ask the user. After they
   paste it, write it to `.env` under a canonical name and tell them.
 
-`.env` never gets committed (it's in `.gitignore`). The template
-`config/llm-providers.example.env` is committed — it lists names only,
-no values.
+`.env` never gets committed (it's in `.gitignore`). The only committed
+env file is the template `config/llm-providers.example.env` in the
+bundle repository — names only, no values.
 
 ## Windows Task Scheduler
 

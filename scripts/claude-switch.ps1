@@ -9,10 +9,13 @@
 # Writes the env block into <project>/.claude/settings.local.json. The
 # permissions block is stable across modes; only `env` changes.
 #
-# Keys and host:port values are NOT hardcoded — they are read from process/user
-# env or from a `.env` file sitting next to this script (e.g. .claude/.env). That
-# .env is the ONLY difference between the public copy (ships with .env.example)
-# and a private deployment (ships a real, gitignored .env). The script is identical.
+# Keys and host:port values are NOT hardcoded — they are read from (in order):
+# process env > user env > a `.env` next to this script > ~/.claude/.env (the
+# canonical bundle .env that the cron pipeline reads too). One .env at
+# ~/.claude/.env therefore covers both the cron side and this switcher. That
+# .env is the ONLY difference between the public copy (ships with
+# config/llm-providers.example.env) and a private deployment (real, gitignored
+# .env). The script is identical.
 #
 # Usage:
 #   .\claude-switch.ps1                      # interactive menu
@@ -54,22 +57,24 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Env loader — reads keys/hosts from a .env next to this script for one-stop
-# config. Order: process env > user env > <script-dir>/.env
+# Env loader. Order: process env > user env > <script-dir>/.env > ~/.claude/.env
+# (the canonical bundle .env, shared with the cron pipeline).
 # ─────────────────────────────────────────────────────────────────────────────
+function Read-DotEnvValue([string]$envFile, [string]$name) {
+    if (-not (Test-Path $envFile)) { return $null }
+    $line = Get-Content $envFile -Encoding UTF8 | Where-Object { $_ -match "^\s*$name\s*=" } | Select-Object -First 1
+    if ($line) {
+        $v = ($line -replace "^\s*$name\s*=", "").Trim().Trim('"').Trim("'")
+        if ($v) { return $v }
+    }
+    return $null
+}
+
 function Get-EnvVar($name) {
     $v = [Environment]::GetEnvironmentVariable($name, "Process")
     if (-not $v) { $v = [Environment]::GetEnvironmentVariable($name, "User") }
-    if (-not $v) {
-        # Try .env next to this script (e.g. <project>/.claude/.env)
-        $envFile = Join-Path $PSScriptRoot ".env"
-        if (Test-Path $envFile) {
-            $line = Get-Content $envFile -Encoding UTF8 | Where-Object { $_ -match "^\s*$name\s*=" } | Select-Object -First 1
-            if ($line) {
-                $v = ($line -replace "^\s*$name\s*=", "").Trim().Trim('"').Trim("'")
-            }
-        }
-    }
+    if (-not $v) { $v = Read-DotEnvValue (Join-Path $PSScriptRoot ".env") $name }
+    if (-not $v) { $v = Read-DotEnvValue (Join-Path $HOME ".claude\.env") $name }
     return $v
 }
 
@@ -238,9 +243,11 @@ function Get-CurrentMode($obj) {
 }
 
 function Set-Permissions($obj) {
-    if ($obj.PSObject.Properties.Match("permissions").Count -gt 0) {
-        $obj.permissions = $STANDARD_PERMISSIONS
-    } else {
+    # Seed the default block ONLY when no permissions exist yet. Claude Code
+    # appends "Always allow" grants (and any deny/ask lists) to
+    # settings.local.json — overwriting the block on every backend switch
+    # would silently destroy what the user has accumulated.
+    if ($obj.PSObject.Properties.Match("permissions").Count -eq 0) {
         $obj | Add-Member -NotePropertyName "permissions" -NotePropertyValue $STANDARD_PERMISSIONS -Force
     }
     return $obj
@@ -270,7 +277,7 @@ function Require-Key([string[]]$names) {
         if ($k) { return $k }
     }
     Write-Host "ERROR: env var '$($names -join ' / ')' not set." -ForegroundColor Red
-    Write-Host "Set it in your environment or in <bundle-root>/.env" -ForegroundColor DarkYellow
+    Write-Host "Set it in your environment, in a .env next to this script, or in ~/.claude/.env" -ForegroundColor DarkYellow
     Write-Host "See config/llm-providers.example.env for the full list." -ForegroundColor DarkYellow
     exit 2
 }
@@ -418,6 +425,22 @@ function Set-CCR($obj, [string]$modelName) {
             Write-Host "Starting CCR locally..." -ForegroundColor Yellow
             Start-Process -FilePath $ccrCmd -ArgumentList "start" -WindowStyle Hidden
             Start-Sleep -Seconds 4
+            # Re-probe: if the launch failed, do NOT write a config that would
+            # fail every Claude Code request.
+            try {
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                $iar = $tcp.BeginConnect($ccrHost, $ccrPort, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tcp.Connected) {
+                    $ccrUp = $true
+                    $tcp.EndConnect($iar)
+                }
+                $tcp.Close()
+            } catch { }
+            if (-not $ccrUp) {
+                Write-Host "CCR still not reachable after the start attempt." -ForegroundColor Red
+                Write-Host "Config NOT changed (ccr mode not activated)." -ForegroundColor Red
+                return $null
+            }
         } else {
             Write-Host "Either start ccr manually, or set CCR_HOST to point at your proxy host." -ForegroundColor Yellow
             Write-Host "Config NOT changed (ccr mode not activated)." -ForegroundColor Red
@@ -633,7 +656,7 @@ if ($Mode -eq "ollama") {
     }
 }
 
-# Apply standard permissions block always
+# Seed default permissions if the file has none yet (existing ones are kept)
 $cfg = Set-Permissions $cfg
 
 # Apply env block per mode

@@ -11,11 +11,48 @@ BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 LOG_DIR="$BUNDLE_ROOT/cron/logs"
 LOG_FILE="$LOG_DIR/git-push-all_$(date +%Y-%m-%d).log"
-REPOS_DIR="${PROJECTS_ROOT:-$(dirname "$BUNDLE_ROOT")}"
 
 mkdir -p "$LOG_DIR"
 
+# Task Scheduler in session 0 has no user env, so PROJECTS_ROOT from a shell
+# profile never reaches this script — read it from the bundle .env (same safe
+# parser as telegram-send.sh).
+ENV_FILE="$BUNDLE_ROOT/.env"
+if [ -f "$ENV_FILE" ]; then
+    while IFS= read -r raw || [ -n "$raw" ]; do
+        line="${raw%$'\r'}"
+        case "$line" in
+            ''|\#*) continue ;;
+            export\ *) line="${line#export }" ;;
+        esac
+        key="${line%%=*}"
+        case "$key" in
+            *[!A-Za-z0-9_]*|'') continue ;;
+        esac
+        val="${line#*=}"
+        val="${val%\"}"; val="${val#\"}"
+        val="${val%\'}"; val="${val#\'}"
+        export "$key=$val"
+    done < "$ENV_FILE"
+fi
+
+REPOS_DIR="${PROJECTS_ROOT:-$(dirname "$BUNDLE_ROOT")}"
+
 echo "=== git-push-all started: $(date) ===" >> "$LOG_FILE"
+
+# Guard: when the bundle is deployed to ~/.claude, the parent directory is the
+# USER PROFILE — auto-committing and pushing every git repo under it would be
+# a disaster. Demand an explicit PROJECTS_ROOT in that layout.
+case "$BUNDLE_ROOT" in
+    */.claude)
+        if [ -z "$PROJECTS_ROOT" ]; then
+            echo "ERROR: bundle lives in ~/.claude — refusing to scan the user profile." >> "$LOG_FILE"
+            echo "       Set PROJECTS_ROOT in $ENV_FILE to your projects directory." >> "$LOG_FILE"
+            exit 1
+        fi
+        ;;
+esac
+
 echo "Scanning: $REPOS_DIR" >> "$LOG_FILE"
 
 # Optional: wait for long-running batch jobs to finish before pushing.
@@ -54,8 +91,10 @@ for dir in "$REPOS_DIR"/*/; do
     cd "$dir" || continue
 
     branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-    if [ -z "$branch" ]; then
-        echo "[$repo] no branch, skipping" >> "$LOG_FILE"
+    # "HEAD" = detached HEAD: committing would create orphan commits and the
+    # push would fail every night.
+    if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+        echo "[$repo] no branch (detached HEAD?), skipping" >> "$LOG_FILE"
         skipped=$((skipped + 1))
         continue
     fi
@@ -100,7 +139,7 @@ WIKI_DIR="$BUNDLE_ROOT/wiki"
 if [ -d "$WIKI_DIR/.git" ]; then
     if cd "$WIKI_DIR"; then
         branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-        if [ -n "$branch" ]; then
+        if [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
             if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
                 git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
                 if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then

@@ -140,11 +140,15 @@ registry, admin scripts).
 
 ### 9. Create `.env` from the example
 
+The pipeline reads `.env` from the DEPLOYED location — `~/.claude/.env`
+(next to the `cron/` you copied in step 8), NOT from the bundle
+repository root:
+
 ```powershell
 $bundleRoot = "<path-to-bundle>"
 Copy-Item "$bundleRoot\config\llm-providers.example.env" `
-          "$bundleRoot\.env"
-notepad "$bundleRoot\.env"
+          "$env:USERPROFILE\.claude\.env"
+notepad "$env:USERPROFILE\.claude\.env"
 ```
 
 Fill in:
@@ -238,7 +242,7 @@ the cue to populate `KNOWN_PROJECTS`.
 
 This auto-elevates to UAC once for the whole batch, then idempotently
 registers (or updates) all 10 tasks from `registry.yaml`. Output goes
-to `%TEMP%\sync-tasks_latest.log`.
+to `%TEMP%\sync-tasks_<timestamp>.log`.
 
 ### 14. Verify
 
@@ -263,7 +267,7 @@ schtasks /run /tn ClaudeTaskMonitor
 
 After it runs, check the log:
 ```
-~/.claude/cron/logs/claude-task-monitor_<today>.log
+~/.claude/cron/logs/task-monitor_<today>.log
 ```
 
 ### 15. (Optional) Wire `claude-switch.ps1`
@@ -275,9 +279,10 @@ If you want to switch the Claude Code session between providers:
 & "<path-to-bundle>\scripts\claude-switch.ps1" deepseek flash
 ```
 
-The script reads keys from `.env` (or your shell env). It writes to
-`<current-folder>/.claude/settings.local.json` by default — pass
-`-ProjectPath <path>` to target a specific project.
+The script reads keys from your shell env, then from a `.env` next to
+itself, then from `~/.claude/.env` (the one created in step 9). It
+writes to `<current-folder>/.claude/settings.local.json` by default —
+pass `-ProjectPath <path>` to target a specific project.
 
 ### 16. (Optional) Codex CLI mirror
 
@@ -326,7 +331,7 @@ The pipeline only writes pages from sessions it knows about. Check:
 - `wiki-flush-sessions.py` and `wiki-compile-sessions.py` run on
   schedule (02:30 / 04:00 by default)
 - Their LLM calls need a working key — check
-  `~/.claude/cron/logs/claude-wiki-*.log` for `DEEPSEEK_KEY env var not
+  `~/.claude/cron/logs/wiki-*.log` for `DEEPSEEK_KEY env var not
   set` or 402 insufficient balance
 - To check source collection **without** spending tokens or hitting the
   network, run a script with `--dry-run` (alias `--no-llm`), e.g.

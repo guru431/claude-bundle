@@ -96,12 +96,14 @@ if (Test-Path $sw) {
     $probe = Join-Path ([System.IO.Path]::GetTempPath()) ("cs-selftest-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $probe -Force | Out-Null
     try {
+        # NOTE: don't check $LASTEXITCODE here — claude-switch ends with
+        # `return`, not `exit`, so the variable would be stale (or unset on a
+        # machine without Python, falsely failing this step). Success = the
+        # call completes without throwing and leaves no side effect.
         & $sw status -ProjectPath $probe | Out-Null
-        $rc = $LASTEXITCODE
         $sideEffect = Test-Path (Join-Path $probe '.claude')
-        if ($rc -eq 0 -and -not $sideEffect) { Ok "claude-switch status (exit 0, no side effect)" }
-        elseif ($sideEffect) { Bad "claude-switch status created .claude/ (side effect)" }
-        else { Bad "claude-switch status exited $rc" }
+        if (-not $sideEffect) { Ok "claude-switch status (no side effect)" }
+        else { Bad "claude-switch status created .claude/ (side effect)" }
     } catch { Bad "claude-switch status threw: $($_.Exception.Message)" }
     finally { Remove-Item $probe -Recurse -Force -ErrorAction SilentlyContinue }
 } else { Bad "claude-switch.ps1 not found" }

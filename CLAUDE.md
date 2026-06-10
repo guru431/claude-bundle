@@ -53,8 +53,10 @@ preserve that discipline.
 │   ├── skills/                         2 skill templates (placeholders)
 │   ├── commands/                       1 slash-command wrapper
 │   ├── wiki/                           empty Karpathy vault skeleton
-│   └── cron/                           tier-2: hooks, llm-call, telegram,
-│                                       wiki/*, task scripts, registry.yaml,
+│   ├── bin/_run-hidden.vbs             hidden-window Task Scheduler launcher
+│   └── cron/                           tier-2: hooks (incl. precompact-handoff),
+│                                       llm-call, telegram, prompts/, wiki/*,
+│                                       task scripts, registry.yaml,
 │                                       admin/{sync,save-cred}
 ├── codex/
 │   ├── AGENTS.md                       universal-rules mirror for Codex CLI
@@ -65,6 +67,7 @@ preserve that discipline.
 │   └── bootstrap-registry.ps1          fill registry.yaml placeholders
 ├── config/
 │   └── llm-providers.example.env       env template (committed; no values)
+├── .githooks/pre-commit                secret-guard hook (git config core.hooksPath .githooks)
 ├── .github/workflows/ci.yml            lint + secret-guard + shellcheck CI
 ├── docs/                               long-form docs referenced from
 │   ├── wiki-method.md                  rules files and INSTALL
@@ -188,8 +191,10 @@ file that gets committed. Its values must all be empty.
   contains Cyrillic, add a UTF-8 BOM (see `home-claude/CLAUDE.md`
   "File Encoding" section).
 
-There is no CI yet. If you add one, keep it independent of any specific
-LLM provider — anyone forking the repo should be able to run it.
+CI (`.github/workflows/ci.yml`) runs JSON/YAML validation, Python
+compileall, a PowerShell parse, shellcheck, the hook smoke tests and a
+generic secret-format scan on every push/PR. Keep it independent of any
+specific LLM provider — anyone forking the repo should be able to run it.
 
 ## Mirror / remote setup
 

@@ -1,5 +1,116 @@
 # Changelog
 
+## 2026-06-10 — Fable 5 project-analysis: full fix batch (1×P1, 11×P2, ~30×P3)
+
+### P1
+
+- **`.env` lived where nothing read it.** All docs told users to create
+  `<repo-root>/.env`, but the pipeline reads `~/.claude/.env` (BUNDLE_ROOT of
+  the deployed `cron/`) and `claude-switch.ps1` read only `scripts/.env`.
+  Now: docs (INSTALL step 9, AGENT-INSTRUCTIONS step 6, README, the env
+  template header) all point at `~/.claude/.env`; `claude-switch.ps1` falls
+  back to `~/.claude/.env` after the script-local `.env`; `scripts/.env.example`
+  (a second committed template with non-empty values, violating the
+  one-template rule) is removed — `config/llm-providers.example.env` is the
+  single template again, now including `OLLAMA_HOST`.
+
+### Data-loss / reliability (P2)
+
+- **wiki-flush**: re-running on the same day APPENDS to the existing daily
+  instead of overwriting it (the first run's JSONLs are already marked
+  processed — their content was unrecoverable); backlog collection now
+  excludes files already picked by the 48h pass (they were processed twice:
+  double LLM cost + duplicated daily content); sources B/C/E
+  (feedback/plans/incidents) are filtered by mtime ≤48h instead of being
+  re-fed to the LLM nightly; collector reads are crash-proof
+  (`errors="replace"` + per-file try).
+- **wiki-compile-sessions**: a daily is marked `compiled` only when every
+  project succeeded — an LLM-provider outage no longer permanently drops a
+  daily; when the LLM saw only page names (>30 pages), "update" now APPENDS
+  (with idempotent dedup) instead of blindly overwriting bodies it never read.
+- **`_log.md` direction fixed**: new date blocks are prepended after the H1
+  (as `get_project_log`'s head-slice always assumed), so session-start
+  injects the freshest activity, not the oldest.
+- **`.processed.json`**: corrupt state now rebuilds from the `log.md` journal
+  instead of resetting dedup; `state_add` takes a best-effort lock file so an
+  overlong flush can't clobber compile's state writes.
+- **task-monitor no longer fail-silent**: a broken collection step (empty or
+  `ERROR:` output) now SENDS an alert instead of suppressing all alerts;
+  literal `\n` in size warnings fixed; "OK" no longer leaks into alert text;
+  `PROJECTS_ROOT` env override + `.env` loading added.
+- **git-push-all**: refuses to scan the user profile when deployed to
+  `~/.claude` without an explicit `PROJECTS_ROOT` (it auto-committed and
+  pushed every repo under `C:\Users\<user>`); reads `.env` (session 0 has no
+  user env); skips detached-HEAD repos.
+- **pre-commit secret-guard**: `tr -d '\r'` — a CRLF-saved
+  `.sanitize-patterns` (the Windows default) silently disabled the entire
+  personal denylist; the `.tmp` fallback file is now covered by `.gitignore`
+  (`.sanitize-patterns*`) and the hook's own filename block.
+- **settings.json**: permission rules unified to the documented
+  `Bash(cmd:*)` prefix form (`Bash(git *)` etc. were literal matches that
+  never fired); example file's blanket `"Bash"` allow-all removed; the two
+  allow lists are identical again (delta = hooks only).
+- **claude-switch.ps1**: no longer overwrites the user's accumulated
+  permissions (incl. deny/ask) in `settings.local.json` on every switch —
+  the default block is seeded only when none exists; CCR auto-launch now
+  re-probes before writing the config.
+- **telegram-send.sh**: `chat_id` JSON-encoded (an `@channelname` no longer
+  breaks the body); text truncated to 4000 chars (4096 limit → HTTP 400 →
+  silently lost alert).
+
+### Smaller fixes (P3)
+
+- `parse_llm_json`: truncated-at-EOF responses return `[]` instead of
+  `TypeError: ord('')`; non-array JSON is rejected at the parser (was an
+  `AttributeError` that killed the whole compile loop).
+- `precompact-handoff.py` keeps the **end** of the transcript (the freshest
+  messages) when truncating, not the beginning.
+- `wiki-lint`: `_log.md` excluded (false "ambiguous name"/"thin content" on
+  every project); the documented Telegram alert is actually invoked
+  (still opt-in via `ENABLE_TELEGRAM_ALERTS`).
+- `memory-update.py`: user messages containing an embedded
+  `<system-reminder>` block are kept (block stripped) instead of dropped;
+  project naming unified with the wiki pipeline via `dir_to_project`; the
+  cross-notes phase documented as opt-in (needs `scan-results/scan_*.json`).
+- Hooks tolerate valid-but-non-object JSON on stdin (no more traceback).
+- `claude-healthcheck.sh` reads `.env` (the comment said it did; it didn't)
+  and `cron/prompts/healthcheck.md` now actually ships.
+- `self-test.ps1` step 5 no longer reads a stale `$LASTEXITCODE` (falsely
+  FAILED on machines without Python).
+- `sync-tasks.ps1` detects trigger TYPE and Weekly day-of-week changes
+  (previously only HH:MM was compared — silent drift).
+- CI: shellcheck now covers `.githooks/pre-commit`; registry `script:` paths
+  are verified to exist in the bundle.
+- Docs: wrong log names fixed (`task-monitor_*`, `wiki-*`,
+  `sync-tasks_<timestamp>`); CCR link → `musistudio/claude-code-router`;
+  Codex link → `openai/codex`; launcher "preserves stdout/stderr" claim
+  corrected; task count 9 → 10 everywhere; layout blocks synced with the
+  tree; "There is no CI yet" replaced with the real CI description;
+  `wiki/index.md` auto-section stubs replaced with what build-index actually
+  maintains; deploy-broken relative links reworded.
+
+### Architecture cleanups
+
+- Duplicate index writers removed from both compilers — `wiki-build-index.py`
+  (scheduled right after) is the only index owner.
+- `wiki-compile-kb.py` uses the robust `utils.parse_llm_json` instead of a
+  greedy regex + bare `json.loads`; dead `source_already_processed` import
+  removed.
+- Wiki scripts import `BUNDLE_ROOT`/`WIKI_ROOT`/... from `utils.py` instead
+  of re-deriving them (one source of truth for the layout).
+- `PROVIDERS` is now genuinely the single source of truth: `max_tokens` /
+  `temperature` / `max_retries` moved into the table; an unknown
+  `WIKI_LLM_PROVIDER` warns loudly and falls back instead of silently hitting
+  the default branch; `_llm_minimax`/`MINIMAX_*` renamed to
+  `_llm_opencode`/`OPENCODE_*` (they always called OpenCode Go).
+- `codex/AGENTS.md` regained the Secrets and Windows Task Scheduler universal
+  blocks that the mirror rule requires.
+- Documented (previously not at all): the claude-switch `ollama` mode in
+  `docs/llm-routing.md` + README; backfilled the missing CHANGELOG entries
+  for the 2026-06-08/09 ollama commits (Ollama backend, per-script `.env`,
+  opencode model picker `minimax-m3`/`qwen3.7-max`, Ollama model list
+  updates).
+
 ## 2026-06-07 — Review fixes + package-quality pass
 
 ### Bug fixes (from an external review)

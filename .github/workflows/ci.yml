@@ -32,9 +32,30 @@ jobs:
             python -c "import json,sys; json.load(open(sys.argv[1])); print('ok:', sys.argv[1])" "$f"
           done
 
-      - name: YAML parse (registry.yaml)
+      - name: YAML parse (registry.yaml) + script paths exist
         run: |
-          python -c "import yaml; d=yaml.safe_load(open('home-claude/cron/registry.yaml')); print('tasks:', len(d.get('tasks', [])))"
+          python - <<'PY'
+          import sys, yaml
+          from pathlib import Path
+          d = yaml.safe_load(open('home-claude/cron/registry.yaml'))
+          tasks = d.get('tasks', [])
+          print('tasks:', len(tasks))
+          # Every script: path (after stripping the install-path placeholder)
+          # must exist in the bundle — cheap guard against future typos.
+          missing = []
+          for t in tasks:
+              script = str(t.get('script', ''))
+              rel = script.replace('<bundle-install-path>', '').lstrip('\\/').replace('\\', '/')
+              if not rel:
+                  continue
+              if not (Path('home-claude') / rel).is_file():
+                  missing.append(f"{t.get('name')}: {script}")
+          if missing:
+              print('MISSING bundle files for registry tasks:')
+              print('\n'.join('  ' + m for m in missing))
+              sys.exit(1)
+          print('script paths: all present')
+          PY
 
       - name: Secret guard (high-confidence token formats)
         run: |
@@ -49,13 +70,14 @@ jobs:
           fi
           echo "secret guard: clean"
 
-      - name: ShellCheck (.sh)
+      - name: ShellCheck (.sh + .githooks)
         run: |
           if command -v shellcheck >/dev/null; then
             # --severity=warning: gate on real issues (errors + warnings), not
             # style/info notes (SC2016/SC2129 etc.) on these working scripts.
             # SC1091: don't follow sourced files; scripts are deployed standalone.
             find home-claude/cron -name '*.sh' -print0 | xargs -0 -r shellcheck --severity=warning -e SC1091
+            shellcheck --severity=warning .githooks/pre-commit
             echo "shellcheck: done"
           else
             echo "shellcheck not available — skipped"

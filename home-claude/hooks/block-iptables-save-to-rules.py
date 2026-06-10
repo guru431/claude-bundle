@@ -56,6 +56,8 @@ def main() -> int:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         return 0  # malformed input, let through (no command to inspect)
+    if not isinstance(data, dict):
+        return 0  # valid JSON but not an object — nothing to inspect
 
     tool_input = data.get("tool_input") or {}
     command = tool_input.get("command") or ""

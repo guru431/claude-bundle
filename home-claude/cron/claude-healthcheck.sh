@@ -12,6 +12,27 @@ BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="$BUNDLE_ROOT/cron/logs"
 mkdir -p "$LOG_DIR"
 
+# Session 0 has no user env — read REMOTE_SSH_HOST / WIN_REMOTE_HOST /
+# PYTHON_EXE from the bundle .env (same safe parser as telegram-send.sh).
+ENV_FILE="$BUNDLE_ROOT/.env"
+if [ -f "$ENV_FILE" ]; then
+    while IFS= read -r raw || [ -n "$raw" ]; do
+        line="${raw%$'\r'}"
+        case "$line" in
+            ''|\#*) continue ;;
+            export\ *) line="${line#export }" ;;
+        esac
+        key="${line%%=*}"
+        case "$key" in
+            *[!A-Za-z0-9_]*|'') continue ;;
+        esac
+        val="${line#*=}"
+        val="${val%\"}"; val="${val#\"}"
+        val="${val%\'}"; val="${val#\'}"
+        export "$key=$val"
+    done < "$ENV_FILE"
+fi
+
 DATE=$(date +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/healthcheck_${DATE}.log"
 
@@ -26,8 +47,9 @@ $(df -h 2>/dev/null || wmic logicaldisk get size,freespace,caption)
 "
 
 # --- Optional: remote Linux server via SSH ---
-# Set REMOTE_SSH_HOST in your env or .env to enable. The host must be an
-# alias from ~/.ssh/config so credentials/ports are handled there.
+# Set REMOTE_SSH_HOST in the bundle .env (read above) or in the process env
+# to enable. The host must be an alias from ~/.ssh/config so credentials and
+# ports are handled there.
 REMOTE_DATA=""
 if [ -n "$REMOTE_SSH_HOST" ]; then
     REMOTE_DATA=$(ssh "$REMOTE_SSH_HOST" bash -s <<'REMOTE_SCRIPT' 2>&1
@@ -68,6 +90,8 @@ $REMOTE_DATA
 $WIN_DATA"
 
 # --- Send collected metrics to the LLM for analysis ---
+# cron/prompts/healthcheck.md ships with the bundle; if it's missing the
+# inline default below is used.
 PROMPT_DIR="$(dirname "$0")/prompts"
 PROMPT_FILE="$PROMPT_DIR/healthcheck.md"
 PROMPT=""

@@ -269,8 +269,8 @@ function Build-Action([hashtable]$task, [string]$launcher) {
     }
     if ($kind -eq 'exec') {
         if (-not $task.execute) { throw "kind=exec requires 'execute:' field in task $($task.name)" }
-        $args = if ($script -match '^/' -or $script -match '\s/c\s') { $script } else { '"' + $script + '"' }
-        return @{ execute=$task.execute; arguments=($args + $rest); work_dir=$null }
+        $execArgs = if ($script -match '^/' -or $script -match '\s/c\s') { $script } else { '"' + $script + '"' }
+        return @{ execute=$task.execute; arguments=($execArgs + $rest); work_dir=$null }
     }
     if ($kind -eq 'vbs') {
         return @{ execute='wscript.exe'; arguments=('"' + $script + '"' + $rest); work_dir=$null }
@@ -291,6 +291,7 @@ function Get-CurrentSummary([string]$name) {
         execute = ($t.Actions | Select-Object -First 1).Execute
         args = ($t.Actions | Select-Object -First 1).Arguments
         triggerType = ($t.Triggers | Select-Object -First 1).CimClass.CimClassName
+        daysOfWeek = ($t.Triggers | Select-Object -First 1).DaysOfWeek
         startBoundary = ($t.Triggers | Select-Object -First 1).StartBoundary
         user = $t.Principal.UserId
         runLevel = "$($t.Principal.RunLevel)"
@@ -358,6 +359,8 @@ foreach ($task in $reg.tasks) {
     $hidden_needs_change = $false
     $timeout_needs_change = $false
     $trigger_needs_change = $false
+    $triggertype_needs_change = $false
+    $dow_needs_change = $false
     if ($current) {
         $action_needs_change = ($current.execute -ne $wantedExec) -or ($current.args -ne $wantedArgs)
         $enabled_needs_change = ([bool]$current.enabled -ne [bool]$task.enabled)
@@ -369,9 +372,23 @@ foreach ($task in $reg.tasks) {
         $runlevel_needs_change = ("$($current.runLevel)" -ne $wantedRunLevel)
         $hidden_needs_change = ([bool]$current.hidden -ne [bool]$task.hidden)
         $timeout_needs_change = ("$($current.executionTimeLimit)" -ne "PT$([int]$task.timeout_hours)H")
+        # Compare trigger TYPE (Daily→Weekly etc. must not report "unchanged").
+        # Monthly registers via XML as the generic MSFT_TaskTrigger.
+        $wantedTriggerType = if ($task.trigger -eq 'AtLogOn') { 'MSFT_TaskLogonTrigger' }
+            elseif ($task.trigger -eq 'AtStartup')      { 'MSFT_TaskBootTrigger' }
+            elseif ($task.trigger -match '^Daily\s')    { 'MSFT_TaskDailyTrigger' }
+            elseif ($task.trigger -match '^Weekly\s')   { 'MSFT_TaskWeeklyTrigger' }
+            else                                        { 'MSFT_TaskTrigger' }
+        if ($current.triggerType) {
+            $triggertype_needs_change = ("$($current.triggerType)" -ne $wantedTriggerType)
+        }
+        # Compare day-of-week for Weekly triggers (bitmask: Sun=1..Sat=64).
+        if ($task.trigger -match '^Weekly\s+(\w+)\s' -and $null -ne $current.daysOfWeek) {
+            $dowBits = @{ sun=1; mon=2; tue=4; wed=8; thu=16; fri=32; sat=64 }
+            $wantedDow = $dowBits[$Matches[1].Substring(0,3).ToLower()]
+            if ($wantedDow) { $dow_needs_change = ([int]$current.daysOfWeek -ne [int]$wantedDow) }
+        }
         # Compare time-of-day for calendar triggers (Daily/Weekly/Monthly HH:MM).
-        # AtLogOn/AtStartup have no time component — rely on -Force to re-register
-        # if a trigger TYPE change ever needs to be pushed.
         if ($task.trigger -match '(\d{1,2}):(\d{2})\s*$') {
             $wantedTime = '{0:D2}:{1}' -f [int]$Matches[1], $Matches[2]
             $currentTime = $null
@@ -382,7 +399,7 @@ foreach ($task in $reg.tasks) {
         }
     }
     $verb = if ($current) {
-        if ($Force -or $action_needs_change -or $enabled_needs_change -or $desc_needs_change -or $logontype_needs_change -or $swa_needs_change -or $runlevel_needs_change -or $hidden_needs_change -or $timeout_needs_change -or $trigger_needs_change) { 'updated' } else { 'unchanged' }
+        if ($Force -or $action_needs_change -or $enabled_needs_change -or $desc_needs_change -or $logontype_needs_change -or $swa_needs_change -or $runlevel_needs_change -or $hidden_needs_change -or $timeout_needs_change -or $trigger_needs_change -or $triggertype_needs_change -or $dow_needs_change) { 'updated' } else { 'unchanged' }
     } else { 'created' }
 
     Write-Host ("[{0,-9}] {1}" -f $verb, $task.name) -ForegroundColor (

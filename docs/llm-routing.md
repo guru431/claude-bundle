@@ -4,7 +4,7 @@ The bundle has two distinct places where LLM choice matters:
 
 1. **`scripts/claude-switch.ps1`** — switches the **Claude Code session
    itself** between providers (Anthropic / DeepSeek / MiniMax / OpenCode
-   Go / CCR). One mode active at a time, writes to
+   Go / Ollama / CCR). One mode active at a time, writes to
    `<project>/.claude/settings.local.json::env`.
 
 2. **`home-claude/cron/hooks/utils.py::llm_call()`** — calls an LLM
@@ -31,9 +31,10 @@ doesn't burn through your Claude subscription. DeepSeek V4-Flash at
 |---|---|---|---|
 | `anthropic` | default | OAuth subscription or API per-token | best alignment, native tool-use |
 | `deepseek` | budget mode, big sessions | PAYG, ~$6/mo at the author's volume | identical surface to Anthropic; works seamlessly |
-| `minimax` | when MiniMax-M2.7 specifically | direct billing | direct latency lower than via OCG |
-| `opencode` | trying out a non-MiniMax model briefly | OCG subscription | the OCG Anthropic-compatible endpoint only exposes MiniMax-M2.7 / M2.5 |
-| `ccr` | routing many models through one proxy | depends on the underlying provider | needs the [Claude Code Router](https://github.com/modelfusion/claude-code-router) running |
+| `minimax` | MiniMax direct (M3 default, M2.7 legacy) | direct billing | direct latency lower than via OCG |
+| `opencode` | OCG models over the Anthropic surface | OCG subscription | the OCG Anthropic-compatible endpoint exposes `minimax-m3` / `qwen3.7-max` (qwen is messages-only — it 401s on the OpenAI-compat route, so it works here but not via CCR) |
+| `ollama` | local/LAN models, offline work | free (your hardware) | Ollama serves the Anthropic `/v1/messages` API natively — no proxy; host:port from `OLLAMA_HOST` (default `127.0.0.1:11434`); a dummy `ANTHROPIC_AUTH_TOKEN=ollama-local` overrides any stored OAuth session |
+| `ccr` | routing many models through one proxy | depends on the underlying provider | needs the [Claude Code Router](https://github.com/musistudio/claude-code-router) running |
 
 The CCR mode is the most powerful — one proxy, 12 models, same Anthropic-
 compatible surface. But it needs you to run `ccr` somewhere (locally or
@@ -72,10 +73,13 @@ because DeepSeek is down, that's a Telegram alert, not a $5 surprise.
 ### Provider registry — the single source of truth (cron side)
 
 All cron-side provider config lives in **one** table,
-`utils.py::PROVIDERS`. The module-level constants (`DEEPSEEK_*`,
-`MINIMAX_*`) are derived from it, so there is exactly one place that lists
-env-var names, endpoints and default models. This table below mirrors it —
-keep the two in sync (and the `.env` template too):
+`utils.py::PROVIDERS` — env-var names, endpoints, default models, and
+the call parameters (`max_tokens` / `temperature` / `max_retries`). The
+module-level constants (`DEEPSEEK_*`, `OPENCODE_*`) are derived from it.
+An unknown `WIKI_LLM_PROVIDER` value is rejected loudly (stderr warning,
+fallback to `deepseek`) instead of silently routing to the default
+branch. This table below mirrors the registry — keep the two in sync
+(and the `.env` template too):
 
 | Provider key | Key env (first non-empty wins) | Base URL | Default model | Model override env |
 |---|---|---|---|---|
@@ -91,9 +95,12 @@ Don't make it the cron default.
 
 ### Where the keys come from
 
-`utils.py::_load_dotenv()` reads `<bundle-root>/.env` at import time and
-populates `os.environ` (without overwriting anything already set). That
-means:
+`utils.py::_load_dotenv()` reads the `.env` next to the deployed bundle
+content — i.e. `~/.claude/.env` after a standard install (the path is
+derived as two levels up from `cron/hooks/utils.py`) — at import time
+and populates `os.environ` (without overwriting anything already set).
+`claude-switch.ps1` reads the same file as its last fallback (after the
+process env, the user env, and a `.env` next to the script). That means:
 
 - Cron tasks fired through Task Scheduler — they read from `.env`
   because Task Scheduler doesn't carry your user environment into

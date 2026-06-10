@@ -1,7 +1,7 @@
 # Cron architecture (Windows Task Scheduler)
 
-The bundle ships 9 scheduled tasks managed declaratively through one
-YAML file. This document explains the moving parts.
+The bundle ships 10 scheduled tasks (one disabled by default) managed
+declaratively through one YAML file. This document explains the moving parts.
 
 ## The big picture
 
@@ -111,7 +111,7 @@ changes the second time.
 | `ClaudeWikiFlush` | Daily 02:30 | drain `.pending/` → daily log |
 | `ClaudeWikiCompileKB` | Daily 03:30 | compile KB sources → `kb/*` (off by default) |
 | `ClaudeWikiCompileSessions` | Daily 04:00 | compile sessions → `projects/<slug>/*` |
-| `ClaudeWikiBuildIndex` | Daily 04:05 | regenerate `wiki/index.md` |
+| `ClaudeWikiBuildIndex` | Daily 04:05 | rebuild `projects/index.md` + `kb/index.md`, refresh stats in `wiki/index.md` |
 | `ClaudeWikiLint` | Weekly Sun 02:00 | broken-link / orphan / project-collapse check |
 | `ClaudeLogRetention` | Weekly Sun 03:00 | prune `cron/logs/*.log` older than 30 days |
 | `ClaudeMemoryUpdate` | Daily 02:00 | JSONL → memory MD |
@@ -142,8 +142,8 @@ to silence them).
 
 - **Operational log** (turn it on once via Event Viewer):
   `Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 50`
-- **Per-task log** — each script writes to
-  `cron/logs/<name>_$(date +%Y-%m-%d).log`. The hidden launcher
-  preserves stdout/stderr to that file.
+- **Per-task log** — each script writes its own log to
+  `cron/logs/<name>_$(date +%Y-%m-%d).log`. The hidden launcher does no
+  redirection — it only propagates the child's exit code.
 - **Telegram alerts** — `ClaudeTaskMonitor` runs daily at 09:30 and
   alerts if any registry task has a non-zero `Last Result`.

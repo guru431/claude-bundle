@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import date, datetime
 from pathlib import Path
 
@@ -57,7 +58,12 @@ def load_state() -> dict:
         try:
             return json.loads(STATE_PATH.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            return {}
+            # Corrupt state file — rebuild from the log.md journal instead of
+            # silently resetting dedup (which would re-feed the whole backlog
+            # to the LLM). Returned in memory; the next state_add persists it.
+            print(f"WARNING: {STATE_PATH.name} unreadable, rebuilding from log.md",
+                  file=sys.stderr)
+            return _migrated_state_from_log() or {}
     migrated = _migrated_state_from_log()
     if migrated is None:
         return {}
@@ -79,19 +85,54 @@ def state_get(section: str, key: str) -> set[str]:
     return set(load_state().get(section, {}).get(key, []))
 
 
+def _acquire_state_lock(timeout: float = 60.0) -> Path | None:
+    """Best-effort inter-process lock around .processed.json updates.
+
+    A slow flush run can overlap the compile runs scheduled after it; without
+    a lock the later save_state() would silently drop keys written in between
+    (load → modify → save race). Stale locks (>10 min) are broken. Returns the
+    lock path, or None on timeout — callers proceed unlocked rather than die.
+    """
+    lock = STATE_PATH.with_name(STATE_PATH.name + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.time() + timeout
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return lock
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > 600:
+                    lock.unlink(missing_ok=True)
+                    continue
+            except OSError:
+                pass
+            if time.time() >= deadline:
+                print("WARNING: state lock timeout, proceeding unlocked", file=sys.stderr)
+                return None
+            time.sleep(1.0)
+
+
 def state_add(section: str, key: str, items) -> None:
     """Append new items to state[section][key] (order-preserving, deduped)."""
     items = list(items)
     if not items:
         return
-    state = load_state()
-    bucket = state.setdefault(section, {}).setdefault(key, [])
-    seen = set(bucket)
-    for it in items:
-        if it not in seen:
-            bucket.append(it)
-            seen.add(it)
-    save_state(state)
+    lock = _acquire_state_lock()
+    try:
+        state = load_state()
+        bucket = state.setdefault(section, {}).setdefault(key, [])
+        seen = set(bucket)
+        for it in items:
+            if it not in seen:
+                bucket.append(it)
+                seen.add(it)
+        save_state(state)
+    finally:
+        if lock is not None:
+            lock.unlink(missing_ok=True)
 
 
 def _migrated_state_from_log() -> dict | None:
@@ -394,6 +435,9 @@ PROVIDERS: dict[str, dict] = {
         "base_url_default": "https://api.deepseek.com/v1",
         "model_env": "DEEPSEEK_MODEL",
         "model_default": "deepseek-v4-flash",
+        "max_tokens": 8192,
+        "temperature": 0.3,
+        "max_retries": 3,
     },
     "opencode": {  # fallback: OpenCode Go gateway (mimo-v2.5-pro)
         "key_env": ["OPENCODE_GO_API_KEY", "OPENCODE_GO_KEY"],
@@ -401,6 +445,9 @@ PROVIDERS: dict[str, dict] = {
         "base_url_default": "https://opencode.ai/zen/go/v1",
         "model_env": "OPENCODE_GO_MODEL",
         "model_default": "mimo-v2.5-pro",
+        "max_tokens": 32768,
+        "temperature": 0.3,
+        "max_retries": 5,
     },
     # "claude" has no entry: it shells out to the `claude` CLI (manual/opt-in
     # mode only) and needs no key/url/model here.
@@ -428,10 +475,16 @@ def _provider_cfg(name: str) -> tuple[str, str, str]:
 # Default provider for wiki/memory scripts. `or "deepseek"` so an empty
 # WIKI_LLM_PROVIDER= line in .env falls back to the default, not "".
 LLM_PROVIDER = os.environ.get("WIKI_LLM_PROVIDER", "deepseek") or "deepseek"
+if LLM_PROVIDER not in set(PROVIDERS) | {"claude"}:
+    # A typo must not silently route to the default branch — warn loudly.
+    print(f"WARNING: unknown WIKI_LLM_PROVIDER='{LLM_PROVIDER}' "
+          f"(valid: {', '.join(sorted(set(PROVIDERS) | {'claude'}))}) — using 'deepseek'",
+          file=sys.stderr)
+    LLM_PROVIDER = "deepseek"
 
 # Derived constants (names kept for the _llm_* callers below).
 DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL = _provider_cfg("deepseek")
-MINIMAX_API_KEY, MINIMAX_BASE_URL, MINIMAX_MODEL = _provider_cfg("opencode")
+OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL = _provider_cfg("opencode")
 
 
 def is_dry_run(argv: list[str] | None = None) -> bool:
@@ -612,9 +665,12 @@ def add_source_to_frontmatter(page_frontmatter: dict, src_path: str, src_hash: s
 
 
 def append_per_project_log(project: str, entries: list[str]) -> None:
-    """Append entries to wiki/projects/{project}/_log.md.
+    """Record entries in wiki/projects/{project}/_log.md (newest day on top).
 
     entries — list of lines like "incident-X.md (update) ← jsonl/foo.jsonl".
+    New `## date` blocks are PREPENDED right after the H1 title so the head of
+    the file always holds the freshest activity — get_project_log() reads the
+    head, and session-start injects it as "recent project context".
     """
     if not entries:
         return
@@ -625,7 +681,7 @@ def append_per_project_log(project: str, entries: list[str]) -> None:
 
     existing = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
     if not existing:
-        existing = f"# _log — {project}\n\n"
+        existing = f"# _log — {project}\n"
 
     header = f"## {today}"
     if header in existing:
@@ -633,11 +689,11 @@ def append_per_project_log(project: str, entries: list[str]) -> None:
         new_block = "\n" + "\n".join(f"- {e}" for e in entries)
         existing = existing[:insert_at] + new_block + existing[insert_at:]
     else:
-        block = f"\n{header}\n" + "\n".join(f"- {e}" for e in entries) + "\n"
-        if existing.rstrip().endswith(project):
-            existing = existing + block
-        else:
-            existing = existing.rstrip() + "\n" + block
+        new_block = header + "\n" + "\n".join(f"- {e}" for e in entries) + "\n"
+        m = re.match(r"^#[^\n]*\n", existing)
+        head = m.group(0) if m else ""
+        rest = existing[len(head):].lstrip("\n")
+        existing = head + "\n" + new_block + ("\n" + rest if rest else "")
 
     log_path.write_text(existing, encoding="utf-8")
 
@@ -822,13 +878,24 @@ def extract_first_json_array(text: str) -> str | None:
     return None
 
 
+def _ensure_list(parsed) -> list:
+    """Callers iterate the result as a list of dicts — anything else (an LLM
+    returning a bare object/string) must become [] here, not an AttributeError
+    deep inside a compile loop."""
+    if isinstance(parsed, list):
+        return parsed
+    print(f"  LLM JSON is {type(parsed).__name__}, expected array — skipping",
+          file=sys.stderr)
+    return []
+
+
 def parse_llm_json(raw: str) -> list[dict]:
     """Parse JSON from an LLM response, fixing common breakage."""
     cleaned = re.sub(r'```json\s*', '', raw)
     cleaned = re.sub(r'```\s*', '', cleaned).strip()
 
     try:
-        return json.loads(cleaned)
+        return _ensure_list(json.loads(cleaned))
     except json.JSONDecodeError:
         pass
 
@@ -836,7 +903,7 @@ def parse_llm_json(raw: str) -> list[dict]:
     if match:
         from_bracket = cleaned[match.start():]
         try:
-            return json.loads(from_bracket)
+            return _ensure_list(json.loads(from_bracket))
         except json.JSONDecodeError:
             pass
 
@@ -845,7 +912,7 @@ def parse_llm_json(raw: str) -> list[dict]:
         json_str = cleaned
 
     try:
-        return json.loads(json_str)
+        return _ensure_list(json.loads(json_str))
     except json.JSONDecodeError:
         pass
 
@@ -853,7 +920,7 @@ def parse_llm_json(raw: str) -> list[dict]:
     prev_state: tuple[int, str] | None = None
     for _ in range(50):
         try:
-            return json.loads(fixed)
+            return _ensure_list(json.loads(fixed))
         except json.JSONDecodeError as e:
             # Progress guard: bail if the (pos, error) tuple repeats — that
             # means our patch didn't move us toward a valid parse.
@@ -872,6 +939,11 @@ def parse_llm_json(raw: str) -> list[dict]:
             elif "Expecting ',' delimiter" in str(e) or "Expecting property name" in str(e):
                 pos = e.pos
                 ch = fixed[pos] if pos < len(fixed) else ''
+                if not ch:
+                    # Error at end-of-input: the response was truncated
+                    # (max_tokens hit) — nothing left to patch.
+                    print("  JSON truncated at end of response, giving up", file=sys.stderr)
+                    return []
                 if ch == '\n':
                     fixed = fixed[:pos] + '\\n' + fixed[pos+1:]
                 elif ch == '\r':
@@ -897,13 +969,17 @@ def parse_llm_json(raw: str) -> list[dict]:
                             new_arr = extract_first_json_array(reformatted)
                             if new_arr:
                                 try:
-                                    return json.loads(new_arr)
+                                    return _ensure_list(json.loads(new_arr))
                                 except json.JSONDecodeError:
                                     pass
                         print(f"  Reformat also failed, skipping", file=sys.stderr)
                         return []
             else:
-                raise e
+                # Unknown breakage (e.g. "Unterminated string" from a
+                # max_tokens cut) — give up gracefully; callers treat [] as
+                # "this response failed", they must not crash on a parse error.
+                print(f"  JSON unrepairable: {e}", file=sys.stderr)
+                return []
 
     print(f"  JSON parse: 50 iterations exhausted, giving up", file=sys.stderr)
     return []
@@ -923,12 +999,12 @@ def llm_call(prompt: str, timeout: int = 600) -> str | None:
     if LLM_PROVIDER == "claude":
         return _llm_claude(prompt, timeout)
     if LLM_PROVIDER == "opencode":
-        return _llm_minimax(prompt, timeout)
+        return _llm_opencode(prompt, timeout)
     out = _llm_deepseek(prompt, timeout)
     if out is not None:
         return out
     print("  DeepSeek failed, falling back to OpenCode Go", file=sys.stderr)
-    out = _llm_minimax(prompt, timeout)
+    out = _llm_opencode(prompt, timeout)
     if out is not None:
         return out
     print("  OpenCode Go also failed → returning None (claude fallback disabled)", file=sys.stderr)
@@ -953,15 +1029,16 @@ def _llm_deepseek(prompt: str, timeout: int = 600) -> str | None:
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
     }
+    cfg = PROVIDERS["deepseek"]
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 8192,
-        "temperature": 0.3,
+        "max_tokens": cfg["max_tokens"],
+        "temperature": cfg["temperature"],
         "stream": False,
     }
 
-    max_retries = 3
+    max_retries = cfg["max_retries"]
     for attempt in range(max_retries):
         try:
             resp = requests.post(
@@ -999,30 +1076,31 @@ def _llm_deepseek(prompt: str, timeout: int = 600) -> str | None:
     return None
 
 
-def _llm_minimax(prompt: str, timeout: int = 600) -> str | None:
+def _llm_opencode(prompt: str, timeout: int = 600) -> str | None:
     """OpenCode Go gateway (OpenAI-compatible)."""
     import requests
 
-    if not MINIMAX_API_KEY:
+    if not OPENCODE_API_KEY:
         print("  OPENCODE_GO_API_KEY env var not set", file=sys.stderr)
         return None
 
     headers = {
-        "Authorization": f"Bearer {MINIMAX_API_KEY}",
+        "Authorization": f"Bearer {OPENCODE_API_KEY}",
         "Content-Type": "application/json",
     }
+    cfg = PROVIDERS["opencode"]
     payload = {
-        "model": MINIMAX_MODEL,
+        "model": OPENCODE_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 32768,
-        "temperature": 0.3,
+        "max_tokens": cfg["max_tokens"],
+        "temperature": cfg["temperature"],
     }
 
-    max_retries = 5
+    max_retries = cfg["max_retries"]
     for attempt in range(max_retries):
         try:
             resp = requests.post(
-                f"{MINIMAX_BASE_URL}/chat/completions",
+                f"{OPENCODE_BASE_URL}/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=timeout,

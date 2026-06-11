@@ -67,6 +67,7 @@ Get-ScheduledTask | Where-Object {
         LastResult = if ($info) { $info.LastTaskResult } else { -1 }
         LastRun = if ($info -and $info.LastRunTime) { $info.LastRunTime.ToString('yyyy-MM-dd HH:mm') } else { 'never' }
         NextRun = if ($info -and $info.NextRunTime -and $info.NextRunTime.Year -gt 1) { $info.NextRunTime.ToString('yyyy-MM-dd HH:mm') } else { 'none' }
+        Description = if ($_.Description) { $_.Description } else { '' }
     }
 } | ConvertTo-Json -Compress
 """
@@ -104,7 +105,14 @@ for t in tasks:
 if failures:
     lines = []
     for f in failures:
-        lines.append(f"{f['Name']}: exit {f['LastResult']} (last run: {f['LastRun']})")
+        # Classify: managed (carries the registry sync marker in its Description)
+        # vs ORPHAN (an external/legacy task not driven by the registry — a
+        # candidate to add to registry.yaml, disable, or suppress on purpose).
+        managed = 'managed-by-registry' in (f.get('Description') or '')
+        tag = 'managed' if managed else 'ORPHAN'
+        lines.append(f"{f['Name']}: exit {f['LastResult']} (last run: {f['LastRun']}) [{tag}]")
+    if any('[ORPHAN]' in ln for ln in lines):
+        lines.append('  ORPHAN → add to cron/registry.yaml, disable it, or add to EXCLUDE_TASKS with a reason')
     print('\n'.join(lines))
 else:
     print('OK')

@@ -487,6 +487,94 @@ DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL = _provider_cfg("deepseek")
 OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL = _provider_cfg("opencode")
 
 
+# ── Reliability & observability for the LLM dispatcher ───────────────────────
+# Three concerns the bare retry loops below don't cover, added so a nightly
+# cron sweep degrades gracefully and leaves a trail:
+#
+#   1. Circuit breaker (_DEPLETED_PROVIDERS): once a provider returns 402
+#      (insufficient balance) or exhausts its 429/529 retries, it is marked
+#      depleted for the rest of THIS process. Later llm_call()s skip it instead
+#      of hammering the same dead provider dozens of times across a multi-part
+#      job. Per-process only — a fresh cron run starts with a clean slate.
+#   2. Startup provider log (_log_provider_once): one line at the first call so
+#      the cron log shows where requests actually went (config-drift diagnosis).
+#   3. Routing audit log (_audit_attempt): one JSONL line per HTTP attempt to
+#      cron/logs/provider_attempts_<date>.jsonl, for after-the-fact stats on the
+#      429/402 share, latency per provider and how often the fallback fired.
+_DEPLETED_PROVIDERS: set[str] = set()
+_DEPLETED_SKIPS: dict[str, int] = {}  # calls skipped because of depletion
+_provider_logged = False
+
+
+def _is_depleted(provider: str) -> bool:
+    """True if the provider was marked depleted this run (and count the skip)."""
+    if provider in _DEPLETED_PROVIDERS:
+        _DEPLETED_SKIPS[provider] = _DEPLETED_SKIPS.get(provider, 0) + 1
+        return True
+    return False
+
+
+def _report_depleted_atexit() -> None:
+    """One run-summary line at process exit: which providers went dark and how
+    many calls were skipped (provider-outage diagnosis from the cron logs)."""
+    if not _DEPLETED_PROVIDERS:
+        return
+    parts = [f"{p} (skipped {_DEPLETED_SKIPS.get(p, 0)} calls)" for p in sorted(_DEPLETED_PROVIDERS)]
+    print(f"  [llm] run summary — depleted this run: {', '.join(parts)}", file=sys.stderr)
+
+
+import atexit as _atexit
+_atexit.register(_report_depleted_atexit)
+
+
+_AUDIT_DIR = BUNDLE_ROOT / "cron" / "logs"
+
+
+def _caller_name() -> str:
+    """Stem of the calling script, to group audit lines by cron task."""
+    try:
+        return Path(sys.argv[0]).stem or "?"
+    except Exception:
+        return "?"
+
+
+def _audit_attempt(provider: str, model: str, status, elapsed_ms: int | None,
+                   fallback_from: str | None = None) -> None:
+    """Append one telemetry line. Never raises — auditing must not break the
+    actual LLM call (best-effort)."""
+    try:
+        rec = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "caller": _caller_name(),
+            "provider": provider,
+            "model": model,
+            "status": status,
+            "elapsed_ms": elapsed_ms,
+            "fallback_from": fallback_from,
+        }
+        _AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+        path = _AUDIT_DIR / f"provider_attempts_{date.today().isoformat()}.jsonl"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _log_provider_once() -> None:
+    """Log the active provider/model/base once per process so the cron log shows
+    where requests actually went (config-drift diagnosis)."""
+    global _provider_logged
+    if _provider_logged:
+        return
+    _provider_logged = True
+    if LLM_PROVIDER == "opencode":
+        print(f"  [llm] provider=opencode model={OPENCODE_MODEL} base={OPENCODE_BASE_URL}", file=sys.stderr)
+    elif LLM_PROVIDER == "deepseek":
+        print(f"  [llm] provider=deepseek model={DEEPSEEK_MODEL} base={DEEPSEEK_BASE_URL} (fallback=opencode)", file=sys.stderr)
+    elif LLM_PROVIDER == "claude":
+        print("  [llm] provider=claude model=sonnet", file=sys.stderr)
+
+
 def is_dry_run(argv: list[str] | None = None) -> bool:
     """True when --dry-run / --no-llm is passed.
 
@@ -996,6 +1084,7 @@ def llm_call(prompt: str, timeout: int = 600) -> str | None:
     Cron scripts should NOT automatically fall back to Claude — better to skip
     a run than to burn a 5h subscription window.
     """
+    _log_provider_once()
     if LLM_PROVIDER == "claude":
         return _llm_claude(prompt, timeout)
     if LLM_PROVIDER == "opencode":
@@ -1004,14 +1093,14 @@ def llm_call(prompt: str, timeout: int = 600) -> str | None:
     if out is not None:
         return out
     print("  DeepSeek failed, falling back to OpenCode Go", file=sys.stderr)
-    out = _llm_opencode(prompt, timeout)
+    out = _llm_opencode(prompt, timeout, fallback_from="deepseek")
     if out is not None:
         return out
     print("  OpenCode Go also failed → returning None (claude fallback disabled)", file=sys.stderr)
     return None
 
 
-def _llm_deepseek(prompt: str, timeout: int = 600) -> str | None:
+def _llm_deepseek(prompt: str, timeout: int = 600, fallback_from: str | None = None) -> str | None:
     """DeepSeek API (OpenAI-compatible /chat/completions).
 
     Returns None on auth error, 402 insufficient_balance, network failure or
@@ -1023,6 +1112,9 @@ def _llm_deepseek(prompt: str, timeout: int = 600) -> str | None:
 
     if not DEEPSEEK_API_KEY:
         print("  DEEPSEEK_KEY env var not set", file=sys.stderr)
+        return None
+
+    if _is_depleted("deepseek"):
         return None
 
     headers = {
@@ -1041,19 +1133,22 @@ def _llm_deepseek(prompt: str, timeout: int = 600) -> str | None:
     max_retries = cfg["max_retries"]
     for attempt in range(max_retries):
         try:
+            t0 = time.monotonic()
             resp = requests.post(
                 f"{DEEPSEEK_BASE_URL}/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=timeout,
             )
+            _audit_attempt("deepseek", DEEPSEEK_MODEL, resp.status_code,
+                           int((time.monotonic() - t0) * 1000), fallback_from)
             if resp.status_code == 402:
                 print(f"  DeepSeek 402 insufficient_balance: {resp.text[:200]}", file=sys.stderr)
+                _DEPLETED_PROVIDERS.add("deepseek")  # don't repeat the 402 this run
                 return None
             if resp.status_code in (429, 529):
                 wait = 30 * (attempt + 1)
                 print(f"  DeepSeek {resp.status_code}, retry {attempt+1}/{max_retries} in {wait}s", file=sys.stderr)
-                import time
                 time.sleep(wait)
                 continue
             if resp.status_code != 200:
@@ -1067,21 +1162,24 @@ def _llm_deepseek(prompt: str, timeout: int = 600) -> str | None:
                 return None
             return content
         except Exception as e:
+            _audit_attempt("deepseek", DEEPSEEK_MODEL, f"exception:{type(e).__name__}", None, fallback_from)
             print(f"  DeepSeek error: {e}", file=sys.stderr)
             if attempt < max_retries - 1:
-                import time
                 time.sleep(15)
                 continue
             return None
     return None
 
 
-def _llm_opencode(prompt: str, timeout: int = 600) -> str | None:
+def _llm_opencode(prompt: str, timeout: int = 600, fallback_from: str | None = None) -> str | None:
     """OpenCode Go gateway (OpenAI-compatible)."""
     import requests
 
     if not OPENCODE_API_KEY:
         print("  OPENCODE_GO_API_KEY env var not set", file=sys.stderr)
+        return None
+
+    if _is_depleted("opencode"):
         return None
 
     headers = {
@@ -1099,22 +1197,23 @@ def _llm_opencode(prompt: str, timeout: int = 600) -> str | None:
     max_retries = cfg["max_retries"]
     for attempt in range(max_retries):
         try:
+            t0 = time.monotonic()
             resp = requests.post(
                 f"{OPENCODE_BASE_URL}/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=timeout,
             )
-            if resp.status_code == 529:
+            _audit_attempt("opencode", OPENCODE_MODEL, resp.status_code,
+                           int((time.monotonic() - t0) * 1000), fallback_from)
+            if resp.status_code in (429, 529):
+                if attempt == max_retries - 1:
+                    _DEPLETED_PROVIDERS.add("opencode")  # retries exhausted — don't repeat this run
+                    print(f"  OpenCode Go {resp.status_code} retries exhausted → marking depleted for this run", file=sys.stderr)
+                    return None
                 wait = 60 * (attempt + 1)
-                print(f"  OpenCode Go overloaded (529), retry {attempt+1}/{max_retries} in {wait}s", file=sys.stderr)
-                import time
-                time.sleep(wait)
-                continue
-            if resp.status_code == 429:
-                wait = 60 * (attempt + 1)
-                print(f"  OpenCode Go rate limit (429), retry {attempt+1}/{max_retries} in {wait}s", file=sys.stderr)
-                import time
+                label = "overloaded (529)" if resp.status_code == 529 else "rate limit (429)"
+                print(f"  OpenCode Go {label}, retry {attempt+1}/{max_retries} in {wait}s", file=sys.stderr)
                 time.sleep(wait)
                 continue
             if resp.status_code != 200:
@@ -1125,9 +1224,9 @@ def _llm_opencode(prompt: str, timeout: int = 600) -> str | None:
             content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
             return content
         except Exception as e:
+            _audit_attempt("opencode", OPENCODE_MODEL, f"exception:{type(e).__name__}", None, fallback_from)
             print(f"  OpenCode Go error: {e}", file=sys.stderr)
             if attempt < max_retries - 1:
-                import time
                 time.sleep(30)
                 continue
             return None

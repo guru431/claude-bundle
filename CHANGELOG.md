@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-06-11 — Reliability & observability port from the meta-repo
+
+Ported generic upstream hardening that the bundle lacked (adapted to the
+bundle's config-driven `PROVIDERS` table, not a raw diff cherry-pick):
+
+- **LLM dispatcher circuit breaker** (`cron/hooks/utils.py`): a provider that
+  returns 402 (insufficient balance) or exhausts its 429/529 retries is marked
+  depleted for the rest of the process; later `llm_call()`s skip it instead of
+  hammering the same dead provider across a multi-part job. Per-process only.
+- **Startup provider log + atexit run-summary**: one `[llm] provider=…` line at
+  the first call (config-drift diagnosis) and one summary line at exit listing
+  which providers went dark and how many calls were skipped.
+- **Routing audit log**: one JSONL line per HTTP attempt →
+  `cron/logs/provider_attempts_<date>.jsonl` (provider/model/status/latency/
+  fallback_from), best-effort, daily rotation. For after-the-fact stats on the
+  429/402 share, per-provider latency and how often the fallback fired.
+- **git-push-all protected-deletions guard**: deletions of `FINDINGS.md`/
+  `AGENTS.md`/`CLAUDE.md`/`registry.yaml`/`project-knowledge-base.yaml` are
+  unstaged before the nightly auto-commit (with a Telegram alert) so the sweep
+  can't silently nuke a key file; `GIT_PUSH_ALL_DRY_RUN=1` preview and
+  `GIT_PUSH_ALL_LIB=1` source-for-tests mode added.
+- **task-monitor managed/ORPHAN classification**: failing tasks are tagged
+  `[managed]` (carry the registry sync marker) vs `[ORPHAN]` (not driven by the
+  registry), with a remediation hint for orphans.
+- **md2pdf-sync cron** (`cron/md2pdf-sync.py`, registry `ClaudeMd2PdfSync`,
+  disabled by default): nightly catch-up that regenerates any PDF whose paired
+  `.md` is newer — complements the existing `md2pdf-on-edit.py` hook for edits
+  made outside Claude Code (Obsidian, git pull, external editors).
+
 ## 2026-06-10 — Fable 5 project-analysis: full fix batch (1×P1, 11×P2, ~30×P3)
 
 ### P1

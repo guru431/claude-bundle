@@ -119,6 +119,20 @@ tasks:
     notify_telegram: true
     timeout_hours: 72
 
+  - name: ClaudeMd2PdfSync
+    project: main
+    description: Nightly catch-up — regenerate any PDF whose paired .md is newer. Disabled by default — enable after installing ~/.claude/bin/md2pdf.py.
+    script: <bundle-install-path>\cron\md2pdf-sync.py
+    kind: python
+    trigger: Daily 06:30
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: true
+    timeout_hours: 2
+    enabled: false
+
   - name: ClaudeGitPushAll
     project: main
     description: Auto-commit + push every git repo under the projects root.

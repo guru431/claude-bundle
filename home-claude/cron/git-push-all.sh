@@ -7,6 +7,57 @@
 # scan sibling directories under <projects-root>/ for git repos. If your
 # layout is different, set PROJECTS_ROOT env var explicitly.
 
+# --- Helpers (defined before the main body so the file can be sourced in tests
+#     via GIT_PUSH_ALL_LIB=1 without running a push sweep) ---
+
+# Dry-run: show what WOULD be committed/pushed without changing anything (handy
+# for testing the guard logic). GIT_PUSH_ALL_DRY_RUN=1 bash cron/git-push-all.sh
+DRY_RUN="${GIT_PUSH_ALL_DRY_RUN:-0}"
+
+git_commit() {
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would commit: $*" >> "$LOG_FILE"
+        git diff --cached --name-status >> "$LOG_FILE" 2>&1
+        git reset -q HEAD >> "$LOG_FILE" 2>&1   # unstage — dry-run leaves no index
+    else
+        git commit "$@" >> "$LOG_FILE" 2>&1
+    fi
+}
+
+git_push() {
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would push: $*" >> "$LOG_FILE"
+        return 0
+    fi
+    git push "$@" >> "$LOG_FILE" 2>&1
+}
+
+# Protected paths: their DELETION is never auto-committed at night (risk of
+# losing findings/registry/docs). If a deletion was staged by `git add --all`,
+# unstage it (the file stays marked deleted in the working tree but never
+# reaches the commit/push) and alert. Real deletions must be done by hand.
+PROTECTED_RE='(^|/)(FINDINGS\.md|AGENTS\.md|CLAUDE\.md|registry\.yaml|project-knowledge-base\.yaml)$'
+
+guard_protected_deletions() {
+    local label="$1"
+    local deleted
+    deleted=$(git diff --cached --name-only --diff-filter=D 2>/dev/null | grep -E "$PROTECTED_RE")
+    [ -z "$deleted" ] && return 0
+    echo "[$label] PROTECTED deletion blocked from auto-commit:" >> "$LOG_FILE"
+    echo "$deleted" | sed 's/^/    /' >> "$LOG_FILE"
+    while IFS= read -r p; do
+        [ -n "$p" ] && git reset -q HEAD -- "$p" >> "$LOG_FILE" 2>&1
+    done <<< "$deleted"
+    if [ -x "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+        bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: blocked auto-delete of protected file(s) in [$label]:
+$deleted
+(left in the working tree, not committed — delete by hand)" >> "$LOG_FILE" 2>&1
+    fi
+}
+
+# Lib mode: function definitions only (for tests), no main sweep.
+[ "${GIT_PUSH_ALL_LIB:-0}" = "1" ] && return 0 2>/dev/null
+
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 LOG_DIR="$BUNDLE_ROOT/cron/logs"
@@ -105,12 +156,13 @@ for dir in "$REPOS_DIR"/*/; do
         # If you actually want this repo to track .env*, gitignore it explicitly
         # or stage the file by hand once.
         git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
+        guard_protected_deletions "$repo"
         if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
             echo "[$repo] nothing to commit after .env exclusion" >> "$LOG_FILE"
             skipped=$((skipped + 1))
             continue
         fi
-        git commit -m "Auto-commit: $(date +%Y-%m-%d)" >> "$LOG_FILE" 2>&1
+        git_commit -m "Auto-commit: $(date +%Y-%m-%d)"
         echo "[$repo] auto-committed changes" >> "$LOG_FILE"
     fi
 
@@ -123,7 +175,7 @@ for dir in "$REPOS_DIR"/*/; do
         continue
     fi
 
-    if git push origin "$branch" >> "$LOG_FILE" 2>&1; then
+    if git_push origin "$branch"; then
         echo "[$repo] pushed $branch" >> "$LOG_FILE"
         pushed=$((pushed + 1))
     else
@@ -142,11 +194,12 @@ if [ -d "$WIKI_DIR/.git" ]; then
         if [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
             if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
                 git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
+                guard_protected_deletions "wiki"
                 if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
                     echo "[wiki] nothing to commit after .env exclusion" >> "$LOG_FILE"
                     skipped=$((skipped + 1))
                 else
-                    git commit -m "wiki: auto-commit $(date +%Y-%m-%d)" >> "$LOG_FILE" 2>&1
+                    git_commit -m "wiki: auto-commit $(date +%Y-%m-%d)"
                     echo "[wiki] auto-committed changes" >> "$LOG_FILE"
                 fi
             fi
@@ -155,7 +208,7 @@ if [ -d "$WIKI_DIR/.git" ]; then
             if [ "$local_hash" = "$remote_hash" ]; then
                 echo "[wiki] up to date" >> "$LOG_FILE"
                 skipped=$((skipped + 1))
-            elif git push origin "$branch" >> "$LOG_FILE" 2>&1; then
+            elif git_push origin "$branch"; then
                 echo "[wiki] pushed $branch" >> "$LOG_FILE"
                 pushed=$((pushed + 1))
             else

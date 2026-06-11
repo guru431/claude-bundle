@@ -934,8 +934,10 @@ def normalize_wiki_path(path: str) -> str:
 
 def extract_first_json_array(text: str) -> str | None:
     """Extract the FIRST complete JSON array via bracket balancing."""
-    text = re.sub(r'```json\s*', '', text)
-    text = re.sub(r'```\s*', '', text)
+    # Strip the markdown wrapper at the EDGES only — a global re.sub chewed
+    # fenced code blocks out of JSON strings (corrupting wiki-page content).
+    text = re.sub(r'^\s*```(?:json)?\s*', '', text)
+    text = re.sub(r'\s*```\s*$', '', text)
 
     depth = 0
     start = None
@@ -979,8 +981,10 @@ def _ensure_list(parsed) -> list:
 
 def parse_llm_json(raw: str) -> list[dict]:
     """Parse JSON from an LLM response, fixing common breakage."""
-    cleaned = re.sub(r'```json\s*', '', raw)
-    cleaned = re.sub(r'```\s*', '', cleaned).strip()
+    # Strip the markdown wrapper at the EDGES only — a global re.sub chewed
+    # fenced code blocks out of JSON strings (corrupting wiki-page content).
+    cleaned = re.sub(r'^\s*```(?:json)?\s*', '', raw)
+    cleaned = re.sub(r'\s*```\s*$', '', cleaned).strip()
 
     try:
         return _ensure_list(json.loads(cleaned))
@@ -1220,8 +1224,14 @@ def _llm_opencode(prompt: str, timeout: int = 600, fallback_from: str | None = N
                 print(f"  OpenCode Go API error {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
                 return None
             data = resp.json()
-            content = data["choices"][0]["message"]["content"].strip()
+            # Defensive .get() chain (like _llm_deepseek): a missing choices/
+            # message/content means "no answer" (return None) so the fallback
+            # fires — an empty string would pass as a valid result and block it.
+            content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
             content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
+            if not content:
+                print("  OpenCode Go empty content (reasoning_only?)", file=sys.stderr)
+                return None
             return content
         except Exception as e:
             _audit_attempt("opencode", OPENCODE_MODEL, f"exception:{type(e).__name__}", None, fallback_from)

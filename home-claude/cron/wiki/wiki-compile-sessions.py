@@ -54,10 +54,30 @@ DATE = datetime.now().strftime("%Y-%m-%d")
 # to append semantics in that case.
 MAX_PAGES_WITH_CONTENT = 30
 
+# A single huge project section (observed 161351 chars) deterministically
+# makes the LLM bail → the whole daily stays uncompiled and is reprocessed
+# every night, re-running the LLM on its already-succeeded neighbours too.
+# We chunk such sections on blank-line boundaries; see compile_project_data.
+MAX_PART_SIZE = 80000
+
+
+def pair_marker(daily_stem: str, project: str) -> str:
+    """State key for a granular (daily, project) pair marker."""
+    return f"{daily_stem}#{project}"
+
 
 def get_compiled_dailies() -> set[str]:
     """Return the set of already-compiled daily dates from .processed.json."""
     return state_get("compile_sessions", "compiled_dailies")
+
+
+def get_compiled_pairs() -> set[str]:
+    """Return already-compiled (daily, project) pair markers.
+
+    A daily blocked by one big failing project still records its succeeded
+    projects here, so they are not re-sent to the LLM on the next retry.
+    """
+    return state_get("compile_sessions", "compiled_pairs")
 
 
 def find_uncompiled_dailies(compiled: set[str]) -> list[Path]:
@@ -100,12 +120,20 @@ def get_existing_project_pages(project: str) -> dict[str, str]:
     proj_dir = PROJECTS_DIR / project
     if proj_dir.exists():
         for f in proj_dir.glob("*.md"):
-            pages[f.stem] = f.read_text(encoding="utf-8")
+            pages[f.stem] = f.read_text(encoding="utf-8", errors="replace")
     return pages
 
 
 def compile_project_data(project: str, data: str, existing_pages: dict[str, str]) -> list[dict] | None:
-    """Call the LLM to compile project data into wiki pages."""
+    """Call the LLM to compile project data into wiki pages.
+
+    A large data section (observed 161351 chars) deterministically makes the
+    LLM bail, so we split it into ~MAX_PART_SIZE chunks on blank-line
+    boundaries (never mid-line/mid-paragraph) and call the LLM per part,
+    concatenating results. If ANY part fails (None/empty) the whole project is
+    failed (None) and retried as a unit — its (daily, project) pair stays
+    unmarked and is reprocessed next run.
+    """
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
     # Guard against context overflow (e.g. 128K-token providers): if there
@@ -121,11 +149,29 @@ def compile_project_data(project: str, data: str, existing_pages: dict[str, str]
                 existing_content += "\n(remaining pages omitted due to size)\n"
                 break
 
-    full_prompt = f"""{prompt}
+    # Split data into parts on blank-line (block) boundaries.
+    if len(data) > MAX_PART_SIZE:
+        parts = []
+        current = ""
+        for block in data.split("\n\n"):
+            if current and len(current) + len(block) > MAX_PART_SIZE:
+                parts.append(current)
+                current = block
+            else:
+                current = current + "\n\n" + block if current else block
+        if current:
+            parts.append(current)
+    else:
+        parts = [data]
+
+    all_changes: list[dict] = []
+    for part_idx, part in enumerate(parts):
+        part_label = f" (part {part_idx+1}/{len(parts)})" if len(parts) > 1 else ""
+        full_prompt = f"""{prompt}
 
 ---
 
-## Project: {project}
+## Project: {project}{part_label}
 
 ## Existing project pages:
 {existing_list or "(none)"}
@@ -133,7 +179,7 @@ def compile_project_data(project: str, data: str, existing_pages: dict[str, str]
 {existing_content if existing_content else ""}
 
 ## New data from the daily log:
-{data}
+{part}
 
 ---
 
@@ -148,21 +194,26 @@ Answer STRICTLY in JSON format (array of objects):
 
 JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
 
-    output = llm_call(full_prompt, timeout=600)
-    if not output:
-        return None
+        output = llm_call(full_prompt, timeout=600)
+        if not output:
+            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: llm_call returned None", file=sys.stderr)
+            return None
 
-    try:
-        result = parse_llm_json(output)
-    except Exception as e:
-        print(f"  ERROR compile {project}: parse_llm_json failed: {e}", file=sys.stderr)
-        return None
+        try:
+            result = parse_llm_json(output)
+        except Exception as e:
+            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: parse_llm_json failed: {e}", file=sys.stderr)
+            return None
 
-    if not result:
-        print(f"  ERROR compile {project}: empty result (response {len(output)} chars)", file=sys.stderr)
-        return None
+        if not result:
+            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: empty result (response {len(output)} chars)", file=sys.stderr)
+            return None
 
-    return result
+        all_changes.extend(result)
+        if part_idx < len(parts) - 1:
+            time.sleep(5)
+
+    return all_changes
 
 
 def apply_changes(changes: list[dict], source_daily: str, project: str,
@@ -227,7 +278,8 @@ def main():
     log(f"=== Wiki Compile Sessions {DATE} ===")
 
     compiled = get_compiled_dailies()
-    log(f"Already compiled: {len(compiled)} daily logs")
+    compiled_pairs = get_compiled_pairs()
+    log(f"Already compiled: {len(compiled)} daily logs, {len(compiled_pairs)} (daily, project) pairs")
 
     dailies = find_uncompiled_dailies(compiled)
     log(f"New daily logs: {len(dailies)}")
@@ -263,6 +315,14 @@ def main():
 
         failed = 0
         for project, data in by_project.items():
+            # Granular dedup: this (daily, project) pair already compiled —
+            # skip it, so one big failing project no longer drags its
+            # already-succeeded neighbours through the LLM on every retry.
+            marker = pair_marker(daily_path.stem, project)
+            if marker in compiled_pairs:
+                log(f"  [{project}] already compiled (pair marker) — skip")
+                continue
+
             existing = get_existing_project_pages(project)
             log(f"  [{project}] existing pages: {len(existing)}, data: {len(data)} chars")
 
@@ -273,6 +333,10 @@ def main():
                                         blind_update=len(existing) > MAX_PAGES_WITH_CONTENT)
                 total_changes += len(applied)
                 log(f"  [{project}] → {len(applied)} changes")
+                # Record the pair immediately — on retry of this daily, a
+                # succeeded project is skipped rather than re-compiled.
+                state_add("compile_sessions", "compiled_pairs", [marker])
+                compiled_pairs.add(marker)
             else:
                 log(f"  [{project}] → ERROR")
                 failed += 1

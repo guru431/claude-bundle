@@ -22,7 +22,13 @@ if sys.platform == "win32":
     sys.stderr.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
-from utils import llm_call, parse_jsonl_messages, dir_to_project  # noqa: E402
+from utils import (  # noqa: E402
+    SKIP_JSONL_PROJECTS,
+    dir_to_project,
+    is_subagent_jsonl,
+    llm_call,
+    parse_jsonl_messages,
+)
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 USER_MD = Path.home() / ".claude" / "memory" / "USER.md"
@@ -60,6 +66,9 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
         # Same project-name derivation as the wiki pipeline (PROJECT_MAP →
         # trailing segment) so both pipelines key the same project identically.
         proj_name = dir_to_project(proj_dir.name)
+        # Some projects (e.g. translation jobs) hold documents, not knowledge.
+        if proj_name in SKIP_JSONL_PROJECTS:
+            continue
 
         bits: list[str] = []
         for jsonl in proj_dir.glob("*.jsonl"):
@@ -67,6 +76,9 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
                 if jsonl.stat().st_mtime < cutoff:
                     continue
             except OSError:
+                continue
+            # Subagent transcripts duplicate the parent session — skip them.
+            if is_subagent_jsonl(str(jsonl)):
                 continue
             try:
                 msgs = parse_jsonl_messages(str(jsonl), last_n=200)

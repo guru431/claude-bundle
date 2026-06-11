@@ -59,9 +59,23 @@ PAYLOAD=$(printf '%s' "$MSG" | PYTHONIOENCODING=utf-8 TELEGRAM_CHAT_ID="$TELEGRA
 # token never appears in the process arg list (ps / tasklist) or shell history.
 # Telegram Bot API only accepts the token in the URL path (no header auth),
 # so keeping the URL out of argv is the way to hide it.
-curl -s -X POST \
+# Capture the response and HTTP code: a 200 with body {"ok":false} (or any
+# non-200) would otherwise vanish silently — the worst failure mode for an
+# alert channel. -w appends the HTTP code on its own last line.
+RESPONSE=$(curl -s -X POST \
   -H "Content-Type: application/json; charset=utf-8" \
   --data-binary "$PAYLOAD" \
+  -w '\n%{http_code}' \
   -K - <<CURL_CFG 2>&1
 url = "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
 CURL_CFG
+)
+HTTP_CODE=$(printf '%s' "$RESPONSE" | tail -n1)
+BODY=$(printf '%s' "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" != "200" ] || printf '%s' "$BODY" | grep -q '"ok":false'; then
+    echo "telegram-send: Bot API error (HTTP ${HTTP_CODE:-?}): $BODY" >&2
+    exit 1
+fi
+
+printf '%s\n' "$BODY"

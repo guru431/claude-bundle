@@ -419,6 +419,9 @@ def main():
         log(f"[{i+1}/{len(all_projects)}] Flush: {project} ({len(chunks)} chunks)")
         extracted = flush_project_data(project, chunks)
         if extracted:
+            # The LLM may inject ##-headings inside the extracted text →
+            # compile-sessions would parse them as project sections. Demote to ###.
+            extracted = re.sub(r'(?m)^##(?=\s)', '###', extracted)
             daily_lines.append(f"## {project}")
             daily_lines.append(extracted)
             daily_lines.append("")

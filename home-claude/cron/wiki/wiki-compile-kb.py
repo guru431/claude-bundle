@@ -69,8 +69,17 @@ def find_new_files(processed: set[str]) -> list[Path]:
             continue
         for f in sorted(src_dir.glob("*.md")):
             rel = f"{subdir}/{f.name}"
-            if rel not in processed:
-                sources.append(f)
+            if rel in processed:
+                continue
+            # KB Update (03:00) may still be writing the file — anything fresher
+            # than 5 minutes is skipped WITHOUT marking it processed (the next
+            # run will pick it up once it has settled).
+            try:
+                if time.time() - f.stat().st_mtime < 300:
+                    continue
+            except OSError:
+                continue
+            sources.append(f)
     return sources
 
 
@@ -235,9 +244,19 @@ def main():
             # State (.processed.json) is the dedup source of truth; update_log
             # keeps the human-readable journal in log.md.
             state_add("compile_kb", "processed", [rel])
-            update_log(rel, applied)
-            total_created += len(applied)
-            log(f"  → {len(applied)} changes")
+            if applied:
+                update_log(rel, applied)
+                total_created += len(applied)
+                log(f"  → {len(applied)} changes")
+            else:
+                # changes was non-empty but normalize_wiki_path rejected every
+                # path → applied == []. Deterministic: a retry would produce the
+                # same result, so we still mark it processed (above) but make
+                # noise in the log and stderr instead of silently dropping it.
+                update_log(rel, ["(ERROR: 0 applied)"])
+                print(f"  ERROR compile-kb {rel}: {len(changes)} changes, 0 applied "
+                      f"(all paths rejected by normalize_wiki_path) — content dropped", file=sys.stderr)
+                log(f"  → ERROR: 0 applied of {len(changes)} changes — marked processed")
         else:
             # Not recorded in state → retried next run. Journal the failure only.
             log(f"  → ERROR: compile failed")

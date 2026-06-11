@@ -134,6 +134,7 @@ fi
 pushed=0
 skipped=0
 failed=0
+failed_repos=""
 
 for dir in "$REPOS_DIR"/*/; do
     [ -d "$dir/.git" ] || continue
@@ -181,6 +182,7 @@ for dir in "$REPOS_DIR"/*/; do
     else
         echo "[$repo] FAILED to push" >> "$LOG_FILE"
         failed=$((failed + 1))
+        failed_repos="${failed_repos:+$failed_repos, }$repo"
     fi
 done
 
@@ -214,6 +216,7 @@ if [ -d "$WIKI_DIR/.git" ]; then
             else
                 echo "[wiki] FAILED to push" >> "$LOG_FILE"
                 failed=$((failed + 1))
+                failed_repos="${failed_repos:+$failed_repos, }wiki"
             fi
         fi
     else
@@ -223,3 +226,12 @@ fi
 
 echo "=== Done: pushed=$pushed skipped=$skipped failed=$failed ===" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE"
+
+# Failed pushes must be visible: Telegram alert + exit 1 (so the task-monitor
+# catches a non-zero exit instead of every night reporting success).
+if [ "$failed" -gt 0 ]; then
+    if [ -x "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+        bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: $failed failed repos: $failed_repos" >> "$LOG_FILE" 2>&1
+    fi
+    exit 1
+fi

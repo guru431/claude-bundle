@@ -1,5 +1,53 @@
 # Changelog
 
+## 2026-06-11 — Wiki-pipeline stall fix + silent-failure hardening (meta-repo port)
+
+Second port from the meta-repo's Fable 5 batch — bug fixes the earlier
+reliability port did not cover. Adapted to the bundle's `.processed.json`
+state store and config-driven `PROVIDERS` table (not a raw cherry-pick).
+
+### P1 — data-pipeline stall
+
+- **`wiki-compile-sessions.py`: large-daily infinite retry.**
+  `compile_project_data` sent the whole project blob to `llm_call` in one
+  shot; an oversized project (~160 KB seen in practice) failed
+  deterministically, and the daily was only marked compiled when
+  `failed==0` — so a single big project blocked the **entire** daily
+  forever and re-ran every other project through the LLM nightly. Now:
+  the blob is chunked on `\n\n` boundaries at ~80 KB/part (any failed
+  part → project retried whole), and per-`(daily, project)` pair markers
+  (`state_get/state_add("compile_sessions", "compiled_pairs", …)`) let
+  already-succeeded projects inside a stuck daily be skipped on retry.
+
+### P2 — silent failures
+
+- **`utils.py` `_llm_opencode`**: an empty/reasoning-only response is now
+  `None` (so the fallback fires) instead of returning `""` as success.
+- **`utils.py` fence stripping**: ```` ```json ```` unwrapping in
+  `extract_first_json_array` / `parse_llm_json` is anchored to the start/end
+  of the response, so a fenced block in the *middle* of a JSON string is no
+  longer cut out (content corruption).
+- **`wiki-flush-sessions.py`**: `##` headings inside extracted text are
+  demoted to `###` (a stray `##` otherwise forged a phantom project section,
+  since compile splits the daily on `## `).
+- **`wiki-compile-kb.py`**: source files younger than 5 min are skipped
+  (un-marked) to avoid ingesting a half-written file mid-update; a change set
+  where every path was rejected by `normalize_wiki_path` (`0 applied`) is now
+  marked processed instead of retried forever.
+- **`git-push-all.sh`**: a failed push now sends a Telegram alert and
+  `exit 1` (was always `exit 0`, so the task monitor never caught it).
+- **`telegram-send.sh`**: the Bot API response is checked — HTTP≠200 or
+  `{"ok":false}` now `exit 1` instead of an HTTP-200 `ok:false` vanishing
+  silently (worst-case failure for an alert channel).
+- **`memory-update.py`**: applies the `SKIP_JSONL_PROJECTS` filter and
+  `is_subagent_jsonl` check (the helpers already shipped in `utils.py` but
+  were never called), so sub-agent sessions stop polluting memory extraction.
+
+### P3 — robustness
+
+- **`errors="replace"`** on vault `.md` reads in `wiki-compile-sessions.py`
+  and `wiki-lint.py` — one corrupt file no longer aborts the whole run.
+
 ## 2026-06-11 — Reliability & observability port from the meta-repo
 
 Ported generic upstream hardening that the bundle lacked (adapted to the

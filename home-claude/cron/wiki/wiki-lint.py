@@ -74,7 +74,7 @@ def check_broken_links(pages: dict[str, list[Path]]) -> list[str]:
 
     for name, paths in pages.items():
         for path in paths:
-            text = path.read_text(encoding="utf-8")
+            text = path.read_text(encoding="utf-8", errors="replace")
             links = extract_wikilinks(text)
             for link in links:
                 if link not in all_names:
@@ -92,7 +92,7 @@ def check_orphan_pages(pages: dict[str, list[Path]]) -> list[str]:
         parts = f.relative_to(WIKI_ROOT).parts
         if ".obsidian" in parts or "daily" in parts:
             continue
-        text = f.read_text(encoding="utf-8")
+        text = f.read_text(encoding="utf-8", errors="replace")
         all_links.update(extract_wikilinks(text))
 
     for name in pages:
@@ -107,7 +107,7 @@ def check_empty_pages(pages: dict[str, list[Path]]) -> list[str]:
     warnings = []
     for name, paths in pages.items():
         for path in paths:
-            text = path.read_text(encoding="utf-8")
+            text = path.read_text(encoding="utf-8", errors="replace")
             words = len(text.split())
             if words < 100:
                 warnings.append(f"WARN: thin content ({words} words): {path.relative_to(WIKI_ROOT)}")

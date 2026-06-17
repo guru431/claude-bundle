@@ -36,7 +36,7 @@ except AttributeError:
     pass
 
 PATTERN = re.compile(
-    r"(iptables-save|ip6tables-save)[^|;&]*([>]+|\|[^|;&]*tee[^|;&]*)[^|;&]*rules\.v[46]"
+    r"(iptables-save|ip6tables-save)[^;&]*([>]+|tee)[^;&]*rules\.v[46]"
 )
 
 REASON = (

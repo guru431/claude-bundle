@@ -133,26 +133,35 @@ elif [ "$TASK_STATUS" != "OK" ]; then
     ALERTS="$TASK_STATUS"
 fi
 
-# --- Policy check: no Password-task may use a mapped-drive (S:\, etc) ---
-# Mapped drives don't exist in session 0 (before user logon). A Password
-# task pointing at S:\... can't find its script and exits 127 with no log.
+# --- Policy check (backstop): no Password-task may use a mapped network drive ---
+# Mapped drives don't exist in session 0 (before user logon). A Password task
+# pointing at one can't find its script and exits 127 with no log. PRIMARY
+# enforcement is in cron/admin/sync-tasks.ps1 (it skips such tasks at
+# registration); this check is a daily redundancy backstop. It detects mapped
+# drives by their ACTUAL type (Win32_LogicalDisk DriveType=4 = network) rather
+# than inferring "mapped" from "not C:" — so a valid local D:/E:/... install
+# never trips a false alarm.
 echo "TRACE: stage=policy $(date '+%H:%M:%S')" >> "$LOG_FILE"
 POLICY_VIOL=$("$PYTHON" - 2>>"$LOG_FILE" <<'PYSCRIPT'
 import subprocess, json
 
 ps_cmd = r"""
+# Enumerate the drive letters that are actually mapped network drives.
+$mapped = @{}
+Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=4' -ErrorAction SilentlyContinue |
+    ForEach-Object { if ($_.DeviceID) { $mapped[$_.DeviceID.TrimEnd(':').ToUpper()] = $true } }
 Get-ScheduledTask | Where-Object {
     $_.Description -like '*managed-by-registry*' -and
     $_.Principal.LogonType -eq 'Password'
 } | ForEach-Object {
     $taskArgs = ($_.Actions | Select-Object -First 1).Arguments
-    # Drive letter anywhere in the args: after a space, after a quote, or at
-    # the very start of the string. (Single-letter drive + `:\` is the minimum.)
-    # C:\ is excluded: it's the system drive and always exists in session 0,
-    # so a Password task referencing C:\ is fine — the policy is about mapped
-    # drives (S:\, etc) that are absent before logon. Add other fixed local
-    # drive letters to the lookahead if your machine has them.
-    if ($taskArgs -match '(^|[\s\"])(?![Cc]:\\)[A-Za-z]:\\') {
+    # Flag only if the args reference a drive letter that is currently a mapped
+    # network drive. UNC paths (\\host\share) and fixed local drives are fine.
+    $hit = $false
+    foreach ($m in [regex]::Matches($taskArgs, '(^|[\s\"])([A-Za-z]):\\')) {
+        if ($mapped.ContainsKey($m.Groups[2].Value.ToUpper())) { $hit = $true; break }
+    }
+    if ($hit) {
         [PSCustomObject]@{ Name = $_.TaskName; Args = $taskArgs }
     }
 } | ConvertTo-Json -Compress
@@ -170,6 +179,7 @@ else:
     lines = ['POLICY VIOLATION: Password-task with mapped-drive path (forbidden — drive not present in session 0):']
     for item in items:
         lines.append(f"  {item['Name']}: {item['Args'][:120]}")
+    lines.append('  (primary enforcement is cron/admin/sync-tasks.ps1, which skips such tasks at registration — these slipped past it, likely a hand-edited task)')
     print('\n'.join(lines))
 PYSCRIPT
 )

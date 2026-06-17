@@ -12,7 +12,7 @@
 #   ./scripts/bootstrap-registry.ps1 -InstallPath '\\srv\share\.claude'
 #   ./scripts/bootstrap-registry.ps1 -DryRun                 # show changes only
 #
-# After running, verify with: pwsh -File scripts/self-test.ps1
+# After running, verify with: powershell -File scripts/self-test.ps1
 # Then apply tasks (elevated): home-claude/cron/admin/sync.cmd
 
 param(
@@ -111,6 +111,6 @@ Copy-Item $RegistryPath $backup -Force
 Write-Host "Wrote:  $RegistryPath" -ForegroundColor Green
 Write-Host "Backup: $backup" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "Next: pwsh -File scripts/self-test.ps1   (placeholder warning should clear)" -ForegroundColor Cyan
+Write-Host "Next: powershell -File scripts/self-test.ps1   (placeholder warning should clear)" -ForegroundColor Cyan
 Write-Host "Then (elevated): home-claude/cron/admin/sync.cmd" -ForegroundColor Cyan
 exit 0

@@ -12,6 +12,7 @@
       "Bash(cmd.exe:*)",
       "Bash(powershell.exe:*)",
       "Bash(python3:*)",
+      "Bash(python:*)",
       "Bash(curl:*)",
       "Bash(where:*)",
       "Bash(yt-dlp:*)",
@@ -46,6 +47,37 @@
           {
             "type": "command",
             "command": "\"<python-exe>\" \"C:/Users/<user>/.claude/hooks/md2pdf-on-edit.py\"",
+            "timeout": 130
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"<python-exe>\" \"C:/Users/<user>/.claude/cron/hooks/session-start.py\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"<python-exe>\" \"C:/Users/<user>/.claude/cron/hooks/session-end.py\""
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"<python-exe>\" \"C:/Users/<user>/.claude/cron/hooks/pre-compact.py\"",
             "timeout": 130
           }
         ]

@@ -94,7 +94,13 @@ function Parse-RegistryYaml([string]$path) {
     $inTasks = $false
     foreach ($raw in $lines) {
         $line = $raw -replace '^\s*#.*$', ''
-        $line = $line -replace '\s+#[^\n]*$', ''
+        # Strip trailing inline comments, but NOT when the value is quoted
+        # (a quoted value may legitimately contain '#', e.g. `desc: 'see #42'`).
+        # We only look at the part after the first ':' to decide.
+        $valPart = if ($line -match '^\s*[^:]+:\s*(.*)$') { $Matches[1].TrimStart() } else { '' }
+        if (-not ($valPart.StartsWith("'") -or $valPart.StartsWith('"'))) {
+            $line = $line -replace '\s+#[^\n]*$', ''
+        }
         if ($line.Trim() -eq '') { continue }
 
         if (-not $inTasks -and $line -match '^([a-z_]+):\s*(.*)$') {
@@ -113,7 +119,6 @@ function Parse-RegistryYaml([string]$path) {
                 user = $env:USERNAME
                 runlevel = 'limited'
                 logon_type = 'password'
-                needs_drive_s = $false
                 hidden = $true
                 notify_telegram = $false
                 timeout_hours = 72
@@ -304,6 +309,34 @@ function Get-CurrentSummary([string]$name) {
     }
 }
 
+# ── mapped-drive predicate ───────────────────────────────────────────────────
+# Mapped network drives don't exist in session 0 (before user logon), where
+# LogonType=Password tasks fire. A Password task whose script/launcher lives on
+# a mapped drive registers cleanly, then silently exits 127 with no log. This is
+# the fail-loud point: query the ACTUAL drive type (Win32_LogicalDisk
+# DriveType=4 = network) rather than inferring "mapped" from "not C:". UNC paths
+# (\\host\share) and fixed local drives (C:/D:/...) are fine.
+$script:_mappedDrives = $null
+function Get-MappedDriveLetters() {
+    if ($null -ne $script:_mappedDrives) { return $script:_mappedDrives }
+    $set = @{}
+    try {
+        Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=4' -ErrorAction Stop |
+            ForEach-Object { if ($_.DeviceID) { $set[$_.DeviceID.TrimEnd(':').ToUpper()] = $true } }
+    } catch {}
+    $script:_mappedDrives = $set
+    return $set
+}
+function Test-PathOnMappedDrive([string]$path) {
+    if (-not $path) { return $false }
+    # UNC (\\host\share) is fine — only drive-letter paths can be mapped.
+    if ($path -match '^[A-Za-z]:') {
+        $letter = $path.Substring(0, 1).ToUpper()
+        return (Get-MappedDriveLetters).ContainsKey($letter)
+    }
+    return $false
+}
+
 # ── main ─────────────────────────────────────────────────────────────────────
 $reg = Parse-RegistryYaml $RegistryPath
 $launcher = $reg.launcher
@@ -346,6 +379,18 @@ foreach ($task in $reg.tasks) {
         continue
     }
     $logonType = if ($task.logon_type -eq 'interactive') { 'Interactive' } else { 'Password' }
+
+    # Fail-loud on the mapped-drive + Password footgun (see Test-PathOnMappedDrive).
+    # claude-task-monitor.sh is only a daily backstop; this is primary enforcement.
+    if ($logonType -eq 'Password') {
+        $checkPaths = @($task.script, $task.execute, $wantedExec) | Where-Object { $_ }
+        $badPath = $checkPaths | Where-Object { Test-PathOnMappedDrive $_ } | Select-Object -First 1
+        if ($badPath) {
+            Write-Host ("[skipped: mapped drive + Password] " + $task.name + " — '" + $badPath + "' is on a mapped network drive (absent in session 0). Use a local C:\ path or a UNC \\host\share path.") -ForegroundColor DarkYellow
+            $summary.skipped++
+            continue
+        }
+    }
 
     $description = $marker + " | " + $task.description
 

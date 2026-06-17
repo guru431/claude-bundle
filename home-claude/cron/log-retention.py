@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prune old cron logs so the bundle doesn't teach unbounded log growth.
 
-Deletes *.log files under cron/logs/ older than the retention window. The
+Deletes *.log and *.jsonl files under cron/logs/ older than the retention window. The
 window defaults to 30 days; override with WIKI_LOG_RETENTION_DAYS.
 
 Usage:
@@ -29,7 +29,7 @@ def main() -> int:
     deleted = 0
     kept = 0
     freed = 0
-    for f in LOG_DIR.glob("*.log"):
+    for f in (*LOG_DIR.glob("*.log"), *LOG_DIR.glob("*.jsonl")):
         try:
             st = f.stat()
         except OSError:

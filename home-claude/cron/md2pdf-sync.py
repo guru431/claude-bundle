@@ -100,7 +100,10 @@ def main() -> int:
         pdf = md.with_suffix(".pdf")
         if not pdf.is_file():
             continue
-        delta = md.stat().st_mtime - pdf.stat().st_mtime
+        try:
+            delta = md.stat().st_mtime - pdf.stat().st_mtime
+        except OSError:
+            continue  # file vanished/renamed since os.walk enumerated it
         if delta <= THRESHOLD:
             skipped += 1
             continue

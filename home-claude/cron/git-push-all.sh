@@ -10,6 +10,15 @@
 # --- Helpers (defined before the main body so the file can be sourced in tests
 #     via GIT_PUSH_ALL_LIB=1 without running a push sweep) ---
 
+# Shared secret-scan snippet (single source of truth for the token regex,
+# also used by .githooks/pre-commit). Source it relative to THIS script's dir
+# so it works regardless of cwd. Optional: a missing lib only disables the scan.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/lib/secret-scan.sh" ]; then
+    # shellcheck source=lib/secret-scan.sh
+    . "$SCRIPT_DIR/lib/secret-scan.sh"
+fi
+
 # Dry-run: show what WOULD be committed/pushed without changing anything (handy
 # for testing the guard logic). GIT_PUSH_ALL_DRY_RUN=1 bash cron/git-push-all.sh
 DRY_RUN="${GIT_PUSH_ALL_DRY_RUN:-0}"
@@ -53,6 +62,25 @@ guard_protected_deletions() {
 $deleted
 (left in the working tree, not committed — delete by hand)" >> "$LOG_FILE" 2>&1
     fi
+}
+
+# Secret guard: scan the staged diff for token-shaped strings before committing
+# (this script auto-commits unattended, so a leaked key would otherwise be
+# pushed to a remote). On a hit: unstage everything, skip the repo, and alert.
+# Returns non-zero so the caller can skip the commit/push for this repo.
+guard_secrets() {
+    local label="$1"
+    local hits
+    # No lib sourced → scan unavailable; don't block the sweep.
+    command -v secret_scan_diff >/dev/null 2>&1 || return 0
+    hits=$(git diff --cached --unified=0 2>/dev/null | secret_scan_diff) && return 0
+    echo "[$label] SECRET-shaped token blocked from auto-commit:" >> "$LOG_FILE"
+    printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
+    git reset -q HEAD >> "$LOG_FILE" 2>&1
+    if [ -x "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+        bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret in staged changes for [$label] — skipped (not committed, not pushed). Check by hand." >> "$LOG_FILE" 2>&1
+    fi
+    return 1
 }
 
 # Lib mode: function definitions only (for tests), no main sweep.
@@ -158,6 +186,10 @@ for dir in "$REPOS_DIR"/*/; do
         # or stage the file by hand once.
         git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
         guard_protected_deletions "$repo"
+        if ! guard_secrets "$repo"; then
+            skipped=$((skipped + 1))
+            continue
+        fi
         if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
             echo "[$repo] nothing to commit after .env exclusion" >> "$LOG_FILE"
             skipped=$((skipped + 1))
@@ -197,7 +229,9 @@ if [ -d "$WIKI_DIR/.git" ]; then
             if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
                 git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
                 guard_protected_deletions "wiki"
-                if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
+                if ! guard_secrets "wiki"; then
+                    skipped=$((skipped + 1))
+                elif [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
                     echo "[wiki] nothing to commit after .env exclusion" >> "$LOG_FILE"
                     skipped=$((skipped + 1))
                 else

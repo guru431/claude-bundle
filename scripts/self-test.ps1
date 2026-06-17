@@ -8,12 +8,14 @@
 #   5. claude-switch      — `status` runs and is side-effect free
 #   6. sync-tasks -DryRun — runs without a parser crash (placeholder guard OK)
 #   7. Placeholders       — report unsubstituted <bundle-install-path>/<user>
+#   8. Preflight (WARN)   — Tier-2 Python deps (requests/PyYAML), Python ≥3.10,
+#                           and PROJECTS_ROOT when deployed under ~/.claude
 #
 # Exit code: 0 if all checks pass, 1 if any FAIL. Placeholder/skip = WARN (not a
 # failure) so a freshly-cloned template still self-tests green.
 #
 # Usage:
-#   pwsh -File scripts/self-test.ps1
+#   powershell -File scripts/self-test.ps1
 #   $env:CLAUDE_HOOK_PYTHON = 'C:\Path\to\python.exe'; ./scripts/self-test.ps1
 
 $ErrorActionPreference = 'Stop'
@@ -126,6 +128,30 @@ if (Test-Path $reg) {
     $hits = Select-String -Path $reg -Pattern '<(bundle-install-path|user)>' -AllMatches
     if ($hits) { Warn "registry.yaml still has placeholders — run scripts/bootstrap-registry.ps1 before sync" }
     else { Ok "registry.yaml has no placeholders" }
+}
+
+# ── 8. Preflight: Tier-2 deps the cron pipeline fails late/silently without ──
+# These are WARN, not FAIL: the offline checks above still pass on a stock
+# Python, but the overnight LLM jobs need `requests` (function-local import,
+# so compileall never catches it) and `registry.yaml` parsing needs PyYAML.
+if ($py) {
+    $ver = (& $py -c "import sys;print('%d.%d' % sys.version_info[:2])" 2>&1).Trim()
+    if ($ver -match '^(\d+)\.(\d+)$') {
+        if ([int]$Matches[1] -lt 3 -or ([int]$Matches[1] -eq 3 -and [int]$Matches[2] -lt 10)) {
+            Warn "Python $ver < 3.10 — the cron pipeline targets 3.10+"
+        } else { Ok "Python version $ver (>= 3.10)" }
+    }
+    foreach ($mod in @('requests', 'yaml')) {
+        & $py -c "import $mod" 2>$null
+        if ($LASTEXITCODE -eq 0) { Ok "Python module importable: $mod" }
+        else { Warn "Python module '$mod' not importable — run: pip install -r requirements.txt (Tier-2 LLM calls / YAML parsing need it)" }
+    }
+}
+# PROJECTS_ROOT is required by git-push-all / md2pdf-sync when the bundle is
+# deployed at the documented default ~/.claude. Only warn there (not when
+# self-test runs from the bundle source tree).
+if ($root -match '[\\/]\.claude$' -and -not $env:PROJECTS_ROOT) {
+    Warn "PROJECTS_ROOT unset — git-push-all.sh / md2pdf-sync.py refuse to run under ~/.claude without it (see config/llm-providers.example.env)"
 }
 
 # ── summary ──────────────────────────────────────────────────────────────────

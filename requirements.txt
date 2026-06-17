@@ -1,0 +1,11 @@
+# Python dependencies for the Tier-2 cron/wiki pipeline.
+#   requests — used by home-claude/cron/hooks/utils.py for every LLM HTTP call
+#              (function-local import, so `python -m compileall` never catches a
+#              missing install — it surfaces only at runtime as a misleading
+#              "DeepSeek error: ..." → "all providers failed").
+#   PyYAML   — parses cron/registry.yaml (the syncer, self-test, and CI).
+#
+# Install:  pip install -r requirements.txt
+# Tier 1 (config only) needs none of this.
+requests
+PyYAML

@@ -135,11 +135,37 @@ def state_add(section: str, key: str, items) -> None:
             lock.unlink(missing_ok=True)
 
 
+def state_remove(section: str, key: str, items) -> None:
+    """Remove items from state[section][key] (no-op if section/key/item absent)."""
+    items = list(items)
+    if not items:
+        return
+    lock = _acquire_state_lock()
+    try:
+        state = load_state()
+        bucket = state.get(section, {}).get(key)
+        if not bucket:
+            return
+        drop = set(items)
+        state[section][key] = [it for it in bucket if it not in drop]
+        save_state(state)
+    finally:
+        if lock is not None:
+            lock.unlink(missing_ok=True)
+
+
 def _migrated_state_from_log() -> dict | None:
     """Build a state dict from a pre-existing log.md (or None if absent).
 
     Pure: reads log.md and returns the equivalent state, without writing
     anything. load_state() decides whether to persist it (skipped in dry-run).
+
+    NOTE: compile_sessions.compiled_pairs is intentionally NOT recovered here.
+    log.md records compile-sessions by daily date (compiled_dailies), never by
+    the (jsonl, page) pairs that compiled_pairs tracks, so there is nothing in
+    log.md to reconstruct it from. After a corrupt-state rebuild this key starts
+    empty; the only cost is wasted — but idempotent — LLM compile calls that
+    re-emit pages already present (dedup keeps the wiki itself correct).
     """
     if not LOG_MD.exists():
         return None
@@ -180,6 +206,11 @@ def dir_to_project(dirname: str) -> str:
       2. last `-`-segment of dirname as a fallback (works for slugs without
          `-` in them: 'myapp', 'infra', ...)
       3. 'main' for empty input
+
+    With an empty PROJECT_MAP, two distinct cwds that share a trailing leaf
+    (e.g. `.../a/myapp` and `.../b/myapp`) both collapse to 'myapp' and merge
+    into one wiki bucket. Add a full-dirname PROJECT_MAP entry for either cwd
+    to disambiguate colliding leaf names.
 
     Example: dir_to_project('C--Users-me-projects-myapp') -> 'myapp'
              (assuming PROJECT_MAP is empty or has no entry).
@@ -772,8 +803,9 @@ def append_per_project_log(project: str, entries: list[str]) -> None:
         existing = f"# _log — {project}\n"
 
     header = f"## {today}"
-    if header in existing:
-        insert_at = existing.index(header) + len(header)
+    hdr_match = re.search(rf'^{re.escape(header)}$', existing, re.M)
+    if hdr_match:
+        insert_at = hdr_match.end()
         new_block = "\n" + "\n".join(f"- {e}" for e in entries)
         existing = existing[:insert_at] + new_block + existing[insert_at:]
     else:
@@ -964,7 +996,14 @@ def extract_first_json_array(text: str) -> str | None:
         elif ch == ']' and start is not None:
             depth -= 1
             if depth == 0:
-                return text[start:i+1]
+                candidate = text[start:i+1]
+                # Only accept an array that opens an object — a bracketed scalar
+                # like a prose footnote "[1]" is not the result array. Keep
+                # scanning past it for the next balanced array.
+                inner = candidate[1:-1].lstrip()
+                if inner.startswith('{'):
+                    return candidate
+                start = None
     return None
 
 
@@ -994,10 +1033,13 @@ def parse_llm_json(raw: str) -> list[dict]:
     match = re.search(r'\[', cleaned)
     if match:
         from_bracket = cleaned[match.start():]
-        try:
-            return _ensure_list(json.loads(from_bracket))
-        except json.JSONDecodeError:
-            pass
+        # Skip a bracketed scalar (prose footnote "[1]"): only accept an array
+        # that opens an object, matching extract_first_json_array.
+        if from_bracket[1:].lstrip().startswith('{'):
+            try:
+                return _ensure_list(json.loads(from_bracket))
+            except json.JSONDecodeError:
+                pass
 
     json_str = extract_first_json_array(raw)
     if not json_str:
@@ -1028,6 +1070,25 @@ def parse_llm_json(raw: str) -> list[dict]:
                     fixed = fixed[:pos-1] + '\\\\' + fixed[pos:]
                 else:
                     fixed = fixed[:pos] + '\\' + fixed[pos:]
+            elif "Invalid control character" in str(e):
+                # A raw newline/tab/other control char inside a string literal.
+                # Escape it the same way the delimiter branch does.
+                pos = e.pos
+                ch = fixed[pos] if pos < len(fixed) else ''
+                if not ch:
+                    print("  JSON truncated at end of response, giving up", file=sys.stderr)
+                    return []
+                if ch == '\n':
+                    fixed = fixed[:pos] + '\\n' + fixed[pos+1:]
+                elif ch == '\r':
+                    fixed = fixed[:pos] + '\\r' + fixed[pos+1:]
+                elif ch == '\t':
+                    fixed = fixed[:pos] + '\\t' + fixed[pos+1:]
+                elif ord(ch) < 32:
+                    fixed = fixed[:pos] + fixed[pos+1:]
+                else:
+                    print(f"  JSON unrepairable control char at pos {pos}", file=sys.stderr)
+                    return []
             elif "Expecting ',' delimiter" in str(e) or "Expecting property name" in str(e):
                 pos = e.pos
                 ch = fixed[pos] if pos < len(fixed) else ''
@@ -1151,6 +1212,10 @@ def _llm_deepseek(prompt: str, timeout: int = 600, fallback_from: str | None = N
                 _DEPLETED_PROVIDERS.add("deepseek")  # don't repeat the 402 this run
                 return None
             if resp.status_code in (429, 529):
+                if attempt == max_retries - 1:
+                    _DEPLETED_PROVIDERS.add("deepseek")  # retries exhausted — don't repeat this run
+                    print(f"  DeepSeek {resp.status_code} retries exhausted → marking depleted for this run", file=sys.stderr)
+                    return None
                 wait = 30 * (attempt + 1)
                 print(f"  DeepSeek {resp.status_code}, retry {attempt+1}/{max_retries} in {wait}s", file=sys.stderr)
                 time.sleep(wait)

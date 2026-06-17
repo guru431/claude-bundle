@@ -11,6 +11,7 @@ process. The extractor is optional: skip if not present.
 Schedule: daily at 02:00.
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -25,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
     SKIP_JSONL_PROJECTS,
     dir_to_project,
+    is_dry_run,
     is_subagent_jsonl,
     llm_call,
     parse_jsonl_messages,
@@ -40,9 +42,19 @@ LOG_DIR.mkdir(exist_ok=True)
 DATE = date.today().isoformat()
 LOG_FILE = LOG_DIR / f"memory-update_{DATE}.log"
 
+# Telegram alert (one-liner on a fully-depleted night). Full bash path so the
+# alert works in session 0 (Password task), where Git\bin is not on PATH.
+TELEGRAM = Path(__file__).resolve().parent / "telegram-send.sh"
+BASH = os.environ.get("BASH_EXE") or r"C:\Program Files\Git\bin\bash.exe"
+
 # Per-project user-message cap, then total prompt cap.
 USER_MSG_CAP_PER_PROJECT = 8000
 PROMPT_TOTAL_CAP = 40000
+
+# The memory files are append-only but small relative to the LLM context. Feed
+# them in full so the dedup pass sees ALL prior facts; only fall back to the
+# tail when a file has grown unusually large.
+CONTEXT_FILE_CAP = 40000
 
 
 def log(msg: str) -> None:
@@ -50,6 +62,20 @@ def log(msg: str) -> None:
     print(line)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+def context_window(text: str, cap: int = CONTEXT_FILE_CAP) -> str:
+    """Full file content for the dedup pass; tail fallback only if oversized."""
+    return text if len(text) <= cap else text[-cap:]
+
+
+def send_telegram(msg: str) -> None:
+    if not (TELEGRAM.exists() and Path(BASH).is_file()):
+        return
+    try:
+        subprocess.run([BASH, str(TELEGRAM), msg], timeout=30, check=False)
+    except Exception as e:  # noqa: BLE001
+        log(f"telegram-send failed: {e}")
 
 
 def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
@@ -114,10 +140,12 @@ def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) ->
     return text[:cap]
 
 
-def update_user_md(proj_messages: dict[str, str]) -> None:
+def update_user_md(proj_messages: dict[str, str]) -> bool:
+    """Returns True if the LLM was reached (regardless of whether anything was
+    appended); False when llm_call returned nothing (providers depleted/failed)."""
     if not proj_messages:
         log("USER.md: no user messages in the last 24h — skipping")
-        return
+        return True
 
     user_md = USER_MD.read_text(encoding="utf-8") if USER_MD.exists() else ""
     summary = build_summary(proj_messages)
@@ -125,8 +153,8 @@ def update_user_md(proj_messages: dict[str, str]) -> None:
     prompt = f"""Task: analyze today's user messages and find NEW important
 information for the global USER.md file.
 
-CURRENT USER.md (last 8000 chars):
-{user_md[-8000:]}
+CURRENT USER.md:
+{context_window(user_md)}
 
 TODAY'S USER MESSAGES (by project):
 {summary}
@@ -147,27 +175,28 @@ JSON only, no markdown wrapper, no commentary."""
     out = llm_call(prompt, timeout=600)
     if not out:
         log("USER.md: llm_call returned empty")
-        return
+        return False
 
     m = re.search(r"\{[\s\S]*\}", out)
     if not m:
         log(f"USER.md: JSON not found in response ({out[:200]!r})")
-        return
+        return True
     try:
         data = json.loads(m.group())
     except json.JSONDecodeError as e:
         log(f"USER.md: parse error: {e}")
-        return
+        return True
 
     add = (data.get("add") or "").strip()
     if not add:
         log("USER.md: nothing new extracted")
-        return
+        return True
 
     USER_MD.parent.mkdir(parents=True, exist_ok=True)
     with open(USER_MD, "a", encoding="utf-8") as f:
         f.write(f"\n\n## Auto-extracted {DATE}\n{add}\n")
     log(f"USER.md: appended {len(add)} chars")
+    return True
 
 
 def update_cross_notes(proj_messages: dict[str, str]) -> None:
@@ -189,8 +218,8 @@ def update_cross_notes(proj_messages: dict[str, str]) -> None:
 
     prompt = f"""Task: find NEW cross-project connections in today's sessions.
 
-CURRENT CROSS-PROJECT NOTES (last 2000 chars):
-{cross[-2000:]}
+CURRENT CROSS-PROJECT NOTES:
+{context_window(cross)}
 
 TODAY'S USER MESSAGES BY PROJECT:
 {summary}
@@ -258,10 +287,30 @@ def main() -> int:
         return 0
     msgs = collect_today_user_messages(hours=24)
     log(f"Collected user messages from {len(msgs)} projects")
-    update_user_md(msgs)
+
+    if is_dry_run():
+        log("DRY RUN — collected user messages per project (no LLM, no writes):")
+        total = 0
+        for project in sorted(msgs):
+            n = len(msgs[project])
+            total += n
+            log(f"  {project}: {n} chars")
+        log(f"DRY RUN — prompt body ~{len(build_summary(msgs))} chars "
+            f"({total} chars across {len(msgs)} project(s)); no memory files written.")
+        return 0
+
+    llm_reached = update_user_md(msgs)
     update_cross_notes(msgs)
     log("=== End Memory Update ===")
     run_incident_extract()
+
+    # If there were messages to process but the LLM was never reached
+    # (all providers depleted/failed), the night is silently empty — make
+    # it visible to the exit-code-based monitor instead of returning 0.
+    if msgs and not llm_reached:
+        log("ERROR: LLM providers depleted/failed — no memory extraction this run.")
+        send_telegram("memory-update: LLM providers depleted/failed — no memory extraction tonight.")
+        return 1
     return 0
 
 

@@ -250,7 +250,7 @@ Profile: <lite | full>
 Lite:   deployed CLAUDE.md, settings.json, skills (templates — paths
         still need filling), commands (1 wired). Hooks: <skipped / X-of-Y
         enabled>.
-Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/10 tasks
+Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/11 tasks
         with Task Scheduler. LLM provider: <provider>. Telegram alerts:
         <yes/no>.   (omit this line for a lite-only deploy)
 Open items: <list of placeholders that still need real values, e.g.

@@ -81,11 +81,23 @@ function Get-EnvVar($name) {
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
+function Split-HostPort([string]$value, [string]$varName, [int]$defaultPort) {
+    # Split on the LAST colon so IPv6 hosts (which contain colons) keep theirs.
+    $idx = $value.LastIndexOf(":")
+    if ($idx -lt 0) { return @($value, $defaultPort) }
+    $h = $value.Substring(0, $idx)
+    $p = $value.Substring($idx + 1)
+    $port = 0
+    if (-not [int]::TryParse($p, [ref]$port)) {
+        Write-Host "ERROR: $varName must be host:port (got '$value')." -ForegroundColor Red
+        exit 2
+    }
+    return @($h, $port)
+}
+
 $ccrHostPort = Get-EnvVar "CCR_HOST"
 if (-not $ccrHostPort) { $ccrHostPort = "127.0.0.1:3456" }
-$ccrParts = $ccrHostPort.Split(":")
-$ccrHost = $ccrParts[0]
-$ccrPort = if ($ccrParts.Count -ge 2) { [int]$ccrParts[1] } else { 3456 }
+$ccrHost, $ccrPort = Split-HostPort $ccrHostPort "CCR_HOST" 3456
 
 if ($ProjectPath) {
     $settingsDir = Join-Path $ProjectPath ".claude"
@@ -160,9 +172,7 @@ $OPENCODE_DIRECT_MODELS = @("minimax-m3", "qwen3.7-max")
 # it directly — no proxy needed. Adjust OLLAMA_MODELS to the models you've pulled.
 $ollamaHostPort = Get-EnvVar "OLLAMA_HOST"
 if (-not $ollamaHostPort) { $ollamaHostPort = "127.0.0.1:11434" }
-$ollamaParts = $ollamaHostPort.Split(":")
-$ollamaHost = $ollamaParts[0]
-$ollamaPort = if ($ollamaParts.Count -ge 2) { [int]$ollamaParts[1] } else { 11434 }
+$ollamaHost, $ollamaPort = Split-HostPort $ollamaHostPort "OLLAMA_HOST" 11434
 $OLLAMA_MODELS = @("gemma4:12b", "qwen3.5:9b", "qwen3.6:35b-a3b-q4_K_M", "gpt-oss:20b")
 
 # ─────────────────────────────────────────────────────────────────────────────

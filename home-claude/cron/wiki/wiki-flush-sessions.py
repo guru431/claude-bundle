@@ -33,7 +33,7 @@ for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (dir_to_project, parse_jsonl_messages, is_subagent_jsonl, llm_call,
-                   state_get, state_add, is_dry_run, SKIP_DIRS, SKIP_JSONL_PROJECTS,
+                   state_get, state_add, state_remove, is_dry_run, SKIP_DIRS, SKIP_JSONL_PROJECTS,
                    BUNDLE_ROOT, WIKI_ROOT, DAILY_DIR, PENDING_DIR, LOG_MD, PROJECTS_BASE)
 
 PLANS_DIR = Path.home() / ".claude" / "plans"
@@ -449,9 +449,13 @@ def main():
         daily_path.write_text(existing + "\n\n" + new_sections + "\n", encoding="utf-8")
         log(f"Daily log: {daily_path} (appended to existing)")
         if DATE in state_get("compile_sessions", "compiled_dailies"):
-            log(f"WARNING: {DATE}.md is already marked compiled — the appended "
-                f"sections will NOT be picked up by compile-sessions. Remove the "
-                f"date from .processed.json to recompile.")
+            # find_uncompiled_dailies would otherwise skip this date forever,
+            # stranding the appended sections — clear the marker so the next
+            # compile run reprocesses the daily.
+            state_remove("compile_sessions", "compiled_dailies", [DATE])
+            log(f"{DATE}.md was already marked compiled — removed it from "
+                f"compiled_dailies so compile-sessions reprocesses the appended "
+                f"sections.")
     else:
         daily_path.write_text("\n".join(daily_lines), encoding="utf-8")
         log(f"Daily log: {daily_path}")

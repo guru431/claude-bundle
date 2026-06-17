@@ -13,7 +13,7 @@ optional Python hooks.)
 **Full** (~30–60 minutes): on top of lite, add the Python hooks, a
 Karpathy-style wiki vault, a registry-driven Windows Task Scheduler
 automation, an LLM provider switcher (`claude-switch.ps1`), an
-`AGENTS.md` mirror for Codex CLI, and 10 scheduled tasks (one disabled
+`AGENTS.md` mirror for Codex CLI, and 11 scheduled tasks (two disabled
 by default) that flush Claude Code sessions into the wiki overnight. Needs Python 3.10+, Git,
 and at least one LLM provider key. (Tier 1 + Tier 2 below.)
 
@@ -53,7 +53,7 @@ claude-bundle/
 │   │   ├── kb/{concepts,tools,people}/ external knowledge
 │   │   └── daily/.pending/             staging area
 │   ├── bin/_run-hidden.vbs             hidden-window launcher for Task Scheduler
-│   └── cron/                           cron foundation + wiki pipeline + 10 tasks
+│   └── cron/                           cron foundation + wiki pipeline + 11 tasks
 │       ├── hooks/utils.py              shared LLM_call, JSONL parsing, wiki utils
 │       ├── hooks/session-{start,end}.py  inject wiki context / dump session
 │       ├── hooks/pre-compact.py        LLM-summarized handoff before compaction
@@ -62,12 +62,13 @@ claude-bundle/
 │       ├── telegram-send.sh            Bot API helper (env-driven)
 │       ├── prompts/                    LLM prompts (flush/compile/healthcheck)
 │       ├── wiki/wiki-*.py              5 compilers (flush/compile/build-index/lint)
-│       ├── log-retention.py            prune old cron/logs/*.log
+│       ├── log-retention.py            prune old cron/logs/*.{log,jsonl}
+│       ├── md2pdf-sync.py              regenerate stale paired PDFs (off by default)
 │       ├── claude-task-monitor.sh      alert on failed Task Scheduler jobs
 │       ├── git-push-all.sh             auto-push project repos
 │       ├── claude-healthcheck.sh       morning self-check
 │       ├── memory-update.py            JSONL → memory MD
-│       ├── registry.yaml               10 tasks declared here
+│       ├── registry.yaml               11 tasks declared here
 │       └── admin/                      idempotent sync + DPAPI cred saver
 │           ├── sync.cmd, sync-tasks.ps1
 │           └── save-cred.cmd, save-cred.ps1
@@ -124,8 +125,8 @@ from your real Claude Code sessions:
   and refreshes the stats table in `wiki/index.md`
 - A lint script catches broken links, orphan pages, missing frontmatter
 
-A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 10
-scheduled jobs (one disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
+A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 11
+scheduled jobs (two disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
 real `Register-ScheduledTask` calls — idempotent, marked, hidden
 windows, Password-mode by default (runs before login → survives
 overnight reboots).
@@ -176,10 +177,10 @@ See [`INSTALL.md`](INSTALL.md) — ~15 steps, includes:
 - Running `cron/admin/save-cred.cmd` to DPAPI-stash your Windows password
 - Filling `registry.yaml` placeholders (`<bundle-install-path>`, `<user>`)
   — automatable via `scripts/bootstrap-registry.ps1`
-- Running `cron/admin/sync.cmd` to register all 10 tasks
+- Running `cron/admin/sync.cmd` to register all 11 tasks
 - Adapting `codex/AGENTS.md` if you also run Codex CLI
 
-Before deploying, run `pwsh -File scripts/self-test.ps1` for a quick
+Before deploying, run `powershell -File scripts/self-test.ps1` for a quick
 offline check (JSON/YAML validity, Python compiles, hooks, placeholder
 status).
 

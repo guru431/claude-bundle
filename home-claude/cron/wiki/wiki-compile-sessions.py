@@ -99,17 +99,26 @@ def parse_daily_by_project(daily_path: Path) -> dict[str, str]:
     current_project = None
     current_lines: list[str] = []
 
+    def _store(name: str, lines: list[str]) -> None:
+        # Two same-named '## main' blocks must merge, not overwrite — mirror
+        # the '+=' merge main() uses for normalized names.
+        body = "\n".join(lines)
+        if name in by_project:
+            by_project[name] += "\n\n" + body
+        else:
+            by_project[name] = body
+
     for line in text.split("\n"):
         if line.startswith("## "):
             if current_project and current_lines:
-                by_project[current_project] = "\n".join(current_lines)
+                _store(current_project, current_lines)
             current_project = line[3:].strip()
             current_lines = []
         elif current_project is not None:
             current_lines.append(line)
 
     if current_project and current_lines:
-        by_project[current_project] = "\n".join(current_lines)
+        _store(current_project, current_lines)
 
     return by_project
 
@@ -124,7 +133,7 @@ def get_existing_project_pages(project: str) -> dict[str, str]:
     return pages
 
 
-def compile_project_data(project: str, data: str, existing_pages: dict[str, str]) -> list[dict] | None:
+def compile_project_data(project: str, data: str, existing_pages: dict[str, str]) -> tuple[list[dict], bool] | None:
     """Call the LLM to compile project data into wiki pages.
 
     A large data section (observed 161351 chars) deterministically makes the
@@ -133,6 +142,10 @@ def compile_project_data(project: str, data: str, existing_pages: dict[str, str]
     concatenating results. If ANY part fails (None/empty) the whole project is
     failed (None) and retried as a unit — its (daily, project) pair stays
     unmarked and is reprocessed next run.
+
+    Returns (changes, bodies_withheld). bodies_withheld is True when the LLM
+    saw only page NAMES for any existing page (page-count or byte cap) — the
+    caller must then append rather than overwrite (blind_update).
     """
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
@@ -142,11 +155,13 @@ def compile_project_data(project: str, data: str, existing_pages: dict[str, str]
 
     existing_list = "\n".join(f"- {name}" for name in sorted(existing_pages.keys()))
     existing_content = ""
-    if len(existing_pages) <= MAX_PAGES_WITH_CONTENT:
+    bodies_withheld = len(existing_pages) > MAX_PAGES_WITH_CONTENT
+    if not bodies_withheld:
         for name, content in existing_pages.items():
             existing_content += f"\n### {name}\n{content}\n"
             if len(existing_content) > MAX_CONTENT_BYTES:
                 existing_content += "\n(remaining pages omitted due to size)\n"
+                bodies_withheld = True
                 break
 
     # Split data into parts on blank-line (block) boundaries.
@@ -161,6 +176,14 @@ def compile_project_data(project: str, data: str, existing_pages: dict[str, str]
                 current = current + "\n\n" + block if current else block
         if current:
             parts.append(current)
+        # A single block with no blank line can still exceed MAX_PART_SIZE and
+        # reintroduce the LLM stall — hard-split any such part into fixed-size
+        # character windows.
+        parts = [
+            p[i:i + MAX_PART_SIZE]
+            for p in parts
+            for i in range(0, len(p), MAX_PART_SIZE)
+        ]
     else:
         parts = [data]
 
@@ -213,7 +236,7 @@ JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
         if part_idx < len(parts) - 1:
             time.sleep(5)
 
-    return all_changes
+    return all_changes, bodies_withheld
 
 
 def apply_changes(changes: list[dict], source_daily: str, project: str,
@@ -228,6 +251,8 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
     applied = []
     log_entries: list[str] = []
     for change in changes:
+        if not isinstance(change, dict):
+            continue  # defensive: a malformed LLM array may yield non-dict entries
         rel_path = normalize_wiki_path(change.get("path", ""))
         content = change.get("content", "")
 
@@ -326,11 +351,12 @@ def main():
             existing = get_existing_project_pages(project)
             log(f"  [{project}] existing pages: {len(existing)}, data: {len(data)} chars")
 
-            changes = compile_project_data(project, data, existing)
+            result = compile_project_data(project, data, existing)
+            changes, bodies_withheld = result if result else (None, False)
             if changes:
                 applied = apply_changes(changes, source_daily=daily_path.name,
                                         project=project,
-                                        blind_update=len(existing) > MAX_PAGES_WITH_CONTENT)
+                                        blind_update=bodies_withheld)
                 total_changes += len(applied)
                 log(f"  [{project}] → {len(applied)} changes")
                 # Record the pair immediately — on retry of this daily, a

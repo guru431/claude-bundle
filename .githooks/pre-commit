@@ -27,12 +27,20 @@ fi
 diff_content=$(git diff --cached --unified=0 -- . ':(exclude).githooks/' 2>/dev/null || git diff --cached --unified=0)
 
 # 2) High-confidence secret/token formats (generic, very low false-positive)
-generic='-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{16,}|ccr-[A-Za-z0-9]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|[0-9]{8,10}:[A-Za-z0-9_-]{35}'
-hits=$(printf '%s\n' "$diff_content" | grep -nE -e "$generic" || true)
-if [ -n "$hits" ]; then
-  echo "BLOCKED: possible secret/token format in staged changes:"
-  printf '%s\n' "$hits" | sed 's/^/  /'
-  fail=1
+# Shared with the nightly cron/git-push-all.sh sweep — one source of truth for
+# the regex lives in home-claude/cron/lib/secret-scan.sh.
+lib="$repo_root/home-claude/cron/lib/secret-scan.sh"
+if [ -f "$lib" ]; then
+  # shellcheck source=/dev/null
+  . "$lib"
+  hits=$(printf '%s\n' "$diff_content" | secret_scan_diff || true)
+  if [ -n "$hits" ]; then
+    echo "BLOCKED: possible secret/token format in staged changes:"
+    printf '%s\n' "$hits" | sed 's/^/  /'
+    fail=1
+  fi
+else
+  echo "WARNING: $lib not found — skipping generic token scan." >&2
 fi
 
 # 3) Personal denylist — concrete values from untracked .sanitize-patterns

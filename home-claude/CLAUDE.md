@@ -157,7 +157,8 @@ between the two without duplicating maintenance:
   + project-specific gotchas). Full rules stay in `CLAUDE.md`.
 
 When you edit a universal block here (file-ops, encoding, error recovery,
-findings), also update the matching section in `~/.codex/AGENTS.md`.
+findings, secrets/.env, Windows Task Scheduler), also update the matching
+section in `~/.codex/AGENTS.md`.
 
 **Do NOT run `codex init`** — it overwrites AGENTS.md without honoring this
 split.

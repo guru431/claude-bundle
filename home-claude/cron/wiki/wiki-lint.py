@@ -62,6 +62,11 @@ def extract_wikilinks(text: str) -> list[str]:
     for match in re.finditer(r'\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]', text):
         link = match.group(1).strip()
         link = link.split("/")[-1]
+        # Drop an Obsidian anchor ([[page#Section]] → 'page'); a same-page
+        # [[#Section]] reduces to empty and is not a page reference.
+        link = link.split("#", 1)[0].strip()
+        if not link:
+            continue
         links.append(link)
     return links
 

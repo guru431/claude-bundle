@@ -108,7 +108,10 @@ Edit to your preference (or remove the key for English default).
 ## Additional prerequisites
 
 - Git for Windows (Git Bash on `PATH`)
-- Python 3.10+ (`python --version`)
+- Python 3.10+ (`python --version`) with the bundle's Python deps:
+  `pip install -r requirements.txt` (installs `requests` + `PyYAML`,
+  used by the cron LLM calls and `registry.yaml` parsing — without
+  `requests` every LLM call fails with a misleading "DeepSeek error")
 - At least one LLM provider key (see [`docs/llm-routing.md`](docs/llm-routing.md)):
   - **DeepSeek** PAYG account (https://platform.deepseek.com) — cheapest reliable option
   - **OpenCode Go** subscription (https://opencode.ai) — flat-rate bundle of ~12 models
@@ -138,6 +141,16 @@ This puts `~/.claude/wiki/` (empty vault skeleton) and
 `~/.claude/cron/` (the foundation, hooks, compilers, task scripts,
 registry, admin scripts).
 
+**(Optional) Wire the session-capture hooks.** The wiki pipeline can be
+fed two ways: it self-collects from `~/.claude/projects/*` JSONLs (works
+out of the box), and — if you opt in — the `SessionStart` / `SessionEnd`
+/ `PreCompact` lifecycle hooks also stage session tails into
+`wiki/daily/.pending/`. These are NOT enabled by the default
+`settings.json`. To turn them on, merge the matching commented blocks
+from `home-claude/settings.example-with-hooks.json` into your
+`settings.json` (replace the `<python-exe>` placeholder). They can only
+be registered through `settings.json`, never via cron.
+
 ### 9. Create `.env` from the example
 
 The pipeline reads `.env` from the DEPLOYED location — `~/.claude/.env`
@@ -157,6 +170,12 @@ Fill in:
 - `TELEGRAM_CHAT_ID=...`
 - `WIKI_LLM_PROVIDER=deepseek` (default — pick `opencode` or `claude`
   if you prefer)
+- `PROJECTS_ROOT=...` — **required** by `git-push-all.sh` and
+  `md2pdf-sync.py` when the bundle is deployed at the documented default
+  `~/.claude` (they refuse to run without it). Point it at the folder
+  that holds the git repos / Markdown trees those tasks sweep. The
+  optional `PYTHON_EXE` / `BASH_EXE` overrides let those tasks find a
+  non-`PATH` interpreter.
 
 `.env` is gitignored. The bundle never commits its values.
 
@@ -241,7 +260,7 @@ the cue to populate `KNOWN_PROJECTS`.
 ```
 
 This auto-elevates to UAC once for the whole batch, then idempotently
-registers (or updates) all 10 tasks from `registry.yaml`. Output goes
+registers (or updates) all 11 tasks from `registry.yaml`. Output goes
 to `%TEMP%\sync-tasks_<timestamp>.log`.
 
 ### 14. Verify
@@ -249,7 +268,7 @@ to `%TEMP%\sync-tasks_<timestamp>.log`.
 First, the offline self-test (no scheduler, no LLM):
 
 ```powershell
-pwsh -File "<path-to-bundle>\scripts\self-test.ps1"
+powershell -File "<path-to-bundle>\scripts\self-test.ps1"
 ```
 
 Then the registered tasks:
@@ -302,7 +321,7 @@ For each of your projects you also want Codex to recognize, copy
 ## Troubleshooting
 
 Quick reference for the failures people hit first. Running
-`pwsh -File scripts/self-test.ps1` catches most of these before deploy.
+`powershell -File scripts/self-test.ps1` catches most of these before deploy.
 
 | Symptom | Cause | Fix |
 |---|---|---|

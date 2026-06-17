@@ -1,5 +1,112 @@
 # Changelog
 
+## 2026-06-17 — Resolve the full 2026-06-15 analysis batch (FINDINGS + IDEAS)
+
+Fixed and removed every open item in `FINDINGS.md` (the 2026-06-15
+multi-agent analysis: ~28 defects, plus the 2026-06-14 CLAUDE.md/AGENTS.md
+sync-drift note) and implemented all four `IDEAS.md` proposals. Code fixes
+were applied across disjoint files in parallel, then adversarially
+re-verified; docs/counters and the cross-cutting bits were reconciled by
+hand. Both `FINDINGS.md` and `IDEAS.md` are now trimmed to empty shells.
+
+### P2 — correctness & silent failures
+
+- **`utils.py` `parse_llm_json` / `extract_first_json_array`**: a bracketed
+  scalar token in prose (e.g. a footnote `[1]`) is no longer mistaken for the
+  JSON array — the scanner now only accepts an array whose first inner
+  non-whitespace char is `{`, and keeps scanning otherwise.
+- **`utils.py` JSON-repair loop**: a literal control char inside a string
+  (`Invalid control character`) is now repaired via the existing
+  `\n`/`\r`/`\t`/drop ladder instead of falling straight to `[]`.
+- **`utils.py` `_llm_deepseek`**: on the final 429/529 attempt it now marks
+  `deepseek` depleted in the circuit breaker and returns immediately
+  (mirroring `_llm_opencode`) instead of sleeping a dead 90s and re-attempting
+  a throttled provider all run.
+- **`wiki-compile-sessions.py` `parse_daily_by_project`**: two same-named
+  sections (e.g. two `## main` blocks) now merge instead of the first body
+  being silently overwritten.
+- **`block-iptables-save-to-rules.py`**: the guard regex now blocks
+  filtered-pipe-then-redirect / `… | tee rules.v4` forms it previously let
+  through (dropped `|` from the gap classes, simplified the `tee` branch);
+  still allows `iptables-restore < rules.v4` and `cat rules.v4`.
+- **`md2pdf-sync.py`**: the `stat()` access is now inside `try/except OSError:
+  continue`, so a file that vanishes mid-sweep no longer crashes `main()` and
+  suppresses the failure alert.
+- **`memory-update.py`**: dedup now sees the FULL `USER.md` / cross-notes
+  (tail fallback only past 40 KB) instead of only the tail, so old facts stop
+  being re-appended; the job gained a `--dry-run` preview and now returns
+  non-zero (+ Telegram alert) on a provider-depleted night.
+- **`claude-task-monitor.sh` + `cron/admin/sync-tasks.ps1`**: the
+  Password+mapped-drive policy is consolidated onto a real
+  `Win32_LogicalDisk DriveType=4` check (was "not C: == mapped", which
+  false-alarmed daily on a valid `D:\` install). `sync-tasks.ps1` is now the
+  fail-loud enforcement point (skips a mapped-drive Password task at
+  registration); the monitor is a backstop. Also: quote-aware inline-comment
+  stripping in `Parse-RegistryYaml`, and the dead `needs_drive_s` field removed.
+
+### P3 — robustness, hygiene, docs
+
+- **`utils.py`**: line-anchored `## YYYY-MM-DD` match in
+  `append_per_project_log` (was a substring `index()` that could splice
+  mid-line); `dir_to_project` docstring notes the leaf-name collision escape
+  hatch; `_migrated_state_from_log` docstring documents that `compiled_pairs`
+  is intentionally not rebuilt; new `state_remove()` helper.
+- **`wiki-compile-sessions.py`**: oversized blank-line-free blocks are
+  hard-split below `MAX_PART_SIZE` (closes the chunker stall gap);
+  `blind_update` is driven from a single "any body withheld?" signal (count OR
+  byte cap), preventing clobber of an unseen page; `apply_changes` skips
+  non-dict change entries.
+- **`wiki-flush-sessions.py`**: a same-day flush retry against an
+  already-compiled daily now `state_remove`s the date from `compiled_dailies`
+  so the next compile reprocesses it (no more stranded sections).
+- **`wiki-lint.py`**: `[[page#anchor]]` links no longer report a false broken
+  link (anchor stripped before lookup).
+- **`log-retention.py`**: prunes `*.jsonl` (the `provider_attempts_*` routing
+  audit logs) alongside `*.log`.
+- **`claude-switch.ps1`**: `CCR_HOST`/`OLLAMA_HOST` parse via
+  `LastIndexOf(':')` + `[int]::TryParse` (IPv6-safe, friendly error + `exit 2`
+  instead of a cryptic cast crash on every invocation).
+- **`settings.json` + `settings.example-with-hooks.json`**: added
+  `Bash(python:*)` (Windows has no `python3`); the example file now wires
+  `SessionStart` / `SessionEnd` / `PreCompact` lifecycle hooks (opt-in).
+- **Task-count drift**: docs corrected to **11 tasks (two disabled:
+  `ClaudeWikiCompileKB`, `ClaudeMd2PdfSync`)** across `README.md`,
+  `INSTALL.md`, `AGENT-INSTRUCTIONS.md`, `docs/cron-architecture.md`
+  (+ added the missing `ClaudeMd2PdfSync` table row and the
+  `md2pdf-sync.py` README cron-tree line).
+- **`pwsh` → `powershell`**: documented self-test invocations now use
+  `powershell -File` (runs on PS 5.1, the bundle's stated platform) in
+  `README.md`, `INSTALL.md`, `bootstrap-registry.ps1`, `self-test.ps1`.
+  CI keeps `shell: pwsh` (GitHub runners ship it).
+- **Mirror-rule alignment**: `home-claude/CLAUDE.md` now lists all six
+  universal blocks that mirror into `codex/AGENTS.md` (added secrets/.env +
+  Task Scheduler); the 2026-06-14 sync-drift note is reconciled (the
+  reverse-direction mirror note already lives in `codex/AGENTS.md`; the
+  wiki-specific Error/alert block is intentionally not mirrored).
+
+### IDEAS implemented
+
+- **Shared secret-scan snippet** — new `home-claude/cron/lib/secret-scan.sh`
+  is the single source of the token regex; `.githooks/pre-commit` sources it,
+  and `git-push-all.sh` now scans the staged diff before each unattended
+  commit (unstage + skip + Telegram alert on a hit), closing the
+  push-without-scan leak path.
+- **Password+mapped-drive predicate consolidated** — see the P2 entry above.
+- **`requirements.txt`** added (`requests`, `PyYAML`) and wired into INSTALL
+  Tier-2, the README, CI, and a new `self-test.ps1` preflight (WARN on missing
+  `requests`/`PyYAML`, Python < 3.10, and unset `PROJECTS_ROOT` under
+  `~/.claude`). `PROJECTS_ROOT`/`PYTHON_EXE`/`BASH_EXE` documented in
+  `config/llm-providers.example.env` + INSTALL.
+- **`memory-update.py` dry-run + outage alert** — see the P2 entry above.
+
+### Sanitization
+
+No private data introduced. New literals are limited to the standard public
+Git-for-Windows bash path (env-overridable), RFC-style `127.0.0.1` defaults,
+and `<user>` / `<python-exe>` placeholders. The secret-guard pattern was
+factored, not weakened. Verified with the pre-commit denylist + generic token
+scan (zero matches).
+
 ## 2026-06-11 — Wiki-pipeline stall fix + silent-failure hardening (meta-repo port)
 
 Second port from the meta-repo's Fable 5 batch — bug fixes the earlier

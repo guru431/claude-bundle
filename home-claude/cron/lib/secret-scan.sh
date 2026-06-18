@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared secret-scan snippet — single source of truth for the generic
 # high-confidence token regex used by both .githooks/pre-commit and the
 # nightly cron/git-push-all.sh sweep.

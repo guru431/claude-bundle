@@ -309,6 +309,16 @@ function Get-CurrentSummary([string]$name) {
     }
 }
 
+# Task Scheduler can re-emit a registered task's Arguments string with
+# normalized whitespace, so a verbatim compare against the string we built
+# would report a phantom change and re-register the task on every run. Collapse
+# whitespace runs and trim before comparing (we always join args with single
+# spaces, so this hides no real change).
+function Normalize-TaskArgs([string]$s) {
+    if (-not $s) { return '' }
+    return ($s -replace '\s+', ' ').Trim()
+}
+
 # ── mapped-drive predicate ───────────────────────────────────────────────────
 # Mapped network drives don't exist in session 0 (before user logon), where
 # LogonType=Password tasks fire. A Password task whose script/launcher lives on
@@ -407,7 +417,7 @@ foreach ($task in $reg.tasks) {
     $triggertype_needs_change = $false
     $dow_needs_change = $false
     if ($current) {
-        $action_needs_change = ($current.execute -ne $wantedExec) -or ($current.args -ne $wantedArgs)
+        $action_needs_change = ($current.execute -ne $wantedExec) -or ((Normalize-TaskArgs $current.args) -ne (Normalize-TaskArgs $wantedArgs))
         $enabled_needs_change = ([bool]$current.enabled -ne [bool]$task.enabled)
         # Full description compare (covers both the marker and the description text).
         $desc_needs_change = ([string]$current.description -ne $description)
@@ -478,6 +488,14 @@ foreach ($task in $reg.tasks) {
         $summary.failed++
     }
 }
+
+# Drop the cached decrypted password once every task is registered — keeping a
+# cleartext copy alive in a script-scope variable for the rest of the run is
+# needless exposure. This shortens the window rather than guaranteeing erasure
+# (System.String is immutable, so this only releases the reference for GC), but
+# it is cheap defense-in-depth; the secret stays DPAPI-encrypted at rest.
+$script:_cachedPassword = $null
+[System.GC]::Collect()
 
 Write-Host ""
 Write-Host "=== Summary ===" -ForegroundColor Cyan

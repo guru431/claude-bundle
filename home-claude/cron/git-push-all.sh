@@ -199,6 +199,11 @@ for dir in "$REPOS_DIR"/*/; do
         echo "[$repo] auto-committed changes" >> "$LOG_FILE"
     fi
 
+    # Refresh the remote-tracking ref before comparing. Without a fetch, a
+    # force-push on origin leaves refs/remotes/origin/<branch> stale, the hashes
+    # match, and a needed push is silently skipped. Skipped in dry-run to stay
+    # side-effect free; errors (offline/no remote) ignored so the sweep goes on.
+    [ "$DRY_RUN" = "1" ] || git fetch -q origin "$branch" >> "$LOG_FILE" 2>&1 || true
     local_hash=$(git rev-parse "$branch" 2>/dev/null)
     remote_hash=$(git rev-parse "origin/$branch" 2>/dev/null)
 
@@ -239,6 +244,8 @@ if [ -d "$WIKI_DIR/.git" ]; then
                     echo "[wiki] auto-committed changes" >> "$LOG_FILE"
                 fi
             fi
+            # Refresh the remote ref before comparing (see the main loop above).
+            [ "$DRY_RUN" = "1" ] || git fetch -q origin "$branch" >> "$LOG_FILE" 2>&1 || true
             local_hash=$(git rev-parse "$branch" 2>/dev/null)
             remote_hash=$(git rev-parse "origin/$branch" 2>/dev/null)
             if [ "$local_hash" = "$remote_hash" ]; then

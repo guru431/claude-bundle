@@ -1,5 +1,53 @@
 # Changelog
 
+## 2026-06-18 — GLM-5.2 external review batch (5 fixes, 1 reviewed-not-changed)
+
+External code review (GLM-5.2 via OpenCode Go) over the cron pipeline + admin
+scripts surfaced 8 findings; each was adversarially verified against the real
+source. Two were false positives already guarded in code (`claude-task-monitor.sh`
+`ConvertTo-Json` single-object → already wrapped via `isinstance(tasks, dict)`;
+`utils.py` `_llm_claude` "missing `text=True`" → already present), and both
+reported P1s were downgraded on verification. The five real defects were fixed,
+then re-reviewed (no regressions). `FINDINGS.md` is trimmed back to an empty shell.
+
+### P2 — correctness & hardening
+
+- **`admin/sync-tasks.ps1` task-arg compare**: the action-change check did a
+  verbatim `$current.args -ne $wantedArgs`; Task Scheduler re-emits a registered
+  task's Arguments with normalized whitespace, so the compare was perpetually
+  true and the task was re-registered on every sync run. Added `Normalize-TaskArgs`
+  (collapse `\s+`, trim) on both sides to restore idempotency — we always join
+  args with single spaces, so no real change is hidden.
+- **`admin/sync-tasks.ps1` password lifetime**: the decrypted DPAPI password was
+  cached in a script-scope variable for the whole run. It is now released
+  (`$null` + `[GC]::Collect()`) right after the registration loop — defense in
+  depth; shortens the cleartext exposure window (still encrypted at rest).
+- **`admin/sync.cmd` relaunch args**: `set /p PASSARGS=<file` stops at the first
+  newline; switched to `for /f "usebackq delims="` to read the args line
+  robustly. (The `-File` relaunch already neutralizes injection; this is a
+  robustness nit.)
+- **`git-push-all.sh` stale remote ref**: the up-to-date check compared against
+  `origin/<branch>` without fetching, so a force-push on origin left the
+  remote-tracking ref stale and a needed push was silently skipped. Now
+  `git fetch -q origin "$branch"` before the compare (main loop and wiki block);
+  skipped in dry-run, errors swallowed so the sweep continues offline.
+
+### P3 — portability
+
+- **`claude-healthcheck.sh`**: the remote-metrics SSH call now passes `-T` (no
+  PTY), overriding any `RequestTTY` in the host's ssh-config alias so stray
+  pseudo-terminal noise can't pollute the captured output.
+
+### Reviewed, not changed
+
+- **`utils.py` `state_add`/`state_remove` per-call `load_state()`** (GLM P3,
+  "redundant I/O in loops"): left as-is. The per-call reload is deliberate — it
+  pairs with the inter-process state lock (`_acquire_state_lock`) so a slow flush
+  overlapping a compile run cannot lose keys via a load→modify→save race. Caching
+  state in memory would reintroduce that race, and the I/O is negligible against
+  the LLM call + `time.sleep(5)` in the same loop. (GLM also misattributed it to
+  `state_get()`, which runs once per run, not in a loop.)
+
 ## 2026-06-17 — Resolve the full 2026-06-15 analysis batch (FINDINGS + IDEAS)
 
 Fixed and removed every open item in `FINDINGS.md` (the 2026-06-15

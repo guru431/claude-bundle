@@ -52,7 +52,7 @@ $(df -h 2>/dev/null || wmic logicaldisk get size,freespace,caption)
 # ports are handled there.
 REMOTE_DATA=""
 if [ -n "$REMOTE_SSH_HOST" ]; then
-    REMOTE_DATA=$(ssh "$REMOTE_SSH_HOST" bash -s <<'REMOTE_SCRIPT' 2>&1
+    REMOTE_DATA=$(ssh -T "$REMOTE_SSH_HOST" bash -s <<'REMOTE_SCRIPT' 2>&1
 echo "=== Remote Linux host ==="
 echo "--- uptime ---"
 uptime

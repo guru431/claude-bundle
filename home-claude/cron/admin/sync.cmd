@@ -22,7 +22,10 @@ exit /b
 set "PASSARGS=%*"
 if "%~1"=="--from-relaunch" (
     set "PASSARGS="
-    if exist "%ARGS_FILE%" set /p PASSARGS=<"%ARGS_FILE%"
+    REM Read the single args line written on line 17. `for /f` reads it robustly
+    REM regardless of trailing newlines (unlike `set /p`, which stops at the
+    REM first newline if the file ever held more than one line).
+    if exist "%ARGS_FILE%" for /f "usebackq delims=" %%a in ("%ARGS_FILE%") do set "PASSARGS=%%a"
 )
 if exist "%ARGS_FILE%" del "%ARGS_FILE%" >nul 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0sync-tasks.ps1" %PASSARGS%

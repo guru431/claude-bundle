@@ -196,6 +196,11 @@ function Format-JsonValue($obj, [int]$depth) {
     }
     if ($obj -is [string]) {
         $s = $obj.Replace('\','\\').Replace('"','\"').Replace("`b",'\b').Replace("`f",'\f').Replace("`n",'\n').Replace("`r",'\r').Replace("`t",'\t')
+        # Escape any remaining control chars U+0000..U+001F as \uXXXX per the JSON
+        # spec — without this a stray control byte (e.g. in a key or .env value)
+        # yields an invalid settings.local.json. Runs AFTER Replace('\') so the new
+        # \u sequences are not double-escaped.
+        $s = [regex]::Replace($s, '[\x00-\x1f]', { param($m) '\u{0:x4}' -f [int][char]$m.Value[0] })
         return '"' + $s + '"'
     }
     if ($obj -is [array] -or $obj -is [System.Collections.IList]) {
@@ -292,6 +297,25 @@ function Require-Key([string[]]$names) {
     exit 2
 }
 
+function Test-TcpPort([string]$targetHost, [int]$port, [int]$timeoutMs = 3000) {
+    # TCP probe: is host:port open? The socket is always closed (finally), even
+    # when BeginConnect/WaitOne throws. Replaces three duplicated inline probes.
+    $tcp = $null
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $iar = $tcp.BeginConnect($targetHost, $port, $null, $null)
+        if ($iar.AsyncWaitHandle.WaitOne($timeoutMs, $false) -and $tcp.Connected) {
+            $tcp.EndConnect($iar)
+            return $true
+        }
+        return $false
+    } catch {
+        return $false
+    } finally {
+        if ($tcp) { $tcp.Close() }
+    }
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Mode setters
 # ─────────────────────────────────────────────────────────────────────────────
@@ -376,16 +400,7 @@ function Set-Ollama($obj, [string]$modelName) {
     $ollamaUrl = "http://${ollamaHost}:${ollamaPort}"
 
     # Probe — is Ollama actually reachable?
-    $ollamaUp = $false
-    try {
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $iar = $tcp.BeginConnect($ollamaHost, $ollamaPort, $null, $null)
-        if ($iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tcp.Connected) {
-            $ollamaUp = $true
-            $tcp.EndConnect($iar)
-        }
-        $tcp.Close()
-    } catch { }
+    $ollamaUp = Test-TcpPort $ollamaHost $ollamaPort
 
     if (-not $ollamaUp) {
         Write-Host "WARN: Ollama not reachable at $ollamaUrl" -ForegroundColor Yellow
@@ -416,16 +431,7 @@ function Set-CCR($obj, [string]$modelName) {
     $ccrUrl  = "http://${ccrHost}:${ccrPort}"
 
     # Probe — is CCR actually reachable?
-    $ccrUp = $false
-    try {
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $iar = $tcp.BeginConnect($ccrHost, $ccrPort, $null, $null)
-        if ($iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tcp.Connected) {
-            $ccrUp = $true
-            $tcp.EndConnect($iar)
-        }
-        $tcp.Close()
-    } catch { }
+    $ccrUp = Test-TcpPort $ccrHost $ccrPort
 
     if (-not $ccrUp) {
         Write-Host "WARN: ccr not reachable at $ccrUrl" -ForegroundColor Yellow
@@ -437,15 +443,7 @@ function Set-CCR($obj, [string]$modelName) {
             Start-Sleep -Seconds 4
             # Re-probe: if the launch failed, do NOT write a config that would
             # fail every Claude Code request.
-            try {
-                $tcp = New-Object System.Net.Sockets.TcpClient
-                $iar = $tcp.BeginConnect($ccrHost, $ccrPort, $null, $null)
-                if ($iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tcp.Connected) {
-                    $ccrUp = $true
-                    $tcp.EndConnect($iar)
-                }
-                $tcp.Close()
-            } catch { }
+            $ccrUp = Test-TcpPort $ccrHost $ccrPort
             if (-not $ccrUp) {
                 Write-Host "CCR still not reachable after the start attempt." -ForegroundColor Red
                 Write-Host "Config NOT changed (ccr mode not activated)." -ForegroundColor Red

@@ -1,5 +1,54 @@
 # Changelog
 
+## 2026-06-20 — GLM-5.2 weekly-review batch (1 fix, 11 false positives)
+
+The auto-cron `ClaudeCodeReviewWeekly` (GLM-5.2 via OpenCode Go) appended 12
+findings (2 P1, 7 P2, 3 P3). Each was adversarially verified against the
+current source by an independent skeptic. Eleven did not survive: most were
+re-flags of code the 2026-06-18 batch already fixed, or rested on a premise
+that is factually wrong about the current code.
+
+### P3 — correctness
+
+- **`wiki/wiki-flush-sessions.py` backlog tie-break**: `find_backlog_jsonls()`
+  sorted candidates by `-mtime` only, so files with equal mtime were ordered by
+  `glob()` (filesystem) order — non-deterministic across runs. Added a secondary
+  key (`x[2].name`) so the nightly slice is reproducible. Self-correcting before
+  (the backlog drained over many nights), so this is a determinism nit.
+
+### Reviewed, not changed (false positive / already fixed / cannot trigger)
+
+- **P1 `utils.py` state_add/state_remove "load before lock"**: false — the lock
+  is acquired *before* `load_state()` (the read-modify-write is already inside
+  the inter-process lock).
+- **P1 `ci.yml` secret guard**: false — the Telegram bot-token shape
+  (`[0-9]{8,10}:…{35}`) is already in the pattern, `sk-…{16,}` is open-ended (it
+  does not miss long keys), and `git grep` already scans any committed `.env`.
+- **P2 `sync-tasks.ps1` kind=exec arg join**: false — `$rest` already carries its
+  own leading space (`' ' + …`), so command and args are separated.
+- **P2 `sync-tasks.ps1` trigger date compare**: already fixed — the compare
+  extracts and compares only `HH:mm`, never the StartBoundary date.
+- **P2 `claude-task-monitor.sh` fail-count filter**: cannot trigger — Windows
+  task names cannot begin with whitespace; the count only picks an alert header
+  and the full failure text is always sent.
+- **P2 `utils.py` `_llm_claude` bare `claude` path**: false in context — that
+  branch is manual-opt-in only (`WIKI_LLM_PROVIDER=claude`) and unreachable from
+  any session-0 cron run, so the PATH/hijack premise does not apply.
+- **P2 `telegram-send.sh` token via heredoc**: false — the token is fed over
+  stdin (`-K -`, out of argv by design); an unquoted heredoc expands `${TOKEN}`
+  once and bash never re-scans the result, and tokens contain no `$`.
+- **P2 `wiki-compile-sessions.py` reads all pages**: false — it reads one
+  project's pages (bounded), and the LLM payload is already capped
+  (`MAX_CONTENT_BYTES` / `MAX_PAGES_WITH_CONTENT`).
+- **P2 `git-push-all.sh` stale ref on fetch failure**: already fixed — the fetch
+  was added on 2026-06-18 before the hash compare; `|| true` only keeps the sweep
+  alive offline and cannot manufacture a false "up to date".
+- **P3 `utils.py` parse_frontmatter block scalars**: cannot trigger — the only
+  writer (`dump_frontmatter`) never emits block scalars, and the limited subset
+  is documented.
+- **P3 `claude-healthcheck.sh` deprecated wmic**: false — `df -h` is primary and
+  succeeds under Git Bash; `wmic` is an unreachable fallback and non-fatal anyway.
+
 ## 2026-06-18 — GLM-5.2 external review batch (5 fixes, 1 reviewed-not-changed)
 
 External code review (GLM-5.2 via OpenCode Go) over the cron pipeline + admin

@@ -148,7 +148,9 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20,
                 continue
             all_candidates.append((st.st_mtime, project, jsonl))
 
-    all_candidates.sort(key=lambda x: -x[0])
+    # Secondary key (filename) breaks mtime ties deterministically, so the same
+    # files land in the nightly slice across runs instead of in glob() order.
+    all_candidates.sort(key=lambda x: (-x[0], x[2].name))
     for _, project, jsonl in all_candidates[:max_files]:
         by_project.setdefault(project, []).append(jsonl)
 

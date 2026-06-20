@@ -315,6 +315,26 @@ def save_to_pending(session_id: str, messages: list[dict], project: str = "unkno
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def save_session_tail(data: dict, last_n: int = 30) -> tuple[str, str] | None:
+    """Save the session tail into .pending/ (shared PreCompact/SessionEnd logic).
+
+    Takes the already-parsed stdin JSON (dict). Returns (transcript_path,
+    session_id) on a successful save, otherwise None (no transcript_path / file
+    missing / no messages). pre-compact uses the return value to then spawn the
+    background handoff.
+    """
+    session_id = data.get("session_id", "unknown")
+    transcript_path = data.get("transcript_path", "")
+    if not transcript_path or not os.path.exists(transcript_path):
+        return None
+    parent_dir = os.path.basename(os.path.dirname(transcript_path))
+    project = dir_to_project(parent_dir)
+    messages = parse_jsonl_messages(transcript_path, last_n=last_n)
+    if messages:
+        save_to_pending(session_id, messages, project)
+    return transcript_path, session_id
+
+
 def today_str() -> str:
     return date.today().isoformat()
 

@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import parse_jsonl_messages, save_to_pending, dir_to_project
+from utils import save_session_tail
 
 
 def spawn_handoff_in_background(transcript_path: str, session_id: str) -> None:
@@ -59,18 +59,10 @@ def main():
     except (json.JSONDecodeError, ValueError):
         return
 
-    session_id = data.get("session_id", "unknown")
-    transcript_path = data.get("transcript_path", "")
-
-    if not transcript_path or not os.path.exists(transcript_path):
+    saved = save_session_tail(data, last_n=30)
+    if saved is None:
         return
-
-    parent_dir = os.path.basename(os.path.dirname(transcript_path))
-    project = dir_to_project(parent_dir)
-
-    messages = parse_jsonl_messages(transcript_path, last_n=30)
-    if messages:
-        save_to_pending(session_id, messages, project)
+    transcript_path, session_id = saved
 
     spawn_handoff_in_background(transcript_path, session_id)
 

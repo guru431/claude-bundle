@@ -29,7 +29,6 @@ from utils import (  # noqa: E402
     normalize_wiki_path,
     parse_llm_json,
     read_page,
-    source_hash,
     state_add,
     state_get,
     is_dry_run,
@@ -136,7 +135,7 @@ JSON only, no markdown wrapper, no commentary."""
     return result or None
 
 
-def apply_changes(changes: list[dict], existing_pages: dict[str, str], article_rel: str, article_hash: str) -> list[str]:
+def apply_changes(changes: list[dict], existing_pages: dict[str, str], article_rel: str) -> list[str]:
     """Apply changes: handle frontmatter + source tracking for create/update/append."""
     created = []
     for change in changes:
@@ -171,10 +170,11 @@ def apply_changes(changes: list[dict], existing_pages: dict[str, str], article_r
             final_body = content
             label = "created"
 
+        # src_hash intentionally omitted: the only consumer (source_already_processed)
+        # is dead code — dedup is done via state (.processed.json), not per-page hashes.
         new_fm = add_source_to_frontmatter(
             existing_fm,
             src_path=article_rel,
-            src_hash=article_hash,
         )
         write_page(full_path, new_fm, final_body)
         created.append(f"{label}: {rel_path}")
@@ -237,10 +237,9 @@ def main():
         rel = str(article_path.relative_to(KBNEWS_DIR)).replace("\\", "/")
         log(f"[{i+1}/{len(new_files)}] Processing: {rel}")
 
-        article_hash = source_hash(article_path)
         changes = compile_article(article_path, existing_pages)
         if changes:
-            applied = apply_changes(changes, existing_pages, f"kb_news/{rel}", article_hash)
+            applied = apply_changes(changes, existing_pages, f"kb_news/{rel}")
             # State (.processed.json) is the dedup source of truth; update_log
             # keeps the human-readable journal in log.md.
             state_add("compile_kb", "processed", [rel])

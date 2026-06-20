@@ -99,12 +99,26 @@ PROMPT=""
 
 PYTHON="${PYTHON_EXE:-python}"
 
-"$PYTHON" "$(dirname "$0")/llm-call.py" 600 >> "$LOG_FILE" 2>&1 <<LLM_EOF
+# Capture LLM output: llm-call.py exits 1 on LLM None/error, 2 on empty stdin.
+# On failure (provider depleted -> llm_call returns None) alert + exit 1,
+# otherwise the task scheduler sees exit 0 and the failure is lost silently.
+ANALYSIS=$("$PYTHON" "$(dirname "$0")/llm-call.py" 600 2>>"$LOG_FILE" <<LLM_EOF
 ${PROMPT:-Analyze the following healthcheck metrics. Report any anomalies, low disk space, missing services or unusual load. Be concise.}
 
 METRICS:
 ${METRICS}
 LLM_EOF
+)
+rc=$?
+
+echo "$ANALYSIS" >> "$LOG_FILE"
+
+if [ $rc -ne 0 ] || [ -z "$ANALYSIS" ]; then
+    echo "FATAL: LLM analysis failed (rc=$rc, empty=$([ -z "$ANALYSIS" ] && echo yes || echo no))" >> "$LOG_FILE"
+    bash "$BUNDLE_ROOT/cron/telegram-send.sh" "healthcheck: LLM analysis failed ($DATE)" >>"$LOG_FILE" 2>&1
+    echo "=== End ===" >> "$LOG_FILE"
+    exit 1
+fi
 
 echo "" >> "$LOG_FILE"
 echo "=== End ===" >> "$LOG_FILE"

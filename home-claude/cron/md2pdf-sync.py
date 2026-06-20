@@ -61,6 +61,8 @@ TELEGRAM = BUNDLE_ROOT / "cron" / "telegram-send.sh"
 # where Git\bin is not on PATH. Override via BASH_EXE if your install differs.
 BASH = os.environ.get("BASH_EXE") or r"C:\Program Files\Git\bin\bash.exe"
 
+TG_LIMIT = 3800  # leave headroom under Telegram's 4096
+
 
 def log(msg: str) -> None:
     line = f"{datetime.now():%H:%M:%S} {msg}"
@@ -129,6 +131,8 @@ def main() -> int:
     if failed and TELEGRAM.exists() and Path(BASH).is_file():
         lines = "\n".join(f"- {md.name}: {err}" for md, err in failed)
         msg = f"md2pdf-sync: {len(failed)} PDF(s) not regenerated:\n{lines}"
+        if len(msg) > TG_LIMIT:
+            msg = msg[:TG_LIMIT].rsplit("\n", 1)[0] + "\n... (truncated)"
         try:
             subprocess.run([BASH, str(TELEGRAM), msg], timeout=30, check=False)
         except Exception as e:  # noqa: BLE001

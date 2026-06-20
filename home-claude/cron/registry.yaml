@@ -42,6 +42,16 @@
 #   Daily HH:MM | Weekly <DOW> HH:MM | AtLogOn | AtStartup
 #   Monthly day=N HH:MM  — uses Register-ScheduledTask -Xml internally.
 #
+# ── Optional repetition fields (repeat_every / repeat_for) ─────────────────
+#   Attach a repetition pattern to a calendar trigger so the task re-fires
+#   throughout the day after its initial start time. Both are ISO-8601
+#   durations (PnYnMnDTnHnMnS):
+#     repeat_every: PT4H   — re-run every 4 hours
+#     repeat_for:   P1D    — keep repeating for 1 day after the start time
+#   Example: `trigger: Daily 01:00` + `repeat_every: PT4H` + `repeat_for: P1D`
+#   fires at 01:00, then every 4h until ~24h later. Implemented in
+#   sync-tasks.ps1 via the <Repetition> block of the trigger XML.
+#
 # ── settings ───────────────────────────────────────────────────────────────
 #   All tasks are registered with StartWhenAvailable=True — if a trigger is
 #   missed (machine off / asleep / not present), Task Scheduler catches up at
@@ -197,3 +207,19 @@ tasks:
     hidden: true
     notify_telegram: false
     timeout_hours: 1
+
+  - name: ClaudeWarmWindow
+    project: main
+    description: Warm up the Claude subscription 5h window with a minimal Haiku ping; repeats every 4h. Disabled by default — read the billing warning in claude-warm-window.sh before enabling.
+    script: <bundle-install-path>\cron\claude-warm-window.sh
+    kind: bash
+    trigger: Daily 01:00
+    repeat_every: PT4H
+    repeat_for: P1D
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    notify_telegram: false
+    timeout_hours: 1
+    enabled: false

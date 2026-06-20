@@ -133,17 +133,20 @@ def get_existing_project_pages(project: str) -> dict[str, str]:
     return pages
 
 
-def compile_project_data(project: str, data: str, existing_pages: dict[str, str]) -> tuple[list[dict], bool] | None:
+def compile_project_data(project: str, data: str, existing_pages: dict[str, str]) -> tuple[list[dict], bool, bool]:
     """Call the LLM to compile project data into wiki pages.
 
     A large data section (observed 161351 chars) deterministically makes the
     LLM bail, so we split it into ~MAX_PART_SIZE chunks on blank-line
     boundaries (never mid-line/mid-paragraph) and call the LLM per part,
-    concatenating results. If ANY part fails (None/empty) the whole project is
-    failed (None) and retried as a unit — its (daily, project) pair stays
-    unmarked and is reprocessed next run.
+    concatenating results.
 
-    Returns (changes, bodies_withheld). bodies_withheld is True when the LLM
+    Returns (changes, complete, bodies_withheld). A failed part no longer zeroes
+    the whole project: successful parts are accumulated and applied (their
+    content is not lost, nor retried forever as part of a big payload), while
+    complete=False leaves the (daily, project) pair unmarked — the retry redoes
+    the whole project, but already-succeeded parts overwrite idempotently and
+    the failed part gets another chance. bodies_withheld is True when the LLM
     saw only page NAMES for any existing page (page-count or byte cap) — the
     caller must then append rather than overwrite (blind_update).
     """
@@ -188,6 +191,7 @@ def compile_project_data(project: str, data: str, existing_pages: dict[str, str]
         parts = [data]
 
     all_changes: list[dict] = []
+    complete = True
     for part_idx, part in enumerate(parts):
         part_label = f" (part {part_idx+1}/{len(parts)})" if len(parts) > 1 else ""
         full_prompt = f"""{prompt}
@@ -219,24 +223,27 @@ JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
 
         output = llm_call(full_prompt, timeout=600)
         if not output:
-            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: llm_call returned None", file=sys.stderr)
-            return None
+            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: llm_call returned None — part skipped, project left unmarked", file=sys.stderr)
+            complete = False
+            continue
 
         try:
             result = parse_llm_json(output)
         except Exception as e:
-            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: parse_llm_json failed: {e}", file=sys.stderr)
-            return None
+            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: parse_llm_json failed: {e} — part skipped", file=sys.stderr)
+            complete = False
+            continue
 
         if not result:
-            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: empty result (response {len(output)} chars)", file=sys.stderr)
-            return None
+            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: empty result (response {len(output)} chars) — part skipped", file=sys.stderr)
+            complete = False
+            continue
 
         all_changes.extend(result)
         if part_idx < len(parts) - 1:
             time.sleep(5)
 
-    return all_changes, bodies_withheld
+    return all_changes, complete, bodies_withheld
 
 
 def apply_changes(changes: list[dict], source_daily: str, project: str,
@@ -351,20 +358,34 @@ def main():
             existing = get_existing_project_pages(project)
             log(f"  [{project}] existing pages: {len(existing)}, data: {len(data)} chars")
 
-            result = compile_project_data(project, data, existing)
-            changes, bodies_withheld = result if result else (None, False)
+            changes, complete, bodies_withheld = compile_project_data(project, data, existing)
+            # Apply the results of the successful parts even on partial failure —
+            # their content is not lost, nor retried forever as part of a big
+            # payload.
             if changes:
                 applied = apply_changes(changes, source_daily=daily_path.name,
                                         project=project,
                                         blind_update=bodies_withheld)
                 total_changes += len(applied)
-                log(f"  [{project}] → {len(applied)} changes")
-                # Record the pair immediately — on retry of this daily, a
-                # succeeded project is skipped rather than re-compiled.
+                log(f"  [{project}] → {len(applied)} changes" + ("" if complete else " (partial — a part failed)"))
+                if complete:
+                    # Record the pair immediately — on retry of this daily, a
+                    # succeeded project is skipped rather than re-compiled.
+                    state_add("compile_sessions", "compiled_pairs", [marker])
+                    compiled_pairs.add(marker)
+                else:
+                    # A part failed — the pair stays unmarked, the retry redoes
+                    # the whole project (succeeded parts overwrite idempotently).
+                    failed += 1
+                    log(f"  [{project}] → partial failure, pair NOT marked — retry next run")
+            elif complete:
+                # Empty result, but every part ran (LLM extracted nothing) —
+                # mark the pair so an empty daily is not retried forever.
                 state_add("compile_sessions", "compiled_pairs", [marker])
                 compiled_pairs.add(marker)
+                log(f"  [{project}] → 0 changes (LLM extracted nothing)")
             else:
-                log(f"  [{project}] → ERROR")
+                log(f"  [{project}] → ERROR (all parts failed)")
                 failed += 1
 
             time.sleep(5)

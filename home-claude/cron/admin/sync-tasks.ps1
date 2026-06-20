@@ -144,12 +144,26 @@ function Parse-RegistryYaml([string]$path) {
 # All triggers go through a single XML path Register-ScheduledTask -Xml. This
 # avoids parameter-set resolution issues that have hit the native
 # -Action/-Trigger combination on some PowerShell 5.1 versions.
-function Build-XmlTrigger([string]$spec) {
+function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [string]$repeatFor) {
+    # Optional <Repetition>: repeat within a single day (e.g. PT4H = every 4 hours).
+    # Useful for Daily tasks that need more than one run per day (the syncer emits
+    # one native trigger per task). repeat_for defaults to P1D (a day). Additive:
+    # without repeat_every the fragment is empty → other tasks' XML is unchanged.
+    $rep = ""
+    if ($repeatEvery) {
+        $dur = if ($repeatFor) { $repeatFor } else { 'P1D' }
+        $rep = "<Repetition><Interval>$repeatEvery</Interval><Duration>$dur</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>`n      "
+    }
     if ($spec -eq 'AtLogOn') {
         return "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
     }
     if ($spec -eq 'AtStartup') {
-        return "<BootTrigger><Enabled>true</Enabled></BootTrigger>"
+        # Optional <Delay>: makes the boot trigger fire N after boot so network
+        # shares (UNC scripts/.env) are mounted before launch. Without it an
+        # onstart task can race the network and exit 2 (script not yet reachable).
+        # Schema order: <Enabled> (base type) then <Delay> (boot-trigger extension).
+        $d = if ($delay) { "<Delay>$delay</Delay>" } else { "" }
+        return "<BootTrigger><Enabled>true</Enabled>$d</BootTrigger>"
     }
     if ($spec -match '^Daily\s+(\d{1,2}):(\d{2})$') {
         $h = [int]$Matches[1]; $m = [int]$Matches[2]
@@ -158,7 +172,7 @@ function Build-XmlTrigger([string]$spec) {
 <CalendarTrigger>
       <StartBoundary>$start</StartBoundary>
       <Enabled>true</Enabled>
-      <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
+      ${rep}<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
     </CalendarTrigger>
 "@
     }
@@ -220,7 +234,16 @@ function Build-TaskXml([hashtable]$task, [string]$wantedExec, [string]$wantedArg
     $escArgs = [System.Security.SecurityElement]::Escape($wantedArgs)
     $escExec = [System.Security.SecurityElement]::Escape($wantedExec)
     $escUser = [System.Security.SecurityElement]::Escape($task.user)
-    $execLimit = "PT$([int]$task.timeout_hours)H"
+    # timeout_hours: 0 → no time limit (PT0S). Needed for service-style daemons
+    # (agent-servers) that must run indefinitely; a positive value caps runtime.
+    $execLimit = if ([int]$task.timeout_hours -le 0) { 'PT0S' } else { "PT$([int]$task.timeout_hours)H" }
+    # Optional restart-on-failure: belt-and-suspenders for boot tasks that may
+    # still race a slow network even with startup_delay (retry up to Count times).
+    $restartXml = ''
+    if ($task.restart_count -and [int]$task.restart_count -gt 0) {
+        $ri = if ($task.restart_interval) { $task.restart_interval } else { 'PT1M' }
+        $restartXml = "`n    <RestartOnFailure><Interval>$ri</Interval><Count>$([int]$task.restart_count)</Count></RestartOnFailure>"
+    }
     return @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -245,7 +268,7 @@ function Build-TaskXml([hashtable]$task, [string]$wantedExec, [string]$wantedArg
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowStartOnDemand>true</AllowStartOnDemand>
-    <StartWhenAvailable>true</StartWhenAvailable>
+    <StartWhenAvailable>true</StartWhenAvailable>$restartXml
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -298,6 +321,9 @@ function Get-CurrentSummary([string]$name) {
         triggerType = ($t.Triggers | Select-Object -First 1).CimClass.CimClassName
         daysOfWeek = ($t.Triggers | Select-Object -First 1).DaysOfWeek
         startBoundary = ($t.Triggers | Select-Object -First 1).StartBoundary
+        bootDelay = "$(($t.Triggers | Select-Object -First 1).Delay)"
+        restartCount = "$($t.Settings.RestartCount)"
+        restartInterval = "$($t.Settings.RestartInterval)"
         user = $t.Principal.UserId
         runLevel = "$($t.Principal.RunLevel)"
         logonType = "$($t.Principal.LogonType)"
@@ -382,7 +408,7 @@ foreach ($task in $reg.tasks) {
     $wantedExec = $actionInfo.execute
     $wantedArgs = $actionInfo.arguments
     try {
-        $triggerXml = Build-XmlTrigger $task.trigger
+        $triggerXml = Build-XmlTrigger $task.trigger $task.startup_delay $task.repeat_every $task.repeat_for
     } catch {
         Write-Host ("[skipped  ] " + $task.name + " — trigger: " + $_.Exception.Message) -ForegroundColor DarkYellow
         $summary.skipped++
@@ -416,6 +442,13 @@ foreach ($task in $reg.tasks) {
     $trigger_needs_change = $false
     $triggertype_needs_change = $false
     $dow_needs_change = $false
+    $delay_needs_change = $false
+    $restart_needs_change = $false
+    $wantedDelay = if ($task.startup_delay) { "$($task.startup_delay)" } else { '' }
+    $wantedRestartCount = if ($task.restart_count) { "$([int]$task.restart_count)" } else { '0' }
+    $wantedRestartInterval = if ($task.restart_count -and [int]$task.restart_count -gt 0) {
+        if ($task.restart_interval) { "$($task.restart_interval)" } else { 'PT1M' }
+    } else { '' }
     if ($current) {
         $action_needs_change = ($current.execute -ne $wantedExec) -or ((Normalize-TaskArgs $current.args) -ne (Normalize-TaskArgs $wantedArgs))
         $enabled_needs_change = ([bool]$current.enabled -ne [bool]$task.enabled)
@@ -426,13 +459,21 @@ foreach ($task in $reg.tasks) {
         $wantedRunLevel = if ($task.runlevel -eq 'highest') { 'Highest' } else { 'Limited' }
         $runlevel_needs_change = ("$($current.runLevel)" -ne $wantedRunLevel)
         $hidden_needs_change = ([bool]$current.hidden -ne [bool]$task.hidden)
-        $timeout_needs_change = ("$($current.executionTimeLimit)" -ne "PT$([int]$task.timeout_hours)H")
+        # Mirror Build-TaskXml: timeout_hours<=0 → PT0S (unlimited), else PTnH.
+        $wantedExecLimit = if ([int]$task.timeout_hours -le 0) { 'PT0S' } else { "PT$([int]$task.timeout_hours)H" }
+        $timeout_needs_change = ("$($current.executionTimeLimit)" -ne $wantedExecLimit)
+        $delay_needs_change = ("$($current.bootDelay)" -ne $wantedDelay)
+        $restart_needs_change = ("$($current.restartCount)" -ne $wantedRestartCount) -or `
+            ($wantedRestartCount -ne '0' -and "$($current.restartInterval)" -ne $wantedRestartInterval)
         # Compare trigger TYPE (Daily→Weekly etc. must not report "unchanged").
-        # Monthly registers via XML as the generic MSFT_TaskTrigger.
+        # Monthly registers via XML, but Task Scheduler reads it back as
+        # MSFT_TaskMonthlyTrigger — without this branch Monthly tasks would be
+        # reported as changed and re-registered on every sync.
         $wantedTriggerType = if ($task.trigger -eq 'AtLogOn') { 'MSFT_TaskLogonTrigger' }
             elseif ($task.trigger -eq 'AtStartup')      { 'MSFT_TaskBootTrigger' }
             elseif ($task.trigger -match '^Daily\s')    { 'MSFT_TaskDailyTrigger' }
             elseif ($task.trigger -match '^Weekly\s')   { 'MSFT_TaskWeeklyTrigger' }
+            elseif ($task.trigger -match '^Monthly')    { 'MSFT_TaskMonthlyTrigger' }
             else                                        { 'MSFT_TaskTrigger' }
         if ($current.triggerType) {
             $triggertype_needs_change = ("$($current.triggerType)" -ne $wantedTriggerType)
@@ -454,7 +495,7 @@ foreach ($task in $reg.tasks) {
         }
     }
     $verb = if ($current) {
-        if ($Force -or $action_needs_change -or $enabled_needs_change -or $desc_needs_change -or $logontype_needs_change -or $swa_needs_change -or $runlevel_needs_change -or $hidden_needs_change -or $timeout_needs_change -or $trigger_needs_change -or $triggertype_needs_change -or $dow_needs_change) { 'updated' } else { 'unchanged' }
+        if ($Force -or $action_needs_change -or $enabled_needs_change -or $desc_needs_change -or $logontype_needs_change -or $swa_needs_change -or $runlevel_needs_change -or $hidden_needs_change -or $timeout_needs_change -or $trigger_needs_change -or $triggertype_needs_change -or $dow_needs_change -or $delay_needs_change -or $restart_needs_change) { 'updated' } else { 'unchanged' }
     } else { 'created' }
 
     Write-Host ("[{0,-9}] {1}" -f $verb, $task.name) -ForegroundColor (

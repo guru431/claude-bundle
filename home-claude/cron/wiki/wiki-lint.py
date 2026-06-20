@@ -50,7 +50,7 @@ def find_all_pages() -> dict[str, list[Path]]:
         # _log.md is the script-managed per-project activity feed — every
         # project has one, so it would trip the ambiguous-name and
         # thin-content checks with pure noise.
-        if f.name in ("index.md", "CLAUDE.md", "log.md", "_log.md"):
+        if f.name in ("index.md", "CLAUDE.md", "log.md", "_log.md", "patterns.md"):
             continue
         pages.setdefault(f.stem, []).append(f)
     return pages
@@ -160,7 +160,7 @@ def check_index_sync(pages: dict[str, list[Path]]) -> list[str]:
             continue
         index_text = index_path.read_text(encoding="utf-8")
         for f in d.glob("*.md"):
-            if f.stem not in index_text:
+            if f"[[{f.stem}]]" not in index_text:
                 errors.append(f"ERROR: {f.stem} missing from index {index_path.relative_to(WIKI_ROOT)}")
 
     return errors

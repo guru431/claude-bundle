@@ -129,7 +129,7 @@ TASK_FAIL_COUNT=0
 if [ -z "$TASK_STATUS" ] || printf '%s\n' "$TASK_STATUS" | head -1 | grep -q '^ERROR'; then
     ALERTS="task-monitor: task-status collection FAILED (${TASK_STATUS:-python produced no output}) — the monitor itself may be broken, check cron/logs/task-monitor_${DATE}.log"
 elif [ "$TASK_STATUS" != "OK" ]; then
-    TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | wc -l)
+    TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | grep -v '^OK$' | grep -v '^[[:space:]]' | grep -c .)
     ALERTS="$TASK_STATUS"
 fi
 

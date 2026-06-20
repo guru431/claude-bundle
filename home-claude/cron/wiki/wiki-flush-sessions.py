@@ -33,6 +33,7 @@ for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (dir_to_project, parse_jsonl_messages, is_subagent_jsonl, llm_call,
+                   normalize_project_name, KNOWN_PROJECTS,
                    state_get, state_add, state_remove, is_dry_run, SKIP_DIRS, SKIP_JSONL_PROJECTS,
                    BUNDLE_ROOT, WIKI_ROOT, DAILY_DIR, PENDING_DIR, LOG_MD, PROJECTS_BASE)
 
@@ -324,6 +325,49 @@ def parse_history_activity() -> dict[str, int]:
     return activity
 
 
+# An LLM section heading: "## Project: foo", "## foo (bar)", etc.
+# Capture the level marker and the label.
+_LLM_H2_RE = re.compile(r"(?m)^(##)(?!#)\s*(.+?)\s*$")
+
+
+def _retarget_subproject_headers(extracted: str, session_project: str) -> str:
+    """Re-target cross-project H2 headings in LLM output to their namespace.
+
+    Contamination case: a session whose cwd is project P, but the LLM also
+    extracted facts about another project under a heading like `## Project: foo`.
+    Naively demoting EVERY `##` to `###` (so compile-sessions doesn't parse them
+    as project sections) trapped those foreign facts INSIDE the `## {P}` H2, and
+    compile-sessions then attributed them to P — a cross-project leak.
+
+    Now: if a heading normalizes to a KNOWN project that differs from the
+    session, keep it as a real `## <project>` H2 so compile-sessions routes the
+    facts to the right namespace. Otherwise (same project / unknown project /
+    LLM chatter like `## Incidents`) demote it to `###`, as before (the facts
+    stay anchored under the session). normalize_project_name doesn't know the
+    English `Project:` prefix, so the label is cleaned here before matching.
+    """
+    def repl(m: re.Match) -> str:
+        label = m.group(2)
+        # Strip a Project: prefix and unescape `\_` from the LLM markdown engine.
+        cleaned = re.sub(r"(?i)^project\s*:\s*", "", label).replace(r"\_", "_")
+        cleaned = cleaned.strip("[] ")  # `[[Finance]]` → `Finance`
+        norm = normalize_project_name(cleaned)
+        # Promote ONLY on an explicit match with a known project that differs
+        # from the session. normalize_project_name falls back to DEFAULT_PROJECT
+        # when nothing usable can be extracted; promoting on that fallback would
+        # drag any chatter (`## Incidents`) into the default namespace. So we
+        # require the label to actually name the default, not fall into it.
+        low = cleaned.lower()
+        explicit = norm != DEFAULT_PROJECT or low == DEFAULT_PROJECT \
+            or low.startswith(DEFAULT_PROJECT + " ") or low.startswith(DEFAULT_PROJECT + "-") \
+            or low.startswith(DEFAULT_PROJECT + "(") or low.startswith(DEFAULT_PROJECT + "—")
+        if explicit and norm in KNOWN_PROJECTS and norm != session_project:
+            return f"## {norm}"
+        return f"### {label}"
+
+    return _LLM_H2_RE.sub(repl, extracted)
+
+
 def main():
     CRON_LOG_DIR.mkdir(parents=True, exist_ok=True)
     DAILY_DIR.mkdir(parents=True, exist_ok=True)
@@ -373,19 +417,37 @@ def main():
 
     all_projects: dict[str, list[str]] = {}
 
-    # JSONL → parse messages (skip subagent and trivial sessions)
+    # JSONL → parse messages (skip subagent and trivial sessions).
+    # Filtered-out files are marked processed right away — otherwise they keep
+    # occupying backlog-quota slots every night, starving the real backlog.
+    filtered_out: list[tuple[str, Path]] = []
     for project, files in jsonls.items():
+        kept: list[Path] = []
         for jf in files:
             if is_subagent_jsonl(str(jf)):
+                filtered_out.append((project, jf))
                 continue
             messages = parse_jsonl_messages(str(jf), last_n=0)
             if not messages:
+                filtered_out.append((project, jf))
                 continue
             user_count = sum(1 for m in messages if m["role"] == "user")
             if user_count < 3:
+                filtered_out.append((project, jf))
                 continue
             text = "\n".join(f"**{m['role']}**: {m['text']}" for m in messages)
             all_projects.setdefault(project, []).append(f"### JSONL: {jf.name}\n{text}")
+            kept.append(jf)
+        jsonls[project] = kept  # filtered-out files must not be marked again below
+
+    if filtered_out and not is_dry_run():
+        filtered_keys = [f"{project}/{jf.name}" for project, jf in filtered_out]
+        state_add("flush", "processed_jsonls", filtered_keys)
+        with open(LOG_MD, "a", encoding="utf-8") as f:
+            for key in filtered_keys:
+                project = key.split("/", 1)[0]
+                f.write(f"- [flush] processed: {key} (filtered: subagent/<3 user, project: {project})\n")
+        log(f"Filtered out and marked processed: {len(filtered_out)} JSONL files")
 
     for project, texts in pending.items():
         all_projects.setdefault(project, []).extend(texts)
@@ -420,8 +482,11 @@ def main():
         extracted = flush_project_data(project, chunks)
         if extracted:
             # The LLM may inject ##-headings inside the extracted text →
-            # compile-sessions would parse them as project sections. Demote to ###.
-            extracted = re.sub(r'(?m)^##(?=\s)', '###', extracted)
+            # compile-sessions would parse them as project sections. Cross-project
+            # headings (known project ≠ session) are re-targeted to their own
+            # namespace; the rest are demoted to ### (stay anchored under the
+            # session). Guards against namespace contamination.
+            extracted = _retarget_subproject_headers(extracted, project)
             daily_lines.append(f"## {project}")
             daily_lines.append(extracted)
             daily_lines.append("")

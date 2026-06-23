@@ -6,12 +6,13 @@ patterns on ALL servers, including through SSH wrapping.
 Pattern (operates on the full Bash command string before shell parsing, so it
 also catches `ssh user@host "iptables-save > /etc/iptables/rules.v4"`):
 
-  (iptables-save|ip6tables-save) ... (> or | tee) ... rules.v[46]
+  (iptables-save|ip6tables-save) ... (>, | tee, or -f/--file) ... rules.v[46]
 
 Examples it blocks:
   - iptables-save > /etc/iptables/rules.v4
   - sudo iptables-save -t nat >> /etc/iptables/rules.v4
   - iptables-save | tee /etc/iptables/rules.v4
+  - iptables-save -f /etc/iptables/rules.v4      (the -f/--file form)
   - ip6tables-save > /etc/iptables/rules.v6
   - ssh user@host "sudo iptables-save > /etc/iptables/rules.v4"
 
@@ -35,8 +36,12 @@ try:
 except AttributeError:
     pass
 
+# `-f`/`--file` is iptables-save's own redirect to a file (writes the same
+# persistent rules.v[46] directly), so it must be blocked alongside shell `>`
+# and `| tee`. `--file` already contains the `-f` substring, but both spellings
+# are listed for clarity.
 PATTERN = re.compile(
-    r"(iptables-save|ip6tables-save)[^;&]*([>]+|tee)[^;&]*rules\.v[46]"
+    r"(iptables-save|ip6tables-save)[^;&]*([>]+|tee|-f|--file)[^;&]*rules\.v[46]"
 )
 
 REASON = (

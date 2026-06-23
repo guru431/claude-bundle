@@ -8,6 +8,7 @@ ENABLE_TELEGRAM_ALERTS below).
 Schedule: Sunday at 02:00.
 """
 
+import os
 import subprocess
 import re
 import sys
@@ -26,6 +27,10 @@ from utils import BUNDLE_ROOT, WIKI_ROOT, LOG_MD  # noqa: E402
 KBNEWS_DIR = BUNDLE_ROOT / "kb_news"
 TELEGRAM_SCRIPT = BUNDLE_ROOT / "cron" / "telegram-send.sh"
 CRON_LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
+
+# Full bash path so the alert works in session 0 (Password task), where Git\bin
+# is not on PATH (same pattern as memory-update.py).
+BASH = os.environ.get("BASH_EXE") or r"C:\Program Files\Git\bin\bash.exe"
 
 DATE = datetime.now().strftime("%Y-%m-%d")
 
@@ -211,10 +216,10 @@ def send_telegram_alert(message: str):
     """Send an alert to Telegram on errors."""
     if not ENABLE_TELEGRAM_ALERTS:
         return
-    if TELEGRAM_SCRIPT.exists():
+    if TELEGRAM_SCRIPT.exists() and Path(BASH).is_file():
         try:
             subprocess.run(
-                ["bash", str(TELEGRAM_SCRIPT), message],
+                [BASH, str(TELEGRAM_SCRIPT), message],
                 timeout=30,
                 capture_output=True,
             )

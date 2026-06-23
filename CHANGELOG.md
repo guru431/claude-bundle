@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-06-23 — Kimi K2.7 review batch (7 fixes, 6 false positives)
+
+Resolved the 7 open P3 findings from the 2026-06-23 Kimi K2.7 (`kimi-k2.7-code`
+via OpenCode Go) whole-project review. All low-severity robustness/footgun nits;
+none manifested in the shipped templates, but each is now fixed. Every fix was
+verified with a focused test (regex match table, isolated-function calls via AST
+extraction, end-to-end hook run, `scripts/self-test.ps1` green).
+
+- **`cron/admin/sync-tasks.ps1` — order-independent registry parse**: top-level
+  keys (`launcher:`, `managed_marker:`) are now read wherever they appear, even
+  after `tasks:`. Previously a one-way `$inTasks` latch silently dropped them →
+  `launcher=$null` → fail-loud "launcher not set".
+- **`cron/admin/sync-tasks.ps1` — `<Repetition>` for Weekly/Monthly**:
+  `repeat_every`/`repeat_for` were only emitted for Daily triggers and silently
+  dropped for Weekly/Monthly. The `${rep}` fragment is now in all three calendar
+  heredocs (additive — empty when no repetition is set).
+- **`cron/admin/sync-tasks.ps1` — quote-aware inline-array split**:
+  `Parse-InlineArray` replaced the naive `-split ','` with a small quote-tracking
+  state machine, so a quoted element like `'a,b,c'` stays one item.
+- **`cron/admin/sync-tasks.ps1` — argument quoting**: new `Quote-Arg` helper
+  doubles embedded `"` and wraps on whitespace/quote, so a `script_args` value
+  containing a quote no longer produces an unbalanced command line.
+- **`hooks/block-iptables-save-to-rules.py` — `-f`/`--file` form**: the deny
+  pattern now also catches `iptables-save -f /etc/iptables/rules.v4` (the flag
+  writes the same persistent file directly, bypassing the old `>`/`tee`-only
+  pattern).
+- **`cron/hooks/utils.py` + `cron/memory-update.py` — robust JSON-object
+  extraction**: added `extract_first_json_object()` (brace-balanced, string- and
+  fence-aware, sibling of `extract_first_json_array`). `memory-update.py` uses it
+  in place of a greedy `re.search(r"\{[\s\S]*\}")` that over-captured when the
+  object was followed by prose or a second object.
+- **`cron/wiki/wiki-lint.py` — full bash path in session 0**: `send_telegram_alert`
+  resolves `BASH_EXE` / `C:\Program Files\Git\bin\bash.exe` instead of a bare
+  `bash`, matching the peer cron scripts (Git\bin is not on PATH in session 0).
+
+Dropped as false positives after checking against the source (recorded so they
+are not re-investigated): AtStartup `<Delay>` re-registration, `sync.cmd`
+injection/TOCTOU, kind=exec mapped-drive bypass, dry-run `git reset` data loss,
+`.env` inline-comment stripping, and `-Only` summary totals. See the prior
+`FINDINGS.md` history in git for the per-item reasoning.
+
 ## 2026-06-20 — GLM-5.2 weekly-review batch (1 fix, 11 false positives)
 
 The auto-cron `ClaudeCodeReviewWeekly` (GLM-5.2 via OpenCode Go) appended 12

@@ -85,7 +85,27 @@ function Unwrap-Value([string]$v) {
 function Parse-InlineArray([string]$body) {
     $body = $body.Trim()
     if ($body -eq '') { return @() }
-    return ($body -split ',') | ForEach-Object { Unwrap-Value $_.Trim() }
+    # Split on commas that are NOT inside quotes, so a quoted element like
+    # 'a,b,c' stays one item (the naive -split ',' tore quoted commas apart).
+    # $q holds the open quote char ('' = outside quotes).
+    $items = @()
+    $cur = ''
+    $q = ''
+    foreach ($c in $body.ToCharArray()) {
+        $ch = [string]$c
+        if ($q -ne '') {
+            $cur += $ch
+            if ($ch -eq $q) { $q = '' }
+        } elseif ($ch -eq "'" -or $ch -eq '"') {
+            $q = $ch; $cur += $ch
+        } elseif ($ch -eq ',') {
+            $items += $cur; $cur = ''
+        } else {
+            $cur += $ch
+        }
+    }
+    $items += $cur
+    return $items | ForEach-Object { Unwrap-Value $_.Trim() }
 }
 function Parse-RegistryYaml([string]$path) {
     $lines = Get-Content $path -Encoding UTF8
@@ -103,9 +123,15 @@ function Parse-RegistryYaml([string]$path) {
         }
         if ($line.Trim() -eq '') { continue }
 
-        if (-not $inTasks -and $line -match '^([a-z_]+):\s*(.*)$') {
+        # Top-level key (column 0). `tasks:` opens the list; any OTHER top-level
+        # key is recorded wherever it appears — even AFTER `tasks:` — so the
+        # parser is not order-dependent. A top-level key also flushes the task
+        # currently being accumulated. (List items are `- name:` and task fields
+        # are indented, so neither collides with this column-0 match.)
+        if ($line -match '^([a-z_]+):\s*(.*)$') {
             $k = $Matches[1]; $v = $Matches[2]
             if ($k -eq 'tasks') { $inTasks = $true; continue }
+            if ($currentTask) { $result.tasks += $currentTask; $currentTask = $null }
             $result[$k] = Unwrap-Value $v
             continue
         }
@@ -145,10 +171,11 @@ function Parse-RegistryYaml([string]$path) {
 # avoids parameter-set resolution issues that have hit the native
 # -Action/-Trigger combination on some PowerShell 5.1 versions.
 function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [string]$repeatFor) {
-    # Optional <Repetition>: repeat within a single day (e.g. PT4H = every 4 hours).
-    # Useful for Daily tasks that need more than one run per day (the syncer emits
-    # one native trigger per task). repeat_for defaults to P1D (a day). Additive:
-    # without repeat_every the fragment is empty → other tasks' XML is unchanged.
+    # Optional <Repetition>: repeat within the trigger period (e.g. PT4H = every
+    # 4 hours). Honored for every calendar trigger (Daily/Weekly/Monthly); the
+    # syncer emits one native trigger per task. repeat_for defaults to P1D (a
+    # day). Additive: without repeat_every the fragment is empty → other tasks'
+    # XML is unchanged.
     $rep = ""
     if ($repeatEvery) {
         $dur = if ($repeatFor) { $repeatFor } else { 'P1D' }
@@ -199,7 +226,7 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
 <CalendarTrigger>
       <StartBoundary>$start</StartBoundary>
       <Enabled>true</Enabled>
-      <ScheduleByWeek>
+      ${rep}<ScheduleByWeek>
         <WeeksInterval>1</WeeksInterval>
         <DaysOfWeek><$dow/></DaysOfWeek>
       </ScheduleByWeek>
@@ -213,7 +240,7 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
 <CalendarTrigger>
       <StartBoundary>$start</StartBoundary>
       <Enabled>true</Enabled>
-      <ScheduleByMonth>
+      ${rep}<ScheduleByMonth>
         <DaysOfMonth><Day>$d</Day></DaysOfMonth>
         <Months><January/><February/><March/><April/><May/><June/><July/><August/><September/><October/><November/><December/></Months>
       </ScheduleByMonth>
@@ -280,6 +307,15 @@ function Build-TaskXml([hashtable]$task, [string]$wantedExec, [string]$wantedArg
 "@
 }
 
+# Quote one argument for a Task Scheduler <Arguments> string: wrap in double
+# quotes when it contains whitespace or a quote, and escape any embedded double
+# quote by doubling it (""), the form the CRT/cmd unquoting understands. Without
+# this, a value like `foo "bar"` produced an unbalanced command line.
+function Quote-Arg([string]$a) {
+    if ($a -match '[\s"]') { return '"' + ($a -replace '"', '""') + '"' }
+    return $a
+}
+
 # ── action builder ───────────────────────────────────────────────────────────
 # kind=bash|python|cmd  → wscript.exe + local _run-hidden.vbs (hidden window)
 # kind=vbs              → wscript.exe <script.vbs>
@@ -291,13 +327,11 @@ function Build-Action([hashtable]$task, [string]$launcher) {
     $script = $task.script
     $rest = ''
     if ($task.script_args -and $task.script_args.Count -gt 0) {
-        $rest = ' ' + (($task.script_args | ForEach-Object {
-            if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
-        }) -join ' ')
+        $rest = ' ' + (($task.script_args | ForEach-Object { Quote-Arg "$_" }) -join ' ')
     }
     if ($kind -eq 'exec') {
         if (-not $task.execute) { throw "kind=exec requires 'execute:' field in task $($task.name)" }
-        $execArgs = if ($script -match '^/' -or $script -match '\s/c\s') { $script } else { '"' + $script + '"' }
+        $execArgs = if ($script -match '^/' -or $script -match '\s/c\s') { $script } else { '"' + ($script -replace '"', '""') + '"' }
         return @{ execute=$task.execute; arguments=($execArgs + $rest); work_dir=$null }
     }
     if ($kind -eq 'vbs') {

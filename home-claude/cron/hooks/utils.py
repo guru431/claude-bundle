@@ -1027,6 +1027,49 @@ def extract_first_json_array(text: str) -> str | None:
     return None
 
 
+def extract_first_json_object(text: str) -> str | None:
+    """Extract the FIRST complete JSON object via brace balancing.
+
+    Sibling of extract_first_json_array for prompts that ask for a single
+    object ({...}) rather than an array. Strips a markdown fence at the edges,
+    then returns the first balanced {...}, honoring strings and escapes so a
+    brace inside a string value doesn't end the object early. More robust than a
+    greedy `\\{.*\\}` regex, which over-captures when the object is followed by
+    prose or a second object.
+    """
+    text = re.sub(r'^\s*```(?:json)?\s*', '', text)
+    text = re.sub(r'\s*```\s*$', '', text)
+
+    depth = 0
+    start = None
+    in_string = False
+    escape = False
+
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            if start is None:
+                start = i
+                depth = 1
+            else:
+                depth += 1
+        elif ch == '}' and start is not None:
+            depth -= 1
+            if depth == 0:
+                return text[start:i+1]
+    return None
+
+
 def _ensure_list(parsed) -> list:
     """Callers iterate the result as a list of dicts — anything else (an LLM
     returning a bare object/string) must become [] here, not an AttributeError

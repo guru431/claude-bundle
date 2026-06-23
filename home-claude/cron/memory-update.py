@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
     SKIP_JSONL_PROJECTS,
     dir_to_project,
+    extract_first_json_object,
     is_dry_run,
     is_subagent_jsonl,
     llm_call,
@@ -177,12 +178,12 @@ JSON only, no markdown wrapper, no commentary."""
         log("USER.md: llm_call returned empty")
         return False
 
-    m = re.search(r"\{[\s\S]*\}", out)
-    if not m:
+    obj = extract_first_json_object(out)
+    if not obj:
         log(f"USER.md: JSON not found in response ({out[:200]!r})")
         return True
     try:
-        data = json.loads(m.group())
+        data = json.loads(obj)
     except json.JSONDecodeError as e:
         log(f"USER.md: parse error: {e}")
         return True
@@ -241,12 +242,12 @@ JSON only, no markdown wrapper."""
         log("cross-notes: llm_call returned empty")
         return
 
-    m = re.search(r"\{[\s\S]*\}", out)
-    if not m:
+    obj = extract_first_json_object(out)
+    if not obj:
         log(f"cross-notes: JSON not found ({out[:200]!r})")
         return
     try:
-        data = json.loads(m.group())
+        data = json.loads(obj)
     except json.JSONDecodeError as e:
         log(f"cross-notes: parse error: {e}")
         return

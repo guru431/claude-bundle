@@ -6,6 +6,11 @@ tier 2 if you want the wiki + cron pipeline.
 The primary target is **Windows 10/11 + VS Code + Git Bash**. Linux /
 macOS notes at the bottom.
 
+> **Working on the bundle itself (not just deploying it)?** Run
+> `scripts/enable-guard.sh` (or `scripts/enable-guard.ps1`) once after
+> cloning — it activates the pre-commit secret-guard so nothing private
+> can leak into a commit to this public repo.
+
 ---
 
 ## Lite vs Full — pick a profile
@@ -30,6 +35,13 @@ agent instructions.
 In the step-by-step sections the **Tier 1 / Tier 2** names stay.
 Lite = Tier 1 steps 1–3, 5, 6 (skip the hooks in step 4).
 Full = all of Tier 1 + all of Tier 2.
+
+**Shortcut (Windows):** `powershell -File scripts/install.ps1` runs the
+whole sequence below — copy config, stamp `.bundle-version`, create
+`.env`, bootstrap the registry, optionally `save-cred` + `sync`, then
+self-test. Pass `-Profile lite|full`; `-NonInteractive` skips the
+elevation steps. **macOS/Linux lite:** `scripts/install-lite.sh`. The
+manual steps below stay as the reference.
 
 ---
 
@@ -260,7 +272,7 @@ the cue to populate `KNOWN_PROJECTS`.
 ```
 
 This auto-elevates to UAC once for the whole batch, then idempotently
-registers (or updates) all 11 tasks from `registry.yaml`. Output goes
+registers (or updates) all 12 tasks from `registry.yaml`. Output goes
 to `%TEMP%\sync-tasks_<timestamp>.log`.
 
 ### 14. Verify
@@ -367,25 +379,38 @@ it, the hook is wrong for you.
 
 ## Linux / macOS notes
 
-The Python and Bash parts of the cron pipeline are portable. The
-Windows-specific parts (Task Scheduler integration, DPAPI password
-stashing) are not.
+The Python and Bash parts of the cron pipeline are portable. Only the
+Windows-specific layer (Task Scheduler, DPAPI password stashing) is
+replaced.
 
-For Tier 1, just use `~/.claude/` instead of `$env:USERPROFILE\.claude`
-and skip the `CLAUDE.md` "File Encoding — BOM Rules" section (harmless
-to keep, but inert).
+**Tier 1 (lite)** — fully supported, OS-agnostic:
 
-For Tier 2 on Linux:
-- Use `crontab -e` instead of Task Scheduler. Translate each entry in
-  `registry.yaml` to a crontab line manually. The hooks
-  (`session-start.py`, `session-end.py`, `pre-compact.py`) and the wiki
-  compilers will work as-is.
-- DPAPI doesn't exist; cron has no equivalent — your password isn't
-  needed because cron runs as your user.
+```bash
+scripts/install-lite.sh          # copies config into ~/.claude, stamps the version
+# or: CLAUDE_HOME=/custom/path scripts/install-lite.sh
+```
 
-For Tier 2 on macOS:
-- Use LaunchAgents (`~/Library/LaunchAgents/`). One plist per task.
+**Tier 2 (full)** — the wiki + cron scripts run as-is; generate scheduler
+units from the same `registry.yaml` instead of Task Scheduler:
 
-I'd accept PRs that translate the registry-driven approach to
-crontab/LaunchAgents — keep the same `registry.yaml` shape, add a
-new syncer.
+```bash
+# Linux (systemd) — writes <name>.service + <name>.timer:
+python scripts/gen-scheduler.py --target systemd --install-path ~/.claude --out-dir units
+# macOS (launchd) — writes com.claude-bundle.<name>.plist:
+python scripts/gen-scheduler.py --target launchd --install-path ~/.claude --out-dir units
+```
+
+It prints the `systemctl --user enable --now` / `launchctl load` commands
+to finish. Disabled registry tasks are skipped (pass `--all` to include
+them); Windows-only kinds (`cmd`/`vbs`/`exec`) are skipped with a note.
+DPAPI / password stashing isn't needed — systemd/launchd run as your user.
+
+The hooks (`session-start.py`, `session-end.py`, `pre-compact.py`) and the
+wiki compilers work unchanged on POSIX.
+
+## Versioning
+
+The bundle carries a top-level `VERSION` file (semver). The installers
+copy it to `~/.claude/.bundle-version`; `scripts/self-test.ps1` compares
+the deployed stamp against the source and warns when a deployment is
+behind. To update a deployment, re-run the installer — it re-stamps.

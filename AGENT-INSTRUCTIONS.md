@@ -25,6 +25,11 @@ to `...\WindowsApps\python.exe` is the Microsoft Store stub, **not** a
 real Python) — Full can't run. Deploy Lite and tell the user exactly
 what to install before Full is possible.
 
+> If you cloned this repo to extend it (rather than only deploy it),
+> activate the secret-guard first: `scripts/enable-guard.sh` (or `.ps1`).
+> It sets `core.hooksPath` and seeds a `.sanitize-patterns.md` reference,
+> so no private data can leak into a commit.
+
 ---
 
 ## 0. Identify the machine
@@ -250,7 +255,7 @@ Profile: <lite | full>
 Lite:   deployed CLAUDE.md, settings.json, skills (templates — paths
         still need filling), commands (1 wired). Hooks: <skipped / X-of-Y
         enabled>.
-Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/11 tasks
+Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/12 tasks
         with Task Scheduler. LLM provider: <provider>. Telegram alerts:
         <yes/no>.   (omit this line for a lite-only deploy)
 Open items: <list of placeholders that still need real values, e.g.

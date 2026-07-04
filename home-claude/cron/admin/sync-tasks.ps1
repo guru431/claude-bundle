@@ -146,7 +146,6 @@ function Parse-RegistryYaml([string]$path) {
                 runlevel = 'limited'
                 logon_type = 'password'
                 hidden = $true
-                notify_telegram = $false
                 timeout_hours = 72
                 enabled = $true
                 script_args = @()
@@ -356,6 +355,8 @@ function Get-CurrentSummary([string]$name) {
         daysOfWeek = ($t.Triggers | Select-Object -First 1).DaysOfWeek
         startBoundary = ($t.Triggers | Select-Object -First 1).StartBoundary
         bootDelay = "$(($t.Triggers | Select-Object -First 1).Delay)"
+        repeatInterval = "$(($t.Triggers | Select-Object -First 1).Repetition.Interval)"
+        repeatDuration = "$(($t.Triggers | Select-Object -First 1).Repetition.Duration)"
         restartCount = "$($t.Settings.RestartCount)"
         restartInterval = "$($t.Settings.RestartInterval)"
         user = $t.Principal.UserId
@@ -377,6 +378,14 @@ function Get-CurrentSummary([string]$name) {
 function Normalize-TaskArgs([string]$s) {
     if (-not $s) { return '' }
     return ($s -replace '\s+', ' ').Trim()
+}
+
+# ISO-8601 duration (PT4H, P1D, ...) → TimeSpan, so a repetition compare is
+# normalization-proof: Task Scheduler may re-emit P1D as PT24H (same span).
+# Empty / unparseable → TimeSpan.Zero (treated as "no repetition").
+function ConvertTo-DurationSpan([string]$iso) {
+    if (-not $iso) { return [TimeSpan]::Zero }
+    try { return [System.Xml.XmlConvert]::ToTimeSpan($iso) } catch { return [TimeSpan]::Zero }
 }
 
 # ── mapped-drive predicate ───────────────────────────────────────────────────
@@ -478,7 +487,13 @@ foreach ($task in $reg.tasks) {
     $dow_needs_change = $false
     $delay_needs_change = $false
     $restart_needs_change = $false
+    $repeat_needs_change = $false
     $wantedDelay = if ($task.startup_delay) { "$($task.startup_delay)" } else { '' }
+    $wantedRepeatEvery = if ($task.repeat_every) { "$($task.repeat_every)" } else { '' }
+    # Build-XmlTrigger defaults repeat_for to P1D whenever repeat_every is set.
+    $wantedRepeatFor = if ($task.repeat_every) {
+        if ($task.repeat_for) { "$($task.repeat_for)" } else { 'P1D' }
+    } else { '' }
     $wantedRestartCount = if ($task.restart_count) { "$([int]$task.restart_count)" } else { '0' }
     $wantedRestartInterval = if ($task.restart_count -and [int]$task.restart_count -gt 0) {
         if ($task.restart_interval) { "$($task.restart_interval)" } else { 'PT1M' }
@@ -499,6 +514,13 @@ foreach ($task in $reg.tasks) {
         $delay_needs_change = ("$($current.bootDelay)" -ne $wantedDelay)
         $restart_needs_change = ("$($current.restartCount)" -ne $wantedRestartCount) -or `
             ($wantedRestartCount -ne '0' -and "$($current.restartInterval)" -ne $wantedRestartInterval)
+        # Repetition (<Repetition> Interval/Duration): every other trigger
+        # attribute is compared but this one was not, so editing repeat_every /
+        # repeat_for in the registry never propagated. Compare as durations
+        # (empty-vs-empty when unset).
+        $repeat_needs_change =
+            ((ConvertTo-DurationSpan $current.repeatInterval) -ne (ConvertTo-DurationSpan $wantedRepeatEvery)) -or `
+            ((ConvertTo-DurationSpan $current.repeatDuration) -ne (ConvertTo-DurationSpan $wantedRepeatFor))
         # Compare trigger TYPE (Daily→Weekly etc. must not report "unchanged").
         # Monthly registers via XML, but Task Scheduler reads it back as
         # MSFT_TaskMonthlyTrigger — without this branch Monthly tasks would be
@@ -529,7 +551,7 @@ foreach ($task in $reg.tasks) {
         }
     }
     $verb = if ($current) {
-        if ($Force -or $action_needs_change -or $enabled_needs_change -or $desc_needs_change -or $logontype_needs_change -or $swa_needs_change -or $runlevel_needs_change -or $hidden_needs_change -or $timeout_needs_change -or $trigger_needs_change -or $triggertype_needs_change -or $dow_needs_change -or $delay_needs_change -or $restart_needs_change) { 'updated' } else { 'unchanged' }
+        if ($Force -or $action_needs_change -or $enabled_needs_change -or $desc_needs_change -or $logontype_needs_change -or $swa_needs_change -or $runlevel_needs_change -or $hidden_needs_change -or $timeout_needs_change -or $trigger_needs_change -or $triggertype_needs_change -or $dow_needs_change -or $delay_needs_change -or $restart_needs_change -or $repeat_needs_change) { 'updated' } else { 'unchanged' }
     } else { 'created' }
 
     Write-Host ("[{0,-9}] {1}" -f $verb, $task.name) -ForegroundColor (

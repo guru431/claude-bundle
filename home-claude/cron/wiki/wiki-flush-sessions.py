@@ -515,14 +515,26 @@ def main():
         new_sections = "\n".join(daily_lines[2:]).strip()
         daily_path.write_text(existing + "\n\n" + new_sections + "\n", encoding="utf-8")
         log(f"Daily log: {daily_path} (appended to existing)")
-        if DATE in state_get("compile_sessions", "compiled_dailies"):
-            # find_uncompiled_dailies would otherwise skip this date forever,
-            # stranding the appended sections — clear the marker so the next
-            # compile run reprocesses the daily.
+        # A same-day append adds delta for projects that may already be compiled.
+        # compile-sessions skips a daily via compiled_dailies AND skips a project
+        # via its DATE#project pair marker — clearing must cover BOTH. Crucially the
+        # pair markers can exist even when the daily is NOT in compiled_dailies (a
+        # PARTIAL compile: project A succeeded and got pair-marked while sibling B
+        # failed, so the daily itself stays uncompiled). So clear this date's
+        # DATE# pair markers unconditionally on any append — otherwise A's appended
+        # delta is skipped forever — and drop DATE from compiled_dailies if present.
+        removed_daily = DATE in state_get("compile_sessions", "compiled_dailies")
+        if removed_daily:
             state_remove("compile_sessions", "compiled_dailies", [DATE])
-            log(f"{DATE}.md was already marked compiled — removed it from "
-                f"compiled_dailies so compile-sessions reprocesses the appended "
-                f"sections.")
+        stale_pairs = [p for p in state_get("compile_sessions", "compiled_pairs")
+                       if p.startswith(f"{DATE}#")]
+        if stale_pairs:
+            state_remove("compile_sessions", "compiled_pairs", stale_pairs)
+        if removed_daily or stale_pairs:
+            log(f"{DATE}.md had prior compile state — cleared "
+                f"{'compiled_dailies and ' if removed_daily else ''}"
+                f"{len(stale_pairs)} pair marker(s) so compile-sessions "
+                f"reprocesses the appended sections.")
     else:
         daily_path.write_text("\n".join(daily_lines), encoding="utf-8")
         log(f"Daily log: {daily_path}")

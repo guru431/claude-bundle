@@ -1,6 +1,6 @@
 # Cron architecture (Windows Task Scheduler)
 
-The bundle ships 11 scheduled tasks (two disabled by default) managed
+The bundle ships 12 scheduled tasks (three disabled by default) managed
 declaratively through one YAML file. This document explains the moving parts.
 
 ## The big picture
@@ -102,10 +102,10 @@ changes the second time.
 
 ## What ships in the bundle
 
-11 tasks (two — `ClaudeWikiCompileKB` and `ClaudeMd2PdfSync` — ship
-`enabled: false`). Edit `registry.yaml` to disable any others you don't
-want before running
-`sync.cmd` the first time.
+12 tasks (three — `ClaudeWikiCompileKB`, `ClaudeMd2PdfSync` and
+`ClaudeWarmWindow` — ship `enabled: false`). Edit `registry.yaml` to
+disable any others you don't want before running `sync.cmd` the first
+time.
 
 | Task | Trigger | What it does |
 |---|---|---|
@@ -120,11 +120,12 @@ want before running
 | `ClaudeGitPushAll` | Daily 07:00 | auto-push your project repos |
 | `ClaudeHealthcheck` | Daily 09:00 | morning self-check |
 | `ClaudeTaskMonitor` | Daily 09:30 | alert on failed Task Scheduler jobs |
+| `ClaudeWarmWindow` | Daily 01:00 /4h | ping the Claude 5h window (off by default — read the billing note in the script) |
 
 The pipeline writes to Telegram only on failure (no spam on success).
 Configure `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in your `.env` to
-receive alerts (or remove `notify_telegram: true` from registry entries
-to silence them).
+receive alerts — leave those two vars unset to silence every alert (the
+scripts self-guard on their presence).
 
 ## Adapting for your machine
 

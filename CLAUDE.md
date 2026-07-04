@@ -63,12 +63,19 @@ preserve that discipline.
 │   └── AGENTS-per-project.template.md
 ├── scripts/
 │   ├── claude-switch.ps1               env-driven provider switcher
+│   ├── install.ps1                     guided full/lite installer (Windows)
+│   ├── install-lite.sh                 lite installer (macOS/Linux)
+│   ├── gen-scheduler.py                systemd/launchd units from registry.yaml
 │   ├── self-test.ps1                   offline sanity check (one command)
+│   ├── check-doc-counts.py             CI guard: docs match registry task count
+│   ├── enable-guard.{sh,ps1}           activate the pre-commit secret-guard
 │   └── bootstrap-registry.ps1          fill registry.yaml placeholders
 ├── config/
 │   └── llm-providers.example.env       env template (committed; no values)
+├── tests/test_pipeline.py              pytest pipeline smoke test (mock provider)
+├── VERSION, requirements-dev.txt       semver stamp + test deps
 ├── .githooks/pre-commit                secret-guard hook (git config core.hooksPath .githooks)
-├── .github/workflows/ci.yml            lint + secret-guard + shellcheck CI
+├── .github/workflows/ci.yml            lint + secret-guard + shellcheck + pytest CI
 ├── docs/                               long-form docs referenced from
 │   ├── wiki-method.md                  rules files and INSTALL
 │   ├── cron-architecture.md
@@ -117,7 +124,10 @@ This grep is now **automated** by the `pre-commit` hook at
 grep plus a generic scan for key/token formats (PEM, `ghp_`,
 `github_pat_`, `AKIA`, `sk-…`, JWT, Telegram bot tokens) and blocks
 commits of sensitive filenames (`.env`, `*.pem`, `id_rsa`, …). Activate
-it once per clone:
+it once per clone — the one-command way is
+[`scripts/enable-guard.sh`](scripts/enable-guard.sh) (or
+`scripts/enable-guard.ps1`), which sets the hook path and seeds a local
+`.sanitize-patterns.md` reference. The bare equivalent:
 
 ```bash
 git config core.hooksPath .githooks
@@ -192,9 +202,12 @@ file that gets committed. Its values must all be empty.
   "File Encoding" section).
 
 CI (`.github/workflows/ci.yml`) runs JSON/YAML validation, Python
-compileall, a PowerShell parse, shellcheck, the hook smoke tests and a
-generic secret-format scan on every push/PR. Keep it independent of any
-specific LLM provider — anyone forking the repo should be able to run it.
+compileall, a PowerShell parse, shellcheck, the hook smoke tests, the
+doc/registry count guard (`scripts/check-doc-counts.py`), the offline
+pipeline smoke test (`tests/`, `WIKI_LLM_PROVIDER=mock`) and a generic
+secret-format scan (sourced from `home-claude/cron/lib/secret-scan.sh`)
+on every push/PR. Keep it independent of any specific LLM provider —
+anyone forking the repo should be able to run it.
 
 ## Mirror / remote setup
 

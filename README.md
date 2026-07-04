@@ -13,7 +13,7 @@ optional Python hooks.)
 **Full** (~30–60 minutes): on top of lite, add the Python hooks, a
 Karpathy-style wiki vault, a registry-driven Windows Task Scheduler
 automation, an LLM provider switcher (`claude-switch.ps1`), an
-`AGENTS.md` mirror for Codex CLI, and 11 scheduled tasks (two disabled
+`AGENTS.md` mirror for Codex CLI, and 12 scheduled tasks (three disabled
 by default) that flush Claude Code sessions into the wiki overnight. Needs Python 3.10+, Git,
 and at least one LLM provider key. (Tier 1 + Tier 2 below.)
 
@@ -53,7 +53,7 @@ claude-bundle/
 │   │   ├── kb/{concepts,tools,people}/ external knowledge
 │   │   └── daily/.pending/             staging area
 │   ├── bin/_run-hidden.vbs             hidden-window launcher for Task Scheduler
-│   └── cron/                           cron foundation + wiki pipeline + 11 tasks
+│   └── cron/                           cron foundation + wiki pipeline + 12 tasks
 │       ├── hooks/utils.py              shared LLM_call, JSONL parsing, wiki utils
 │       ├── hooks/session-{start,end}.py  inject wiki context / dump session
 │       ├── hooks/pre-compact.py        LLM-summarized handoff before compaction
@@ -67,8 +67,9 @@ claude-bundle/
 │       ├── claude-task-monitor.sh      alert on failed Task Scheduler jobs
 │       ├── git-push-all.sh             auto-push project repos
 │       ├── claude-healthcheck.sh       morning self-check
+│       ├── claude-warm-window.sh       ping the Claude 5h window (off by default)
 │       ├── memory-update.py            JSONL → memory MD
-│       ├── registry.yaml               11 tasks declared here
+│       ├── registry.yaml               12 tasks declared here
 │       └── admin/                      idempotent sync + DPAPI cred saver
 │           ├── sync.cmd, sync-tasks.ps1
 │           └── save-cred.cmd, save-cred.ps1
@@ -79,11 +80,19 @@ claude-bundle/
 │
 ├── scripts/
 │   ├── claude-switch.ps1              switch session backend (Claude/DS/MM/OCG/Ollama/CCR)
+│   ├── install.ps1                    guided full/lite installer (Windows)
+│   ├── install-lite.sh               lite installer (macOS/Linux)
+│   ├── gen-scheduler.py              emit systemd/launchd units from registry.yaml
 │   ├── self-test.ps1                  one-command offline sanity check
+│   ├── check-doc-counts.py           CI guard: docs match the registry task count
+│   ├── enable-guard.sh / .ps1        activate the pre-commit secret-guard
 │   └── bootstrap-registry.ps1         fill registry.yaml placeholders + path policy
 │
 ├── config/
 │   └── llm-providers.example.env      env template (copy to ~/.claude/.env)
+│
+├── tests/                             pytest pipeline smoke test (mock LLM provider)
+├── VERSION, requirements-dev.txt
 │
 ├── .githooks/pre-commit               secret-guard hook (activate: git config core.hooksPath .githooks)
 ├── .github/workflows/ci.yml           lint + secret-guard + shellcheck CI
@@ -125,8 +134,8 @@ from your real Claude Code sessions:
   and refreshes the stats table in `wiki/index.md`
 - A lint script catches broken links, orphan pages, missing frontmatter
 
-A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 11
-scheduled jobs (two disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
+A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 12
+scheduled jobs (three disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
 real `Register-ScheduledTask` calls — idempotent, marked, hidden
 windows, Password-mode by default (runs before login → survives
 overnight reboots).
@@ -148,6 +157,11 @@ only — cron jobs will never silently burn your subscription.
   key the bundle reads, where to get it, and which component uses it.
 
 ## Quick start
+
+**Automated:** `scripts/install.ps1` (Windows — guided lite or full) or
+`scripts/install-lite.sh` (macOS/Linux — lite). Both stamp
+`~/.claude/.bundle-version` and run the self-test. The manual steps below
+are the fallback / reference.
 
 ### If you only want the minimal tier
 
@@ -177,7 +191,7 @@ See [`INSTALL.md`](INSTALL.md) — ~15 steps, includes:
 - Running `cron/admin/save-cred.cmd` to DPAPI-stash your Windows password
 - Filling `registry.yaml` placeholders (`<bundle-install-path>`, `<user>`)
   — automatable via `scripts/bootstrap-registry.ps1`
-- Running `cron/admin/sync.cmd` to register all 11 tasks
+- Running `cron/admin/sync.cmd` to register all 12 tasks
 - Adapting `codex/AGENTS.md` if you also run Codex CLI
 
 Before deploying, run `powershell -File scripts/self-test.ps1` for a quick
@@ -213,9 +227,12 @@ status).
   - Claude can be used but is **opt-in** for cron — see [`docs/llm-routing.md`](docs/llm-routing.md)
 - Telegram bot + chat_id (optional, for alerts)
 
-Linux / macOS for the full tier needs cron + LaunchAgent equivalents
-(not bundled — adapt the scripts; the Python and Bash parts are
-portable).
+Linux / macOS **lite** tier is fully supported via
+`scripts/install-lite.sh` (config only, OS-agnostic). For the **full**
+tier, `scripts/gen-scheduler.py` emits systemd `.timer`/`.service` units
+(Linux) or launchd `.plist` files (macOS) from the same OS-neutral
+`registry.yaml` — the Python and Bash parts of the pipeline are
+portable; only the Windows Task Scheduler layer is replaced.
 
 ## Troubleshooting — common first failures
 

@@ -73,7 +73,6 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: true
     timeout_hours: 72
 
   - name: ClaudeWikiFlush
@@ -86,7 +85,6 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: true
     timeout_hours: 72
 
   - name: ClaudeWikiCompileKB
@@ -99,7 +97,6 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: true
     timeout_hours: 72
     enabled: false
 
@@ -113,7 +110,6 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: true
     timeout_hours: 72
 
   - name: ClaudeWikiBuildIndex
@@ -126,7 +122,6 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: true
     timeout_hours: 72
 
   - name: ClaudeMd2PdfSync
@@ -139,7 +134,6 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: true
     timeout_hours: 2
     enabled: false
 
@@ -153,7 +147,6 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: true
     timeout_hours: 72
 
   - name: ClaudeHealthcheck
@@ -166,7 +159,6 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: true
     timeout_hours: 72
 
   - name: ClaudeTaskMonitor
@@ -179,7 +171,6 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: true
     timeout_hours: 72
 
   - name: ClaudeWikiLint
@@ -192,7 +183,6 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: true
     timeout_hours: 72
 
   - name: ClaudeLogRetention
@@ -205,7 +195,6 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: false
     timeout_hours: 1
 
   - name: ClaudeWarmWindow
@@ -220,6 +209,5 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    notify_telegram: false
     timeout_hours: 1
     enabled: false

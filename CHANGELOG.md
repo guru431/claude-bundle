@@ -1,5 +1,69 @@
 # Changelog
 
+Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
+are date-headed and predate the `VERSION` file.
+
+## [0.1.0] - 2026-07-04 — audit batch: 11 findings fixed, 7 ideas shipped, first versioned release
+
+First tagged release. Introduces semver: a top-level `VERSION` file, a
+`.bundle-version` stamp written by the installers, and a self-test staleness
+check. Resolves the 2026-07-04 adversarial multi-lens audit in full — all 11
+FINDINGS and all 7 IDEAS. `FINDINGS.md` and `IDEAS.md` are now empty.
+
+### Findings fixed
+
+- **`bin/_run-hidden.vbs` — resolve the interpreter, not a bare name** (P2): the
+  launcher ran `bash`/`python` by bare name, which a Password task's session-0
+  system PATH may not resolve (Git\bin is off it by default). Now resolves
+  `C:\Program Files\Git\bin\bash.exe` / `python.exe` with `BASH_EXE`/`PYTHON_EXE`
+  overrides, matching the peer cron scripts.
+- **Scheduled-task count drift** (P2): the registry had grown to 12 tasks / 3
+  disabled while every doc still said "11 (two disabled)". Corrected README,
+  INSTALL, AGENT-INSTRUCTIONS and docs/cron-architecture, added the missing
+  `ClaudeWarmWindow` to the task table + README cron-tree.
+- **compile-sessions silent content drop** (P3): when the LLM returned changes but
+  `normalize_wiki_path` rejected every path, the pair was marked compiled and
+  logged an innocuous "→ 0 changes". Now emits the same loud content-dropped ERROR
+  wiki-compile-kb already does (stderr + log).
+- **flush same-day append stranding** (P3): a same-day re-flush cleared
+  `compiled_dailies` but not the per-project `compiled_pairs`, so compile-sessions
+  re-listed the daily yet skipped every already-compiled project. Now also drops
+  the `DATE#…` pair markers.
+- **sync-tasks.ps1 — repetition never compared** (P3): editing `repeat_every` /
+  `repeat_for` never propagated. Now compared as durations (normalization-proof,
+  so a P1D↔PT24H re-emit isn't a phantom change).
+- **`notify_telegram` removed** (P3): a per-task registry field nothing read, with
+  a doc falsely claiming removing it silenced alerts. Dropped from all 12 entries +
+  the parser default; the doc now says alerts are gated only by the Telegram env vars.
+- **git-push-all.sh alert gate** (P3): the three Telegram alerts fired only under
+  `[ -x telegram-send.sh ]`, false on POSIX/CI (the file ships 100644). Changed to
+  `[ -f ]`, matching the ungated peer scripts.
+- **claude-warm-window.sh `.env` fallback** (P3): added the bundle-`.env` parser so
+  `CLAUDE_BIN` resolves in session 0 (now documented in the env template).
+- **`WIKI_LOG_RETENTION_DAYS`** (P3): added to the env template (read but undocumented).
+- **md2pdf-sync.py interpreter var** (P3): now `CLAUDE_HOOK_PYTHON or PYTHON_EXE or
+  sys.executable`, closing the drift while keeping the twin-hook override.
+
+### Ideas shipped
+
+- **Doc-count CI guard** — `scripts/check-doc-counts.py` derives the task count from
+  `registry.yaml` and fails on doc drift; wired into CI and self-test.
+- **DRY secret-scan** — CI now sources `home-claude/cron/lib/secret-scan.sh` instead
+  of inlining a second copy of the token regex.
+- **Secret-guard bootstrap** — `scripts/enable-guard.{sh,ps1}` activate the
+  pre-commit hook + seed a local `.sanitize-patterns.md`; self-test warns when the
+  hook is inactive.
+- **Pipeline smoke test** — a `mock` LLM provider (`WIKI_LLM_PROVIDER=mock`, reads
+  `WIKI_LLM_MOCK_RESPONSE`) plus `tests/test_pipeline.py` drive compile-sessions →
+  build-index → lint offline; wired into CI via `requirements-dev.txt`.
+- **Version stamping** — `VERSION` + `.bundle-version` + self-test staleness check.
+- **Guided installer** — `scripts/install.ps1` (lite/full, `-NonInteractive`).
+- **POSIX support** — `scripts/install-lite.sh` (lite) and `scripts/gen-scheduler.py`
+  (systemd/launchd units from the OS-neutral registry) for the full tier.
+
+Sanitization: all new files use placeholders / env vars only — no hostnames,
+usernames, keys, or private paths. Secret-format scan clean.
+
 ## 2026-06-23 — Kimi K2.7 review batch (7 fixes, 6 false positives)
 
 Resolved the 7 open P3 findings from the 2026-06-23 Kimi K2.7 (`kimi-k2.7-code`

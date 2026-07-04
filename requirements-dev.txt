@@ -1,0 +1,4 @@
+# Dev/test-only dependencies (CI + local `pytest tests/`).
+# Runtime deps are in requirements.txt; the pipeline smoke test uses the offline
+# `mock` LLM provider, so it needs no provider SDK — just a test runner.
+pytest>=7

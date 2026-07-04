@@ -367,17 +367,29 @@ def main():
                                         project=project,
                                         blind_update=bodies_withheld)
                 total_changes += len(applied)
-                log(f"  [{project}] → {len(applied)} changes" + ("" if complete else " (partial — a part failed)"))
+                if not applied:
+                    # The LLM produced changes but normalize_wiki_path rejected
+                    # EVERY path (bare filenames, <3 path parts, ...) → this
+                    # section's content was dropped. Mirror wiki-compile-kb and
+                    # make LOUD noise instead of the old innocuous "→ 0 changes"
+                    # log line, which hid the loss.
+                    print(f"  ERROR compile-sessions [{project}] daily {daily_path.stem}: "
+                          f"{len(changes)} changes, 0 applied (all paths rejected by "
+                          f"normalize_wiki_path) — content dropped", file=sys.stderr)
                 if complete:
                     # Record the pair immediately — on retry of this daily, a
-                    # succeeded project is skipped rather than re-compiled.
+                    # succeeded project is skipped rather than re-compiled. An
+                    # all-rejected drop (above) is deterministic, so marking it
+                    # too avoids re-running the LLM on it every night forever.
                     state_add("compile_sessions", "compiled_pairs", [marker])
                     compiled_pairs.add(marker)
+                    drop = "" if applied else f" — 0 applied of {len(changes)} (content dropped)"
+                    log(f"  [{project}] → {len(applied)} changes{drop}")
                 else:
                     # A part failed — the pair stays unmarked, the retry redoes
                     # the whole project (succeeded parts overwrite idempotently).
                     failed += 1
-                    log(f"  [{project}] → partial failure, pair NOT marked — retry next run")
+                    log(f"  [{project}] → partial failure ({len(applied)} applied), pair NOT marked — retry next run")
             elif complete:
                 # Empty result, but every part ran (LLM extracted nothing) —
                 # mark the pair so an empty daily is not retried forever.

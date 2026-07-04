@@ -57,7 +57,7 @@ guard_protected_deletions() {
     while IFS= read -r p; do
         [ -n "$p" ] && git reset -q HEAD -- "$p" >> "$LOG_FILE" 2>&1
     done <<< "$deleted"
-    if [ -x "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+    if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
         bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: blocked auto-delete of protected file(s) in [$label]:
 $deleted
 (left in the working tree, not committed — delete by hand)" >> "$LOG_FILE" 2>&1
@@ -77,7 +77,7 @@ guard_secrets() {
     echo "[$label] SECRET-shaped token blocked from auto-commit:" >> "$LOG_FILE"
     printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
     git reset -q HEAD >> "$LOG_FILE" 2>&1
-    if [ -x "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+    if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
         bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret in staged changes for [$label] — skipped (not committed, not pushed). Check by hand." >> "$LOG_FILE" 2>&1
     fi
     return 1
@@ -271,7 +271,7 @@ echo "" >> "$LOG_FILE"
 # Failed pushes must be visible: Telegram alert + exit 1 (so the task-monitor
 # catches a non-zero exit instead of every night reporting success).
 if [ "$failed" -gt 0 ]; then
-    if [ -x "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+    if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
         bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: $failed failed repos: $failed_repos" >> "$LOG_FILE" 2>&1
     fi
     exit 1

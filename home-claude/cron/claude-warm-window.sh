@@ -27,8 +27,31 @@ mkdir -p "$LOG_DIR"
 DATE=$(date +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/warm-window_${DATE}.log"
 
-# Locate the claude CLI. Override with CLAUDE_BIN if it isn't on PATH (e.g. when
-# this runs in session 0, before logon, where PATH may be trimmed).
+# Task Scheduler in session 0 has no user env, so CLAUDE_BIN from a shell profile
+# never reaches this script — read it from the bundle .env (same safe parser as
+# telegram-send.sh / git-push-all.sh).
+ENV_FILE="$BUNDLE_ROOT/.env"
+if [ -f "$ENV_FILE" ]; then
+    while IFS= read -r raw || [ -n "$raw" ]; do
+        line="${raw%$'\r'}"
+        case "$line" in
+            ''|\#*) continue ;;
+            export\ *) line="${line#export }" ;;
+        esac
+        key="${line%%=*}"
+        case "$key" in
+            *[!A-Za-z0-9_]*|'') continue ;;
+        esac
+        val="${line#*=}"
+        val="${val%\"}"; val="${val#\"}"
+        val="${val%\'}"; val="${val#\'}"
+        export "$key=$val"
+    done < "$ENV_FILE"
+fi
+
+# Locate the claude CLI. Override with CLAUDE_BIN (in the bundle .env or the
+# machine env) if it isn't on PATH — e.g. in session 0, before logon, where PATH
+# may be trimmed.
 CLAUDE="${CLAUDE_BIN:-$(command -v claude)}"
 
 echo "=== Warm-up $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$LOG_FILE"

@@ -63,7 +63,13 @@ WIKI_LLM_PROVIDER env var:
   "deepseek"  →  DeepSeek V4-Flash  →  on failure, OpenCode Go  →  None
   "opencode"  →  OpenCode Go (mimo-v2.5-pro)  →  None
   "claude"    →  claude CLI (sonnet)  →  None  [opt-in only]
+  "mock"      →  canned text from $WIKI_LLM_MOCK_RESPONSE  →  "[]"  [tests/CI]
 ```
+
+`mock` (like `claude`) is special-cased in `llm_call()`, not a `PROVIDERS`-table
+entry — it needs no key, endpoint or model. It returns the verbatim contents of
+the file named by `WIKI_LLM_MOCK_RESPONSE`, letting `tests/test_pipeline.py`
+drive the whole flush→compile→index→lint flow offline (see that test).
 
 The default is `deepseek`. **Claude is never the silent fallback** — the
 chain returns `None` (and the calling script logs an error) rather than

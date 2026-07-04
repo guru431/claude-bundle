@@ -57,12 +57,19 @@ jobs:
           print('script paths: all present')
           PY
 
+      - name: Doc/registry task-count guard
+        run: python scripts/check-doc-counts.py
+
       - name: Secret guard (high-confidence token formats)
         run: |
-          pattern='-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{16,}|ccr-[A-Za-z0-9]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|[0-9]{8,10}:[A-Za-z0-9_-]{35}'
+          # Single source of truth for the regex is
+          # home-claude/cron/lib/secret-scan.sh (also sourced by
+          # .githooks/pre-commit). Do NOT inline a second copy here — it drifts
+          # from the lib and silently weakens this cardinal-rule enforcement.
+          . home-claude/cron/lib/secret-scan.sh
           # -e is required: the pattern starts with '-----' which git would
           # otherwise read as an option. -I skips binary files.
-          hits=$(git grep -nIE -e "$pattern" -- . ':(exclude).githooks/' ':(exclude).github/' || true)
+          hits=$(git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/' ':(exclude).github/' || true)
           if [ -n "$hits" ]; then
             echo "$hits"
             echo "::error::Possible secret/token format found in tracked files"
@@ -82,6 +89,11 @@ jobs:
           else
             echo "shellcheck not available — skipped"
           fi
+
+      - name: Pipeline smoke test (offline mock LLM provider)
+        run: |
+          python -m pip install --quiet -r requirements-dev.txt
+          python -m pytest tests/ -q
 
   powershell:
     name: powershell syntax (windows)

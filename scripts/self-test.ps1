@@ -10,6 +10,8 @@
 #   7. Placeholders       — report unsubstituted <bundle-install-path>/<user>
 #   8. Preflight (WARN)   — Tier-2 Python deps (requests/PyYAML), Python ≥3.10,
 #                           and PROJECTS_ROOT when deployed under ~/.claude
+#   9. Doc counts         — scheduled-task count in docs matches registry.yaml
+#  10. Secret-guard (WARN)— pre-commit hook active (bundle source tree only)
 #
 # Exit code: 0 if all checks pass, 1 if any FAIL. Placeholder/skip = WARN (not a
 # failure) so a freshly-cloned template still self-tests green.
@@ -50,7 +52,17 @@ Write-Host ""
 Write-Host "=== claude-bundle self-test ===" -ForegroundColor Cyan
 Write-Host "Root:   $root"
 Write-Host "Python: $(if ($py) { $py } else { '(not found)' })"
+
+# Version banner: source VERSION vs the version stamped into a deployment.
+$verFile = Join-Path $root 'VERSION'
+$srcVer = if (Test-Path $verFile) { (Get-Content $verFile -Raw).Trim() } else { '(none)' }
+$deployedFile = Join-Path $env:USERPROFILE '.claude/.bundle-version'
+$deployedVer = if (Test-Path $deployedFile) { (Get-Content $deployedFile -Raw).Trim() } else { $null }
+Write-Host "Version: $srcVer (source)$(if ($deployedVer) { " | $deployedVer (deployed)" })"
 Write-Host ""
+if ($deployedVer -and $deployedVer -ne $srcVer) {
+    Warn "deployed bundle version ($deployedVer) differs from source ($srcVer) — re-run the installer to update"
+}
 
 # ── 1. JSON validity ─────────────────────────────────────────────────────────
 foreach ($rel in @('settings.json', 'settings.example-with-hooks.json')) {
@@ -152,6 +164,29 @@ if ($py) {
 # self-test runs from the bundle source tree).
 if ($root -match '[\\/]\.claude$' -and -not $env:PROJECTS_ROOT) {
     Warn "PROJECTS_ROOT unset — git-push-all.sh / md2pdf-sync.py refuse to run under ~/.claude without it (see config/llm-providers.example.env)"
+}
+
+# ── 9. Doc/registry task-count guard ─────────────────────────────────────────
+# The scheduled-task count is hand-copied into several docs; this guard derives
+# it from registry.yaml and fails on drift (scripts/check-doc-counts.py).
+if ($py) {
+    $dc = Join-Path $root 'scripts/check-doc-counts.py'
+    if (Test-Path $dc) {
+        $out = & $py $dc 2>&1
+        if ($LASTEXITCODE -eq 0) { Ok "doc counts match registry" }
+        else { Bad "doc/registry task-count drift:`n$out" }
+    }
+}
+
+# ── 10. Secret-guard hook activation (WARN; bundle source tree only) ─────────
+# The pre-commit secret-guard is inert until `git config core.hooksPath .githooks`
+# is set. Only meaningful from the bundle repo (the hook is never copied into a
+# ~/.claude deployment), so gate on .githooks + .git being present.
+$hook = Join-Path $root '.githooks/pre-commit'
+if ((Test-Path $hook) -and (Test-Path (Join-Path $root '.git'))) {
+    $hp = & git -C $root config core.hooksPath 2>$null
+    if ($hp -eq '.githooks') { Ok "secret-guard hook active (core.hooksPath=.githooks)" }
+    else { Warn "secret-guard hook not active — run scripts/enable-guard.ps1 (git config core.hooksPath .githooks)" }
 }
 
 # ── summary ──────────────────────────────────────────────────────────────────

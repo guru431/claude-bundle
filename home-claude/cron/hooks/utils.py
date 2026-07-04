@@ -526,10 +526,10 @@ def _provider_cfg(name: str) -> tuple[str, str, str]:
 # Default provider for wiki/memory scripts. `or "deepseek"` so an empty
 # WIKI_LLM_PROVIDER= line in .env falls back to the default, not "".
 LLM_PROVIDER = os.environ.get("WIKI_LLM_PROVIDER", "deepseek") or "deepseek"
-if LLM_PROVIDER not in set(PROVIDERS) | {"claude"}:
+if LLM_PROVIDER not in set(PROVIDERS) | {"claude", "mock"}:
     # A typo must not silently route to the default branch — warn loudly.
     print(f"WARNING: unknown WIKI_LLM_PROVIDER='{LLM_PROVIDER}' "
-          f"(valid: {', '.join(sorted(set(PROVIDERS) | {'claude'}))}) — using 'deepseek'",
+          f"(valid: {', '.join(sorted(set(PROVIDERS) | {'claude', 'mock'}))}) — using 'deepseek'",
           file=sys.stderr)
     LLM_PROVIDER = "deepseek"
 
@@ -624,6 +624,8 @@ def _log_provider_once() -> None:
         print(f"  [llm] provider=deepseek model={DEEPSEEK_MODEL} base={DEEPSEEK_BASE_URL} (fallback=opencode)", file=sys.stderr)
     elif LLM_PROVIDER == "claude":
         print("  [llm] provider=claude model=sonnet", file=sys.stderr)
+    elif LLM_PROVIDER == "mock":
+        print("  [llm] provider=mock (offline fixture responses)", file=sys.stderr)
 
 
 def is_dry_run(argv: list[str] | None = None) -> bool:
@@ -1213,6 +1215,8 @@ def llm_call(prompt: str, timeout: int = 600) -> str | None:
     a run than to burn a 5h subscription window.
     """
     _log_provider_once()
+    if LLM_PROVIDER == "mock":
+        return _llm_mock(prompt, timeout)
     if LLM_PROVIDER == "claude":
         return _llm_claude(prompt, timeout)
     if LLM_PROVIDER == "opencode":
@@ -1369,6 +1373,23 @@ def _llm_opencode(prompt: str, timeout: int = 600, fallback_from: str | None = N
                 continue
             return None
     return None
+
+
+def _llm_mock(prompt: str, timeout: int = 600) -> str | None:
+    """Deterministic offline provider for tests / CI (WIKI_LLM_PROVIDER=mock).
+
+    Returns the verbatim contents of the file named by WIKI_LLM_MOCK_RESPONSE, so
+    a fixture can drive the whole flush→compile pipeline with no network and no
+    API key. With no file set (or missing), returns "[]" — the "LLM extracted
+    nothing" path. The prompt is ignored on purpose.
+    """
+    path = os.environ.get("WIKI_LLM_MOCK_RESPONSE")
+    if path and os.path.isfile(path):
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return None
+    return "[]"
 
 
 def _llm_claude(prompt: str, timeout: int = 600) -> str | None:

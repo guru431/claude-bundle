@@ -100,9 +100,18 @@ if ($py) {
 if ($py) {
     $reg = Join-Path $home_claude 'cron/registry.yaml'
     $code = "import sys,yaml; d=yaml.safe_load(open(sys.argv[1],encoding='utf-8')); print(len(d.get('tasks',[])))"
-    $out = & $py -c $code $reg 2>&1
-    if ($LASTEXITCODE -eq 0) { Ok "registry.yaml parses ($($out.Trim()) tasks)" }
-    elseif ($out -match 'ModuleNotFoundError') { Warn "PyYAML not installed — skipped registry.yaml parse" }
+    # A missing PyYAML makes python print a ModuleNotFoundError traceback to
+    # stderr. Under $ErrorActionPreference='Stop', piping that via 2>&1 raises a
+    # terminating NativeCommandError in PS 5.1 and would kill the whole self-test
+    # before the WARN branch. Relax the preference just for this native call and
+    # decide on the exit code instead.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $out = (& $py -c $code $reg 2>&1 | Out-String).Trim()
+    $rc = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    if ($rc -eq 0) { Ok "registry.yaml parses ($out tasks)" }
+    elseif ($out -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped registry.yaml parse" }
     else { Bad "registry.yaml parse error: $out" }
 }
 
@@ -174,8 +183,11 @@ if ($py) {
         } else { Ok "Python version $ver (>= 3.10)" }
     }
     foreach ($mod in @('requests', 'yaml')) {
-        & $py -c "import $mod" 2>$null
-        if ($LASTEXITCODE -eq 0) { Ok "Python module importable: $mod" }
+        # find_spec returns None (no exception, no stderr) for a missing module,
+        # so this never trips the PS 5.1 native-stderr-under-Stop abort that a
+        # bare `import $mod` traceback would.
+        $have = (& $py -c "import importlib.util,sys; sys.stdout.write('1' if importlib.util.find_spec('$mod') else '0')" 2>$null)
+        if ($have -eq '1') { Ok "Python module importable: $mod" }
         else { Warn "Python module '$mod' not importable — run: pip install -r requirements.txt (Tier-2 LLM calls / YAML parsing need it)" }
     }
 }

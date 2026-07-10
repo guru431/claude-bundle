@@ -55,6 +55,11 @@ jobs:
               print('\n'.join('  ' + m for m in missing))
               sys.exit(1)
           print('script paths: all present')
+          # The committed machine-local manifest template must be valid YAML too
+          # (it ships to users and is parsed by utils.py at runtime).
+          m = yaml.safe_load(open('config/bundle.local.example.yaml'))
+          assert isinstance(m, dict), 'bundle.local.example.yaml is not a mapping'
+          print('bundle.local.example.yaml: valid mapping')
           PY
 
       - name: Doc/registry task-count guard

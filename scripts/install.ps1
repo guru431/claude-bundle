@@ -117,6 +117,19 @@ Info "InstallPath: $InstallPath"
 Info "Source:      $srcHome"
 Info ""
 
+# InstallPath is only the run-from / copy location. Claude Code ALWAYS reads
+# CLAUDE.md + settings.json from ~/.claude and always stores sessions + memory
+# there — a custom path can't change that (F7). Warn so nobody expects config
+# (or the session store) to move with -InstallPath.
+$defaultHome = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.claude'))
+if ([System.IO.Path]::GetFullPath($InstallPath) -ne $defaultHome) {
+    Warn "InstallPath is not the default ~/.claude:"
+    Warn "  Claude Code only ever reads CLAUDE.md / settings.json from ~/.claude,"
+    Warn "  and always keeps session history + memory there. A custom InstallPath"
+    Warn "  is only meaningful as an advanced run-from location for the full-tier"
+    Warn "  cron/wiki files — the config won't take effect from here. See INSTALL.md."
+}
+
 if ($Profile -eq 'full') { Preflight-Full }
 
 # ── 0. Guard an existing config (do not silently overwrite) ───────────────────
@@ -162,12 +175,34 @@ if ($Profile -eq 'full') {
     # scripts just makes them available; see settings.example-with-hooks.json.
     if ($DryRun) {
         Info "[dry-run] would copy hooks/, wiki/, bin/, cron/ (full tier)"
+        Info "[dry-run] would preserve an existing bootstrapped registry.yaml + manual wiki/index.md"
     } else {
+        # Reinstall-safety (F5): the -Force cron/ + wiki/ copies would reset a
+        # user-bootstrapped registry.yaml (back to placeholders, losing manual
+        # task edits) and clobber the hand-written wiki/index.md. Snapshot those
+        # two files byte-for-byte first, restore them after the copy. A registry
+        # that still has placeholders is a fresh template — let it be replaced.
+        $preserve = @{}
+        $regPath = Join-Path $InstallPath 'cron/registry.yaml'
+        if ((Test-Path $regPath) -and
+            -not (Select-String -Path $regPath -Pattern '<(bundle-install-path|user)>' -Quiet)) {
+            $t = [System.IO.Path]::GetTempFileName(); Copy-Item $regPath $t -Force
+            $preserve[$regPath] = $t
+        }
+        $idxPath = Join-Path $InstallPath 'wiki/index.md'
+        if (Test-Path $idxPath) {
+            $t = [System.IO.Path]::GetTempFileName(); Copy-Item $idxPath $t -Force
+            $preserve[$idxPath] = $t
+        }
         foreach ($d in @('hooks', 'wiki', 'bin', 'cron')) {
             $s = Join-Path $srcHome $d
             if (Test-Path $s) { Copy-Item $s $InstallPath -Recurse -Force }
         }
         Good "copied hooks/, wiki/, bin/, cron/ (full tier)"
+        foreach ($dst in $preserve.Keys) {
+            Copy-Item $preserve[$dst] $dst -Force; Remove-Item $preserve[$dst] -Force
+            Good "preserved your existing $((Split-Path $dst -Leaf)) (reinstall-safe)"
+        }
     }
 }
 
@@ -214,6 +249,20 @@ if ($DryRun) {
     Warn "edit $envDst — set at least DEEPSEEK_KEY or OPENCODE_GO_API_KEY for the full tier"
 }
 
+# ── 3c. bundle.local.yaml from the template (full only; never overwritten) ────
+# Project map + privacy policy live here (not in cron/hooks/utils.py) so they
+# survive a reinstall (F5). Created once; a later run leaves it untouched.
+$manifestDst = Join-Path $InstallPath 'bundle.local.yaml'
+$manifestTpl = Join-Path $root 'config/bundle.local.example.yaml'
+if ($DryRun) {
+    Info "[dry-run] would create bundle.local.yaml from template (if absent)"
+} elseif (Test-Path $manifestDst) {
+    Good "bundle.local.yaml already present — left untouched"
+} elseif (Test-Path $manifestTpl) {
+    Copy-Item $manifestTpl $manifestDst -Force
+    Good "created bundle.local.yaml from template (project map + privacy policy — reinstall-safe)"
+}
+
 # ── 4. Bootstrap registry placeholders (full) ────────────────────────────────
 $user = Ask 'Windows user for the scheduled tasks' $env:USERNAME
 if ($DryRun -and -not (Test-Path (Join-Path $InstallPath 'cron/registry.yaml'))) {
@@ -245,6 +294,31 @@ if ($NonInteractive) {
     }
 }
 
+# ── 5b. Companion tools (optional; NOT part of the copied home-claude set) ───
+# claude-switch.ps1 and codex/AGENTS.md live in the bundle checkout, so a plain
+# full install leaves them behind if you later delete the checkout (F9). Offer
+# to place them somewhere durable and report the outcome.
+$switcherInstalled = $false
+$codexMirrored = $false
+if ($DryRun) {
+    Info "[dry-run] would offer to copy claude-switch.ps1 into the deployment and mirror codex/AGENTS.md into ~/.codex"
+} else {
+    $swSrc = Join-Path $root 'scripts/claude-switch.ps1'
+    if ((Test-Path $swSrc) -and (AskYN 'Copy claude-switch.ps1 into the deployment (survives deleting the bundle checkout)?' $true)) {
+        Copy-Item $swSrc (Join-Path $InstallPath 'claude-switch.ps1') -Force
+        Good "copied claude-switch.ps1 -> $InstallPath\claude-switch.ps1"
+        $switcherInstalled = $true
+    }
+    $codexSrc = Join-Path $root 'codex/AGENTS.md'
+    $codexDir = Join-Path $env:USERPROFILE '.codex'
+    if ((Test-Path $codexSrc) -and (AskYN 'Mirror codex/AGENTS.md into ~/.codex (for Codex CLI coexistence)?' (Test-Path $codexDir))) {
+        New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+        Copy-Item $codexSrc (Join-Path $codexDir 'AGENTS.md') -Force
+        Good "mirrored codex/AGENTS.md -> $codexDir\AGENTS.md"
+        $codexMirrored = $true
+    }
+}
+
 # ── 6. Open items (full; read-only summary of what still needs attention) ────
 Info ""
 Info "--- Open items --------------------------------------------------"
@@ -254,11 +328,15 @@ if (Test-Path $envDst) {
         if ($envTxt -notmatch "(?m)^\s*$k\s*=\s*\S") { Warn "$k not set in .env" }
     }
 }
-$utils = Join-Path $InstallPath 'cron/hooks/utils.py'
-if (Test-Path $utils) {
-    $ut = Get-Content $utils -Raw
-    if ($ut -match 'PROJECT_MAP\s*=\s*\{\s*\}')    { Warn "PROJECT_MAP still empty in cron/hooks/utils.py" }
-    if ($ut -match 'KNOWN_PROJECTS\s*=\s*\[\s*\]') { Warn "KNOWN_PROJECTS still empty in cron/hooks/utils.py" }
+# Project map + privacy policy live in bundle.local.yaml now (not utils.py), so
+# they survive reinstalls. An empty project_map is fine — slugs auto-derive.
+$manifest = Join-Path $InstallPath 'bundle.local.yaml'
+if (Test-Path $manifest) {
+    if ((Get-Content $manifest -Raw) -match '(?m)^\s*project_map:\s*\{\s*\}\s*$') {
+        Warn "project_map empty in bundle.local.yaml — optional (slugs auto-derive); set it to pin names + privacy policy"
+    } else { Good "bundle.local.yaml has a project_map" }
+} else {
+    Warn "bundle.local.yaml not created — project map + privacy policy fall back to defaults (all projects, auto-slugs)"
 }
 $regDeployed = Join-Path $InstallPath 'cron/registry.yaml'
 if (Test-Path $regDeployed) {
@@ -268,6 +346,8 @@ if (Test-Path $regDeployed) {
     Info "registry.yaml task count: $taskCount"
 }
 Info "sync run this session: $(if ($syncRan) { 'yes' } else { 'no' })"
+Info "claude-switch.ps1 in deployment: $(if ($switcherInstalled) { 'yes' } else { 'no (invoke from the bundle checkout)' })"
+Info "codex/AGENTS.md mirrored to ~/.codex: $(if ($codexMirrored) { 'yes' } else { 'no' })"
 
 # ── 7. Self-test (validates the deployed tree) ───────────────────────────────
 Info ""

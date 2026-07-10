@@ -24,17 +24,73 @@ DAILY_DIR = WIKI_ROOT / "daily"
 PENDING_DIR = DAILY_DIR / ".pending"
 PROJECTS_BASE = Path.home() / ".claude" / "projects"
 
-# Map last segment of Claude Code's project-dir name → wiki project folder.
-# Directory format: --<encoded-cwd>--<project-name>. Fill in your own mappings.
-PROJECT_MAP: dict[str, str] = {}
+# ── Machine-local pipeline config (bundle.local.yaml) ────────────────────────
+# PROJECT_MAP / KNOWN_PROJECTS and the privacy policy below used to be edited
+# directly in this template file — which a bundle reinstall then silently
+# overwrote. They now come from an OPTIONAL, reinstall-safe manifest at
+# <bundle>/bundle.local.yaml (next to .env; the installer copies
+# config/bundle.local.example.yaml there once and never overwrites it). The
+# in-code values stay the empty template default, so with no manifest the
+# pipeline behaves exactly as before. PyYAML is optional — without it the
+# manifest is skipped (empty defaults), never a hard failure.
+def _load_manifest() -> dict:
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    path = BUNDLE_ROOT / "bundle.local.yaml"
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as e:  # a broken manifest must not kill module import
+        print(f"WARNING: bundle.local.yaml unreadable ({e}) — ignoring", file=sys.stderr)
+        return {}
+    return data if isinstance(data, dict) else {}
 
-# Claude Code project directories that should be skipped entirely
-# (e.g. system paths that accidentally became "projects").
-SKIP_DIRS: set[str] = set()
 
-# Projects whose JSONL transcripts must NOT be processed
-# (e.g. ones containing translated documents rather than knowledge).
-SKIP_JSONL_PROJECTS: set[str] = set()
+_MANIFEST = _load_manifest()
+
+# Map the FULL Claude Code project-dir name → wiki project slug. Directory
+# format: the encoded cwd with `\`, `/`, `:` replaced by `-`. Configure via
+# bundle.local.yaml `project_map:`; the empty default falls back to the
+# trailing `-`-segment (see dir_to_project).
+PROJECT_MAP: dict[str, str] = dict(_MANIFEST.get("project_map") or {})
+
+# Wiki project slugs the path/section normalizer recognizes (bundle.local.yaml
+# `known_projects:`).
+KNOWN_PROJECTS: list[str] = list(_MANIFEST.get("known_projects") or [])
+
+# ── Unified per-project privacy policy (honored by EVERY pipeline source) ────
+# One declarative policy, applied identically by every collector (JSONL, memory
+# feedback, plans, incidents/sessions) in both wiki-flush-sessions.py and
+# memory-update.py — so "exclude project X" can no longer mean "excluded from
+# JSONL but still sent from memory". Configure in bundle.local.yaml:
+#   skip_dirs:      raw ~/.claude/projects/<dir> names dropped before name resolution
+#   skip_projects:  resolved slugs excluded from ALL sources
+#   allow_projects: allowlist — EMPTY means "all projects allowed" (the shipped
+#                   default); set it to make a small, explicit set the ONLY
+#                   sources the pipeline ever reads (safe first-run posture).
+SKIP_DIRS: set[str] = set(_MANIFEST.get("skip_dirs") or [])
+SKIP_PROJECTS: set[str] = set(_MANIFEST.get("skip_projects") or [])
+ALLOW_PROJECTS: set[str] = set(_MANIFEST.get("allow_projects") or [])
+# Backward-compatible name (older configs / imports): folded into the single
+# gate below so it keeps excluding what it always did.
+SKIP_JSONL_PROJECTS: set[str] = set(_MANIFEST.get("skip_jsonl_projects") or []) | SKIP_PROJECTS
+
+
+def project_allowed(project: str) -> bool:
+    """Single privacy gate every source collector calls before reading a project.
+
+    False when the project is denied by skip_projects / skip_jsonl_projects, or
+    when a non-empty allow_projects allowlist doesn't list it. Empty allowlist =
+    allow all (the shipped default). See bundle.local.yaml.
+    """
+    if project in SKIP_JSONL_PROJECTS:
+        return False
+    if ALLOW_PROJECTS and project not in ALLOW_PROJECTS:
+        return False
+    return True
 
 
 # ── Processed-state tracking ─────────────────────────────────────────────────
@@ -893,11 +949,6 @@ def find_existing_page_by_name(folder: Path, filename: str) -> Path | None:
         if normalized_name_key(f.name) == target_key:
             return f
     return None
-
-
-# Add your wiki project folder names here for normalize_project_name() to
-# recognize them when collapsing free-form section headings.
-KNOWN_PROJECTS: list[str] = []
 
 
 def _slugify_project(raw: str) -> str:

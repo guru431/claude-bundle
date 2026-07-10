@@ -1,0 +1,55 @@
+# bundle.local.yaml — your machine-local pipeline config (EXAMPLE / template).
+#
+# Copy this to ~/.claude/bundle.local.yaml (next to the deployed .env). The
+# installer does that once and NEVER overwrites it, so — unlike editing
+# cron/hooks/utils.py directly — your project map and privacy policy survive a
+# bundle reinstall (F5 / IDEAS "user manifest").
+#
+# The whole file is OPTIONAL. With no manifest (or an empty one) the pipeline
+# behaves exactly as the shipped template: no project mappings, and every
+# project allowed. Read by home-claude/cron/hooks/utils.py (needs PyYAML; if
+# PyYAML is missing the manifest is skipped, not an error).
+#
+# After editing, preview exactly what each source WOULD send without spending a
+# token or hitting the network:
+#   python ~/.claude/cron/wiki/wiki-flush-sessions.py --dry-run
+#   python ~/.claude/cron/memory-update.py           --dry-run
+# Both print the effective policy line first.
+
+# ── Project naming ───────────────────────────────────────────────────────────
+# Map the FULL Claude Code project-dir name (~/.claude/projects/<dir>) to the
+# wiki project slug you want. Run `ls ~/.claude/projects` to see the real
+# directory names (they look like C--Users-you-projects-myapp). Leave empty to
+# let the pipeline derive a slug from the trailing segment.
+project_map: {}
+#   "C--Users-you-projects-myapp": myapp
+#   "C--Users-you-projects-infra": infra
+
+# Slugs the wiki path/section normalizer recognizes when it has to resolve an
+# ambiguous LLM-emitted path or free-form daily-log heading. Usually the same
+# slugs as the values above.
+known_projects: []
+#   - myapp
+#   - infra
+
+# ── Unified privacy policy (applied to EVERY source: JSONL, memory feedback, ──
+# ── plans, incidents/sessions — in BOTH the wiki flush and memory-update) ─────
+
+# allow_projects: an ALLOWLIST. EMPTY (the default) means "all projects
+# allowed". Set it to a small explicit list to make those the ONLY projects the
+# pipeline ever reads — the safe first-run posture when you don't want every
+# historical session shipped to an LLM.
+allow_projects: []
+#   - myapp
+#   - infra
+
+# skip_projects: resolved slugs to exclude from ALL sources (a denylist). Use
+# this for projects that hold documents rather than knowledge, or anything you
+# never want leaving the machine.
+skip_projects: []
+#   - client-nda-work
+
+# skip_dirs: raw ~/.claude/projects/<dir> names to drop BEFORE slug resolution
+# (e.g. a system path that accidentally became a "project").
+skip_dirs: []
+#   - C--Windows-System32

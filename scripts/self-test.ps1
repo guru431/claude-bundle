@@ -113,6 +113,21 @@ if ($py) {
     if ($rc -eq 0) { Ok "registry.yaml parses ($out tasks)" }
     elseif ($out -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped registry.yaml parse" }
     else { Bad "registry.yaml parse error: $out" }
+
+    # The committed manifest template must be valid YAML too (source-tree file;
+    # $root is always the bundle source, even for a deployed -InstallPath run).
+    $mani = Join-Path $root 'config/bundle.local.example.yaml'
+    if (Test-Path $mani) {
+        $mcode = "import sys,yaml; d=yaml.safe_load(open(sys.argv[1],encoding='utf-8')); sys.exit(0 if isinstance(d,dict) else 3)"
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $mout = (& $py -c $mcode $mani 2>&1 | Out-String).Trim()
+        $mrc = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        if ($mrc -eq 0) { Ok "bundle.local.example.yaml parses (mapping)" }
+        elseif ($mout -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped manifest template parse" }
+        else { Bad "bundle.local.example.yaml invalid: $mout" }
+    }
 }
 
 # ── 4. Hook smoke test ───────────────────────────────────────────────────────

@@ -156,16 +156,28 @@ not the one-time source you copied out of. For Password-mode tasks that
 path must be UNC (`\\host\share\...`) or local `C:\...`, never a mapped
 drive (see step 11 for why).
 
+This is **only** the run-from location for `cron/`/`bin/`/`wiki/`. Claude
+Code itself always reads `CLAUDE.md`/`settings.json` from `~/.claude`, and
+always stores your session history + memory there, regardless of where the
+tasks run from — so a custom `install.ps1 -InstallPath` moves the pipeline
+files, not the config or the session store (the installer warns if you
+point it away from `~/.claude`).
+
 ### 8. Copy the wiki and cron components
 
 ```powershell
 Copy-Item -Recurse "$src\wiki" $dst -Force
 Copy-Item -Recurse "$src\cron" $dst -Force
+Copy-Item -Recurse "$src\bin"  $dst -Force
 ```
 
-This puts `~/.claude/wiki/` (empty vault skeleton) and
-`~/.claude/cron/` (the foundation, hooks, compilers, task scripts,
-registry, admin scripts).
+This puts `~/.claude/wiki/` (empty vault skeleton), `~/.claude/cron/`
+(the foundation, hooks, compilers, task scripts, registry, admin
+scripts), and `~/.claude/bin/_run-hidden.vbs` — the hidden-window
+launcher every Password-mode `bash`/`python` task runs through. **Don't
+skip `bin/`:** the syncer aborts if the launcher is missing, and the
+default `registry.yaml` points every task at it. (`install.ps1` copies it
+for you; this manual step must too.)
 
 **(Optional) Wire the session-capture hooks.** The wiki pipeline can be
 fed two ways: it self-collects from `~/.claude/projects/*` JSONLs (works
@@ -255,29 +267,41 @@ inside `~/.claude/cron/`. Either point them at `~/.claude/cron/<file>`
 directly (UNC: `\\<your-host>\c$\Users\<user>\.claude\cron\<file>`), or
 at the bundle's source copy if you keep the bundle around.
 
-### 12. Populate your project list
+### 12. Populate your project list + privacy policy
 
-Edit `home-claude/cron/hooks/utils.py`:
+Edit `~/.claude/bundle.local.yaml` (the installer copied it from
+`config/bundle.local.example.yaml`). It lives next to `.env` and is
+**reinstall-safe** — unlike editing `cron/hooks/utils.py`, a later
+reinstall won't wipe it:
 
-- `PROJECT_MAP = {}` — map each `~/.claude/projects/<dir>` directory
-  name to a wiki project slug. Example:
-  ```python
-  PROJECT_MAP = {
-      "C--Users-myuser-projects-myapp": "myapp",
-      "C--Users-myuser-projects-infra": "infra",
-  }
-  ```
-  Run `dir ~/.claude/projects` first to see the actual directory names
-  Claude Code uses for your projects.
-- `KNOWN_PROJECTS = []` — same slugs again, used by the wiki path
-  normalizer to resolve ambiguous LLM-emitted paths.
+```yaml
+project_map:
+  "C--Users-myuser-projects-myapp": myapp
+  "C--Users-myuser-projects-infra": infra
+known_projects:
+  - myapp
+  - infra
+# Privacy policy — applied to EVERY source (JSONL, memory, plans, incidents):
+allow_projects: []        # empty = all projects; a list = ONLY those
+skip_projects: []         # slugs excluded from all sources
+```
 
-You can leave these empty initially — the normalizer derives a clean
+Run `dir ~/.claude/projects` first to see the actual directory names
+Claude Code uses for your projects.
+
+You can leave everything empty initially — the normalizer derives a clean
 slug from each session heading, so distinct projects still get distinct
 folders. Only headings it can't parse to an ASCII slug fall back to
 `wiki/projects/main/`. If you later notice most pages piling up in
-`main/`, `wiki-lint` flags it as a "project-collapse" warning — that's
-the cue to populate `KNOWN_PROJECTS`.
+`main/`, `wiki-lint` flags it as a "project-collapse" warning — that's the
+cue to populate `known_projects`.
+
+Preview exactly what the pipeline would read, per project, without
+spending a token: `python ~/.claude/cron/wiki/wiki-flush-sessions.py
+--dry-run` (it prints the effective policy first). On the very first
+nights, set `WIKI_BACKLOG_MAX=0` in `.env` if you'd rather not sweep the
+historical backlog until you've dialled in `allow_projects`. Details:
+[`docs/cron-architecture.md`](docs/cron-architecture.md#per-project-privacy-policy-bundlelocalyaml).
 
 ### 13. Run the syncer
 
@@ -409,11 +433,15 @@ units from the same `registry.yaml` instead of Task Scheduler. From the
 repo root:
 
 ```bash
-# 1. Copy the wiki + cron components into ~/.claude (POSIX form of step 8):
+# 1. Copy the wiki + cron components into ~/.claude (POSIX form of step 8).
+# (bin/ is a Windows-only hidden-window launcher — not needed on POSIX, where
+#  gen-scheduler runs bash/python directly.)
 cp -r home-claude/wiki home-claude/cron ~/.claude/
 
-# 2. Create + fill .env (same keys as step 9):
-cp config/llm-providers.example.env ~/.claude/.env && "${EDITOR:-nano}" ~/.claude/.env
+# 2. Create + fill .env and the machine-local manifest (POSIX steps 9 + 12):
+cp config/llm-providers.example.env ~/.claude/.env
+cp config/bundle.local.example.yaml ~/.claude/bundle.local.yaml  # project map + privacy policy
+"${EDITOR:-nano}" ~/.claude/.env
 
 # 3. Generate scheduler units from the OS-neutral registry.yaml:
 # Linux (systemd) — writes <name>.service + <name>.timer:
@@ -425,6 +453,11 @@ python scripts/gen-scheduler.py --target launchd --install-path ~/.claude --out-
 cp units/systemd/*.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload
 for t in ~/.config/systemd/user/Claude*.timer; do systemctl --user enable --now "$(basename "$t")"; done
+
+# 4b. Make the timers fire WITHOUT an active login (overnight / headless) —
+# the POSIX analogue of Windows Password-mode. Without this, --user timers only
+# run while you are logged in, so nightly jobs silently never happen:
+loginctl enable-linger "$USER"           # check: loginctl show-user "$USER" -p Linger
 
 # 5. Inspect a run:
 journalctl --user -u ClaudeWikiFlush.service --no-pager | tail -n 40

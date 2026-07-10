@@ -133,18 +133,93 @@ scripts self-guard on their presence).
 ## Data, cost & publishing per task
 
 Before enabling a task, know what it reaches out to. Everything not
-listed here (`ClaudeWikiBuildIndex`, `ClaudeWikiLint`, `ClaudeLogRetention`,
-`ClaudeMemoryUpdate`) is local-only: it never leaves your machine, spends
-nothing, and publishes nothing.
+listed here (`ClaudeWikiBuildIndex`, `ClaudeWikiLint`, `ClaudeLogRetention`)
+is local-only: it never leaves your machine, spends nothing, and
+publishes nothing.
 
 | Task | Sends data off-box (to whom) | Spends money | Publishes / pushes | Default state |
 |---|---|---|---|---|
 | Wiki flush + compile (`ClaudeWikiFlush`, `ClaudeWikiCompileSessions`, `ClaudeWikiCompileKB`) | session/source text → your LLM provider (DeepSeek / OpenCode Go) | yes (PAYG tokens) | no | on (KB compile off) |
+| `ClaudeMemoryUpdate` | your user messages (up to ~40 KB/night) + a slice of `~/.claude/memory/` → your LLM provider | yes (PAYG tokens) | no | on |
 | `ClaudeHealthcheck` | prompt → your LLM provider | yes (PAYG tokens) | no | on |
 | `ClaudeGitPushAll` | your git remotes | no | yes (`git push`) | off (opt-in) |
 | `ClaudeTaskMonitor` / alerts | failure summary → Telegram Bot API | no | no | on |
 | `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
 | `ClaudeMd2PdfSync` | nothing (local render) | no | no | off |
+
+## Ordering & the wiki-pipeline orchestrator
+
+The nightly wiki phases run as separate tasks on staggered timers:
+`ClaudeWikiFlush` (02:30) → `ClaudeWikiCompileSessions` (04:00) →
+`ClaudeWikiBuildIndex` (04:05). Those are **independent** timers — nothing
+enforces that flush finishes before compile starts, and after a missed
+trigger (`StartWhenAvailable`) they can bunch up and fire almost together.
+
+That is safe by design: every phase is **idempotent and self-healing**.
+Compile skips dailies it already compiled; a phase that sees nothing new
+just no-ops; whatever one night misses, the next night picks up. A bad
+ordering only ever **defers** material one cycle — it never loses it. The
+one real cost is that a "processed tonight" status can mislead on a night
+things bunch up.
+
+If you want a hard ordering guarantee (and an accurate per-night status),
+run the shipped orchestrator `cron/wiki/wiki-pipeline.py` as a **single**
+task instead — it runs flush → compile → index in sequence in one process:
+
+1. Add one registry entry pointing at `cron/wiki/wiki-pipeline.py`
+   (`kind: python`), e.g. `trigger: Daily 02:30`.
+2. Set `enabled: false` on `ClaudeWikiFlush`, `ClaudeWikiCompileSessions`,
+   and `ClaudeWikiBuildIndex` so they don't also run.
+3. Apply: `sync.cmd` (Windows) or re-run `gen-scheduler.py` (POSIX).
+
+A failing phase is logged (and alerted via Telegram when configured) but
+does not abort the later phases; the run exits non-zero so the scheduler
+still records the failure. Accept `--dry-run` to pass it through to each
+phase.
+
+## Health check — bundle-status.py
+
+`python ~/.claude/cron/bundle-status.py` prints a read-only snapshot of the
+deployment: provider keys, the effective privacy policy, the launcher,
+pipeline state (pending queue, processed count, last per-phase success,
+quarantine), and wiki page counts. It makes no network call and changes
+nothing — the quick answer to "is the pipeline actually wired, or did files
+just get copied?" (For the pass/fail deploy check, use
+`scripts/self-test.ps1`.)
+
+## Per-project privacy policy (bundle.local.yaml)
+
+Every source the pipeline reads — JSONL transcripts, memory feedback,
+plans, incidents/sessions, and the `ClaudeMemoryUpdate` task — honors ONE
+declarative policy from `~/.claude/bundle.local.yaml` (optional; template
+in `config/bundle.local.example.yaml`). So "exclude project X" can no
+longer mean "excluded from JSONL but still sent from memory":
+
+- `allow_projects: []` — an allowlist. **Empty = all projects allowed**
+  (the default). Set it to a small explicit list to make those the only
+  projects the pipeline ever reads — the safe first-run posture.
+- `skip_projects: []` — resolved slugs excluded from **all** sources.
+- `skip_dirs: []` — raw `~/.claude/projects/<dir>` names dropped early.
+
+The same file also holds `project_map` / `known_projects` (moved out of
+`cron/hooks/utils.py` so they survive a reinstall). Preview exactly what
+each source would send, per project, without spending a token or hitting
+the network:
+
+```
+python ~/.claude/cron/wiki/wiki-flush-sessions.py --dry-run
+python ~/.claude/cron/memory-update.py           --dry-run
+```
+
+Both print the effective policy line first.
+
+### First run — controlling the historical backlog
+
+On the first nights, flush also sweeps up to `WIKI_BACKLOG_MAX` (default
+50) older, never-processed transcripts per night, on top of the last 48h.
+Set `WIKI_BACKLOG_MAX=0` in `.env` to disable the historical sweep while
+you dial in `allow_projects` from the `--dry-run` preview, then raise it
+once you're happy with the scope.
 
 ## Adapting for your machine
 

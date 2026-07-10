@@ -183,6 +183,69 @@ def test_flush_dedup(bundle: Path, tmp_path: Path):
     assert after == before, "rerun changed the daily logs (duplicate processing)"
 
 
+def test_flush_respects_allowlist(bundle: Path, tmp_path: Path):
+    """allow_projects in bundle.local.yaml makes flush read ONLY the listed
+    projects — an off-list project's sessions are never collected/processed
+    (unified privacy policy)."""
+    wiki = bundle / "wiki"
+    # Manifest lives at BUNDLE_ROOT (= the copied bundle tree); utils loads it
+    # at import, and each _run() is a fresh process, so it takes effect.
+    (bundle / "bundle.local.yaml").write_text(
+        "allow_projects:\n  - keepme\n", encoding="utf-8")
+
+    home = tmp_path / "home_allow"
+    projects = home / ".claude" / "projects"
+    filler = "x" * 600
+
+    def seed(dirname: str):
+        d = projects / dirname
+        d.mkdir(parents=True)
+        lines = []
+        for i in range(12):
+            lines.append(json.dumps({"type": "user",
+                "message": {"role": "user", "content": f"msg {i} {filler}"}}))
+            lines.append(json.dumps({"type": "assistant",
+                "message": {"role": "assistant", "content": f"reply {i} {filler}"}}))
+        (d / "s.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    seed("C--Users-test-projects-keepme")   # on the allowlist
+    seed("C--Users-test-projects-secret")   # off the allowlist → must be skipped
+
+    resp = bundle / "allow_response.md"
+    resp.write_text("- A durable fact. [[index]]\n", encoding="utf-8")
+    env = {"WIKI_LLM_MOCK_RESPONSE": str(resp),
+           "USERPROFILE": str(home), "HOME": str(home)}
+
+    r = _run(bundle / "cron" / "wiki" / "wiki-flush-sessions.py", env, cwd=bundle)
+    assert r.returncode == 0, f"flush failed:\n{r.stdout}\n{r.stderr}"
+    state = json.loads((wiki / ".processed.json").read_text(encoding="utf-8"))
+    processed = state.get("flush", {}).get("processed_jsonls", [])
+    assert any(k.startswith("keepme/") for k in processed), \
+        f"allowed project not processed: {processed}"
+    assert not any(k.startswith("secret/") for k in processed), \
+        f"off-list project leaked past the allowlist: {processed}"
+
+
+def test_wiki_pipeline_runs_phases_in_order(bundle: Path, tmp_path: Path):
+    """wiki-pipeline.py runs flush -> compile -> index in one process, in that
+    order, and exits 0 (F6 orchestrator)."""
+    home = tmp_path / "home_pipe"
+    (home / ".claude" / "projects").mkdir(parents=True)  # empty → flush no-ops
+    resp = bundle / "pipe_compile.json"
+    resp.write_text(json.dumps(
+        [{"path": "projects/myproject/note.md", "action": "create",
+          "content": "# Note\n\nA durable fact. Back to [[index]].\n"}]),
+        encoding="utf-8")
+    r = _run(bundle / "cron" / "wiki" / "wiki-pipeline.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp),
+              "USERPROFILE": str(home), "HOME": str(home)}, cwd=bundle)
+    assert r.returncode == 0, f"pipeline failed:\n{r.stdout}\n{r.stderr}"
+    order = [r.stdout.find(f"[{p}]") for p in ("flush", "compile", "index")]
+    assert all(i != -1 for i in order), f"a phase did not run:\n{r.stdout}"
+    assert order == sorted(order), f"phases ran out of order:\n{r.stdout}"
+    assert "all phases OK" in r.stdout
+
+
 def test_gen_scheduler_skips_windows_only_task(tmp_path: Path):
     """gen-scheduler must not emit a POSIX unit for a `platform: windows` task
     (ClaudeTaskMonitor) — guards against a Windows-only task leaking into

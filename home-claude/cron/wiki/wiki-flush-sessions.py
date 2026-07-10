@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (dir_to_project, parse_jsonl_messages, is_subagent_jsonl, llm_call,
                    normalize_project_name, KNOWN_PROJECTS, mark_phase_success,
                    state_get, state_add, state_remove, is_dry_run, SKIP_DIRS, SKIP_JSONL_PROJECTS,
+                   project_allowed, ALLOW_PROJECTS,
                    BUNDLE_ROOT, WIKI_ROOT, DAILY_DIR, PENDING_DIR, LOG_MD, PROJECTS_BASE)
 
 PLANS_DIR = Path.home() / ".claude" / "plans"
@@ -51,6 +52,16 @@ DEFAULT_PROJECT = "main"
 # Sources B/C/E are re-read every night; without an age filter the same text
 # would be fed to the LLM (and land in a new daily) again and again.
 SOURCE_MAX_AGE_HOURS = 48
+
+# Historical backlog: how many older, never-processed JSONLs to sweep per night
+# (on top of the last-48h files). Set WIKI_BACKLOG_MAX=0 in .env to disable the
+# historical sweep entirely — e.g. on the first nights, so the very first full
+# run doesn't ship every old transcript to the LLM at once (see F3 /
+# docs/cron-architecture.md "First run"). Bad values fall back to the default.
+try:
+    BACKLOG_MAX = int(os.environ.get("WIKI_BACKLOG_MAX") or 50)
+except ValueError:
+    BACKLOG_MAX = 50
 
 
 def _is_fresh(path: Path, max_age_hours: int = SOURCE_MAX_AGE_HOURS) -> bool:
@@ -91,7 +102,7 @@ def find_recent_jsonls(processed: set[str], max_age_hours: int = 48) -> dict[str
         if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
             continue
         project = dir_to_project(proj_dir.name)
-        if project in SKIP_JSONL_PROJECTS:
+        if not project_allowed(project):
             continue
         for jsonl in proj_dir.glob("*.jsonl"):
             # Accept the legacy bare-name key too, so JSONLs already logged
@@ -132,7 +143,7 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20,
         if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
             continue
         project = dir_to_project(proj_dir.name)
-        if project in SKIP_JSONL_PROJECTS:
+        if not project_allowed(project):
             continue
         for jsonl in proj_dir.glob("*.jsonl"):
             # Accept the legacy bare-name key too (see find_recent_jsonls).
@@ -208,10 +219,16 @@ def collect_feedback_files() -> dict[str, list[str]]:
         return by_project
 
     for proj_dir in PROJECTS_BASE.iterdir():
+        if proj_dir.name in SKIP_DIRS:
+            continue
         mem_dir = proj_dir / "memory"
         if not mem_dir.exists():
             continue
         project = dir_to_project(proj_dir.name)
+        # Same privacy gate as the JSONL collectors — an excluded project must
+        # not leak in through its memory/feedback files (unified policy).
+        if not project_allowed(project):
+            continue
         for fb in mem_dir.glob("feedback_*.md"):
             if not _is_fresh(fb):
                 continue
@@ -246,10 +263,16 @@ def collect_incidents_sessions() -> dict[str, list[str]]:
         return by_project
 
     for proj_dir in PROJECTS_BASE.iterdir():
+        if proj_dir.name in SKIP_DIRS:
+            continue
         mem_dir = proj_dir / "memory"
         if not mem_dir.exists():
             continue
         project = dir_to_project(proj_dir.name)
+        # Unified privacy gate (see collect_feedback_files) — incidents/sessions
+        # of an excluded project must not reach the LLM either.
+        if not project_allowed(project):
+            continue
         for fname in ["incidents.md", "sessions.md"]:
             f = mem_dir / fname
             if f.exists() and _is_fresh(f):
@@ -400,6 +423,11 @@ def main():
             f.write(line + "\n")
 
     log(f"=== Wiki Flush Sessions {DATE} ===")
+    # Show the effective privacy policy up front (also visible in --dry-run) so
+    # it's obvious which projects can reach the LLM and how much history is swept.
+    log(f"Policy: allow_projects={sorted(ALLOW_PROJECTS) or 'ALL'}; "
+        f"skip_projects={sorted(SKIP_JSONL_PROJECTS) or 'none'}; "
+        f"skip_dirs={sorted(SKIP_DIRS) or 'none'}; backlog_max={BACKLOG_MAX}")
 
     processed = get_processed_sessions()
     log(f"Already processed: {len(processed)} JSONL files")
@@ -409,10 +437,11 @@ def main():
     total_jsonls = sum(len(v) for v in jsonls.values())
     log(f"Source A (JSONL 48h): {total_jsonls} files across {len(jsonls)} projects")
 
-    # Source A+: backlog — 50 older unprocessed JSONLs per night
-    # (excluding files Source A already picked, to avoid double processing)
+    # Source A+: backlog — up to BACKLOG_MAX older unprocessed JSONLs per night
+    # (excluding files Source A already picked, to avoid double processing).
+    # WIKI_BACKLOG_MAX=0 disables the historical sweep.
     already_picked = {p for files in jsonls.values() for p in files}
-    backlog = find_backlog_jsonls(processed, max_files=50, exclude=already_picked)
+    backlog = find_backlog_jsonls(processed, max_files=BACKLOG_MAX, exclude=already_picked)
     backlog_count = sum(len(v) for v in backlog.values())
     log(f"Source A+ (backlog): {backlog_count} files")
     for project, files in backlog.items():
@@ -479,7 +508,9 @@ def main():
     for project, texts in feedbacks.items():
         all_projects.setdefault(project, []).extend(texts)
 
-    if plans:
+    # Plans have no project of their own — they bucket under DEFAULT_PROJECT, so
+    # honor the policy for that bucket (an allowlist excluding "main" drops them).
+    if plans and project_allowed(DEFAULT_PROJECT):
         all_projects.setdefault(DEFAULT_PROJECT, []).extend(plans)
 
     for project, texts in incidents.items():

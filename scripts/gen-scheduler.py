@@ -238,6 +238,13 @@ def main() -> int:
               "systemctl --user daemon-reload && "
               "for t in ~/.config/systemd/user/Claude*.timer; do "
               "systemctl --user enable --now \"$(basename \"$t\")\"; done")
+        # --user timers only fire while the user has an active login session,
+        # UNLESS lingering is enabled — otherwise nightly/headless runs silently
+        # never happen after logout/reboot (the POSIX analogue of Password-mode).
+        print("  # To run these WITHOUT an active login (overnight / headless), "
+              "enable lingering once:")
+        print("  loginctl enable-linger \"$USER\"")
+        print("  # (check with: loginctl show-user \"$USER\" -p Linger)")
     if "launchd" in targets:
         print(f"  cp {out}/launchd/*.plist ~/Library/LaunchAgents/ && "
               "for p in ~/Library/LaunchAgents/com.claude-bundle.*.plist; do "

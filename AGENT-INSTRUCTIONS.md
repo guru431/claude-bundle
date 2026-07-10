@@ -121,7 +121,12 @@ SRC="<abs-path-to-bundle>"
 DST="$USERPROFILE/.claude"
 cp -r "$SRC/home-claude/wiki" "$DST/"
 cp -r "$SRC/home-claude/cron" "$DST/"
+cp -r "$SRC/home-claude/bin"  "$DST/"   # hidden-window launcher — REQUIRED
 ```
+
+Do not skip `bin/`: every Password-mode `bash`/`python` task runs through
+`bin/_run-hidden.vbs`, and the syncer aborts if it's missing. (On a POSIX
+target you can omit `bin/` — `gen-scheduler.py` runs bash/python directly.)
 
 ### 6. Create `.env` and ask for keys
 
@@ -168,21 +173,30 @@ If the user wants to skip and use Interactive-mode only — edit
 `cron/registry.yaml` and change every `logon_type: password` to
 `interactive`. Warn them tasks won't run before they log in.
 
-### 8. Populate project map
+### 8. Populate project map + privacy policy
 
-Read `home-claude/cron/hooks/utils.py`. Find `PROJECT_MAP = {}` and
-`KNOWN_PROJECTS = []`.
+Edit `$DST/bundle.local.yaml` (created from
+`config/bundle.local.example.yaml`) — NOT `cron/hooks/utils.py`. The
+manifest is reinstall-safe; edits to `utils.py` are overwritten by a
+future reinstall.
 
 Ask the user:
 > List the project slugs you want in the wiki — one short slug per
-> repo you care about (e.g. `myapp`, `infra`, `docs-site`). I'll
-> wire `PROJECT_MAP` and `KNOWN_PROJECTS` for you.
+> repo you care about (e.g. `myapp`, `infra`, `docs-site`). Also: should
+> the pipeline read ALL your projects, or only an allowlist? (The nightly
+> jobs send session text to an LLM, so an allowlist is the safe choice.)
 
-Then look at `~/.claude/projects/` to see the actual directory names
-Claude Code uses for those projects (they look like
-`C--Users-user-projects-myapp`). Fill in `PROJECT_MAP` mapping each
-real directory name to the user's chosen slug, and put the slug list
-into `KNOWN_PROJECTS`.
+Then look at `~/.claude/projects/` for the actual directory names Claude
+Code uses (they look like `C--Users-user-projects-myapp`). Write into
+`bundle.local.yaml`:
+- `project_map:` — each real directory name → the user's chosen slug
+- `known_projects:` — the slug list
+- `allow_projects:` — the allowlist if the user wants one (empty = all)
+- `skip_projects:` — any slugs to exclude from all sources
+
+Before enabling tasks, preview what would be sent without spending a
+token: `python "$DST/cron/wiki/wiki-flush-sessions.py" --dry-run` (prints
+the effective policy first).
 
 ### 9. Edit `registry.yaml` placeholders
 

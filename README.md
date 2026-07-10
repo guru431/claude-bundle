@@ -11,11 +11,13 @@ coding discipline across machines. (This is Tier 1 below, minus the
 optional Python hooks.)
 
 **Full** (~30–60 minutes): on top of lite, add the Python hooks, a
-Karpathy-style wiki vault, a registry-driven Windows Task Scheduler
-automation, an LLM provider switcher (`claude-switch.ps1`), an
-`AGENTS.md` mirror for Codex CLI, and 12 scheduled tasks (four disabled
-by default) that flush Claude Code sessions into the wiki overnight. Needs Python 3.10+, Git,
-and at least one LLM provider key. (Tier 1 + Tier 2 below.)
+Karpathy-style wiki vault, and a registry-driven Windows Task Scheduler
+automation — 12 scheduled tasks (four disabled by default) that flush
+Claude Code sessions into the wiki overnight. The installer also offers to
+wire two optional companion tools: an LLM provider switcher
+(`claude-switch.ps1`) and an `AGENTS.md` mirror for Codex CLI. Needs
+Python 3.10+, Git, and at least one LLM provider key. (Tier 1 + Tier 2
+below.)
 
 Both profiles were extracted from a real working setup, then sanitized
 of all private hosts, paths, tokens, and project names.
@@ -61,7 +63,8 @@ claude-bundle/
 │       ├── llm-call.py                 CLI wrapper for utils.py::llm_call
 │       ├── telegram-send.sh            Bot API helper (env-driven)
 │       ├── prompts/                    LLM prompts (flush/compile/healthcheck)
-│       ├── wiki/wiki-*.py              5 compilers (flush/compile/build-index/lint)
+│       ├── wiki/wiki-*.py              6 scripts (flush/compile-sessions/compile-kb/build-index/lint + pipeline orchestrator)
+│       ├── bundle-status.py            on-demand full-profile health report
 │       ├── log-retention.py            prune old cron/logs/*.{log,jsonl}
 │       ├── md2pdf-sync.py              regenerate stale paired PDFs (off by default)
 │       ├── claude-task-monitor.sh      alert on failed Task Scheduler jobs
@@ -89,7 +92,8 @@ claude-bundle/
 │   └── bootstrap-registry.ps1         fill registry.yaml placeholders + path policy
 │
 ├── config/
-│   └── llm-providers.example.env      env template (copy to ~/.claude/.env)
+│   ├── llm-providers.example.env      env template (copy to ~/.claude/.env)
+│   └── bundle.local.example.yaml      machine-local manifest template (project map + privacy policy)
 │
 ├── tests/                             pytest pipeline smoke test (mock LLM provider)
 ├── VERSION, requirements.txt, requirements-dev.txt
@@ -147,6 +151,13 @@ only — cron jobs will never silently burn your subscription.
 For a per-task breakdown of what each job sends off-box, spends, or
 pushes, see the [data/money matrix](docs/cron-architecture.md#data-cost--publishing-per-task).
 
+Which projects the pipeline may read is one declarative policy in
+`~/.claude/bundle.local.yaml` (`allow_projects` / `skip_projects`) —
+honored by **every** source (JSONL, memory, plans, incidents) and
+previewable with `--dry-run` before a single token is spent.
+`cron/bundle-status.py` prints a read-only health snapshot of the whole
+deployment.
+
 ### Companion artifacts
 
 - **`scripts/claude-switch.ps1`** — interactive menu (and CLI mode) to
@@ -158,6 +169,10 @@ pushes, see the [data/money matrix](docs/cron-architecture.md#data-cost--publish
   sections like slash commands and hooks are omitted from this mirror).
 - **`config/llm-providers.example.env`** — env template listing every
   key the bundle reads, where to get it, and which component uses it.
+- **`config/bundle.local.example.yaml`** — machine-local manifest
+  template: your project map plus the per-project privacy policy
+  (`allow_projects` / `skip_projects`). Copied to
+  `~/.claude/bundle.local.yaml` and never overwritten by a reinstall.
 
 ## Quick start
 

@@ -3,6 +3,109 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.3.0] - 2026-07-11 — audit batch: 9 findings fixed, 6 ideas shipped, 4 ideas declined
+
+Resolves the 2026-07-10 audit in full: all 9 `FINDINGS` fixed and all 10 `IDEAS`
+dispositioned (6 implemented, 4 declined with rationale below). Each finding was
+re-verified against the real source before any change. `FINDINGS.md` and
+`IDEAS.md` are back to just their headers.
+
+### Central change — the machine-local manifest (`bundle.local.yaml`)
+
+Project mappings and the privacy policy used to be edited directly in
+`cron/hooks/utils.py` — which a bundle reinstall then silently overwrote. They
+now live in an OPTIONAL, reinstall-safe `~/.claude/bundle.local.yaml` (template:
+`config/bundle.local.example.yaml`; loaded by `utils.py`, PyYAML optional). This
+one file underpins several of the fixes below (F4/F5 + ideas I2/I7). With no
+manifest the pipeline behaves exactly as before.
+
+### Findings fixed
+
+- **Manual/agent full install skipped the launcher** (P1): `INSTALL.md` step 8
+  and `AGENT-INSTRUCTIONS.md` step 5 copied only `wiki/` + `cron/`, not `bin/`,
+  so the syncer aborted on the missing `_run-hidden.vbs` (which `install.ps1`
+  does copy). Both manual flows now copy `bin/` (with a "don't skip it" note).
+- **Data/money matrix mislabelled `ClaudeMemoryUpdate` as local-only** (P1):
+  `docs/cron-architecture.md` listed it among the tasks that "never leave your
+  machine", but it sends up to ~40 KB/night of your user messages plus a slice
+  of `~/.claude/memory/` to the LLM provider. Moved into the off-box table with
+  an accurate row.
+- **First full run captured every project + the whole historical backlog**
+  (P1): flush walked all projects unconditionally and swept up to 50 old
+  transcripts a night. Added the `allow_projects` allowlist (empty = all, the
+  default) and a `WIKI_BACKLOG_MAX` env cap (`0` disables the historical sweep)
+  so the first run is scoped and predictable. `--dry-run` now prints the
+  effective policy as a pre-send preview.
+- **Project exclusion wasn't uniform across sources** (P2): `SKIP_*` only
+  filtered JSONL; the feedback / incidents / sessions collectors and
+  `memory-update.py` ignored it, so an "excluded" project still reached the LLM
+  through its memory files. Introduced one gate, `project_allowed()`, honored by
+  **every** source in both `wiki-flush-sessions.py` and `memory-update.py`.
+- **Reinstall reset user config** (P2): `install.ps1 -Force` recursively copied
+  the template `cron/` + `wiki/`, resetting a bootstrapped `registry.yaml` (and
+  clobbering the hand-written `wiki/index.md`). The installer now snapshots and
+  restores both across the copy, and project/policy config lives in the
+  never-overwritten manifest.
+- **Nightly phase ordering wasn't guaranteed** (P2): flush/compile/index are
+  independent timers that can bunch up after a missed trigger. Documented that
+  the phases are idempotent and self-healing (a bad order only defers a cycle),
+  and shipped an opt-in orchestrator `cron/wiki/wiki-pipeline.py` that runs the
+  three in sequence as a single task for a hard ordering guarantee.
+- **Custom `-InstallPath` produced an inconsistent setup** (P2): the config and
+  session store always live in `~/.claude` regardless of `-InstallPath`.
+  `install.ps1` now warns when the path isn't `~/.claude`, and INSTALL clarifies
+  the flag only relocates the run-from `cron/`/`bin/`/`wiki/`.
+- **POSIX full didn't survive logout** (P2): user-level systemd timers only fire
+  during an active login without lingering. `gen-scheduler.py` and INSTALL now
+  print `loginctl enable-linger "$USER"` as the POSIX analogue of Password-mode.
+- **Companion tools weren't actually delivered by full** (P3): `claude-switch.ps1`
+  and `codex/AGENTS.md` were framed as part of Full but only lived in the
+  checkout. `install.ps1` now offers to copy the switcher into the deployment and
+  mirror the Codex file into `~/.codex`, and reports both; README reframes them
+  as optional companions.
+
+### Ideas shipped
+
+- **I1 safe onboarding / I7 unified sensitivity policy** — `allow_projects` /
+  `skip_projects` / `skip_dirs` in the manifest, applied to every source, with a
+  `--dry-run` preview and the `WIKI_BACKLOG_MAX` first-run control.
+- **I2 user manifest** — `bundle.local.yaml` (see above).
+- **I3 phase orchestrator** — `cron/wiki/wiki-pipeline.py` (flush → compile →
+  index in one process; failing phase logged/alerted, later phases still run,
+  non-zero exit on failure).
+- **I8 full-profile status page** — `cron/bundle-status.py`: read-only snapshot
+  of keys, policy, launcher, pipeline state (pending/processed/last-success/
+  quarantine) and wiki page counts.
+- **I9 companion delivery modes** — installer prompts + report lines for the
+  switcher and Codex mirror.
+
+### Ideas declined (wontfix — kept out to honor the bundle's "Simplicity First")
+
+- **I4 inbox with diff review** — contradicts the zero-touch automation premise;
+  the existing `--dry-run` preview, `cron/logs/rejected/` quarantine and weekly
+  `wiki-lint` already cover the "catch a bad extraction" need.
+- **I5 provenance + revocation tooling** — each page already records its sources
+  (`path`/`hash`/`mtime`/`processed`) in frontmatter; a page-revocation +
+  index-rebuild subsystem is beyond a starter bundle.
+- **I6 budget contour with money/token limits** — the circuit breaker
+  (`_DEPLETED_PROVIDERS`), the routing audit log, and the implicit
+  keep-and-retry of failed projects already prevent runaway spend; per-task
+  money budgets need a pricing model the bundle deliberately doesn't ship.
+- **I10 memory lifecycle / staleness** — `wiki-lint` already flags orphans and
+  project-collapse, and `FINDINGS.md` carries the 90-day stale-review convention;
+  confidence/review-by statuses + archival is a heavyweight KB layer, not
+  starter material.
+
+### New files / env
+
+- `config/bundle.local.example.yaml` — manifest template (committed; empty).
+- `home-claude/cron/wiki/wiki-pipeline.py` — opt-in phase orchestrator.
+- `home-claude/cron/bundle-status.py` — on-demand health report.
+- `WIKI_BACKLOG_MAX` env (default 50; `0` disables the historical sweep).
+- `.gitignore` now excludes a real `bundle.local.yaml`; CI + `self-test.ps1`
+  validate the manifest template YAML; two pytest cases cover the allowlist and
+  the orchestrator.
+
 ## [0.2.0] - 2026-07-10 — audit batch: 25 findings fixed, 15 ideas shipped, 4 reviewed-not-changed
 
 Resolves the 2026-07-08 adversarial multi-lens audit in full: all 29 `FINDINGS`

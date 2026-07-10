@@ -24,6 +24,8 @@ if sys.platform == "win32":
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
+    ALLOW_PROJECTS,
+    SKIP_DIRS,
     SKIP_JSONL_PROJECTS,
     dir_to_project,
     extract_first_json_object,
@@ -31,6 +33,7 @@ from utils import (  # noqa: E402
     is_subagent_jsonl,
     llm_call,
     parse_jsonl_messages,
+    project_allowed,
 )
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
@@ -88,13 +91,15 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
     # ~/.claude/projects/ is considered. Customize the glob if you only
     # want a subset.
     for proj_dir in PROJECTS_DIR.iterdir():
-        if not proj_dir.is_dir():
+        if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
             continue
         # Same project-name derivation as the wiki pipeline (PROJECT_MAP →
         # trailing segment) so both pipelines key the same project identically.
         proj_name = dir_to_project(proj_dir.name)
-        # Some projects (e.g. translation jobs) hold documents, not knowledge.
-        if proj_name in SKIP_JSONL_PROJECTS:
+        # Unified privacy gate (bundle.local.yaml) — the SAME policy the wiki
+        # pipeline honors, so a project excluded there is also excluded from
+        # memory extraction (this task sends user messages to the LLM too).
+        if not project_allowed(proj_name):
             continue
 
         bits: list[str] = []
@@ -283,6 +288,9 @@ def run_incident_extract() -> None:
 
 def main() -> int:
     log(f"=== Memory Update {DATE} ===")
+    log(f"Policy: allow_projects={sorted(ALLOW_PROJECTS) or 'ALL'}; "
+        f"skip_projects={sorted(SKIP_JSONL_PROJECTS) or 'none'}; "
+        f"skip_dirs={sorted(SKIP_DIRS) or 'none'}")
     if not PROJECTS_DIR.is_dir():
         log(f"No projects dir at {PROJECTS_DIR} — nothing to process.")
         return 0

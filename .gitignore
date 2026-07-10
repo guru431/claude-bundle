@@ -20,6 +20,11 @@ local/
 .env
 .env.*
 
+# Machine-local pipeline manifest (real project-dir names = personal). The only
+# committed template is config/bundle.local.example.yaml.
+bundle.local.yaml
+home-claude/bundle.local.yaml
+
 # Local sanitization patterns — see CLAUDE.md § Sanitization checklist.
 # This file itself is the leak it tries to prevent — never commit.
 # (The * also covers the pre-commit hook's .sanitize-patterns.tmp fallback.)

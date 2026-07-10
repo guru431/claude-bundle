@@ -3,6 +3,136 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.2.0] - 2026-07-10 — audit batch: 25 findings fixed, 15 ideas shipped, 4 reviewed-not-changed
+
+Resolves the 2026-07-08 adversarial multi-lens audit in full: all 29 `FINDINGS`
+(25 fixed, 4 reviewed-and-kept — 2 false positives, 1 accepted tradeoff, 1
+already-consistent) and all 15 `IDEAS`. Each finding was re-verified against the
+real source by an independent pass before any change (the audit runs ~10% false
+positives / shifted line numbers). `FINDINGS.md` and `IDEAS.md` are empty again.
+
+Two behaviour changes worth calling out:
+
+- **`ClaudeGitPushAll` now ships `enabled: false`** (opt-in). Auto-committing and
+  pushing every repo under `PROJECTS_ROOT` is too sharp a default for a public
+  bundle; enable it deliberately after setting `PROJECTS_ROOT` and dry-running
+  with `GIT_PUSH_ALL_DRY_RUN=1`. (4 tasks now ship disabled, of 12.)
+- **`install.ps1` default profile is now `lite`** (was `full`). `full` requires an
+  explicit `-Profile full`, so a no-arg or `-NonInteractive` run no longer silently
+  pulls cron/`.env`/scheduler.
+
+### Findings fixed
+
+- **Wiki-path traversal** (P2): `normalize_wiki_path()` accepted `.`/`..` segments,
+  so an LLM-emitted `projects/../CLAUDE.md` resolved to `WIKI_ROOT/CLAUDE.md` and
+  `write_page` clobbered a top-level vault file. Now normalizes `\`→`/` and returns
+  `""` (skip) when any resolved segment is `.`/`..`.
+- **Silent wiki-pipeline failures** (P2): `wiki-compile-sessions.py`,
+  `wiki-compile-kb.py`, `wiki-lint.py` `main()` returned 0 on a provider outage /
+  parse failure / all-rejected drop / lint errors, so Task Scheduler saw
+  `LastResult=0`. Each now accumulates a hard-failure flag and `sys.exit(1)` at the
+  very end (all work still completes first; unmarked items retry next run).
+- **Rejected-path content drop** (P1×2): the all-rejected branches in both compilers
+  still marked the pair/source processed (deliberate — a deterministic rejection must
+  not loop forever) but discarded the raw output. They now `quarantine_raw()` the
+  payload under `cron/logs/rejected/` before marking, and set the hard-failure flag.
+- **Flush double-feed** (P2): a session whose full JSONL was collected also had its
+  `.pending` hook draft fed to the LLM (same tail twice → duplicated facts, extra
+  cost). `collect_pending()` now skips+deletes a draft whose `<session-id>.jsonl` is
+  being flushed this run (the on-disk JSONL is the source of truth).
+- **`_run-hidden.vbs` ignores `.env` interpreter overrides** (P2): the launcher read
+  `BASH_EXE`/`PYTHON_EXE` only from the process env, which is empty in Password-mode
+  session 0. It now parses `<bundle>\.env` (guarded, defaults-only override) so a
+  non-standard Python/Git-Bash path survives before login.
+- **Installer overwrote existing config** (P2): `install.ps1` `Copy-Item -Force`'d
+  `CLAUDE.md`/`settings.json` unconditionally. Added `-Force` + an existing-config
+  guard: interactive offers a timestamped backup then overwrite/abort; `-NonInteractive`
+  without `-Force` errors and exits 1.
+- **Self-test checked the source repo, not the deployment** (P2): `self-test.ps1`
+  gained `-InstallPath`; the full installer now self-tests the actual deployment and
+  the source-only checks (claude-switch, doc-count, secret-guard) are gated off in
+  deployed mode. Source-mode (no args) is unchanged.
+- **Lite tier violated the "no extra software" contract** (P2/P3): lite no longer
+  creates `.env` (full-only) and no longer runs the full source self-test — it does a
+  minimal copied-file + `settings.json` JSON-parse check. `install-lite.sh` gained the
+  matching POSIX offline check (README already claimed one).
+- **POSIX generator emitted a broken unit for `ClaudeTaskMonitor`** (P2): the
+  Windows-only Task-Scheduler monitor (`kind: bash`) was emitted as a systemd/launchd
+  unit. Added a `platform: windows|posix|all` registry field; `gen-scheduler.py` skips
+  non-POSIX tasks with a note.
+- **CI secret scan excluded all of `.github/`** (P2): a token pasted into a workflow
+  YAML would pass CI whenever the local pre-commit was bypassed. Removed the
+  `.github/` pathspec exclusion (kept `.githooks/`); verified zero current matches.
+- **Bootstrap false mapped-drive warning** (P3): warned on any non-`C:` path. Now
+  uses the same `Win32_LogicalDisk DriveType` detection as the syncer (4=network warn,
+  3=fixed ok, query-fail hedged).
+- **Docs realigned with code** (P2/P3): `AGENT-INSTRUCTIONS.md` POSIX flow points at
+  `gen-scheduler.py` (not manual crontab) and its Lite verify no longer hard-requires
+  Python (PowerShell `ConvertFrom-Json` / guarded `python`); the README manual-Lite
+  snippet copies `skills/`+`commands/`; the repo-root `CLAUDE.md` "Verification"
+  section became "Local verification" (adds the pytest smoke test, drops the false
+  "hook smoke tests" CI claim); `docs/wiki-method.md` describes the current
+  JSONL→daily→compile flow (not the old `.pending` contract); `docs/cron-architecture.md`
+  corrects the "renamed managed tasks re-found by marker" promise (sync matches by
+  name) and the `ClaudeWikiFlush` row; the `projects/main` troubleshooting cause is
+  corrected (no-ASCII-slug headings, not an empty `KNOWN_PROJECTS`); layout blocks list
+  `requirements.txt`; CI one-liners reflect the real jobs; `<bundle-install-path>` is
+  clarified as the run-from directory; GitHub wording standardized on the `github`
+  remote / "release pending"; `docs/llm-routing.md` notes the public DeepSeek→OpenCode-Go
+  default is deliberate and user-overridable.
+
+### Ideas shipped
+
+- **Installer preflight + `-DryRun` + open-items report** — `install.ps1` gained a
+  `Preflight-Full` gate (real-vs-Store-stub Python, git, deps, drive type, existing
+  config), a `-DryRun` plan mode across every mutating action, and an end-of-run
+  "Open items" summary (unset keys, empty maps, remaining placeholders, task count).
+- **Rejected-output quarantine + per-phase heartbeat + atomic page write** —
+  `utils.py` gained `quarantine_raw()`, `mark_phase_success()` (writes a
+  `last_success.json` heartbeat beside the state file, for exit-code-independent
+  staleness monitoring), and `write_page()` now writes via temp+`os.replace` (atomic).
+- **`platform` registry field + POSIX guard** — see the `ClaudeTaskMonitor` finding; a
+  pytest test asserts no Windows-only task leaks into generated POSIX units.
+- **CI/guard coverage** — `check-doc-counts.py` accepts number-words for the total and
+  cross-checks task *names* (not just counts) against the docs table; a new
+  `scripts/check-agents-sync.py` guards the `home-claude/CLAUDE.md` ↔ `codex/AGENTS.md`
+  universal-block mirror (heading presence); the Windows CI job now runs
+  `self-test.ps1`.
+- **Pipeline test coverage** — `tests/test_pipeline.py` gained an end-to-end flush
+  test (raw JSONL → daily, plus the dedup/no-reprocess path) and a malformed-output
+  test (a path-escaping page → non-zero exit, no page outside `projects/`, quarantine
+  file written).
+- **Docs** — a per-task data/cost/publishing matrix in `docs/cron-architecture.md`, a
+  POSIX full end-to-end quickstart and an install-contract matrix in `INSTALL.md`.
+
+### Reviewed, not changed
+
+- **`pre-compact`/`session-end` pending overwrite** (claimed P1): the second hook
+  overwrites the first's `.pending/<sid>.md`, but that is not data loss — flush reads
+  the full append-only JSONL and pre-compact also writes `handoff.md`; the `.pending`
+  snapshot is a supplementary fast-path. Adding per-event files would double-feed the
+  LLM (see the flush fix). Left as-is.
+- **State-lock timeout proceeds unlocked** (claimed P2): a conscious best-effort
+  tradeoff already documented in code — hard-failing the nightly run on a rare lock
+  timeout would trade a rare lost key for a guaranteed missed run. Unchanged.
+- **`sync.cmd` arg command-injection** (claimed P2): false positive (re-flag of a
+  2026-06-23 rejection). The elevated relaunch uses `%PASSARGS%` immediate expansion
+  (no delayed expansion) and `-File` (not `-Command`), so metacharacters pass literally
+  as script *parameters*, not code.
+- **Cron LLM default drift** (claimed P2): false positive — the default chain
+  (`deepseek → opencode → None`, Claude opt-in) is already consistent across `utils.py`,
+  `docs/llm-routing.md`, `README.md` and the env template. Added only an explanatory
+  note that the public default is deliberate and user-overridable.
+
+### Sanitization
+
+All additions use env vars / placeholders — no usernames, hostnames, LAN IPs, domains,
+keys, or private paths. Two doc strings that incidentally matched the `sk-…` key shape
+because the word *task* was followed by a hyphen and a long run (a hyphenated
+Task Scheduler reference and a section-heading anchor)
+were reworded so the generic token scan stays clean. Pre-commit denylist + generic
+secret-format scan: zero matches.
+
 ## [0.1.0] - 2026-07-04 — audit batch: 11 findings fixed, 7 ideas shipped, first versioned release
 
 First tagged release. Introduces semver: a top-level `VERSION` file, a

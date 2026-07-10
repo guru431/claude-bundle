@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-from utils import BUNDLE_ROOT, WIKI_ROOT, LOG_MD  # noqa: E402
+from utils import BUNDLE_ROOT, WIKI_ROOT, LOG_MD, mark_phase_success  # noqa: E402
 
 KBNEWS_DIR = BUNDLE_ROOT / "kb_news"
 TELEGRAM_SCRIPT = BUNDLE_ROOT / "cron" / "telegram-send.sh"
@@ -285,6 +285,12 @@ def main():
         )
 
     log(f"=== Lint complete ===")
+
+    # Lint errors (broken links, ambiguous names, index desync) are a hard
+    # failure: skip the heartbeat and exit non-zero so the cron monitor sees it.
+    if stats["errors"] > 0:
+        sys.exit(1)
+    mark_phase_success("lint")
 
 
 if __name__ == "__main__":

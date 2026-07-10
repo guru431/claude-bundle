@@ -18,11 +18,24 @@
 #
 # Usage:
 #   powershell -File scripts/self-test.ps1
+#   powershell -File scripts/self-test.ps1 -InstallPath $HOME\.claude   # validate a deployment
 #   $env:CLAUDE_HOOK_PYTHON = 'C:\Path\to\python.exe'; ./scripts/self-test.ps1
+#
+# With -InstallPath, checks run against that deployed tree instead of the bundle
+# source; source-tree-only checks (claude-switch, doc counts, secret-guard) are
+# skipped since they are not copied into a deployment.
+
+param([string]$InstallPath)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$home_claude = Join-Path $root 'home-claude'
+if ($InstallPath) {
+    $home_claude = $InstallPath.TrimEnd('\', '/')
+    $deployed = $true
+} else {
+    $home_claude = Join-Path $root 'home-claude'
+    $deployed = $false
+}
 
 $script:pass = 0
 $script:fail = 0
@@ -67,7 +80,11 @@ if ($deployedVer -and $deployedVer -ne $srcVer) {
 # ── 1. JSON validity ─────────────────────────────────────────────────────────
 foreach ($rel in @('settings.json', 'settings.example-with-hooks.json')) {
     $f = Join-Path $home_claude $rel
-    if (-not (Test-Path $f)) { Bad "JSON missing: $rel"; continue }
+    if (-not (Test-Path $f)) {
+        # settings.example-with-hooks.json is not copied into a deployment.
+        if ($deployed -and $rel -eq 'settings.example-with-hooks.json') { continue }
+        Bad "JSON missing: $rel"; continue
+    }
     try { Get-Content $f -Raw -Encoding UTF8 | ConvertFrom-Json | Out-Null; Ok "JSON valid: $rel" }
     catch { Bad "JSON invalid: $rel — $($_.Exception.Message)" }
 }
@@ -105,8 +122,11 @@ if ($py) {
 }
 
 # ── 5. claude-switch status (must be side-effect free) ───────────────────────
+# Source-tree-only: claude-switch.ps1 is not copied into a deployment.
 $sw = Join-Path $root 'scripts/claude-switch.ps1'
-if (Test-Path $sw) {
+if ($deployed) {
+    # skipped for a deployed tree
+} elseif (Test-Path $sw) {
     $probe = Join-Path ([System.IO.Path]::GetTempPath()) ("cs-selftest-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $probe -Force | Out-Null
     try {
@@ -166,10 +186,11 @@ if ($root -match '[\\/]\.claude$' -and -not $env:PROJECTS_ROOT) {
     Warn "PROJECTS_ROOT unset — git-push-all.sh / md2pdf-sync.py refuse to run under ~/.claude without it (see config/llm-providers.example.env)"
 }
 
-# ── 9. Doc/registry task-count guard ─────────────────────────────────────────
+# ── 9. Doc/registry task-count guard (source tree only) ──────────────────────
 # The scheduled-task count is hand-copied into several docs; this guard derives
-# it from registry.yaml and fails on drift (scripts/check-doc-counts.py).
-if ($py) {
+# it from registry.yaml and fails on drift (scripts/check-doc-counts.py). The
+# docs it checks are not copied into a deployment, so skip when -InstallPath.
+if ($py -and -not $deployed) {
     $dc = Join-Path $root 'scripts/check-doc-counts.py'
     if (Test-Path $dc) {
         $out = & $py $dc 2>&1
@@ -183,7 +204,7 @@ if ($py) {
 # is set. Only meaningful from the bundle repo (the hook is never copied into a
 # ~/.claude deployment), so gate on .githooks + .git being present.
 $hook = Join-Path $root '.githooks/pre-commit'
-if ((Test-Path $hook) -and (Test-Path (Join-Path $root '.git'))) {
+if ((-not $deployed) -and (Test-Path $hook) -and (Test-Path (Join-Path $root '.git'))) {
     $hp = & git -C $root config core.hooksPath 2>$null
     if ($hp -eq '.githooks') { Ok "secret-guard hook active (core.hooksPath=.githooks)" }
     else { Warn "secret-guard hook not active — run scripts/enable-guard.ps1 (git config core.hooksPath .githooks)" }

@@ -46,6 +46,39 @@ If bashExe = "" Then bashExe = "C:\Program Files\Git\bin\bash.exe"
 pythonExe = env("PYTHON_EXE")
 If pythonExe = "" Then pythonExe = "python.exe"
 
+' Password-mode tasks fire in session 0, where the process env vars above may be
+' empty (they aren't inherited from an interactive shell). Fall back to the
+' bundle .env, which lives one level up from this script (<bundle>\.env), so an
+' interpreter override survives before-logon. Only overrides values that are
+' still at their hardcoded defaults; ignores every other key.
+Dim fso, envPath, envFile, line, eqPos, envKey, envVal
+On Error Resume Next
+Set fso = CreateObject("Scripting.FileSystemObject")
+envPath = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName)) & "\.env"
+If fso.FileExists(envPath) Then
+    Set envFile = fso.OpenTextFile(envPath, 1)
+    Do Until envFile.AtEndOfStream
+        line = Trim(envFile.ReadLine)
+        If line <> "" And Left(line, 1) <> "#" Then
+            eqPos = InStr(line, "=")
+            If eqPos > 0 Then
+                envKey = Trim(Left(line, eqPos - 1))
+                envVal = Trim(Mid(line, eqPos + 1))
+                If Left(envVal, 1) = """" And Right(envVal, 1) = """" Then
+                    envVal = Mid(envVal, 2, Len(envVal) - 2)
+                End If
+                If envKey = "BASH_EXE" And bashExe = "C:\Program Files\Git\bin\bash.exe" And envVal <> "" Then
+                    bashExe = envVal
+                ElseIf envKey = "PYTHON_EXE" And pythonExe = "python.exe" And envVal <> "" Then
+                    pythonExe = envVal
+                End If
+            End If
+        End If
+    Loop
+    envFile.Close
+End If
+On Error Goto 0
+
 Select Case kind
     Case "bash"
         cmd = """" & bashExe & """ """ & script & """" & extra

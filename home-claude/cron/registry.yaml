@@ -38,6 +38,12 @@
 #   exec                 — arbitrary executable: needs `execute:` + `script:` +
 #                          optional `script_args:`. Used for service-style tasks.
 #
+# ── Optional `platform` field ──────────────────────────────────────────────
+#   platform: windows|posix|all (default all) — gen-scheduler.py skips
+#   non-POSIX tasks (anything other than all/posix) when emitting
+#   systemd/launchd units. Mark a task `platform: windows` when it can only
+#   run on Windows (e.g. drives Task Scheduler via PowerShell Get-ScheduledTask).
+#
 # ── Supported `trigger` values ─────────────────────────────────────────────
 #   Daily HH:MM | Weekly <DOW> HH:MM | AtLogOn | AtStartup
 #   Monthly day=N HH:MM  — uses Register-ScheduledTask -Xml internally.
@@ -139,7 +145,7 @@ tasks:
 
   - name: ClaudeGitPushAll
     project: main
-    description: Auto-commit + push every git repo under the projects root.
+    description: Auto-commit + push every git repo under the projects root. Disabled by default — set PROJECTS_ROOT in .env, dry-run with GIT_PUSH_ALL_DRY_RUN=1, then enable.
     script: <bundle-install-path>\cron\git-push-all.sh
     kind: bash
     trigger: Daily 07:00
@@ -148,6 +154,7 @@ tasks:
     runlevel: limited
     hidden: true
     timeout_hours: 72
+    enabled: false
 
   - name: ClaudeHealthcheck
     project: main
@@ -166,6 +173,7 @@ tasks:
     description: Check all managed tasks for failures + Password+mapped-drive policy violations; alerts to Telegram.
     script: <bundle-install-path>\cron\claude-task-monitor.sh
     kind: bash
+    platform: windows
     trigger: Daily 09:30
     user: <user>
     logon_type: password

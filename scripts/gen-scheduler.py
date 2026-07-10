@@ -9,8 +9,9 @@ This generator translates each enabled task into either:
 
 so the full-tier wiki+cron pipeline can run on mac/linux, not just Windows.
 
-Windows-only task kinds (cmd / vbs / exec) are skipped with a note — they have
-no POSIX equivalent. The `logon_type` / Password machinery is Windows-specific
+Windows-only task kinds (cmd / vbs / exec) or tasks marked `platform: windows`
+are skipped with a note — they have no POSIX equivalent. The `logon_type` /
+Password machinery is Windows-specific
 and irrelevant here (systemd/launchd run under the invoking user).
 
 Usage:
@@ -217,6 +218,10 @@ def main() -> int:
     for task in tasks:
         if task.get("enabled") is False and not args.all:
             print(f"  - {task['name']}: disabled in registry (use --all to include)")
+            continue
+        plat = str(task.get('platform', 'all')).lower()
+        if plat not in ('all', 'posix'):
+            print(f"  - {task['name']}: platform={plat}, skipped (not POSIX)")
             continue
         for tgt in targets:
             note = (emit_systemd if tgt == "systemd" else emit_launchd)(task, install_path, out)

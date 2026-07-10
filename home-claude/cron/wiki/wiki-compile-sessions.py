@@ -28,10 +28,12 @@ from utils import (  # noqa: E402
     normalize_project_name,
     normalize_wiki_path,
     parse_llm_json,
+    quarantine_raw,
     read_page,
     state_add,
     state_get,
     is_dry_run,
+    mark_phase_success,
     write_page,
     BUNDLE_ROOT,
     WIKI_ROOT,
@@ -330,6 +332,7 @@ def main():
         return
 
     total_changes = 0
+    hard_failure = False
     for daily_path in dailies:
         log(f"Processing: {daily_path.name}")
         raw_by_project = parse_daily_by_project(daily_path)
@@ -372,7 +375,10 @@ def main():
                     # EVERY path (bare filenames, <3 path parts, ...) → this
                     # section's content was dropped. Mirror wiki-compile-kb and
                     # make LOUD noise instead of the old innocuous "→ 0 changes"
-                    # log line, which hid the loss.
+                    # log line, which hid the loss. Save the dropped payload for
+                    # inspection and flag the run as a hard failure (exit 1).
+                    quarantine_raw(f"{daily_path.stem}#{project}", "all-paths-rejected", str(changes))
+                    hard_failure = True
                     print(f"  ERROR compile-sessions [{project}] daily {daily_path.stem}: "
                           f"{len(changes)} changes, 0 applied (all paths rejected by "
                           f"normalize_wiki_path) — content dropped", file=sys.stderr)
@@ -407,6 +413,7 @@ def main():
         # On retry, append-dedup in apply_changes keeps succeeded projects
         # from duplicating their pages.
         if failed:
+            hard_failure = True
             log(f"  {failed}/{len(by_project)} project(s) failed — "
                 f"{daily_path.name} left uncompiled for retry")
         else:
@@ -417,6 +424,13 @@ def main():
     # projects/index.md is rebuilt by wiki-build-index.py, scheduled right
     # after this task — no duplicate index writer here.
     log(f"=== Total: {total_changes} changes across {len(dailies)} daily logs ===")
+
+    # Heartbeat only on a clean run; a hard failure (dropped content or a daily
+    # left uncompiled) must surface as a non-zero exit for the cron monitor.
+    if not hard_failure:
+        mark_phase_success("compile")
+    if hard_failure:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

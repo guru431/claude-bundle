@@ -54,14 +54,29 @@ $usesPassword = ($reg -match '(?m)^\s*logon_type:\s*password') -or ($reg -notmat
 
 if ($InstallPath -match '^\\\\') {
     Write-Host "[ok]   InstallPath is UNC — safe for Password-mode tasks." -ForegroundColor Green
-} elseif ($InstallPath -match '^[A-Za-z]:\\') {
-    $drive = $InstallPath.Substring(0, 1).ToUpper()
-    if ($drive -eq 'C') {
-        Write-Host "[ok]   InstallPath is local C:\ — safe for Password-mode tasks." -ForegroundColor Green
-    } elseif ($usesPassword) {
-        Write-Host "[warn] InstallPath is on drive ${drive}:\ — if that is a MAPPED network drive," -ForegroundColor Yellow
-        Write-Host "       Password-mode tasks will silently fail in session 0 (exit 127, no log)." -ForegroundColor Yellow
-        Write-Host "       Use a UNC path (\\host\share\...) or a local C:\ path instead." -ForegroundColor Yellow
+} elseif ($InstallPath -match '^([A-Za-z]):\\') {
+    # Query the ACTUAL drive type (mirrors sync-tasks.ps1): DriveType 4 = network,
+    # 3 = local fixed. Don't infer "mapped" from "not C:".
+    $drive = $Matches[1].ToUpper()
+    $driveType = $null
+    try {
+        $d = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='${drive}:'" -ErrorAction Stop
+        $driveType = $d.DriveType
+    } catch { $driveType = $null }
+    if ($driveType -eq 4) {
+        Write-Host "[warn] InstallPath is on drive ${drive}:\ — a MAPPED NETWORK drive." -ForegroundColor Yellow
+        if ($usesPassword) {
+            Write-Host "       Password-mode tasks will silently fail in session 0 (exit 127, no log)." -ForegroundColor Yellow
+            Write-Host "       Use a UNC path (\\host\share\...) or a local C:\ path instead." -ForegroundColor Yellow
+        }
+    } elseif ($driveType -eq 3) {
+        Write-Host "[ok]   InstallPath is a local fixed drive (${drive}:\) — safe for Password-mode tasks." -ForegroundColor Green
+    } else {
+        Write-Host "[warn] InstallPath drive ${drive}:\ type could not be determined." -ForegroundColor Yellow
+        if ($usesPassword) {
+            Write-Host "       If it is a MAPPED network drive, Password-mode tasks fail in session 0 (exit 127, no log)." -ForegroundColor Yellow
+            Write-Host "       Prefer a UNC path (\\host\share\...) or a local C:\ path." -ForegroundColor Yellow
+        }
     }
 } else {
     Write-Host "[warn] InstallPath '$InstallPath' is neither UNC nor an absolute drive path." -ForegroundColor Yellow

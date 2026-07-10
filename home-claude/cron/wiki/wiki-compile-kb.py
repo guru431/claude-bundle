@@ -28,10 +28,12 @@ from utils import (  # noqa: E402
     llm_call,
     normalize_wiki_path,
     parse_llm_json,
+    quarantine_raw,
     read_page,
     state_add,
     state_get,
     is_dry_run,
+    mark_phase_success,
     write_page,
     BUNDLE_ROOT,
     WIKI_ROOT,
@@ -233,6 +235,7 @@ def main():
     log(f"Existing wiki pages: {len(existing_pages)}")
 
     total_created = 0
+    hard_failure = False
     for i, article_path in enumerate(new_files):
         rel = str(article_path.relative_to(KBNEWS_DIR)).replace("\\", "/")
         log(f"[{i+1}/{len(new_files)}] Processing: {rel}")
@@ -240,6 +243,10 @@ def main():
         changes = compile_article(article_path, existing_pages)
         if changes:
             applied = apply_changes(changes, existing_pages, f"kb_news/{rel}")
+            # Save the dropped payload for inspection BEFORE we mark it processed
+            # (deterministic rejection is still recorded so it won't loop forever).
+            if not applied:
+                quarantine_raw(rel, "all-paths-rejected", str(changes))
             # State (.processed.json) is the dedup source of truth; update_log
             # keeps the human-readable journal in log.md.
             state_add("compile_kb", "processed", [rel])
@@ -252,12 +259,14 @@ def main():
                 # path → applied == []. Deterministic: a retry would produce the
                 # same result, so we still mark it processed (above) but make
                 # noise in the log and stderr instead of silently dropping it.
+                hard_failure = True
                 update_log(rel, ["(ERROR: 0 applied)"])
                 print(f"  ERROR compile-kb {rel}: {len(changes)} changes, 0 applied "
                       f"(all paths rejected by normalize_wiki_path) — content dropped", file=sys.stderr)
                 log(f"  → ERROR: 0 applied of {len(changes)} changes — marked processed")
         else:
             # Not recorded in state → retried next run. Journal the failure only.
+            hard_failure = True
             log(f"  → ERROR: compile failed")
             update_log(rel, ["(ERROR)"])
 
@@ -267,6 +276,13 @@ def main():
     # kb/index.md is rebuilt by wiki-build-index.py, scheduled after the
     # compile tasks — no duplicate index writer here.
     log(f"=== Total: {total_created} changes across {len(new_files)} files ===")
+
+    # Heartbeat only on a clean run; a compile failure or an all-rejected drop
+    # must surface as a non-zero exit for the cron monitor.
+    if not hard_failure:
+        mark_phase_success("compile-kb")
+    if hard_failure:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

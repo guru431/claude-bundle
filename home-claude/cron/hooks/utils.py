@@ -80,6 +80,38 @@ def save_state(state: dict) -> None:
     tmp.replace(STATE_PATH)
 
 
+def quarantine_raw(source_id: str, reason: str, raw: str) -> None:
+    """Best-effort: save a rejected/parse-failed raw LLM response for later inspection."""
+    try:
+        import re as _re
+        d = BUNDLE_ROOT / "cron" / "logs" / "rejected"
+        d.mkdir(parents=True, exist_ok=True)
+        safe = _re.sub(r"[^A-Za-z0-9._-]", "_", str(source_id))[:80]
+        safe_reason = _re.sub(r"[^A-Za-z0-9._-]", "_", str(reason))[:40]
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        (d / f"{stamp}_{safe}_{safe_reason}.txt").write_text(str(raw or ""), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def mark_phase_success(phase: str) -> None:
+    """Best-effort per-phase heartbeat for stale-pipeline monitoring; never raises."""
+    try:
+        p = STATE_PATH.with_name("last_success.json")
+        data = {}
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        data[phase] = datetime.now().isoformat(timespec="seconds")
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
 def state_get(section: str, key: str) -> set[str]:
     """Return the recorded items for state[section][key] as a set."""
     return set(load_state().get(section, {}).get(key, []))
@@ -750,7 +782,11 @@ def write_page(path: Path, frontmatter: dict, body: str) -> None:
     fm["updated"] = datetime.now().strftime("%Y-%m-%d")
     path.parent.mkdir(parents=True, exist_ok=True)
     out = dump_frontmatter(fm) + body.lstrip("\n")
-    path.write_text(out, encoding="utf-8")
+    # Atomic write (temp file + os.replace) so a crash mid-write can't leave a
+    # half-written page behind — same pattern as save_state().
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(out, encoding="utf-8")
+    tmp.replace(path)
 
 
 def source_hash(source_path: str | Path, chunk_size: int = 65536) -> str:
@@ -916,6 +952,7 @@ def normalize_wiki_path(path: str) -> str:
     if path.startswith("wiki/"):
         path = path[5:]
     path = path.lstrip("/")
+    path = path.replace("\\", "/")
 
     if path and not path.endswith(".md"):
         path += ".md"
@@ -977,6 +1014,10 @@ def normalize_wiki_path(path: str) -> str:
         return ""
     # Disallow _log.md (managed by append_per_project_log)
     if path.endswith("/_log.md"):
+        return ""
+    # Reject any traversal segment that survived the rewrites above — a
+    # "projects/../CLAUDE.md" must never resolve outside its project folder.
+    if any(p in (".", "..") for p in parts):
         return ""
     # Dedup: if a similarly-named file already exists, return that path.
     folder = WIKI_ROOT / parts[0] / parts[1]

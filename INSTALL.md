@@ -24,6 +24,16 @@ agent instructions.
 | **Lite** | `CLAUDE.md`, `settings.json`, skill templates, slash command — config only | **None** beyond VS Code + the Claude Code extension | Tier 1 *minus* the optional Python hooks |
 | **Full** | Lite + Python hooks + Karpathy wiki vault + cron pipeline + `claude-switch.ps1` + Codex `AGENTS.md` mirror | Python 3.10+, Git for Windows, ≥1 LLM provider key, (optional) Telegram bot + your Windows password | Tier 1 + Tier 2 |
 
+### Install paths at a glance
+
+| Path | What's copied | Prerequisites | Verification run |
+|---|---|---|---|
+| Lite — automated (`install.ps1 -Profile lite`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/`, `.bundle-version` stamp (no `.env`) | Windows PowerShell, VS Code + Claude Code ext | runs `self-test.ps1` automatically |
+| Lite — manual (Copy-Item snippet) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/` | Windows PowerShell | manual: `/help`, `/skills` in chat |
+| Full — automated (`install.ps1 -Profile full`) | Lite set + `hooks/`, `wiki/`, `bin/`, `cron/` + `.env` from template + registry bootstrap (optional `save-cred`/`sync`) | Python 3.10+, Git for Windows, ≥1 LLM key | runs `self-test.ps1` automatically |
+| POSIX — lite (`install-lite.sh`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/`, `.bundle-version` stamp | bash (macOS/Linux) | manual: `/help`, `/skills` in chat |
+| POSIX — full (`cp` + `gen-scheduler.py`) | Lite set + `wiki/`, `cron/` + `.env` + generated systemd/launchd units | Python 3.10+, bash, systemd or launchd, ≥1 LLM key | `gen-scheduler.py` prints enable cmds; check `journalctl --user` / `cron/logs/*.log` |
+
 - Choose **Lite** if you just want consistent rules, permissions, and
   plugins across machines and don't want to install anything. It is the
   whole of Tier 1 except step 4 (the example hooks are Python scripts,
@@ -135,12 +145,16 @@ Edit to your preference (or remove the key for English default).
 
 ## Steps
 
-### 7. Decide where the bundle lives
+### 7. Decide where the scheduled tasks run from
 
-The cron pipeline references the bundle by absolute path. The simplest
-choice is to put the bundle at a fixed local path that won't move:
-`C:\claude-bundle\` is one common choice. Whatever you pick, the
-**physical path** matters (not the install-time copy location).
+`<bundle-install-path>` in `registry.yaml` means **the directory that
+physically holds the `cron/` and `bin/` the scheduler executes** — after
+step 8 that is normally `~/.claude` (the copy you deploy). You may
+instead point the registry at a bundle checkout you keep around and run
+the tasks from there; either way it is the stable *run-from* location,
+not the one-time source you copied out of. For Password-mode tasks that
+path must be UNC (`\\host\share\...`) or local `C:\...`, never a mapped
+drive (see step 11 for why).
 
 ### 8. Copy the wiki and cron components
 
@@ -341,7 +355,7 @@ Quick reference for the failures people hit first. Running
 | Cron log: `DEEPSEEK_KEY env var not set` / 402 | `.env` missing or unfunded key | step 9 — copy the template, fill a working key |
 | `self-test.ps1`: "Python not found", checks skipped | Python not on PATH | install Python 3.10+ or set `$env:CLAUDE_HOOK_PYTHON` |
 | Password-mode task: `Last Result` 127, no log | `script:` on a mapped drive (no session 0) | use UNC `\\host\share\...` or local `C:\...`; bootstrap warns about this |
-| Wiki pages all land in `projects/main` | `KNOWN_PROJECTS` empty / non-ASCII headings | populate `KNOWN_PROJECTS`; `wiki-lint` flags it as "project-collapse" |
+| Wiki pages all land in `projects/main` | headings that yield no ASCII slug (e.g. all-Cyrillic) fall back to `main` — an empty `KNOWN_PROJECTS` alone won't do it | populate `KNOWN_PROJECTS`; `wiki-lint` flags it as "project-collapse" |
 
 ### "Login required" when running cron tasks
 You skipped step 10 (`save-cred.cmd`). Password-mode tasks need the
@@ -391,19 +405,37 @@ scripts/install-lite.sh          # copies config into ~/.claude, stamps the vers
 ```
 
 **Tier 2 (full)** — the wiki + cron scripts run as-is; generate scheduler
-units from the same `registry.yaml` instead of Task Scheduler:
+units from the same `registry.yaml` instead of Task Scheduler. From the
+repo root:
 
 ```bash
+# 1. Copy the wiki + cron components into ~/.claude (POSIX form of step 8):
+cp -r home-claude/wiki home-claude/cron ~/.claude/
+
+# 2. Create + fill .env (same keys as step 9):
+cp config/llm-providers.example.env ~/.claude/.env && "${EDITOR:-nano}" ~/.claude/.env
+
+# 3. Generate scheduler units from the OS-neutral registry.yaml:
 # Linux (systemd) — writes <name>.service + <name>.timer:
 python scripts/gen-scheduler.py --target systemd --install-path ~/.claude --out-dir units
 # macOS (launchd) — writes com.claude-bundle.<name>.plist:
 python scripts/gen-scheduler.py --target launchd --install-path ~/.claude --out-dir units
+
+# 4. Install + enable (systemd) — the generator also prints these:
+cp units/systemd/*.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+for t in ~/.config/systemd/user/Claude*.timer; do systemctl --user enable --now "$(basename "$t")"; done
+
+# 5. Inspect a run:
+journalctl --user -u ClaudeWikiFlush.service --no-pager | tail -n 40
+tail -n 40 ~/.claude/cron/logs/*.log     # the scripts' own per-task logs
 ```
 
-It prints the `systemctl --user enable --now` / `launchctl load` commands
-to finish. Disabled registry tasks are skipped (pass `--all` to include
-them); Windows-only kinds (`cmd`/`vbs`/`exec`) are skipped with a note.
-DPAPI / password stashing isn't needed — systemd/launchd run as your user.
+Disabled registry tasks are skipped (pass `--all` to include them);
+Windows-only task kinds (`cmd`/`vbs`/`exec`) and `platform: windows`
+tasks like `ClaudeTaskMonitor` (its alerting is Task Scheduler-specific)
+are skipped with a note. DPAPI / password stashing isn't needed —
+systemd/launchd run as your user.
 
 The hooks (`session-start.py`, `session-end.py`, `pre-compact.py`) and the
 wiki compilers work unchanged on POSIX.

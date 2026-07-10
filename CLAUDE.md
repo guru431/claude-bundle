@@ -20,8 +20,9 @@ as two **profiles**: **lite** (config only, no extra software — Tier 1
 are synonyms layered on top of the tier names, not a third structure —
 keep the Tier 1 / Tier 2 split as the canonical one when editing.
 
-Maintained on a private Forgejo + Gitea pair; planned for GitHub
-publication. MIT license.
+Maintained on a private Forgejo + Gitea pair; public GitHub release
+pending (a `github` remote may already be configured locally). MIT
+license.
 
 ## The cardinal rule — this is a PUBLIC repo
 
@@ -73,9 +74,9 @@ preserve that discipline.
 ├── config/
 │   └── llm-providers.example.env       env template (committed; no values)
 ├── tests/test_pipeline.py              pytest pipeline smoke test (mock provider)
-├── VERSION, requirements-dev.txt       semver stamp + test deps
+├── VERSION, requirements.txt, requirements-dev.txt  semver stamp + runtime + test deps
 ├── .githooks/pre-commit                secret-guard hook (git config core.hooksPath .githooks)
-├── .github/workflows/ci.yml            lint + secret-guard + shellcheck + pytest CI
+├── .github/workflows/ci.yml            compileall + JSON/YAML + secret-guard + doc-count + mirror-sync + shellcheck + pytest + PS parse/self-test CI
 ├── docs/                               long-form docs referenced from
 │   ├── wiki-method.md                  rules files and INSTALL
 │   ├── cron-architecture.md
@@ -188,11 +189,12 @@ file that gets committed. Its values must all be empty.
 6. **Commit**: include a `CHANGELOG.md` entry noting what was added and
    what sanitization was applied.
 
-## Verification (this repo has no automated tests)
+## Local verification
 
 - **Grep sanity** — see above. Mandatory.
 - **JSON validity** — `python -c "import json; json.load(open('home-claude/settings.json'))"`
 - **YAML parsing of `registry.yaml`** — `python -c "import yaml; print(len(yaml.safe_load(open('home-claude/cron/registry.yaml'))))"`
+- **Pipeline smoke test** — `WIKI_LLM_PROVIDER=mock python -m pytest tests/ -q` (offline, mock provider).
 - **Hook smoke test** — pipe a sample JSON payload through each hook
   script and confirm it exits 0 and emits valid JSON.
 - **`claude-switch.ps1`** — run with `status` (it should not modify any
@@ -201,13 +203,17 @@ file that gets committed. Its values must all be empty.
   contains Cyrillic, add a UTF-8 BOM (see `home-claude/CLAUDE.md`
   "File Encoding" section).
 
-CI (`.github/workflows/ci.yml`) runs JSON/YAML validation, Python
-compileall, a PowerShell parse, shellcheck, the hook smoke tests, the
-doc/registry count guard (`scripts/check-doc-counts.py`), the offline
-pipeline smoke test (`tests/`, `WIKI_LLM_PROVIDER=mock`) and a generic
-secret-format scan (sourced from `home-claude/cron/lib/secret-scan.sh`)
-on every push/PR. Keep it independent of any specific LLM provider —
-anyone forking the repo should be able to run it.
+CI (`.github/workflows/ci.yml`) runs two jobs. **Ubuntu:** Python
+compileall, JSON validity, YAML parse + `script:` path guard, the
+doc/registry count guard (`scripts/check-doc-counts.py`), the
+universal-rules mirror check (`scripts/check-agents-sync.py`), the
+secret-format guard (now also scanning `.github/`, sourced from
+`home-claude/cron/lib/secret-scan.sh`), shellcheck, and the offline
+pipeline smoke test (`tests/`, `WIKI_LLM_PROVIDER=mock`). **Windows:** a
+PowerShell parse-check plus `scripts/self-test.ps1`. There is no
+dedicated hook-smoke-test CI step — that one stays a local check. Keep CI
+independent of any specific LLM provider — anyone forking the repo should
+be able to run it.
 
 ## Mirror / remote setup
 
@@ -216,8 +222,9 @@ anyone forking the repo should be able to run it.
   itself is not committed (it's machine-local).
 - **Gitea (mirror)** — pull-mirror (~8h interval). Catches up from
   Forgejo automatically. Do NOT push here.
-- **GitHub (public)** — push as a `gh` remote when ready for public
-  release. The bundle is meant for public consumption; the private
+- **GitHub (public)** — release pending; a `github` remote may already
+  be configured locally (add it with `git remote add github <url>`, URL
+  not committed). The bundle is meant for public consumption; the private
   Forgejo+Gitea is just the working environment.
 
 ## Do NOT

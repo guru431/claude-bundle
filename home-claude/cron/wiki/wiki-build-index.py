@@ -20,7 +20,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-from utils import WIKI_ROOT, parse_frontmatter  # noqa: E402
+from utils import WIKI_ROOT, parse_frontmatter, mark_phase_success  # noqa: E402
 
 PROJECTS_DIR = WIKI_ROOT / "projects"
 KB_DIR = WIKI_ROOT / "kb"
@@ -222,6 +222,7 @@ def main():
     print(f"kb/tools/: {kb_counts.get('tools', 0)}")
     print(f"kb/people/: {kb_counts.get('people', 0)}")
     print("Indexes rebuilt.")
+    mark_phase_success("build")
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ wiki/
     people/                  external authors / researchers
   daily/
     YYYY-MM-DD.md            daily log (one file per active day)
-    .pending/                staging area for sessions before flush
+    .pending/                session-tail staging (written by the session-end hook)
 ```
 
 Page-level rules:
@@ -44,25 +44,29 @@ Each phase runs as a cron-scheduled script. The default schedule is in
 
 ### Phase 1 — flush (`wiki-flush-sessions.py`)
 
-Reads `~/.claude/projects/*/`. For each Claude Code JSONL session
-transcript, extracts the last N user/assistant message pairs (skipping
-tool_use and tool_result noise) and writes them to
-`wiki/daily/.pending/<session-id>.md` as a draft.
-
-This is **pure parsing** — no LLM.
+Reads several sources — JSONL transcripts under `~/.claude/projects/*`,
+memory feedback files, plans, `history.jsonl`, and per-project
+incident/session notes — and calls the configured LLM to distill them
+into one dated daily log, `wiki/daily/YYYY-MM-DD.md`, grouped by project
+(not per-session drafts). Already-processed JSONL sessions are tracked in
+a processed-state store (`.processed.json`) so the same session isn't
+flushed twice; re-read text sources are filtered by mtime.
 
 ### Phase 2 — compile sessions (`wiki-compile-sessions.py`)
 
-Reads each `.pending/<session-id>.md`. Asks an LLM to extract:
+Reads the dated daily logs (`wiki/daily/*.md`) produced by the flush
+phase. Asks an LLM to extract:
 
 - Incidents (symptom → cause → fix) → `projects/<slug>/incident-*.md`
 - Solutions to recurring problems → `projects/<slug>/solution-*.md`
 - Feedback the user gave you ("always X", "never Y") → `projects/<slug>/feedback-*.md`
 - Architectural decisions → `projects/<slug>/architecture-*.md`
 
-The LLM returns JSON; the script normalizes wiki paths, deduplicates
-against existing pages (by hash of source), and writes new pages with
-proper frontmatter (`sources:` array with `path`/`hash`/`processed`/`mtime`).
+The LLM returns JSON; the script normalizes wiki paths and deduplicates
+**two ways** — against each page's `sources:` frontmatter (by source
+hash) and against a processed-state store that records which dailies are
+already compiled — then writes new pages with proper frontmatter
+(`sources:` array with `path`/`hash`/`processed`/`mtime`).
 
 The "Karpathy" part: the **LLM only writes pages**. It doesn't pick which
 pages get read later — that's done by `[[wikilinks]]` and `grep`.
@@ -87,9 +91,9 @@ orphan pages, missing frontmatter, etc.
 ## How sessions get into the wiki — the hooks
 
 `cron/hooks/session-end.py` runs at the end of each Claude Code session
-and saves the message tail to `wiki/daily/.pending/<session-id>.md`.
-The next overnight `wiki-flush-sessions.py` + `wiki-compile-sessions.py`
-turns those drafts into proper pages.
+and stages the message tail into `wiki/daily/.pending/`. The overnight
+flush + compile then distills your JSONL sessions and the other sources
+into dated daily logs and per-project pages.
 
 `cron/hooks/session-start.py` runs at the start of each session and
 injects three things into context: `wiki/index.md`, the latest daily log,

@@ -76,6 +76,12 @@ chain returns `None` (and the calling script logs an error) rather than
 silently chew through your Claude subscription. If a wiki compile fails
 because DeepSeek is down, that's a Telegram alert, not a $5 surprise.
 
+This public default (DeepSeek direct primary, OpenCode Go fallback) is
+deliberate because DeepSeek PAYG is universally available with no
+subscription gate; your own routing policy may legitimately invert or
+replace it by setting `WIKI_LLM_PROVIDER` and editing the `PROVIDERS`
+table below.
+
 ### Provider registry — the single source of truth (cron side)
 
 All cron-side provider config lives in **one** table,

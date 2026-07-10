@@ -60,6 +60,9 @@ jobs:
       - name: Doc/registry task-count guard
         run: python scripts/check-doc-counts.py
 
+      - name: AGENTS/CLAUDE mirror guard (structural)
+        run: python scripts/check-agents-sync.py
+
       - name: Secret guard (high-confidence token formats)
         run: |
           # Single source of truth for the regex is
@@ -69,7 +72,9 @@ jobs:
           . home-claude/cron/lib/secret-scan.sh
           # -e is required: the pattern starts with '-----' which git would
           # otherwise read as an option. -I skips binary files.
-          hits=$(git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/' ':(exclude).github/' || true)
+          # Only .githooks/ is excluded (it documents token FORMATS on purpose);
+          # .github/ is deliberately scanned — do NOT re-add ':(exclude).github/'.
+          hits=$(git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/' || true)
           if [ -n "$hits" ]; then
             echo "$hits"
             echo "::error::Possible secret/token format found in tracked files"
@@ -112,3 +117,7 @@ jobs:
             else { Write-Host "ok: $($_.Name)" }
           }
           if ($errs -gt 0) { exit 1 }
+
+      - name: self-test (offline, source mode)
+        shell: pwsh
+        run: powershell -File scripts/self-test.ps1

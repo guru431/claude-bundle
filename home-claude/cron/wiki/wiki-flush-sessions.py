@@ -33,7 +33,7 @@ for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (dir_to_project, parse_jsonl_messages, is_subagent_jsonl, llm_call,
-                   normalize_project_name, KNOWN_PROJECTS,
+                   normalize_project_name, KNOWN_PROJECTS, mark_phase_success,
                    state_get, state_add, state_remove, is_dry_run, SKIP_DIRS, SKIP_JSONL_PROJECTS,
                    BUNDLE_ROOT, WIKI_ROOT, DAILY_DIR, PENDING_DIR, LOG_MD, PROJECTS_BASE)
 
@@ -157,22 +157,39 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20,
     return by_project
 
 
-def collect_pending() -> tuple[dict[str, list[str]], list[tuple[Path, str]]]:
+def collect_pending(covered_ids: set[str] | None = None) -> tuple[dict[str, list[str]], list[tuple[Path, str]], int]:
     """Collect data from .pending/ (left by PreCompact/SessionEnd hooks).
 
-    Returns (data_by_project, consumed_files). Each consumed entry is a
+    Returns (data_by_project, consumed_files, skipped). Each consumed entry is a
     (path, project) pair so the caller can keep files belonging to a project
     whose extraction failed. Files are NOT deleted here — the caller deletes
     them only after the daily log is written and only for projects that
     extracted successfully, so a crash or LLM failure mid-run can't lose
     pending data (it's reprocessed next run).
+
+    A pending draft is named `<session-id>.md` (save_to_pending keys by
+    session_id) and is only the *tail* of a session whose full transcript is
+    `<session-id>.jsonl`. When that JSONL is already being fed this run
+    (its stem is in `covered_ids`), the draft is a strict subset — feeding both
+    double-feeds the LLM and duplicates the daily content. Such drafts are
+    skipped and deleted (the JSONL on disk stays the source of truth); `skipped`
+    counts them.
     """
     by_project: dict[str, list[str]] = {}
     consumed: list[tuple[Path, str]] = []
+    covered_ids = covered_ids or set()
+    skipped = 0
     if not PENDING_DIR.exists():
-        return by_project, consumed
+        return by_project, consumed, skipped
 
     for f in PENDING_DIR.glob("*.md"):
+        if f.stem in covered_ids:
+            skipped += 1
+            try:
+                f.unlink()
+            except OSError:
+                pass
+            continue
         text = _read_text_safe(f)
         if text is None:
             continue
@@ -181,7 +198,7 @@ def collect_pending() -> tuple[dict[str, list[str]], list[tuple[Path, str]]]:
         by_project.setdefault(project, []).append(text)
         consumed.append((f, project))
 
-    return by_project, consumed
+    return by_project, consumed, skipped
 
 
 def collect_feedback_files() -> dict[str, list[str]]:
@@ -413,10 +430,6 @@ def main():
     incidents = collect_incidents_sessions()
     log(f"Source E (incidents/sessions): {sum(len(v) for v in incidents.values())} files")
 
-    # Hook-provided pending
-    pending, pending_files = collect_pending()
-    log(f"Pending (hooks): {sum(len(v) for v in pending.values())} files")
-
     all_projects: dict[str, list[str]] = {}
 
     # JSONL → parse messages (skip subagent and trivial sessions).
@@ -450,6 +463,15 @@ def main():
                 project = key.split("/", 1)[0]
                 f.write(f"- [flush] processed: {key} (filtered: subagent/<3 user, project: {project})\n")
         log(f"Filtered out and marked processed: {len(filtered_out)} JSONL files")
+
+    # Hook-provided pending — collected AFTER the JSONL filter so we know which
+    # sessions are already fed this run. A draft whose <session-id>.jsonl is in
+    # the kept set is a strict subset and is skipped+deleted (dedup). Dry-run
+    # passes no covered ids so it neither skips nor deletes anything.
+    covered_ids = set() if is_dry_run() else {jf.stem for files in jsonls.values() for jf in files}
+    pending, pending_files, skipped_pending = collect_pending(covered_ids)
+    log(f"Pending (hooks): {sum(len(v) for v in pending.values())} files"
+        + (f" ({skipped_pending} skipped as already covered by JSONL)" if skipped_pending else ""))
 
     for project, texts in pending.items():
         all_projects.setdefault(project, []).extend(texts)
@@ -574,6 +596,7 @@ def main():
         log(f"Source D (history): activity recorded for {len(activity)} projects")
 
     log(f"=== Flush complete: {len(all_projects)} projects ===")
+    mark_phase_success("flush")
 
 
 if __name__ == "__main__":

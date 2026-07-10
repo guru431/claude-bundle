@@ -13,7 +13,7 @@ optional Python hooks.)
 **Full** (~30–60 minutes): on top of lite, add the Python hooks, a
 Karpathy-style wiki vault, a registry-driven Windows Task Scheduler
 automation, an LLM provider switcher (`claude-switch.ps1`), an
-`AGENTS.md` mirror for Codex CLI, and 12 scheduled tasks (three disabled
+`AGENTS.md` mirror for Codex CLI, and 12 scheduled tasks (four disabled
 by default) that flush Claude Code sessions into the wiki overnight. Needs Python 3.10+, Git,
 and at least one LLM provider key. (Tier 1 + Tier 2 below.)
 
@@ -92,10 +92,10 @@ claude-bundle/
 │   └── llm-providers.example.env      env template (copy to ~/.claude/.env)
 │
 ├── tests/                             pytest pipeline smoke test (mock LLM provider)
-├── VERSION, requirements-dev.txt
+├── VERSION, requirements.txt, requirements-dev.txt
 │
 ├── .githooks/pre-commit               secret-guard hook (activate: git config core.hooksPath .githooks)
-├── .github/workflows/ci.yml           lint + secret-guard + shellcheck CI
+├── .github/workflows/ci.yml           compileall + JSON/YAML validity + secret-guard + doc-count guard + mirror-sync + shellcheck + pytest smoke + PowerShell parse/self-test CI
 │
 └── docs/
     ├── wiki-method.md                 how the Karpathy wiki pipeline works
@@ -135,7 +135,7 @@ from your real Claude Code sessions:
 - A lint script catches broken links, orphan pages, missing frontmatter
 
 A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 12
-scheduled jobs (three disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
+scheduled jobs (four disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
 real `Register-ScheduledTask` calls — idempotent, marked, hidden
 windows, Password-mode by default (runs before login → survives
 overnight reboots).
@@ -143,6 +143,9 @@ overnight reboots).
 LLM calls go through `utils.py::llm_call()` with a configurable fallback
 chain: **DeepSeek V4-Flash → OpenCode Go → None**. Claude is opt-in
 only — cron jobs will never silently burn your subscription.
+
+For a per-task breakdown of what each job sends off-box, spends, or
+pushes, see the [data/money matrix](docs/cron-architecture.md#data-cost--publishing-per-task).
 
 ### Companion artifacts
 
@@ -172,6 +175,8 @@ $dst = "$env:USERPROFILE\.claude"
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 Copy-Item "$src\CLAUDE.md"     $dst -Force
 Copy-Item "$src\settings.json" $dst -Force
+Copy-Item -Recurse "$src\skills"   $dst -Force
+Copy-Item -Recurse "$src\commands" $dst -Force
 ```
 
 Then in a Claude Code chat:
@@ -242,7 +247,7 @@ portable; only the Windows Task Scheduler layer is replaced.
 | Cron LLM call logs `DEEPSEEK_KEY env var not set` | no `.env` (or wrong key name) | copy `config/llm-providers.example.env` → `~/.claude/.env`, fill a key |
 | `self-test.ps1` warns "Python not found" / skips checks | Python not on PATH | install Python 3.10+, or set `$env:CLAUDE_HOOK_PYTHON` |
 | Password-mode task exits 127, no log | `script:` on a mapped drive (absent in session 0) | use a UNC `\\host\share\...` or local `C:\...` path; `bootstrap-registry.ps1` warns about this |
-| All wiki pages land in `projects/main` | `KNOWN_PROJECTS` empty / headings non-ASCII | populate `KNOWN_PROJECTS` in `utils.py`; `wiki-lint` flags this as "project-collapse" |
+| All wiki pages land in `projects/main` | headings that yield no ASCII slug (e.g. all-Cyrillic names) fall back to `main` — an empty `KNOWN_PROJECTS` alone won't do it, distinct ASCII headings still split into distinct folders | populate `KNOWN_PROJECTS` in `utils.py`; `wiki-lint` flags this as "project-collapse" |
 
 More detail in [`INSTALL.md` § Troubleshooting](INSTALL.md).
 

@@ -31,6 +31,32 @@ if [ -f "$here/VERSION" ]; then
     echo "[ok] stamped .bundle-version = $(cat "$here/VERSION")"
 fi
 
+# --- minimal offline self-test (no extra software required) ------------------
+st_ok=1
+for f in CLAUDE.md settings.json; do
+    if [ -f "$dst/$f" ]; then
+        echo "[ok] present: $f"
+    else
+        echo "[FAIL] missing: $dst/$f"; st_ok=0
+    fi
+done
+if command -v python3 >/dev/null 2>&1; then PY=python3
+elif command -v python >/dev/null 2>&1; then PY=python
+else PY=""; fi
+if [ -n "$PY" ]; then
+    if "$PY" -c "import json,sys; json.load(open(sys.argv[1]))" "$dst/settings.json" >/dev/null 2>&1; then
+        echo "[ok] settings.json is valid JSON"
+    else
+        echo "[FAIL] settings.json is not valid JSON"; st_ok=0
+    fi
+else
+    echo "[warn] python not found — skipped settings.json JSON validation"
+fi
+if [ "$st_ok" -ne 1 ]; then
+    echo "[FAIL] lite self-test failed"
+    exit 1
+fi
+
 cat <<'EOF'
 
 Lite install done. In a Claude Code chat, run:

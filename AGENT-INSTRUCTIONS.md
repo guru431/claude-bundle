@@ -89,8 +89,19 @@ You can't invoke `/plugin` yourself — it's an interactive shell command.
 
 ```bash
 test -f "$USERPROFILE/.claude/CLAUDE.md" && wc -c "$USERPROFILE/.claude/CLAUDE.md"
-test -f "$USERPROFILE/.claude/settings.json" \
-  && cat "$USERPROFILE/.claude/settings.json" | python -c "import sys,json; print('json-ok' if json.load(sys.stdin) else 'json-bad')"
+test -f "$USERPROFILE/.claude/settings.json" && echo "settings.json present"
+```
+
+Validate the JSON without hard-requiring Python (Lite targets may have
+none). On Windows, PowerShell's `ConvertFrom-Json` is always available:
+```powershell
+Get-Content "$env:USERPROFILE\.claude\settings.json" -Raw | ConvertFrom-Json | Out-Null; "json-ok"
+```
+On POSIX, guard `python` (skip validation gracefully if it's absent):
+```bash
+command -v python >/dev/null \
+  && python -c "import json,sys; json.load(open(sys.argv[1]))" "$HOME/.claude/settings.json" && echo json-ok \
+  || echo "settings.json present (install Python to validate JSON)"
 ```
 
 Then ask the user:
@@ -276,10 +287,13 @@ Tell the user before overwriting.
 
 ### Linux / macOS target
 - Tier 1 works as-is (use `~/.claude/` instead of `$USERPROFILE`).
-- Tier 2 needs crontab/LaunchAgent adaptation — the bundle's
-  Task Scheduler bits are Windows-only. Translate `registry.yaml`
-  entries to crontab manually. The Python compilers and Bash hooks
-  are portable.
+- Tier 2: don't hand-translate `registry.yaml` to crontab — generate
+  scheduler units from it with `python scripts/gen-scheduler.py --target
+  systemd|launchd --install-path ~/.claude --out-dir units`, then run the
+  `systemctl --user enable --now` / `launchctl load` commands it prints.
+  Windows-only kinds (`cmd`/`vbs`/`exec`) and `platform: windows` tasks
+  are skipped; DPAPI / `save-cred` isn't needed on POSIX. The Python
+  compilers and Bash hooks are portable.
 
 ### Remote deployment via SSH/WinRM
 Push the bundle (`scp` / `Copy-Item -ToSession`), then run steps 1–11

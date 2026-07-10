@@ -1,6 +1,6 @@
 # Cron architecture (Windows Task Scheduler)
 
-The bundle ships 12 scheduled tasks (three disabled by default) managed
+The bundle ships 12 scheduled tasks (four disabled by default) managed
 declaratively through one YAML file. This document explains the moving parts.
 
 ## The big picture
@@ -92,24 +92,27 @@ launcher needed.
 ## Marking + idempotency
 
 The syncer marks every task it manages with
-`Description: managed-by-registry | <your description>`. The next sync
-finds them by that prefix even if you renamed them. Tasks not in the
-registry are left alone — the syncer is **additive within its own
-namespace**, not destructive across the whole Task Scheduler.
+`Description: managed-by-registry | <your description>`. Sync matches
+existing tasks by their registry **name** (`Get-ScheduledTask -TaskName`);
+the marker is informational only and is **not** used to re-discover a
+renamed task — rename a managed task and the next sync simply recreates
+it under the registry name. Tasks not in the registry are left alone —
+the syncer is **additive within its own namespace**, not destructive
+across the whole Task Scheduler.
 
 Sync is idempotent — running `sync.cmd` twice in a row produces no
 changes the second time.
 
 ## What ships in the bundle
 
-12 tasks (three — `ClaudeWikiCompileKB`, `ClaudeMd2PdfSync` and
-`ClaudeWarmWindow` — ship `enabled: false`). Edit `registry.yaml` to
-disable any others you don't want before running `sync.cmd` the first
-time.
+12 tasks (four — `ClaudeWikiCompileKB`, `ClaudeMd2PdfSync`,
+`ClaudeWarmWindow` and `ClaudeGitPushAll` — ship `enabled: false`). Edit
+`registry.yaml` to disable any others you don't want before running
+`sync.cmd` the first time.
 
 | Task | Trigger | What it does |
 |---|---|---|
-| `ClaudeWikiFlush` | Daily 02:30 | drain `.pending/` → daily log |
+| `ClaudeWikiFlush` | Daily 02:30 | JSONL sessions + sources → daily log |
 | `ClaudeWikiCompileKB` | Daily 03:30 | compile KB sources → `kb/*` (off by default) |
 | `ClaudeWikiCompileSessions` | Daily 04:00 | compile sessions → `projects/<slug>/*` |
 | `ClaudeWikiBuildIndex` | Daily 04:05 | rebuild `projects/index.md` + `kb/index.md`, refresh stats in `wiki/index.md` |
@@ -117,7 +120,7 @@ time.
 | `ClaudeLogRetention` | Weekly Sun 03:00 | prune `cron/logs/*.{log,jsonl}` older than 30 days |
 | `ClaudeMd2PdfSync` | Daily 06:30 | regenerate any PDF whose paired `.md` is newer (off by default) |
 | `ClaudeMemoryUpdate` | Daily 02:00 | JSONL → memory MD |
-| `ClaudeGitPushAll` | Daily 07:00 | auto-push your project repos |
+| `ClaudeGitPushAll` | Daily 07:00 | auto-push your project repos (off by default — opt-in) |
 | `ClaudeHealthcheck` | Daily 09:00 | morning self-check |
 | `ClaudeTaskMonitor` | Daily 09:30 | alert on failed Task Scheduler jobs |
 | `ClaudeWarmWindow` | Daily 01:00 /4h | ping the Claude 5h window (off by default — read the billing note in the script) |
@@ -126,6 +129,22 @@ The pipeline writes to Telegram only on failure (no spam on success).
 Configure `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in your `.env` to
 receive alerts — leave those two vars unset to silence every alert (the
 scripts self-guard on their presence).
+
+## Data, cost & publishing per task
+
+Before enabling a task, know what it reaches out to. Everything not
+listed here (`ClaudeWikiBuildIndex`, `ClaudeWikiLint`, `ClaudeLogRetention`,
+`ClaudeMemoryUpdate`) is local-only: it never leaves your machine, spends
+nothing, and publishes nothing.
+
+| Task | Sends data off-box (to whom) | Spends money | Publishes / pushes | Default state |
+|---|---|---|---|---|
+| Wiki flush + compile (`ClaudeWikiFlush`, `ClaudeWikiCompileSessions`, `ClaudeWikiCompileKB`) | session/source text → your LLM provider (DeepSeek / OpenCode Go) | yes (PAYG tokens) | no | on (KB compile off) |
+| `ClaudeHealthcheck` | prompt → your LLM provider | yes (PAYG tokens) | no | on |
+| `ClaudeGitPushAll` | your git remotes | no | yes (`git push`) | off (opt-in) |
+| `ClaudeTaskMonitor` / alerts | failure summary → Telegram Bot API | no | no | on |
+| `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
+| `ClaudeMd2PdfSync` | nothing (local render) | no | no | off |
 
 ## Adapting for your machine
 

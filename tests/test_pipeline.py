@@ -107,3 +107,96 @@ def test_compile_build_lint(bundle: Path):
     m = re.search(r"(\d+)\s+errors", r.stdout)
     assert m, f"lint printed no stats line:\n{r.stdout}"
     assert int(m.group(1)) == 0, f"lint reported errors:\n{r.stdout}"
+
+
+def test_compile_rejects_path_escape(bundle: Path):
+    """A page path that escapes projects/ ('projects/../CLAUDE.md') must be
+    rejected: no file written outside the tree, the payload quarantined, and the
+    run flagged as a hard failure (wave-1 contract: exit != 0)."""
+    wiki = bundle / "wiki"
+    resp = bundle / "escape_response.json"
+    resp.write_text(json.dumps(
+        [{"path": "projects/../CLAUDE.md", "action": "create",
+          "content": "# Escaped\n\nThis must never be written outside projects/.\n"}]),
+        encoding="utf-8")
+
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode != 0, \
+        f"expected non-zero exit on rejected payload:\n{r.stdout}\n{r.stderr}"
+    # No page escaped the projects/ tree.
+    assert not (wiki / "CLAUDE.md").exists(), "traversal wrote a page under wiki/"
+    assert not (bundle / "CLAUDE.md").exists(), "traversal wrote a page in the bundle"
+    # The dropped payload was quarantined for later inspection.
+    rejected = list((bundle / "cron" / "logs" / "rejected").glob("*"))
+    assert rejected, f"no quarantine file under cron/logs/rejected/:\n{r.stdout}"
+
+
+def test_flush_dedup(bundle: Path, tmp_path: Path):
+    """flush turns a JSONL session into a daily log and records it processed;
+    a second run must NOT reprocess it (dedup via .processed.json)."""
+    wiki = bundle / "wiki"
+    # Sandbox HOME/USERPROFILE so utils.PROJECTS_BASE (Path.home()/.claude/
+    # projects) resolves into tmp, where we seed one session fixture.
+    home = tmp_path / "home"
+    proj_dir = home / ".claude" / "projects" / "C--Users-test-projects-myproj"
+    proj_dir.mkdir(parents=True)
+
+    # >3 user messages and >10 KB (flush's size floor); not a subagent session.
+    filler = "x" * 600
+    lines = []
+    for i in range(12):
+        lines.append(json.dumps({"type": "user",
+            "message": {"role": "user", "content": f"user message {i} {filler}"}}))
+        lines.append(json.dumps({"type": "assistant",
+            "message": {"role": "assistant", "content": f"assistant reply {i} {filler}"}}))
+    (proj_dir / "sess1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # flush appends the LLM text verbatim under a `## project` heading.
+    resp = bundle / "flush_response.md"
+    resp.write_text("- A durable fact about the widget parser. [[index]]\n",
+                    encoding="utf-8")
+
+    env = {"WIKI_LLM_MOCK_RESPONSE": str(resp),
+           "USERPROFILE": str(home), "HOME": str(home)}
+    flush = bundle / "cron" / "wiki" / "wiki-flush-sessions.py"
+
+    r = _run(flush, env, cwd=bundle)
+    assert r.returncode == 0, f"flush failed:\n{r.stdout}\n{r.stderr}"
+    dailies = list((wiki / "daily").glob("????-??-??.md"))
+    assert dailies, f"no daily log produced:\n{r.stdout}"
+    state = json.loads((wiki / ".processed.json").read_text(encoding="utf-8"))
+    processed = state.get("flush", {}).get("processed_jsonls", [])
+    assert any("sess1.jsonl" in k for k in processed), \
+        f"session not recorded processed: {processed}"
+
+    before = {p.name: p.read_text(encoding="utf-8")
+              for p in (wiki / "daily").glob("????-??-??.md")}
+
+    # Second run: the session is already processed → nothing to reprocess.
+    r2 = _run(flush, env, cwd=bundle)
+    assert r2.returncode == 0, f"flush rerun failed:\n{r2.stdout}\n{r2.stderr}"
+    assert "Nothing to process" in r2.stdout, \
+        f"expected dedup skip on rerun:\n{r2.stdout}"
+    after = {p.name: p.read_text(encoding="utf-8")
+             for p in (wiki / "daily").glob("????-??-??.md")}
+    assert after == before, "rerun changed the daily logs (duplicate processing)"
+
+
+def test_gen_scheduler_skips_windows_only_task(tmp_path: Path):
+    """gen-scheduler must not emit a POSIX unit for a `platform: windows` task
+    (ClaudeTaskMonitor) — guards against a Windows-only task leaking into
+    systemd/launchd units."""
+    pytest.importorskip("yaml")  # gen-scheduler requires PyYAML
+    out_dir = tmp_path / "units"
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "gen-scheduler.py"),
+         "--target", "both", "--out-dir", str(out_dir)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=60,
+    )
+    assert r.returncode == 0, f"gen-scheduler failed:\n{r.stdout}\n{r.stderr}"
+    emitted = [p.name for p in out_dir.rglob("*") if p.is_file()]
+    assert emitted, f"gen-scheduler wrote no unit files:\n{r.stdout}"
+    leaked = [n for n in emitted if "ClaudeTaskMonitor" in n]
+    assert not leaked, f"platform: windows task leaked into POSIX units: {leaked}"

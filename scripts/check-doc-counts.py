@@ -37,10 +37,12 @@ WORD_NUM = {
     "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
 }
 
-# A digit run followed — within a small whitespace gap so a line-wrap between
-# the number and the noun is tolerated — by "tasks"/"jobs" (the total count).
+# A number (digits OR a spelled-out word like "twelve") followed — within a
+# small whitespace gap so a line-wrap between the number and the noun is
+# tolerated — by "tasks"/"jobs" (the total count). A non-number word captured
+# here (e.g. "scheduled"/"these") resolves to None below and is skipped.
 COUNT_RE = re.compile(
-    r"\b(\d+)\s{1,4}(?:scheduled\s{1,4})?(?:tasks|jobs)\b", re.IGNORECASE)
+    r"\b([A-Za-z]+|\d+)\s{1,4}(?:scheduled\s{1,4})?(?:tasks|jobs)\b", re.IGNORECASE)
 # A number word or digit immediately before "disabled" (the disabled count).
 DISABLED_RE = re.compile(r"\b([A-Za-z]+|\d+)\s{1,4}disabled\b", re.IGNORECASE)
 
@@ -69,6 +71,43 @@ def registry_counts() -> tuple[int, int, list[str]]:
         return total, len(disabled), disabled
 
 
+def registry_task_names() -> set[str]:
+    """All task names from the registry (same YAML/line loader as counts)."""
+    text = REGISTRY.read_text(encoding="utf-8")
+    try:
+        import yaml
+        return {t["name"] for t in yaml.safe_load(text)["tasks"]}
+    except Exception:
+        names: set[str] = set()
+        for raw in text.splitlines():
+            m = re.match(r"^\s*-\s+name:\s*(.+?)\s*$", raw)
+            if m:
+                names.add(m.group(1).strip().strip("'\""))
+        return names
+
+
+def arch_table_task_names(text: str) -> set[str]:
+    """Backtick-wrapped `Claude…` names from the ONE main task table in
+    docs/cron-architecture.md (the `| Task | Trigger | … |` table). Scoped to
+    that table so prose mentions of task names elsewhere don't count."""
+    names: set[str] = set()
+    in_table = False
+    for line in text.splitlines():
+        if re.match(r"^\|\s*Task\s*\|\s*Trigger\s*\|", line):
+            in_table = True
+            continue
+        if in_table:
+            if not line.lstrip().startswith("|"):
+                break  # table ended
+            if set(line.strip()) <= set("|-: "):
+                continue  # header separator row
+            first_cell = line.split("|")[1] if "|" in line else ""
+            m = re.search(r"`(Claude\w+)`", first_cell)
+            if m:
+                names.add(m.group(1))
+    return names
+
+
 def _line(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
 
@@ -86,7 +125,10 @@ def check() -> int:
             continue
         text = p.read_text(encoding="utf-8")
         for m in COUNT_RE.finditer(text):
-            got = int(m.group(1))
+            tok = m.group(1).lower()
+            got = int(tok) if tok.isdigit() else WORD_NUM.get(tok)
+            if got is None:
+                continue  # a non-number word (e.g. "these tasks") — not a count
             if got != total:
                 snip = re.sub(r"\s+", " ", m.group(0)).strip()
                 problems.append(f'{rel}:{_line(text, m.start())}: "{snip}" '
@@ -100,6 +142,19 @@ def check() -> int:
                 snip = re.sub(r"\s+", " ", m.group(0)).strip()
                 problems.append(f'{rel}:{_line(text, m.start())}: "{snip}" '
                                 f"claims {val} disabled, registry has {n_disabled}")
+
+    # Cross-check task NAMES: the cron-architecture task table must list exactly
+    # the registry task names (no ghost tasks, no missing ones).
+    arch = ROOT / "docs" / "cron-architecture.md"
+    if arch.is_file():
+        reg_names = registry_task_names()
+        table_names = arch_table_task_names(arch.read_text(encoding="utf-8"))
+        for n in sorted(table_names - reg_names):
+            problems.append(f"docs/cron-architecture.md: task `{n}` in the task "
+                            f"table is not in the registry")
+        for n in sorted(reg_names - table_names):
+            problems.append(f"docs/cron-architecture.md: registry task `{n}` is "
+                            f"missing from the task table")
 
     if problems:
         print("DOC-COUNT DRIFT — update the docs (or the registry):")

@@ -8,7 +8,7 @@ agent) working **on this repo**.
 A portable Claude Code starter pack: sanitized `~/.claude/` config,
 optional Karpathy-style wiki + cron pipeline, `claude-switch.ps1`
 backend switcher, `codex/AGENTS.md` mirror. Public on GitHub
-(planned), MIT.
+(release pending), MIT.
 
 ## Where the real rules live
 

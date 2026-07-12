@@ -99,7 +99,13 @@ def read_existing_pages() -> dict[str, str]:
 def compile_article(article_path: Path, existing_pages: dict[str, str]) -> list[dict] | None:
     """Call the LLM to compile one article into wiki pages."""
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
-    article_text = article_path.read_text(encoding="utf-8")
+    try:
+        article_text = article_path.read_text(encoding="utf-8")
+    except OSError:
+        # File vanished between find_new_files() and here (the KB Update writer
+        # at 03:00 may still be mutating kb_news/) — treat as a compile failure
+        # so it isn't marked processed and a later run retries if it reappears.
+        return None
 
     existing_list = ", ".join(sorted(existing_pages.keys())[:100])
 

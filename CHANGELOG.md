@@ -3,6 +3,66 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.3.1] - 2026-07-12 — audit batch: 2 findings fixed, 11 declined
+
+Resolves the 2026-07-11 GLM-5.2 auto-review batch (13 `FINDINGS`) in full. Each
+finding was re-verified twice against the real source (an independent verifier
+plus an adversarial skeptic) before any change — 11 of the 13 turned out to be
+false positives or non-issues and were declined with rationale; 2 were real and
+fixed. `FINDINGS.md` is back to just its header.
+
+### Findings fixed
+
+- **`compile_article` could crash the whole KB run on a vanished source file**
+  (P2): `wiki-compile-kb.py` guarded `stat()` in `find_new_files` but left the
+  later `article_path.read_text()` unguarded, so a source deleted mid-run (the
+  03:00 KB writer may still be mutating `kb_news/`) raised an unhandled `OSError`
+  that aborted the entire loop. `read_text()` is now wrapped in `try/except
+  OSError` and routed into the existing compile-failure path (journaled, not
+  marked processed, retried next run).
+- **`wmic` disk fallback is gone on modern Windows** (P3): `claude-healthcheck.sh`
+  fell back to `wmic logicaldisk` when `df` was absent, but `wmic` is deprecated
+  and no longer installed by default on Windows 11 22H2+ / Server 2025. Replaced
+  with `powershell.exe -Command 'Get-CimInstance Win32_LogicalDisk | ...'`,
+  matching the script's existing `powershell.exe` usage.
+
+### Findings declined (re-verified false positives / non-issues)
+
+- **F1 (P1) wiki-lint Telegram "leak"** — the alert already sends a count-only
+  summary; the detailed path list only goes to the local log, and alerts are
+  opt-in (`ENABLE_TELEGRAM_ALERTS=False`). The claimed leak does not exist.
+- **F2 (P2) sync-tasks arg injection** — command-line quoting is already done
+  upstream in `Build-Action`; `SecurityElement::Escape` correctly XML-escapes the
+  already-quoted string. The proposed `Quote-Arg`-the-whole-line fix would be
+  harmful.
+- **F3 (P2) deepseek 402 no fallback** — returning `None` on 402 *is* the
+  fallback trigger; the dispatcher then calls `_llm_opencode`. Data is not
+  skipped.
+- **F4 (P2) blind_update data loss** — the `blind_update` branch never
+  overwrites; it preserves the body verbatim and appends under a dated heading.
+  No data loss.
+- **F5 (P2) memory-update context overflow** — two deterministic caps
+  (`USER_MSG_CAP_PER_PROJECT`, `PROMPT_TOTAL_CAP`) bound the prompt; overflow
+  cannot occur. A cap-hit log line would be a P3 nicety, not the described bug.
+- **F6 (P2) git-push-all wiki `continue`** — the wiki block is not in a loop
+  (`continue` would be a no-op); `guard_secrets` already unstages on a hit so no
+  secret is ever committed or pushed.
+- **F7 (P2) github-push first-push OOM** — `xargs -0` batches under `ARG_MAX`;
+  loading tracked content once is the deliberate design (needed to scan an empty
+  index) and is reused by three checks. Speculative micro-optimization.
+- **F9 (P2) secret-scan `\b`** — no `\b` exists in the pattern (it starts at the
+  token literals); the premise is false and the proposed PCRE fix is invalid in
+  `grep -E`.
+- **F10 (P3) parse_llm_json 50-iteration LLM latency** — `llm_call` runs at most
+  once (terminal, not in the loop); the loop does cheap local string repairs with
+  a progress guard. No LLM latency.
+- **F11 (P3) DEFAULT_PROJECT duplication** — a real DRY nit but no live bug (both
+  values are `"main"`); a true single-source refactor would touch ~5 unrelated
+  call sites — broader than a surgical change warrants on a public bundle.
+- **F13 (P3) telegram-send empty-response message** — `-w '%{http_code}'` emits
+  `000` on connection failure, so `HTTP_CODE` is never empty and `${HTTP_CODE:-?}`
+  guards the print anyway. The claimed `HTTP :` output cannot occur.
+
 ## [0.3.0] - 2026-07-11 — audit batch: 9 findings fixed, 6 ideas shipped, 4 ideas declined
 
 Resolves the 2026-07-10 audit in full: all 9 `FINDINGS` fixed and all 10 `IDEAS`

@@ -43,7 +43,7 @@ LOCAL_DATA="=== Local host ===
 $(uname -a 2>/dev/null || systeminfo | head -5)
 
 --- disk ---
-$(df -h 2>/dev/null || wmic logicaldisk get size,freespace,caption)
+$(df -h 2>/dev/null || powershell.exe -Command 'Get-CimInstance Win32_LogicalDisk | Select-Object Caption,FreeSpace,Size | Format-Table -AutoSize')
 "
 
 # --- Optional: remote Linux server via SSH ---

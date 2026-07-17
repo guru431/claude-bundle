@@ -25,6 +25,8 @@ if sys.platform == "win32":
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
     ALLOW_PROJECTS,
+    CLAUDE_HOME,
+    PROJECTS_BASE,
     SKIP_DIRS,
     SKIP_JSONL_PROJECTS,
     dir_to_project,
@@ -36,9 +38,11 @@ from utils import (  # noqa: E402
     project_allowed,
 )
 
-PROJECTS_DIR = Path.home() / ".claude" / "projects"
-USER_MD = Path.home() / ".claude" / "memory" / "USER.md"
-CROSS_NOTES = Path.home() / ".claude" / "memory" / "cross-project-notes.md"
+# From utils, not re-derived here: one definition of "where Claude Code lives"
+# (see utils.CLAUDE_HOME) instead of four copies that can drift apart.
+PROJECTS_DIR = PROJECTS_BASE
+USER_MD = CLAUDE_HOME / "memory" / "USER.md"
+CROSS_NOTES = CLAUDE_HOME / "memory" / "cross-project-notes.md"
 SCAN_DIR = Path(__file__).resolve().parent / "scan-results"
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)

@@ -34,15 +34,18 @@ from pathlib import Path
 # A Task Scheduler Password task starts in session 0 with no user env, so the
 # bundle .env must be loaded before the retention windows below are read.
 sys.path.insert(0, str(Path(__file__).parent / "hooks"))
-from utils import _load_dotenv  # noqa: E402
+from utils import _load_dotenv, PROJECTS_BASE  # noqa: E402
 
 _load_dotenv()
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 REJECTED_DIR = LOG_DIR / "rejected"
-# Sibling of the deployed cron/ — i.e. ~/.claude/projects/ for a default install,
-# which is where Claude Code keeps per-project transcripts and their memory/.
-PROJECTS_DIR = Path(__file__).resolve().parent.parent / "projects"
+# PROJECTS_BASE (= CLAUDE_HOME/projects), NOT a path derived from this file:
+# Claude Code always keeps transcripts and their memory/ under ~/.claude, even
+# when the pipeline itself is deployed elsewhere via -PipelineRoot. Deriving it
+# from __file__ made this sweep look next to the pipeline and silently prune
+# nothing on a non-default install.
+PROJECTS_DIR = PROJECTS_BASE
 RETENTION_DAYS = int(os.environ.get("WIKI_LOG_RETENTION_DAYS", "30"))
 REJECTED_RETENTION_DAYS = int(os.environ.get("WIKI_REJECTED_RETENTION_DAYS", "7"))
 HANDOFF_RETENTION_DAYS = int(os.environ.get("WIKI_HANDOFF_RETENTION_DAYS", "7"))

@@ -3,6 +3,72 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.5.1] - 2026-07-17 — the two gaps 0.5.0 left open
+
+Closes both items 0.5.0 recorded as "known gaps, recorded not fixed", plus a
+pre-existing installer hang found while verifying them.
+
+Still open from that list: `llm-call.py` and the healthcheck reach `llm_call`
+without the project gate. They send host metrics and whatever you pipe in — not
+session transcripts — so the fix there is `WIKI_LLM_PROVIDER=local` or leaving
+`ClaudeHealthcheck` off, not a gate on an unattributed CLI.
+
+### Behaviour changes (read before upgrading)
+
+- **Plans are no longer sent to the LLM by default.** `~/.claude/plans/*.md` used
+  to flow to your provider under the `main` bucket, gated only on `main` being
+  allowed — which the shipped default allows. Set `collect_plans: true` in
+  `bundle.local.yaml` to restore the old behaviour.
+
+### Fixed
+
+- **The privacy policy could not cover plans, and pretended it did.** Plan files
+  are flat, randomly named (`cheeky-conjuring-noodle.md`) and carry no cwd,
+  frontmatter or any other attribution — nothing can map them to a project. So a
+  plan written during a `skip_projects` session was **not** excluded by
+  `skip_projects`: it was indistinguishable from any other, bucketed under
+  `main`, and shipped. Data that can't be attributed can't be judged by a
+  per-project rule, so it is now **opt-in** (`collect_plans`, default `false`) —
+  the same fail-closed posture as `WIKI_BACKLOG_MAX=0` and a broken manifest. The
+  effective setting is printed on every run's policy line, and
+  `docs/cron-architecture.md` now states the limit instead of listing plans as
+  policy-covered.
+- **`log-retention.py` swept the wrong directory on a non-default install** (a
+  bug introduced in 0.5.0). It derived `projects/` from its own location, but
+  Claude Code always keeps transcripts under `~/.claude` — so on any install
+  outside `~/.claude` the new handoff sweep silently pruned nothing. Root cause
+  was the conflation below.
+- **`-InstallPath` silently put the config where Claude Code never reads it.**
+  Claude Code reads `CLAUDE.md`/`settings.json` only from `~/.claude`, so
+  `install.ps1 -InstallPath D:\x` produced an install that looked fine and did
+  nothing for the config half — the script carried 15 lines of warnings
+  apologising for it. There are now two roots: **`-ClaudeHome`** (default
+  `~/.claude`; config) and **`-PipelineRoot`** (default: same; `cron/`, `wiki/`,
+  `bin/`, `.env`), so the pipeline can live anywhere while the config still takes
+  effect. `-InstallPath` remains as an alias setting both, so existing one-root
+  and sandbox installs behave exactly as before. `.bundle-manifest.json` records
+  both roots and tags every file with the root it belongs to; `uninstall.ps1`
+  reads the pipeline root from the manifest rather than being told.
+- **An advisory preflight check could hang the full-tier installer forever.**
+  `Get-InstallDriveType` asked WMI (`Get-CimInstance Win32_LogicalDisk`) whether
+  the install drive is a network drive — a check that only ever prints a warning.
+  Observed and reproduced on a machine where that query never returned: the
+  installer stopped dead after "python: ..." with no output, no timeout and no
+  way to know why. It now uses `System.IO.DriveInfo`, which answers from the
+  filesystem API, cannot hang, and needs no WMI service at all.
+  `cron/admin/sync-tasks.ps1` still uses the WMI form and has the same exposure.
+
+### Changed
+
+- **`utils.CLAUDE_HOME`** is now the single definition of "where Claude Code
+  keeps config, transcripts, plans and memory" (always `~/.claude`; overridable
+  for tests), separate from `BUNDLE_ROOT` ("where the pipeline's own files
+  live"). `memory-update.py`, `wiki-flush-sessions.py` and `log-retention.py`
+  consumed four private copies of that path, which is how the retention bug got
+  in.
+- `self-test.ps1` takes an optional `-ClaudeHome` so it checks `settings.json` in
+  the config root when the two are split.
+
 ## [0.5.0] - 2026-07-17 — IDEAS batch resolved: 5 real bugs fixed, ~10k lines of framework declined
 
 Resolves all 19 proposals from the 2026-07-13 idea batch (`IDEAS.md` I-01…I-19).
@@ -119,6 +185,8 @@ it closes is a regression in what this bundle sells.
   plaintext on the same disk; brokering only the destination is theater.
 
 ### Known gaps, recorded not fixed
+
+*(Both of these were closed in 0.5.1 — see above. Left as written for the record.)*
 
 - `collect_plans()` buckets `~/.claude/plans/*.md` with no project attribution,
   and `llm-call.py` / the healthcheck reach `llm_call` without the project gate.

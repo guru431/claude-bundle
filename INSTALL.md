@@ -181,9 +181,43 @@ drive (see step 11 for why).
 This is **only** the run-from location for `cron/`/`bin/`/`wiki/`. Claude
 Code itself always reads `CLAUDE.md`/`settings.json` from `~/.claude`, and
 always stores your session history + memory there, regardless of where the
-tasks run from — so a custom `install.ps1 -InstallPath` moves the pipeline
-files, not the config or the session store (the installer warns if you
-point it away from `~/.claude`).
+tasks run from.
+
+That is why the installer takes **two** roots, not one:
+
+```powershell
+# Pipeline on another disk; config stays where Claude Code reads it.
+& "<path-to-bundle>\scripts\install.ps1" -Profile full -PipelineRoot D:\claude
+```
+
+- **`-ClaudeHome`** (default `~/.claude`) — `CLAUDE.md`, `settings.json`,
+  `skills/`, `commands/`. Moving this only makes sense for a sandbox
+  install: config placed anywhere else is never read.
+- **`-PipelineRoot`** (default: same as `-ClaudeHome`) — `cron/`, `wiki/`,
+  `bin/`, `.env`, `bundle.local.yaml`. These resolve paths relative to
+  their own location, so they genuinely run from anywhere.
+
+`-InstallPath` still works and sets both at once (the old one-root
+behaviour). It used to be the *only* option, which meant a custom path put
+the config somewhere Claude Code never reads — an install that looked fine
+and quietly did nothing.
+
+### Uninstalling
+
+The installer writes `.bundle-manifest.json` into `-ClaudeHome`, recording
+every file it wrote (with a checksum) and which root it went to:
+
+```powershell
+& "<path-to-bundle>\scripts\uninstall.ps1"            # dry run — lists, deletes nothing
+& "<path-to-bundle>\scripts\uninstall.ps1" -Confirm   # actually delete
+```
+
+It removes only what the manifest lists — your `.env`, `bundle.local.yaml`,
+wiki notes, logs and pipeline state are never touched — and finds the
+pipeline root from the manifest, so you don't have to remember it. A file
+changed since install is reported and kept unless you pass `-Force`.
+Scheduled tasks are **not** unregistered (that needs elevation): remove
+them with `schtasks /delete /tn <name> /f` first.
 
 ### 8. Copy the wiki and cron components
 

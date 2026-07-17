@@ -25,7 +25,7 @@
 # source; source-tree-only checks (claude-switch, doc counts, secret-guard) are
 # skipped since they are not copied into a deployment.
 
-param([string]$InstallPath)
+param([string]$InstallPath, [string]$ClaudeHome)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -36,6 +36,10 @@ if ($InstallPath) {
     $home_claude = Join-Path $root 'home-claude'
     $deployed = $false
 }
+# The config half can live in a different root than the pipeline (install.ps1
+# -PipelineRoot). Defaults to the same path, so the common one-root case and a
+# bare source run are unchanged.
+$configRoot = if ($ClaudeHome) { $ClaudeHome.TrimEnd('\', '/') } else { $home_claude }
 # Every deployment check derives from this one path, so -InstallPath can never
 # silently validate a different tree than the one the installer wrote to. With
 # no -InstallPath the only deployment that can exist is the documented default.
@@ -87,7 +91,9 @@ if ($deployedVer -and $deployedVer -ne $srcVer) {
 
 # ── 1. JSON validity ─────────────────────────────────────────────────────────
 foreach ($rel in @('settings.json', 'settings.example-with-hooks.json')) {
-    $f = Join-Path $home_claude $rel
+    # $configRoot, not $home_claude: settings.json is config and follows
+    # ClaudeHome, which -PipelineRoot can move away from the pipeline tree.
+    $f = Join-Path $configRoot $rel
     if (-not (Test-Path $f)) {
         # settings.example-with-hooks.json is not copied into a deployment.
         if ($deployed -and $rel -eq 'settings.example-with-hooks.json') { continue }

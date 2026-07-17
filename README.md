@@ -86,11 +86,15 @@ claude-bundle/
 ├── scripts/
 │   ├── claude-switch.ps1              switch session backend (Claude/DS/MM/OCG/Ollama/CCR)
 │   ├── install.ps1                    guided full/lite installer (Windows)
+│   ├── uninstall.ps1                  remove what install.ps1 wrote (per manifest)
 │   ├── install-lite.sh               lite installer (macOS/Linux)
 │   ├── gen-scheduler.py              emit systemd/launchd units from registry.yaml
 │   ├── self-test.ps1                  one-command offline sanity check
 │   ├── check-doc-counts.py           CI guard: docs match the registry task count
-│   ├── enable-guard.sh / .ps1        activate the pre-commit secret-guard
+│   ├── check-registry.py             CI guard: registry fields / kind / trigger grammar
+│   ├── check-env-ref.py              CI guard: .env template matches the docs
+│   ├── check-agents-sync.py          CI guard: CLAUDE.md ↔ codex/AGENTS.md mirror
+│   ├── enable-guard.sh / .ps1        activate the pre-commit + pre-push secret-guard
 │   └── bootstrap-registry.ps1         fill registry.yaml placeholders + path policy
 │
 ├── config/
@@ -183,6 +187,15 @@ deployment.
 `scripts/install-lite.sh` (macOS/Linux — lite). Both stamp
 `~/.claude/.bundle-version` and run the self-test. The manual steps below
 are the fallback / reference.
+
+`install.ps1` takes two roots: **`-ClaudeHome`** (default `~/.claude` —
+config, and the only place Claude Code reads it from) and
+**`-PipelineRoot`** (default: the same — `cron/`, `wiki/`, `bin/`, `.env`),
+so you can run the pipeline off another disk without the config quietly
+landing somewhere that never takes effect. It records what it wrote in
+`.bundle-manifest.json`; **`scripts/uninstall.ps1`** removes exactly that
+and nothing of yours (dry-run by default, `-Confirm` to apply). See
+[INSTALL.md](INSTALL.md).
 
 ### If you only want the minimal tier
 

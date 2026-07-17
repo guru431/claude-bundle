@@ -13,17 +13,23 @@
 # come from your registry.yaml). Remove them first, elevated, e.g.:
 #   schtasks /delete /tn <task-name> /f
 #
+# The install may span two roots (install.ps1 -PipelineRoot): config in
+# ~/.claude, pipeline elsewhere. Both are recorded IN the manifest, and each
+# file says which root it belongs to — so you only point this at the ClaudeHome
+# that holds the manifest, and it finds the rest.
+#
 # Usage:
 #   powershell -File scripts/uninstall.ps1                  # dry run (default)
 #   powershell -File scripts/uninstall.ps1 -Confirm         # actually delete
 #   powershell -File scripts/uninstall.ps1 -Confirm -Force  # also delete modified files
-#   powershell -File scripts/uninstall.ps1 -InstallPath D:\claude -Confirm
+#   powershell -File scripts/uninstall.ps1 -ClaudeHome D:\claude -Confirm
 #
 # Exit codes: 0 = ok (or dry run), 1 = missing / unreadable manifest,
 #             2 = finished, but some files were skipped.
 
 param(
-    [string]$InstallPath = (Join-Path $env:USERPROFILE '.claude'),
+    [Alias('InstallPath')]
+    [string]$ClaudeHome = (Join-Path $env:USERPROFILE '.claude'),
     [switch]$Confirm,
     [switch]$Force,
     [switch]$DryRun
@@ -35,14 +41,14 @@ function Info($m) { Write-Host $m -ForegroundColor Cyan }
 function Good($m) { Write-Host "[ok]   $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "[warn] $m" -ForegroundColor Yellow }
 
-$InstallPath = $InstallPath.TrimEnd('\', '/')
-$mfPath = Join-Path $InstallPath '.bundle-manifest.json'
+$ClaudeHome = $ClaudeHome.TrimEnd('\', '/')
+$mfPath = Join-Path $ClaudeHome '.bundle-manifest.json'
 
 # ── 1. Load the manifest (no manifest = nothing this script may delete) ──────
 if (-not (Test-Path $mfPath)) {
     Write-Host "ERROR: no install manifest at $mfPath" -ForegroundColor Red
     Write-Host "       Without it this script cannot tell your files from the bundle's," -ForegroundColor DarkYellow
-    Write-Host "       so it removes nothing. Installed elsewhere? Pass -InstallPath." -ForegroundColor DarkYellow
+    Write-Host "       so it removes nothing. Installed elsewhere? Pass -ClaudeHome." -ForegroundColor DarkYellow
     Write-Host "       Installed before manifests existed? Remove the files by hand." -ForegroundColor DarkYellow
     exit 1
 }
@@ -63,20 +69,35 @@ if ($null -eq $mf.written) {
 # -DryRun always wins; without it, deleting still needs an explicit -Confirm/-Force.
 $apply = ($Confirm -or $Force) -and -not $DryRun
 
+# Roots come from the manifest, not from guesswork: the pipeline may sit
+# somewhere this script was never told about. Fall back to the manifest's own
+# ClaudeHome for pre-split manifests that carry neither field.
+$mfClaudeHome = if ($mf.claude_home) { $mf.claude_home } else { $ClaudeHome }
+$mfPipelineRoot = if ($mf.pipeline_root) { $mf.pipeline_root } else { $mfClaudeHome }
+$rootsSplit = ($mfClaudeHome -ne $mfPipelineRoot)
+
 Info ""
 Info "=== claude-bundle uninstaller ==="
-Info "InstallPath: $InstallPath"
-Info "Installed:   $($mf.installed_at) (bundle $($mf.bundle_version), $($mf.tier) tier)"
-Info "Files:       $(@($mf.written).Count) written by the installer"
-Info "Mode:        $(if ($apply) { 'DELETE' } else { 'dry run — re-run with -Confirm to delete' })"
+Info "ClaudeHome:   $mfClaudeHome"
+if ($rootsSplit) { Info "PipelineRoot: $mfPipelineRoot" }
+Info "Installed:    $($mf.installed_at) (bundle $($mf.bundle_version), $($mf.tier) tier)"
+Info "Files:        $(@($mf.written).Count) written by the installer"
+Info "Mode:         $(if ($apply) { 'DELETE' } else { 'dry run — re-run with -Confirm to delete' })"
 Info ""
+
+function Resolve-Root($rootName) {
+    # Pre-split manifests have no `root` on their entries — everything was one
+    # tree, so ClaudeHome is the right base for them.
+    if ($rootName -eq 'pipeline_root') { return $mfPipelineRoot }
+    return $mfClaudeHome
+}
 
 # ── 2. Remove the files the installer wrote ─────────────────────────────────
 $removed = 0
 $gone = 0
 $skipped = 0
 foreach ($f in @($mf.written)) {
-    $full = Join-Path $InstallPath $f.path
+    $full = Join-Path (Resolve-Root $f.root) $f.path
     if (-not (Test-Path $full -PathType Leaf)) { $gone++; continue }
     if ($f.sha256 -and (Get-FileHash $full -Algorithm SHA256).Hash -ne $f.sha256 -and -not $Force) {
         Warn "changed since install — keeping $($f.path) (use -Force to delete it anyway)"
@@ -92,20 +113,25 @@ foreach ($f in @($mf.written)) {
 # still holds anything (wiki notes, logs, .processed.json) is left alone.
 $pruned = 0
 if ($apply) {
-    # Byte-code caches first: Python regenerates them, and the installer's closing
-    # self-test compiles the tree it just deployed — so a full install always
-    # leaves these, and without this the dirs below never become empty. Only .pyc
-    # is ours to assume; a __pycache__ holding anything else is left alone.
-    foreach ($d in (Get-ChildItem $InstallPath -Recurse -Directory -Filter '__pycache__')) {
-        if (-not (Get-ChildItem $d.FullName -Recurse -Force | Where-Object { $_.Extension -ne '.pyc' })) {
-            Remove-Item $d.FullName -Recurse -Force
-            $pruned++
+    $roots = @($mfClaudeHome)
+    if ($rootsSplit) { $roots += $mfPipelineRoot }
+    foreach ($rootDir in $roots) {
+        if (-not (Test-Path $rootDir)) { continue }
+        # Byte-code caches first: Python regenerates them, and the installer's closing
+        # self-test compiles the tree it just deployed — so a full install always
+        # leaves these, and without this the dirs below never become empty. Only .pyc
+        # is ours to assume; a __pycache__ holding anything else is left alone.
+        foreach ($d in (Get-ChildItem $rootDir -Recurse -Directory -Filter '__pycache__')) {
+            if (-not (Get-ChildItem $d.FullName -Recurse -Force | Where-Object { $_.Extension -ne '.pyc' })) {
+                Remove-Item $d.FullName -Recurse -Force
+                $pruned++
+            }
         }
-    }
-    foreach ($d in (Get-ChildItem $InstallPath -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending)) {
-        if ((Test-Path $d.FullName) -and -not (Get-ChildItem $d.FullName -Force)) {
-            Remove-Item $d.FullName -Force
-            $pruned++
+        foreach ($d in (Get-ChildItem $rootDir -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending)) {
+            if ((Test-Path $d.FullName) -and -not (Get-ChildItem $d.FullName -Force)) {
+                Remove-Item $d.FullName -Force
+                $pruned++
+            }
         }
     }
 }

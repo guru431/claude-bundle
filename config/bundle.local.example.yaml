@@ -53,3 +53,20 @@ skip_projects: []
 # (e.g. a system path that accidentally became a "project").
 skip_dirs: []
 #   - C--Windows-System32
+
+# ── Unattributed sources ─────────────────────────────────────────────────────
+
+# collect_plans: send ~/.claude/plans/*.md to the LLM. OFF by default, and this
+# is the one setting the per-project policy above CANNOT protect you on.
+#
+# Plan files are flat, randomly named (`cheeky-conjuring-noodle.md`) and contain
+# no cwd, frontmatter or any other hint of which project they belong to. Nothing
+# can attribute them — so a plan written during a `skip_projects` session looks
+# exactly like any other, and `skip_projects` does not exclude it. Enabling this
+# means EVERY recent plan goes to your provider, whatever it was written for.
+#
+# Plans are also the single richest thing on disk: whole strategies, client
+# names, architecture decisions. Turn this on only if you're comfortable with
+# all of that leaving the machine — or set WIKI_LLM_PROVIDER=local first, which
+# keeps it on your own hardware (see docs/llm-routing.md).
+collect_plans: false

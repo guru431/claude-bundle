@@ -11,18 +11,32 @@
 # Usage:
 #   powershell -File scripts/install.ps1                       # interactive (lite default)
 #   powershell -File scripts/install.ps1 -Profile full
-#   powershell -File scripts/install.ps1 -Profile lite -InstallPath D:\claude
-#     ^ -InstallPath is a copy / run-from location ONLY. Claude Code reads
-#       CLAUDE.md + settings.json exclusively from ~/.claude, so config placed
-#       elsewhere never takes effect; only full-tier cron/wiki files run from it.
+#   powershell -File scripts/install.ps1 -Profile full -PipelineRoot D:\claude
+#     ^ config stays in ~/.claude (the only place Claude Code reads it from);
+#       only the full-tier cron/wiki/bin files run from D:\claude.
 #   powershell -File scripts/install.ps1 -Profile full -NonInteractive
 #   powershell -File scripts/install.ps1 -Force                # overwrite existing ~/.claude config
 #   powershell -File scripts/install.ps1 -Profile full -DryRun # print the plan, change nothing
+#
+# Two roots, because they are two different things:
+#   -ClaudeHome   (default ~/.claude) — CLAUDE.md, settings.json, skills/,
+#                 commands/. Claude Code reads config ONLY from ~/.claude and
+#                 keeps sessions/plans/memory there; moving this is only useful
+#                 for a sandbox install.
+#   -PipelineRoot (default = -ClaudeHome) — the full-tier cron/, wiki/, bin/,
+#                 .env, bundle.local.yaml. These derive their paths from their
+#                 own location, so they genuinely run from anywhere.
+# They used to be one -InstallPath, which meant a custom path put the config
+# somewhere Claude Code never reads — an install that looked fine and did
+# nothing. -InstallPath still works (it sets ClaudeHome, and PipelineRoot
+# follows it), so a sandbox install keeps behaving exactly as before.
 
 param(
     [ValidateSet('lite', 'full')]
     [string]$Profile,
-    [string]$InstallPath = (Join-Path $env:USERPROFILE '.claude'),
+    [Alias('InstallPath')]
+    [string]$ClaudeHome = (Join-Path $env:USERPROFILE '.claude'),
+    [string]$PipelineRoot,
     [switch]$NonInteractive,
     [switch]$Force,
     [switch]$DryRun
@@ -31,32 +45,43 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $srcHome = Join-Path $root 'home-claude'
-$instFull = [System.IO.Path]::GetFullPath($InstallPath)
+
+# PipelineRoot follows ClaudeHome unless asked otherwise, so the one-root case
+# (including a sandbox -InstallPath) behaves exactly as it always did.
+if (-not $PipelineRoot) { $PipelineRoot = $ClaudeHome }
+$homeFull = [System.IO.Path]::GetFullPath($ClaudeHome)
+$pipeFull = [System.IO.Path]::GetFullPath($PipelineRoot)
+$rootsSplit = ($homeFull -ne $pipeFull)
 
 # Install manifest (.bundle-manifest.json): what this run wrote, so uninstall.ps1
-# can remove exactly that and nothing else. Paths are relative to $InstallPath.
-$script:written = New-Object System.Collections.Generic.List[string]
+# can remove exactly that and nothing else. Each entry records WHICH root it is
+# relative to — with two roots, a bare relative path is ambiguous.
+$script:written = New-Object System.Collections.Generic.List[object]
 $script:preserved = New-Object System.Collections.Generic.List[string]
 
-function Get-RelPath($full) {
-    return [System.IO.Path]::GetFullPath($full).Substring($instFull.Length).TrimStart('\', '/').Replace('\', '/')
+function Get-RelPath($full, $base) {
+    return [System.IO.Path]::GetFullPath($full).Substring(([System.IO.Path]::GetFullPath($base)).Length).TrimStart('\', '/').Replace('\', '/')
 }
 
 # Record what a copy wrote. $src is the bundle-side file or directory, $dst its
 # destination: for a directory, every source file maps to one written
 # destination file — which is exactly what `Copy-Item -Recurse -Force` wrote, so
-# files the user already had under $dst are never claimed as ours.
-function Add-Written($src, $dst) {
+# files the user already had under $dst are never claimed as ours. $rootName is
+# 'claude_home' or 'pipeline_root' — which base $dst is relative to.
+function Add-Written($src, $dst, $rootName) {
+    $base = if ($rootName -eq 'claude_home') { $ClaudeHome } else { $PipelineRoot }
     if (-not (Test-Path $dst)) { return }
-    if (Test-Path $dst -PathType Leaf) { $script:written.Add((Get-RelPath $dst)); return }
-    $base = (Get-Item $src).FullName
+    if (Test-Path $dst -PathType Leaf) {
+        $script:written.Add(@{ root = $rootName; path = (Get-RelPath $dst $base) }); return
+    }
+    $srcBase = (Get-Item $src).FullName
     foreach ($f in (Get-ChildItem $src -Recurse -File)) {
         # Skip __pycache__: byte-code is a regenerable artifact, and the self-test
         # recompiles it right after the manifest is written — tracking it would
         # make every uninstall report a phantom "changed since install".
         if ($f.FullName -match '[\\/]__pycache__[\\/]') { continue }
-        $p = Join-Path $dst $f.FullName.Substring($base.Length).TrimStart('\', '/')
-        if (Test-Path $p) { $script:written.Add((Get-RelPath $p)) }
+        $p = Join-Path $dst $f.FullName.Substring($srcBase.Length).TrimStart('\', '/')
+        if (Test-Path $p) { $script:written.Add(@{ root = $rootName; path = (Get-RelPath $p $base) }) }
     }
 }
 
@@ -66,22 +91,34 @@ function Add-Written($src, $dst) {
 function Write-Manifest($tier) {
     if ($DryRun) { Info "[dry-run] would write .bundle-manifest.json ($($script:written.Count) files)"; return }
     $files = @()
-    foreach ($p in ($script:written | Select-Object -Unique)) {
-        if ($script:preserved -contains $p) { continue }   # yours, not ours to remove
-        $full = Join-Path $InstallPath $p
+    $seen = @{}
+    foreach ($e in $script:written) {
+        $key = "$($e.root)|$($e.path)"
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        if ($script:preserved -contains $e.path) { continue }   # yours, not ours to remove
+        $base = if ($e.root -eq 'claude_home') { $ClaudeHome } else { $PipelineRoot }
+        $full = Join-Path $base $e.path
         if (-not (Test-Path $full)) { continue }
-        $files += [pscustomobject]@{ path = $p; sha256 = (Get-FileHash $full -Algorithm SHA256).Hash }
+        $files += [pscustomobject]@{
+            root   = $e.root
+            path   = $e.path
+            sha256 = (Get-FileHash $full -Algorithm SHA256).Hash
+        }
     }
     $mf = [pscustomobject]@{
         bundle_version = $bundleVer
         installed_at   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         tier           = $tier
-        install_path   = $instFull
+        claude_home    = $homeFull
+        pipeline_root  = $pipeFull
         written        = @($files)
         preserved      = @($script:preserved | Select-Object -Unique)
     }
     $json = ($mf | ConvertTo-Json -Depth 4)
-    [System.IO.File]::WriteAllText((Join-Path $InstallPath '.bundle-manifest.json'), $json, [System.Text.UTF8Encoding]::new($false))
+    # Manifest lives at ClaudeHome: it is the root that always exists (lite has no
+    # pipeline) and the one a user can find without remembering where the pipeline went.
+    [System.IO.File]::WriteAllText((Join-Path $ClaudeHome '.bundle-manifest.json'), $json, [System.Text.UTF8Encoding]::new($false))
     Good "wrote .bundle-manifest.json ($($files.Count) files — uninstall with scripts/uninstall.ps1)"
 }
 
@@ -111,15 +148,22 @@ function Test-ExistingConfig($path) {
     return $false
 }
 
-# Network-drive detection (DriveType 4), mirroring cron/admin/sync-tasks.ps1.
-# Returns 'network' | 'fixed' | 'unknown' for the drive letter of $path.
+# Network-drive detection. Returns 'network' | 'fixed' | 'unknown' for the drive
+# letter of $path.
+#
+# System.IO.DriveInfo, not Get-CimInstance Win32_LogicalDisk (which is what
+# cron/admin/sync-tasks.ps1 still uses): a wedged WMI service makes that query
+# block forever with no timeout and no output, which hung the whole full-tier
+# install on an advisory check that only ever prints a warning. Reproduced on a
+# machine where Win32_LogicalDisk never returned. DriveInfo answers from the
+# filesystem API, cannot hang, and needs no WMI service at all.
 function Get-InstallDriveType($path) {
     if ($path -notmatch '^([A-Za-z]):') { return 'other' }
     $letter = $Matches[1].ToUpper()
     try {
-        $d = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='${letter}:'" -ErrorAction Stop
-        if ($d.DriveType -eq 4) { return 'network' }
-        if ($d.DriveType -eq 3) { return 'fixed' }
+        $d = New-Object System.IO.DriveInfo $letter
+        if ($d.DriveType -eq [System.IO.DriveType]::Network) { return 'network' }
+        if ($d.DriveType -eq [System.IO.DriveType]::Fixed) { return 'fixed' }
         return 'unknown'
     } catch { return 'unknown' }
 }
@@ -156,13 +200,14 @@ function Preflight-Full {
     }
     # (2) git present.
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $issues += 'git not found — task sync / mirror push need it' }
-    # (3) InstallPath drive type (network drives are unsafe for Password-mode session 0).
-    switch (Get-InstallDriveType $InstallPath) {
-        'network' { $issues += "InstallPath is on a network drive — unsafe for Password-mode tasks (session 0)" }
-        'fixed'   { Good "InstallPath drive is a local fixed disk" }
+    # (3) PipelineRoot drive type — this is the tree the scheduled tasks run FROM,
+    # so it is the one that must exist in session 0 (a mapped/network drive does not).
+    switch (Get-InstallDriveType $PipelineRoot) {
+        'network' { $issues += "PipelineRoot is on a network drive — unsafe for Password-mode tasks (session 0)" }
+        'fixed'   { Good "PipelineRoot drive is a local fixed disk" }
     }
     # (4) existing config that will be touched.
-    if (Test-ExistingConfig $InstallPath) { $issues += "existing config at $InstallPath — it will be backed up / overwritten (or pass -Force)" }
+    if (Test-ExistingConfig $ClaudeHome) { $issues += "existing config at $ClaudeHome — it will be backed up / overwritten (or pass -Force)" }
     foreach ($i in $issues) { Warn $i }
     if ($issues.Count -eq 0) { Good "preflight clean" }
     else {
@@ -178,30 +223,42 @@ if ($Profile -notin @('lite', 'full')) {
 
 Info ""
 Info "=== claude-bundle installer ==="
-Info "Profile:     $Profile"
-Info "InstallPath: $InstallPath"
-Info "Source:      $srcHome"
+Info "Profile:      $Profile"
+Info "ClaudeHome:   $ClaudeHome    (CLAUDE.md, settings.json, skills/, commands/)"
+if ($Profile -eq 'full') {
+    Info "PipelineRoot: $PipelineRoot    (cron/, wiki/, bin/, .env)"
+}
+Info "Source:       $srcHome"
 Info ""
 
-# InstallPath is only the run-from / copy location. Claude Code ALWAYS reads
-# CLAUDE.md + settings.json from ~/.claude and always stores sessions + memory
-# there — a custom path can't change that (F7). Warn so nobody expects config
-# (or the session store) to move with -InstallPath.
+# Claude Code ALWAYS reads CLAUDE.md + settings.json from ~/.claude and always
+# stores sessions + memory there — no flag can change that (F7). So a ClaudeHome
+# elsewhere is a sandbox, not a deployment. Say that, and point at the flag that
+# actually does what someone asking for a custom path usually wants.
 $defaultHome = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.claude'))
-$customPath = ([System.IO.Path]::GetFullPath($InstallPath) -ne $defaultHome)
+$customPath = ($homeFull -ne $defaultHome)
 if ($customPath) {
-    Warn "InstallPath is not the default ~/.claude:"
+    Warn "ClaudeHome is not the default ~/.claude:"
     Warn "  Claude Code only ever reads CLAUDE.md / settings.json from ~/.claude,"
-    Warn "  and always keeps session history + memory there. A custom InstallPath"
-    Warn "  is only meaningful as an advanced run-from location for the full-tier"
-    Warn "  cron/wiki files — the config won't take effect from here. See INSTALL.md."
+    Warn "  and always keeps session history + memory there. Config written here"
+    Warn "  will NOT take effect — this is a sandbox install."
+    if (-not $rootsSplit) {
+        Warn "  To run the pipeline from elsewhere while the config still works, use"
+        Warn "  -PipelineRoot <path> instead (config stays in ~/.claude). See INSTALL.md."
+    }
+}
+if ($rootsSplit -and $Profile -eq 'lite') {
+    Warn "-PipelineRoot is ignored for a lite install (there is no pipeline to place)."
+    $PipelineRoot = $ClaudeHome
+    $pipeFull = $homeFull
+    $rootsSplit = $false
 }
 
 if ($Profile -eq 'full') { Preflight-Full }
 
 # ── 0. Guard an existing config (do not silently overwrite) ───────────────────
-if ((Test-ExistingConfig $InstallPath) -and -not $Force) {
-    Warn "existing config found in $InstallPath (CLAUDE.md / settings.json)"
+if ((Test-ExistingConfig $ClaudeHome) -and -not $Force) {
+    Warn "existing config found in $ClaudeHome (CLAUDE.md / settings.json)"
     if ($DryRun) {
         Info "[dry-run] would back up + overwrite existing config (or abort in interactive mode)"
     } elseif ($NonInteractive) {
@@ -211,7 +268,7 @@ if ((Test-ExistingConfig $InstallPath) -and -not $Force) {
         if (AskYN 'Back up the existing config before overwriting?' $true) {
             $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
             foreach ($f in @('CLAUDE.md', 'settings.json')) {
-                $p = Join-Path $InstallPath $f
+                $p = Join-Path $ClaudeHome $f
                 if (Test-Path $p) { Copy-Item $p "$p.bak-$stamp" -Force; Good "backed up $f -> $f.bak-$stamp" }
             }
         }
@@ -221,22 +278,29 @@ if ((Test-ExistingConfig $InstallPath) -and -not $Force) {
     }
 }
 
-if ($DryRun) { Info "[dry-run] would create $InstallPath" }
-else { New-Item -ItemType Directory -Force -Path $InstallPath | Out-Null }
+if ($DryRun) { Info "[dry-run] would create $ClaudeHome" }
+else { New-Item -ItemType Directory -Force -Path $ClaudeHome | Out-Null }
+if ($rootsSplit) {
+    if ($DryRun) { Info "[dry-run] would create $PipelineRoot" }
+    else { New-Item -ItemType Directory -Force -Path $PipelineRoot | Out-Null }
+}
 
-# ── 1. Copy config ───────────────────────────────────────────────────────────
+# ── 1. Copy config (ClaudeHome — the only place Claude Code reads it) ────────
 if ($DryRun) {
-    Info "[dry-run] would copy CLAUDE.md, settings.json, skills/, commands/ -> $InstallPath"
+    Info "[dry-run] would copy CLAUDE.md, settings.json, skills/, commands/ -> $ClaudeHome"
 } else {
     foreach ($f in @('CLAUDE.md', 'settings.json')) {
-        Copy-Item (Join-Path $srcHome $f) $InstallPath -Force
-        Add-Written (Join-Path $srcHome $f) (Join-Path $InstallPath $f)
+        Copy-Item (Join-Path $srcHome $f) $ClaudeHome -Force
+        Add-Written (Join-Path $srcHome $f) (Join-Path $ClaudeHome $f) 'claude_home'
     }
     foreach ($d in @('skills', 'commands')) {
         $s = Join-Path $srcHome $d
-        if (Test-Path $s) { Copy-Item $s $InstallPath -Recurse -Force; Add-Written $s (Join-Path $InstallPath $d) }
+        if (Test-Path $s) {
+            Copy-Item $s $ClaudeHome -Recurse -Force
+            Add-Written $s (Join-Path $ClaudeHome $d) 'claude_home'
+        }
     }
-    Good "copied CLAUDE.md, settings.json, skills/, commands/"
+    Good "copied CLAUDE.md, settings.json, skills/, commands/ -> $ClaudeHome"
 }
 
 if ($Profile -eq 'full') {
@@ -252,27 +316,30 @@ if ($Profile -eq 'full') {
         # two files byte-for-byte first, restore them after the copy. A registry
         # that still has placeholders is a fresh template — let it be replaced.
         $preserve = @{}
-        $regPath = Join-Path $InstallPath 'cron/registry.yaml'
+        $regPath = Join-Path $PipelineRoot 'cron/registry.yaml'
         if ((Test-Path $regPath) -and
             -not (Select-String -Path $regPath -Pattern '<(bundle-install-path|user)>' -Quiet)) {
             $t = [System.IO.Path]::GetTempFileName(); Copy-Item $regPath $t -Force
             $preserve[$regPath] = $t
         }
-        $idxPath = Join-Path $InstallPath 'wiki/index.md'
+        $idxPath = Join-Path $PipelineRoot 'wiki/index.md'
         if (Test-Path $idxPath) {
             $t = [System.IO.Path]::GetTempFileName(); Copy-Item $idxPath $t -Force
             $preserve[$idxPath] = $t
         }
         foreach ($d in @('hooks', 'wiki', 'bin', 'cron')) {
             $s = Join-Path $srcHome $d
-            if (Test-Path $s) { Copy-Item $s $InstallPath -Recurse -Force; Add-Written $s (Join-Path $InstallPath $d) }
+            if (Test-Path $s) {
+                Copy-Item $s $PipelineRoot -Recurse -Force
+                Add-Written $s (Join-Path $PipelineRoot $d) 'pipeline_root'
+            }
         }
-        Good "copied hooks/, wiki/, bin/, cron/ (full tier)"
+        Good "copied hooks/, wiki/, bin/, cron/ (full tier) -> $PipelineRoot"
         foreach ($dst in $preserve.Keys) {
             Copy-Item $preserve[$dst] $dst -Force; Remove-Item $preserve[$dst] -Force
             # Restored from your copy, so the manifest lists it as preserved, not
             # written — the uninstaller must never remove it.
-            $script:preserved.Add((Get-RelPath $dst))
+            $script:preserved.Add((Get-RelPath $dst $PipelineRoot))
             Good "preserved your existing $((Split-Path $dst -Leaf)) (reinstall-safe)"
         }
     }
@@ -284,8 +351,8 @@ $bundleVer = if (Test-Path $verFile) { (Get-Content $verFile -Raw).Trim() } else
 if (Test-Path $verFile) {
     if ($DryRun) { Info "[dry-run] would stamp .bundle-version = $bundleVer" }
     else {
-        Copy-Item $verFile (Join-Path $InstallPath '.bundle-version') -Force
-        Add-Written $verFile (Join-Path $InstallPath '.bundle-version')
+        Copy-Item $verFile (Join-Path $PipelineRoot '.bundle-version') -Force
+        Add-Written $verFile (Join-Path $PipelineRoot '.bundle-version') 'pipeline_root'
         Good "stamped .bundle-version = $bundleVer"
     }
 }
@@ -295,7 +362,7 @@ if ($Profile -eq 'lite') {
     Write-Manifest 'lite'
     Info ""
     if ($customPath) {
-        Warn "Files were copied to $InstallPath, but Claude Code reads config only from"
+        Warn "Files were copied to $ClaudeHome, but Claude Code reads config only from"
         Warn "$defaultHome — this lite install will NOT take effect until it lives there."
     }
     Info "Lite install done. In a Claude Code chat, run:"
@@ -307,16 +374,16 @@ if ($Profile -eq 'lite') {
     # Minimal copied-file check (the full source self-test is not for a lite deploy).
     $liteOk = $true
     foreach ($f in @('CLAUDE.md', 'settings.json')) {
-        $p = Join-Path $InstallPath $f
+        $p = Join-Path $ClaudeHome $f
         if (Test-Path $p) { Good "present: $f" } else { Warn "missing: $f"; $liteOk = $false }
     }
-    try { Get-Content (Join-Path $InstallPath 'settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json | Out-Null; Good "settings.json parses" }
+    try { Get-Content (Join-Path $ClaudeHome 'settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json | Out-Null; Good "settings.json parses" }
     catch { Warn "settings.json invalid: $($_.Exception.Message)"; $liteOk = $false }
     if ($liteOk) { exit 0 } else { exit 1 }
 }
 
 # ── 3b. .env from the template (full only) ───────────────────────────────────
-$envDst = Join-Path $InstallPath '.env'
+$envDst = Join-Path $PipelineRoot '.env'
 $envTpl = Join-Path $root 'config/llm-providers.example.env'
 if ($DryRun) {
     Info "[dry-run] would create .env from template (if absent)"
@@ -333,7 +400,7 @@ if (Test-Path $envDst) { $script:preserved.Add('.env') }
 # ── 3c. bundle.local.yaml from the template (full only; never overwritten) ────
 # Project map + privacy policy live here (not in cron/hooks/utils.py) so they
 # survive a reinstall (F5). Created once; a later run leaves it untouched.
-$manifestDst = Join-Path $InstallPath 'bundle.local.yaml'
+$manifestDst = Join-Path $PipelineRoot 'bundle.local.yaml'
 $manifestTpl = Join-Path $root 'config/bundle.local.example.yaml'
 if ($DryRun) {
     Info "[dry-run] would create bundle.local.yaml from template (if absent)"
@@ -347,11 +414,11 @@ if (Test-Path $manifestDst) { $script:preserved.Add('bundle.local.yaml') }
 
 # ── 4. Bootstrap registry placeholders (full) ────────────────────────────────
 $user = Ask 'Windows user for the scheduled tasks' $env:USERNAME
-if ($DryRun -and -not (Test-Path (Join-Path $InstallPath 'cron/registry.yaml'))) {
+if ($DryRun -and -not (Test-Path (Join-Path $PipelineRoot 'cron/registry.yaml'))) {
     # Nothing was copied in a dry run, so the deployed registry isn't there yet.
     Info "[dry-run] would fill registry.yaml placeholders (user=$user)"
 } else {
-    & (Join-Path $root 'scripts/bootstrap-registry.ps1') -InstallPath $InstallPath -User $user -DryRun:$DryRun
+    & (Join-Path $root 'scripts/bootstrap-registry.ps1') -InstallPath $PipelineRoot -User $user -DryRun:$DryRun
     if (-not $DryRun) {
         if ($LASTEXITCODE -ne 0) { Warn "bootstrap-registry exited $LASTEXITCODE — check its output above" }
         else { Good "registry.yaml placeholders filled" }
@@ -362,13 +429,13 @@ if ($DryRun -and -not (Test-Path (Join-Path $InstallPath 'cron/registry.yaml')))
 $syncStatus = 'no'
 if ($NonInteractive) {
     Warn "skipped save-cred + sync (need elevation / interaction). Run by hand:"
-    Warn "  $InstallPath\cron\admin\save-cred.cmd   (non-elevated, stashes your password)"
-    Warn "  $InstallPath\cron\admin\sync.cmd        (auto-elevates, registers tasks)"
+    Warn "  $PipelineRoot\cron\admin\save-cred.cmd   (non-elevated, stashes your password)"
+    Warn "  $PipelineRoot\cron\admin\sync.cmd        (auto-elevates, registers tasks)"
 } elseif ($DryRun) {
     Info "[dry-run] would offer to run save-cred.cmd and sync.cmd (elevated)"
 } else {
     if (AskYN 'Stash your Windows password for Password-mode tasks now (save-cred.cmd)?' $true) {
-        & (Join-Path $InstallPath 'cron/admin/save-cred.cmd')
+        & (Join-Path $PipelineRoot 'cron/admin/save-cred.cmd')
     }
     # Scope confirmation BEFORE registration, not in the closing report: once the
     # tasks are registered the nightly flush reads whatever the policy allows,
@@ -384,7 +451,7 @@ if ($NonInteractive) {
         }
     }
     if ($scopeOk -and (AskYN 'Register the scheduled tasks now (sync.cmd — prompts for UAC)?' $true)) {
-        & (Join-Path $InstallPath 'cron/admin/sync.cmd')
+        & (Join-Path $PipelineRoot 'cron/admin/sync.cmd')
         # sync.cmd waits for the elevated run and propagates its exit code, so a
         # cancelled UAC prompt or a registration error must not report success.
         $syncRc = $LASTEXITCODE
@@ -392,7 +459,7 @@ if ($NonInteractive) {
         else {
             $syncStatus = "FAILED (sync.cmd exit $syncRc)"
             Warn "sync.cmd exited $syncRc — tasks are probably NOT registered (UAC cancelled or a registration error)."
-            Warn "  Re-run by hand: $InstallPath\cron\admin\sync.cmd"
+            Warn "  Re-run by hand: $PipelineRoot\cron\admin\sync.cmd"
         }
     }
 }
@@ -408,9 +475,9 @@ if ($DryRun) {
 } else {
     $swSrc = Join-Path $root 'scripts/claude-switch.ps1'
     if ((Test-Path $swSrc) -and (AskYN 'Copy claude-switch.ps1 into the deployment (survives deleting the bundle checkout)?' $true)) {
-        Copy-Item $swSrc (Join-Path $InstallPath 'claude-switch.ps1') -Force
-        Add-Written $swSrc (Join-Path $InstallPath 'claude-switch.ps1')
-        Good "copied claude-switch.ps1 -> $InstallPath\claude-switch.ps1"
+        Copy-Item $swSrc (Join-Path $ClaudeHome 'claude-switch.ps1') -Force
+        Add-Written $swSrc (Join-Path $ClaudeHome 'claude-switch.ps1') 'claude_home'
+        Good "copied claude-switch.ps1 -> $ClaudeHome\claude-switch.ps1"
         $switcherInstalled = $true
     }
     $codexSrc = Join-Path $root 'codex/AGENTS.md'
@@ -437,7 +504,7 @@ if (Test-Path $envDst) {
 }
 # Project map + privacy policy live in bundle.local.yaml now (not utils.py), so
 # they survive reinstalls. An empty project_map is fine — slugs auto-derive.
-$manifest = Join-Path $InstallPath 'bundle.local.yaml'
+$manifest = Join-Path $PipelineRoot 'bundle.local.yaml'
 if (Test-Path $manifest) {
     if ((Get-Content $manifest -Raw) -match '(?m)^\s*project_map:\s*\{\s*\}\s*$') {
         Warn "project_map empty in bundle.local.yaml — optional (slugs auto-derive); set it to pin names + privacy policy"
@@ -445,7 +512,7 @@ if (Test-Path $manifest) {
 } else {
     Warn "bundle.local.yaml not created — project map + privacy policy fall back to defaults (all projects, auto-slugs)"
 }
-$regDeployed = Join-Path $InstallPath 'cron/registry.yaml'
+$regDeployed = Join-Path $PipelineRoot 'cron/registry.yaml'
 if (Test-Path $regDeployed) {
     $rtxt = Get-Content $regDeployed -Raw
     if ($rtxt -match '<(bundle-install-path|user)>') { Warn "registry.yaml still has <...> placeholders — run bootstrap-registry.ps1" }
@@ -453,7 +520,10 @@ if (Test-Path $regDeployed) {
     Info "registry.yaml task count: $taskCount"
 }
 if ($customPath) {
-    Warn "InstallPath is not $defaultHome — Claude Code will NOT read CLAUDE.md / settings.json from $InstallPath (the cron/wiki files do run from there)"
+    Warn "ClaudeHome is not $defaultHome — Claude Code will NOT read CLAUDE.md / settings.json from $ClaudeHome (the cron/wiki files do run from where they were placed)"
+}
+if ($rootsSplit) {
+    Info "Roots: config in $ClaudeHome, pipeline in $PipelineRoot"
 }
 Info "sync run this session: $syncStatus"
 Info "claude-switch.ps1 in deployment: $(if ($switcherInstalled) { 'yes' } else { 'no (invoke from the bundle checkout)' })"
@@ -461,7 +531,7 @@ Info "codex/AGENTS.md mirrored to ~/.codex: $(if ($codexMirrored) { 'yes' } else
 
 # ── 7. Self-test (validates the deployed tree) ───────────────────────────────
 Info ""
-if ($DryRun) { Info "[dry-run] would run self-test -InstallPath $InstallPath"; exit 0 }
+if ($DryRun) { Info "[dry-run] would run self-test -InstallPath $PipelineRoot -ClaudeHome $ClaudeHome"; exit 0 }
 Info "Running self-test..."
-& (Join-Path $root 'scripts/self-test.ps1') -InstallPath $InstallPath
+& (Join-Path $root 'scripts/self-test.ps1') -InstallPath $PipelineRoot -ClaudeHome $ClaudeHome
 exit $LASTEXITCODE

@@ -22,7 +22,16 @@ BUNDLE_ROOT = Path(__file__).resolve().parents[2]
 WIKI_ROOT = BUNDLE_ROOT / "wiki"
 DAILY_DIR = WIKI_ROOT / "daily"
 PENDING_DIR = DAILY_DIR / ".pending"
-PROJECTS_BASE = Path.home() / ".claude" / "projects"
+
+# The OTHER root. BUNDLE_ROOT is where the pipeline's own files live and moves
+# with -PipelineRoot; CLAUDE_HOME is where Claude Code itself keeps config,
+# session transcripts, plans and memory — always ~/.claude, and no install flag
+# can move it. Conflating the two is a real bug source: a pipeline deployed
+# outside ~/.claude would look for transcripts next to itself and silently find
+# none. Every consumer of the session store must use CLAUDE_HOME, never
+# BUNDLE_ROOT. Overridable for tests, which sandbox HOME.
+CLAUDE_HOME = Path(os.environ.get("CLAUDE_HOME") or (Path.home() / ".claude"))
+PROJECTS_BASE = CLAUDE_HOME / "projects"
 
 # ── Machine-local pipeline config (bundle.local.yaml) ────────────────────────
 # PROJECT_MAP / KNOWN_PROJECTS and the privacy policy below used to be edited
@@ -116,6 +125,35 @@ ALLOW_PROJECTS: set[str] = set(_manifest_str_list("allow_projects"))
 # Backward-compatible name (older configs / imports): folded into the single
 # gate below so it keeps excluding what it always did.
 SKIP_JSONL_PROJECTS: set[str] = set(_manifest_str_list("skip_jsonl_projects")) | SKIP_PROJECTS
+
+
+def _manifest_bool(key: str, default: bool) -> bool:
+    """Read a bool from the manifest; a non-bool value is a loud error, not a
+    silent truthy cast ('false' as a string would otherwise mean True)."""
+    if key not in _MANIFEST:
+        return default
+    val = _MANIFEST.get(key)
+    if isinstance(val, bool):
+        return val
+    print(f"ERROR: bundle.local.yaml '{key}' must be true/false, got "
+          f"{type(val).__name__} — using default {default}.", file=sys.stderr)
+    return default
+
+
+# ── Unattributed sources (opt-in) ────────────────────────────────────────────
+# ~/.claude/plans/*.md carries NO project attribution: the files are flat,
+# randomly named (`cheeky-conjuring-noodle.md`), and contain no cwd, frontmatter
+# or any other hint of what they belong to. Nothing can map them onto a project,
+# so the per-project policy above cannot cover them — a plan written during a
+# `skip_projects` session is NOT excluded by that rule, because nothing knows it
+# was that session's. They previously flowed to the LLM under the DEFAULT_PROJECT
+# bucket, gated only on "main" being allowed, which the shipped default allows.
+#
+# So: off unless explicitly enabled. The policy the rest of this file enforces is
+# per-project, and data that cannot be attributed cannot be judged by it. Turn it
+# on only if you accept that every plan goes to your provider regardless of which
+# project it was written for.
+COLLECT_PLANS: bool = _manifest_bool("collect_plans", False)
 
 
 def project_allowed(project: str) -> bool:

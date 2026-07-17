@@ -139,7 +139,7 @@ publishes nothing.
 
 | Task | Sends data off-box (to whom) | Spends money | Publishes / pushes | Default state |
 |---|---|---|---|---|
-| Wiki flush + compile (`ClaudeWikiFlush`, `ClaudeWikiCompileSessions`, `ClaudeWikiCompileKB`) | session/source text → your LLM provider (DeepSeek / OpenCode Go) | yes (PAYG tokens) | no | on (KB compile off) |
+| Wiki flush + compile (`ClaudeWikiFlush`, `ClaudeWikiCompileSessions`, `ClaudeWikiCompileKB`) | session/source text of allowed projects → your LLM provider (DeepSeek / OpenCode Go). Plans are excluded unless `collect_plans: true` | yes (PAYG tokens) | no | on (KB compile off) |
 | `ClaudeMemoryUpdate` | your user messages (up to ~40 KB/night) + a slice of `~/.claude/memory/` → your LLM provider | yes (PAYG tokens) | no | on |
 | `ClaudeHealthcheck` | host metrics → your LLM provider (see below) | yes (PAYG tokens) | no | on |
 | `ClaudeGitPushAll` | your git remotes | no | yes (`git push`) | off (opt-in) |
@@ -242,17 +242,19 @@ just get copied?" (For the pass/fail deploy check, use
 
 ## Per-project privacy policy (bundle.local.yaml)
 
-Every source the pipeline reads — JSONL transcripts, memory feedback,
-plans, incidents/sessions, and the `ClaudeMemoryUpdate` task — honors ONE
-declarative policy from `~/.claude/bundle.local.yaml` (optional; template
-in `config/bundle.local.example.yaml`). So "exclude project X" can no
-longer mean "excluded from JSONL but still sent from memory":
+Every **attributable** source the pipeline reads — JSONL transcripts,
+memory feedback, incidents/sessions, and the `ClaudeMemoryUpdate` task —
+honors ONE declarative policy from `~/.claude/bundle.local.yaml`
+(optional; template in `config/bundle.local.example.yaml`). So "exclude
+project X" can no longer mean "excluded from JSONL but still sent from
+memory":
 
 - `allow_projects: []` — an allowlist. **Empty = all projects allowed**
   (the default). Set it to a small explicit list to make those the only
   projects the pipeline ever reads — the safe first-run posture.
 - `skip_projects: []` — resolved slugs excluded from **all** sources.
 - `skip_dirs: []` — raw `~/.claude/projects/<dir>` names dropped early.
+- `collect_plans: false` — the exception, see below.
 
 The same file also holds `project_map` / `known_projects` (moved out of
 `cron/hooks/utils.py` so they survive a reinstall). Preview exactly what
@@ -286,6 +288,20 @@ and two limits are worth knowing before you rely on it:
   useful), and nothing strips secrets before the text reaches the
   provider. Keep genuinely sensitive projects out via `allow_projects` /
   `skip_projects` rather than expecting the pipeline to sanitize them.
+- **Plans cannot be attributed at all**, so the policy above simply does
+  not apply to them. `~/.claude/plans/*.md` is a flat directory of
+  randomly-named files (`cheeky-conjuring-noodle.md`) with no cwd, no
+  frontmatter, and nothing else identifying which project a plan was
+  written for. A plan authored during a `skip_projects` session is
+  indistinguishable from any other — `skip_projects` does **not** exclude
+  it. Because data that can't be attributed can't be judged by a
+  per-project rule, plans are **off by default**: set `collect_plans: true`
+  in `bundle.local.yaml` to send them, accepting that *every* recent plan
+  goes to your provider whatever it was written for. Plans are also the
+  richest thing on disk (whole strategies, client names, architecture
+  decisions), so if you want them in the wiki, consider pairing the opt-in
+  with `WIKI_LLM_PROVIDER=local` (see `docs/llm-routing.md`). The
+  effective setting is printed on the policy line of every run.
 
 ### First run — controlling the historical backlog
 

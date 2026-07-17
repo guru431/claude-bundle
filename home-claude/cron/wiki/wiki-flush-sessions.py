@@ -35,12 +35,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (dir_to_project, parse_jsonl_messages, is_subagent_jsonl, llm_call,
                    normalize_project_name, KNOWN_PROJECTS, mark_phase_success,
                    state_get, state_add, state_remove, is_dry_run, SKIP_DIRS, SKIP_JSONL_PROJECTS,
-                   project_allowed, slug_collisions, ALLOW_PROJECTS,
-                   BUNDLE_ROOT, WIKI_ROOT, DAILY_DIR, PENDING_DIR, LOG_MD, PROJECTS_BASE)
+                   project_allowed, slug_collisions, ALLOW_PROJECTS, COLLECT_PLANS,
+                   BUNDLE_ROOT, CLAUDE_HOME, WIKI_ROOT, DAILY_DIR, PENDING_DIR, LOG_MD, PROJECTS_BASE)
 from untrusted import fence
 
-PLANS_DIR = Path.home() / ".claude" / "plans"
-HISTORY_JSONL = Path.home() / ".claude" / "history.jsonl"
+# CLAUDE_HOME, not a local Path.home() copy — these belong to Claude Code, not
+# to the pipeline, and stay under ~/.claude wherever the pipeline is deployed.
+PLANS_DIR = CLAUDE_HOME / "plans"
+HISTORY_JSONL = CLAUDE_HOME / "history.jsonl"
 PROMPT_PATH = BUNDLE_ROOT / "cron" / "prompts" / "wiki-flush-sessions.md"
 CRON_LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 
@@ -273,7 +275,15 @@ def collect_feedback_files() -> dict[str, list[str]]:
 
 
 def collect_plans() -> list[str]:
-    """Collect recently-modified plans from ~/.claude/plans/."""
+    """Collect recently-modified plans from ~/.claude/plans/ — opt-in.
+
+    Plans carry no project attribution (flat dir, random filenames, no cwd in
+    the file), so the per-project privacy policy cannot judge them: a plan
+    written during a skip_projects session is indistinguishable from any other.
+    Off unless bundle.local.yaml sets `collect_plans: true`. See utils.COLLECT_PLANS.
+    """
+    if not COLLECT_PLANS:
+        return []
     plans = []
     if PLANS_DIR.exists():
         for f in sorted(PLANS_DIR.glob("*.md")):
@@ -476,7 +486,8 @@ def main():
     # it's obvious which projects can reach the LLM and how much history is swept.
     log(f"Policy: allow_projects={sorted(ALLOW_PROJECTS) or 'ALL'}; "
         f"skip_projects={sorted(SKIP_JSONL_PROJECTS) or 'none'}; "
-        f"skip_dirs={sorted(SKIP_DIRS) or 'none'}; backlog_max={BACKLOG_MAX}")
+        f"skip_dirs={sorted(SKIP_DIRS) or 'none'}; backlog_max={BACKLOG_MAX}; "
+        f"collect_plans={'yes' if COLLECT_PLANS else 'no (unattributed — opt-in)'}")
     # A slug claimed by two cwds makes the policy ambiguous: it can only name the
     # slug, so allowing one directory quietly allows the other as well.
     for slug, dirs in sorted(slug_collisions().items()):
@@ -576,7 +587,9 @@ def main():
         all_projects.setdefault(project, []).extend(texts)
 
     # Plans have no project of their own — they bucket under DEFAULT_PROJECT, so
-    # honor the policy for that bucket (an allowlist excluding "main" drops them).
+    # honor the policy for that bucket too (an allowlist excluding "main" drops
+    # them). collect_plans (checked in collect_plans()) is the real gate: the
+    # bucket is a placement decision, not an attribution.
     if plans and project_allowed(DEFAULT_PROJECT):
         all_projects.setdefault(DEFAULT_PROJECT, []).extend(plans)
 

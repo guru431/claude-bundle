@@ -457,27 +457,31 @@ function ConvertTo-DurationSpan([string]$iso) {
 # Mapped network drives don't exist in session 0 (before user logon), where
 # LogonType=Password tasks fire. A Password task whose script/launcher lives on
 # a mapped drive registers cleanly, then silently exits 127 with no log. This is
-# the fail-loud point: query the ACTUAL drive type (Win32_LogicalDisk
-# DriveType=4 = network) rather than inferring "mapped" from "not C:". UNC paths
-# (\\host\share) and fixed local drives (C:/D:/...) are fine.
-$script:_mappedDrives = $null
-function Get-MappedDriveLetters() {
-    if ($null -ne $script:_mappedDrives) { return $script:_mappedDrives }
-    $set = @{}
-    try {
-        Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=4' -ErrorAction Stop |
-            ForEach-Object { if ($_.DeviceID) { $set[$_.DeviceID.TrimEnd(':').ToUpper()] = $true } }
-    } catch {}
-    $script:_mappedDrives = $set
-    return $set
+# the fail-loud point: query the ACTUAL drive type rather than inferring "mapped"
+# from "not C:". UNC paths (\\host\share) and fixed local drives (C:/D:/...) are
+# fine.
+#
+# System.IO.DriveInfo, not Get-CimInstance Win32_LogicalDisk: a wedged WMI
+# service makes that query block forever with no timeout and no output, which
+# would hang the elevated syncer inside its own safety predicate (the same hang
+# that hit install.ps1's Get-InstallDriveType).
+#
+# Deliberately no try/catch: the WMI version swallowed failures into "no mapped
+# drives", the exact wrong answer this predicate exists to prevent. An
+# unexpected throw must abort the sync via $ErrorActionPreference='Stop', not
+# quietly register a task doomed to exit 127.
+$script:_driveTypes = @{}
+function Test-DriveLetterMapped([string]$letter) {
+    $letter = $letter.ToUpper()
+    if ($script:_driveTypes.ContainsKey($letter)) { return $script:_driveTypes[$letter] }
+    $verdict = ((New-Object System.IO.DriveInfo $letter).DriveType -eq [System.IO.DriveType]::Network)
+    $script:_driveTypes[$letter] = $verdict
+    return $verdict
 }
 function Test-PathOnMappedDrive([string]$path) {
     if (-not $path) { return $false }
     # UNC (\\host\share) is fine — only drive-letter paths can be mapped.
-    if ($path -match '^[A-Za-z]:') {
-        $letter = $path.Substring(0, 1).ToUpper()
-        return (Get-MappedDriveLetters).ContainsKey($letter)
-    }
+    if ($path -match '^([A-Za-z]):') { return (Test-DriveLetterMapped $Matches[1]) }
     return $false
 }
 

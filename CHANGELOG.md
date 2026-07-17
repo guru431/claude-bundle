@@ -3,6 +3,28 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.5.2] - 2026-07-17 — the syncer's turn to stop hanging on WMI
+
+0.5.1 fixed a WMI hang in `install.ps1` and recorded the identical hang in the
+task syncer as a finding rather than fixing it. This closes that finding.
+
+### Fixed
+
+- **`sync-tasks.ps1` could hang forever on a wedged WMI service.** Its
+  mapped-drive predicate queried `Get-CimInstance Win32_LogicalDisk`, the same
+  call that hung the 0.5.1 installer with no timeout and no output. It now reads
+  `System.IO.DriveInfo`, which answers from the filesystem API and needs no WMI
+  service. This mattered more here than in the installer: the predicate is the
+  fail-loud guard against the mapped-drive + Password footgun (such a task
+  registers cleanly, then silently exits 127 in session 0), so it has to either
+  answer or fail visibly — never stall.
+- **The same predicate swallowed every failure into "no mapped drives"** — the
+  exact wrong answer it exists to prevent, which would have waved a doomed task
+  through. The `catch {}` is gone rather than replaced with an "unknown" verdict:
+  `DriveInfo` only throws on an invalid drive name, which the drive-letter regex
+  already rules out, so an unknown branch would have been dead code. Anything
+  unexpected now aborts the sync via `$ErrorActionPreference='Stop'`.
+
 ## [0.5.1] - 2026-07-17 — the two gaps 0.5.0 left open
 
 Closes both items 0.5.0 recorded as "known gaps, recorded not fixed", plus a

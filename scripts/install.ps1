@@ -151,12 +151,12 @@ function Test-ExistingConfig($path) {
 # Network-drive detection. Returns 'network' | 'fixed' | 'unknown' for the drive
 # letter of $path.
 #
-# System.IO.DriveInfo, not Get-CimInstance Win32_LogicalDisk (which is what
-# cron/admin/sync-tasks.ps1 still uses): a wedged WMI service makes that query
-# block forever with no timeout and no output, which hung the whole full-tier
-# install on an advisory check that only ever prints a warning. Reproduced on a
-# machine where Win32_LogicalDisk never returned. DriveInfo answers from the
-# filesystem API, cannot hang, and needs no WMI service at all.
+# System.IO.DriveInfo, not Get-CimInstance Win32_LogicalDisk: a wedged WMI
+# service makes that query block forever with no timeout and no output, which
+# hung the whole full-tier install on an advisory check that only ever prints a
+# warning. Reproduced on a machine where Win32_LogicalDisk never returned.
+# DriveInfo answers from the filesystem API, cannot hang, and needs no WMI
+# service at all. cron/admin/sync-tasks.ps1 uses it for the same reason.
 function Get-InstallDriveType($path) {
     if ($path -notmatch '^([A-Za-z]):') { return 'other' }
     $letter = $Matches[1].ToUpper()

@@ -3,6 +3,158 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.4.0] - 2026-07-17 — deep-audit batch: 66 findings resolved
+
+Resolves the 2026-07-13 deep-audit batch (`FINDINGS.md` F-01…F-66) in full.
+Every finding was independently re-verified against the real source before any
+change — unlike the 2026-07-11 batch, which was 85% false positives, this one
+held up: all 66 reproduced. `FINDINGS.md` is back to just its header.
+
+### Behaviour changes (read before upgrading)
+
+- **`WIKI_BACKLOG_MAX` now defaults to 0** (was 50). Backfilling the historical
+  transcript archive is opt-in: a first run can no longer ship years of old
+  sessions to an LLM before the operator has seen a `--dry-run` preview. Set it
+  explicitly to sweep history.
+- **A broken privacy manifest now denies everything.** `bundle.local.yaml` that
+  exists but can't be honored (invalid YAML, PyYAML missing, a field of the
+  wrong type) used to degrade silently to the permissive default — the one
+  failure mode this file must not have. Empty `allow_projects` still means "all
+  projects" (the documented default); the installer now confirms that scope
+  before registering tasks instead of mentioning it afterwards.
+- **Default permissions narrowed.** `home-claude/settings.json` no longer
+  pre-allows blanket `powershell`/`cmd`/`python`/`curl`/`npm`/`pip`/`git:*` or
+  `WebFetch`. Read-only inspection stays prompt-free; execution and network
+  paths fall through to Claude Code's normal per-use prompt.
+- **The flush phase now exits non-zero when a project fails**, so a failed
+  night stops reporting green. A clean no-op night now marks the heartbeat
+  (it previously looked stale).
+- **`claude-switch.ps1` refuses to write keys into a git-TRACKED**
+  `settings.local.json`, and adds an untracked-but-unignored one to
+  `.git/info/exclude`. It also merges the `env` block instead of replacing it,
+  so project-local variables it doesn't own survive a backend switch.
+
+### Data-loss and correctness fixes
+
+- **Partial multipart flush finalized the whole source** (F-06): one successful
+  part made the result truthy, so every JSONL was marked processed and pending
+  deleted while the failed parts' content was gone. Partial now keeps the
+  sources for a retry; oversized single blocks are hard-split.
+- **The tail of a live session was lost forever** (F-07): the dedup key was
+  `project/name`, so anything appended after the first flush was never read
+  again. Keys are now pinned to the byte size at read time.
+- **Compile-sessions lost early chunks** (F-08): every chunk saw the same
+  pre-run page body and overwrote the previous chunk's facts. Each part now
+  merges into the state the next part is shown.
+- **Compile-KB could destroy a page via `action: create`** (F-09): the model
+  never sees page bodies, so any non-append action was a blind full-body
+  replace. An existing target now always appends.
+- **The session compiler could write into another project or global `kb/`**
+  (F-10), and the per-project log attributed it to the source project. Writes
+  are now pinned to `projects/<current>/`; out-of-scope paths are quarantined.
+- **A partially rejected LLM batch counted as fully processed** (F-12) in both
+  compilers — rejected changes vanished as long as a sibling applied. They are
+  now quarantined and the source stays unfinalized.
+- **A valid `[]` answer was treated as a permanent error** (F-14), making the
+  intended "0 changes" path unreachable and retrying such a daily forever.
+- **State writes raced** (F-18, F-55): the heartbeat did an unlocked
+  read-modify-write, and a lock timeout deliberately proceeded unlocked —
+  reintroducing the exact lost update the lock exists to prevent. Both now
+  share the lock and skip the write rather than corrupt state.
+- **`memory-update` overwrote colliding projects** (F-05/F-27) instead of
+  merging, cut the summary in filesystem order, counted malformed LLM output as
+  success (F-28), and could iterate a string `links` character by character
+  (F-29). Slug collisions are now reported by the flush policy line.
+
+### Privacy fixes
+
+- `.pending` files and the detached PreCompact handoff bypassed `project_allowed()`
+  entirely (F-02) — an excluded project still left the machine by two paths.
+- Quarantined raw payloads (echoed session text) escaped log retention forever
+  (F-33); they now have their own shorter TTL.
+- Untrusted data (transcripts, external articles, existing pages) is now fenced
+  with typed, un-forgeable delimiters in every LLM prompt, and wiki content
+  re-injected at SessionStart is labelled reference material, not instructions
+  (F-45).
+- The healthcheck's real egress (local and optional remote host metrics) is now
+  documented, and `REMOTE_SSH_HOST`/`WIN_REMOTE_HOST` added to the env template
+  (F-34).
+
+### Known limitation, now documented rather than implied
+
+- **The allowlist is a source gate, not a DLP boundary** (F-03). `USER.md` is
+  global and carries no per-project provenance, so a fact extracted while a
+  project was allowed keeps being sent after you exclude it; and the memory
+  prompts deliberately ask for exact paths/hosts/ports with no redaction pass.
+  Excluding a project stops new extraction from it — prune `USER.md` by hand if
+  old facts must go. Per-project provenance is a larger change, deferred.
+
+### Guard fixes (this repo's own secret guards)
+
+- The push guard scanned only the net `base..HEAD` diff (F-11a), so a secret
+  added and removed across two outgoing commits still shipped in the published
+  history. It now walks per-commit patches.
+- `--diff-filter=A` missed renames (F-11b), so `git mv safe.txt .env` bypassed
+  the sensitive-filename gate. Now `AR`.
+- `.githooks/pre-commit` was tracked as mode 100644 (F-11c) — POSIX git
+  silently skipped it despite the docs calling it active. Now 100755.
+- The scanner blocked commits that *remove* a leaked token (F-48), preventing
+  remediation. It now scans added lines only.
+- `git-push-all.sh` auto-committed an already-staged `.env` despite the
+  exclusion pathspec (F-46), and its `--dry-run` destroyed the user's staging
+  area (F-47).
+
+### Other fixes
+
+- `sync.cmd` spliced `%*` through two cmd.exe parses, so an argument containing
+  `&` executed before elevation (F-44); args now travel via an unpredictable
+  file, validated against an allowlist, and the elevated run is waited on with
+  its exit code propagated (F-49).
+- The scheduler syncer silently adopted same-named foreign tasks despite the
+  documented "left alone" contract, and ignored a changed `user:` (F-25).
+- The POSIX scheduler generator dropped `script_args` and emitted invalid
+  units/plists for paths with spaces or `&` (F-24).
+- `wiki-pipeline --dry-run` still rewrote indexes and the heartbeat, and
+  "read-only" `bundle-status.py` could create `.processed.json` (F-17).
+- OpenCode's 402 didn't trip the circuit breaker (F-16); `_llm_claude` ignored
+  `CLAUDE_BIN` and so couldn't find the CLI in session 0 (F-52); `read_page`
+  stayed strict so a corrupt page still aborted a run at apply time (F-15).
+- `md2pdf-sync` always returned 0 (F-20); the healthcheck collected none of the
+  metrics it promised and never alerted on its own verdict (F-51); the monitor
+  logged "Alert sent" even when Telegram failed (F-66).
+- `md2pdf-sync`/`log-retention` ignored the bundle `.env` (F-19); the Full
+  preflight pointed at the wrong requirements file (F-21); `self-test.ps1`
+  tested the wrong deployment under `-InstallPath` (F-23); `install-lite.sh`
+  force-overwrote user config and invented `CLAUDE_HOME` instead of
+  `CLAUDE_CONFIG_DIR` (F-42, F-40).
+- Wiki lint compared link stems only, so `[[projects/a/foo]]` resolved against
+  `projects/b/foo.md`, and it hard-errored on the anticipated links its own
+  prompts ask for (F-32); orphan detection counted the generated indexes and so
+  was always clean (F-36).
+- The AGENTS mirror check only counted headings (F-54) — it now compares
+  normalized section content, which immediately caught two real drifts in
+  `codex/AGENTS.md`.
+
+### Documentation truth-fixes
+
+Manual/agent install steps ran the source checkout's `sync.cmd` against the
+deployed registry and never copied `bundle.local.yaml` (F-22); docs promised
+source-hash dedup and backlinks that no code computes (F-31, F-58), claimed the
+normalizer rejects deep paths when it flattens them (F-38), asserted "no
+retrieval misses" and "wikilinks stable forever" while contradicting both a few
+lines later (F-37), pointed users at code constants that must ship empty (F-35),
+and quoted a DeepSeek price that had since halved (F-60). Prerequisites now
+agree across the three entry docs (F-59); the lite hook example no longer hands
+Lite users Tier-2-only hooks (F-53); the hooks README no longer gives impossible
+`CLAUDE_HOOK_PYTHON` bootstrap advice (F-41); `codex/AGENTS.md` no longer
+documents a nonexistent shared MCP config path (F-57); Windows path/encoding
+rules no longer contradict themselves (F-62). The `personal-voice` skill now
+addresses third-party consent in the corpus (F-56), and `code-review-external`
+classifies severity by evidence rather than by hedging words (F-65). Two old
+CHANGELOG rationales (I4, I6) were rewritten: the circuit breaker is a
+dead-provider fuse, not a cost ceiling (F-63), and dry-run/quarantine/lint catch
+malformed extractions, not semantic ones (F-64).
+
 ## [0.3.1] - 2026-07-12 — audit batch: 2 findings fixed, 11 declined
 
 Resolves the 2026-07-11 GLM-5.2 auto-review batch (13 `FINDINGS`) in full. Each
@@ -141,16 +293,25 @@ manifest the pipeline behaves exactly as before.
 
 ### Ideas declined (wontfix — kept out to honor the bundle's "Simplicity First")
 
-- **I4 inbox with diff review** — contradicts the zero-touch automation premise;
-  the existing `--dry-run` preview, `cron/logs/rejected/` quarantine and weekly
-  `wiki-lint` already cover the "catch a bad extraction" need.
+- **I4 inbox with diff review** — contradicts the zero-touch automation premise.
+  Accepted trade-off, honestly scoped: the `--dry-run` preview,
+  `cron/logs/rejected/` quarantine and weekly `wiki-lint` catch *malformed*
+  extractions (parse failures, structural drift, broken links/orphans) — they do
+  NOT catch *semantically* wrong ones (a hallucinated fact, a destructive merge
+  into an existing page). Those land in the wiki unreviewed; `git log` on the
+  vault is the fallback.
 - **I5 provenance + revocation tooling** — each page already records its sources
   (`path`/`hash`/`mtime`/`processed`) in frontmatter; a page-revocation +
   index-rebuild subsystem is beyond a starter bundle.
-- **I6 budget contour with money/token limits** — the circuit breaker
-  (`_DEPLETED_PROVIDERS`), the routing audit log, and the implicit
-  keep-and-retry of failed projects already prevent runaway spend; per-task
-  money budgets need a pricing model the bundle deliberately doesn't ship.
+- **I6 budget contour with money/token limits** — a scope decision: a real
+  budget guard needs a per-model pricing model that the bundle deliberately
+  doesn't ship (and that would go stale). To be clear about what the shipped
+  parts do and don't do: the circuit breaker (`_DEPLETED_PROVIDERS`) only trips
+  on a provider that has ALREADY failed (402 / exhausted retries) — it is a
+  failure damper, not a cost ceiling; successful paid calls have no call or
+  token cap. The routing audit log tells you what was spent after the fact.
+  Cap spend at the provider (DeepSeek and OpenCode Go both do this) if you want
+  a hard limit.
 - **I10 memory lifecycle / staleness** — `wiki-lint` already flags orphans and
   project-collapse, and `FINDINGS.md` carries the 90-day stale-review convention;
   confidence/review-by statuses + archival is a heavyweight KB layer, not

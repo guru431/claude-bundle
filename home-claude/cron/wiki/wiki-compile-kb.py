@@ -39,6 +39,7 @@ from utils import (  # noqa: E402
     WIKI_ROOT,
     LOG_MD,
 )
+from untrusted import fence  # noqa: E402
 
 # Allow nested Claude CLI invocation
 for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
@@ -109,17 +110,16 @@ def compile_article(article_path: Path, existing_pages: dict[str, str]) -> list[
 
     existing_list = ", ".join(sorted(existing_pages.keys())[:100])
 
+    article_rel_path = article_path.relative_to(KBNEWS_DIR)
     full_prompt = f"""{prompt}
 
 ---
 
 ## Existing pages (check before creating new ones):
-{existing_list}
+{fence("kind=existing-page-names", existing_list)}
 
 ## Article to process:
-File: {article_path.relative_to(KBNEWS_DIR)}
-
-{article_text}
+{fence(f"kind=article file={article_rel_path}", article_text)}
 
 ---
 
@@ -143,15 +143,36 @@ JSON only, no markdown wrapper, no commentary."""
     return result or None
 
 
-def apply_changes(changes: list[dict], existing_pages: dict[str, str], article_rel: str) -> list[str]:
-    """Apply changes: handle frontmatter + source tracking for create/update/append."""
+def apply_changes(changes: list[dict], existing_pages: dict[str, str],
+                  article_rel: str) -> tuple[list[str], list[str]]:
+    """Apply changes: handle frontmatter + source tracking for create/append.
+
+    Returns (created, rejected). A rejected change used to disappear silently
+    whenever a sibling change applied — the article was then marked processed
+    and the dropped entity never came back. The caller must not finalize the
+    article while `rejected` is non-empty.
+    """
     created = []
+    rejected: list[str] = []
     for change in changes:
+        if not isinstance(change, dict):
+            rejected.append(f"non-dict entry: {str(change)[:80]}")
+            continue
         rel_path = normalize_wiki_path(change.get("path", ""))
         action = change.get("action", "create")
         content = change.get("content", "")
 
         if not rel_path or not content:
+            rejected.append(f"unusable path/content: {str(change.get('path'))[:80]}")
+            continue
+
+        # The session compiler pins writes to its own project; this one is the
+        # KB curator, so kb/ is the whole of its namespace and anything else
+        # (e.g. projects/...) is a model error or an injected instruction.
+        if not rel_path.startswith("kb/"):
+            quarantine_raw(article_rel, "path-outside-kb", json.dumps(change))
+            print(f"  WARN compile-kb: rejected out-of-scope path {rel_path}", file=sys.stderr)
+            rejected.append(f"out-of-scope path: {rel_path}")
             continue
 
         full_path = WIKI_ROOT / rel_path
@@ -164,16 +185,16 @@ def apply_changes(changes: list[dict], existing_pages: dict[str, str], article_r
         existing_fm, existing_body = read_page(full_path)
 
         if full_path.exists():
-            if action == "append":
-                if content.strip() not in existing_body:
-                    final_body = existing_body.rstrip() + "\n\n" + content
-                    label = "appended"
-                else:
-                    final_body = existing_body
-                    label = "skipped"
+            # The prompt only ever shows page NAMES, never bodies, so the model
+            # cannot have judged what a non-append action would overwrite. An
+            # existing target therefore always appends — a stray action:create
+            # on a live page used to be a silent full-body replace.
+            if content.strip() not in existing_body:
+                final_body = existing_body.rstrip() + "\n\n" + content
+                label = "appended" if action == "append" else "appended (forced)"
             else:
-                final_body = content
-                label = "updated"
+                final_body = existing_body
+                label = "skipped"
         else:
             final_body = content
             label = "created"
@@ -190,7 +211,7 @@ def apply_changes(changes: list[dict], existing_pages: dict[str, str], article_r
         page_name = Path(rel_path).stem
         existing_pages[page_name] = final_body
 
-    return created
+    return created, rejected
 
 
 def update_log(article_rel: str, changes: list[str]):
@@ -248,11 +269,18 @@ def main():
 
         changes = compile_article(article_path, existing_pages)
         if changes:
-            applied = apply_changes(changes, existing_pages, f"kb_news/{rel}")
+            applied, rejected = apply_changes(changes, existing_pages, f"kb_news/{rel}")
             # Save the dropped payload for inspection BEFORE we mark it processed
             # (deterministic rejection is still recorded so it won't loop forever).
             if not applied:
                 quarantine_raw(rel, "all-paths-rejected", str(changes))
+            elif rejected:
+                # Partial rejection: siblings applied, so the article used to be
+                # marked processed and the rejected entities were lost for good.
+                quarantine_raw(rel, "partially-rejected", "\n".join(rejected))
+                print(f"  ERROR compile-kb {rel}: {len(rejected)} of {len(changes)} "
+                      f"changes rejected — quarantined", file=sys.stderr)
+                hard_failure = True
             # State (.processed.json) is the dedup source of truth; update_log
             # keeps the human-readable journal in log.md.
             state_add("compile_kb", "processed", [rel])

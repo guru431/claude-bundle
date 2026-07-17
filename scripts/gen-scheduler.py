@@ -25,7 +25,9 @@ launchctl load).
 from __future__ import annotations
 
 import argparse
+import plistlib
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -82,11 +84,19 @@ def posix_script(task: dict, install_path: str) -> str:
 def exec_argv(task: dict, install_path: str) -> list[str] | None:
     kind = task.get("kind", "bash")
     script = posix_script(task, install_path)
+    extra = [str(a) for a in (task.get("script_args") or [])]
     if kind == "bash":
-        return ["/bin/bash", script]
+        return ["/bin/bash", script] + extra
     if kind in ("python", "python_local"):
-        return ["/usr/bin/env", "python3", script]
+        return ["/usr/bin/env", "python3", script] + extra
     return None  # cmd / vbs / exec — Windows-only, no POSIX equivalent
+
+
+def systemd_quote(arg: str) -> str:
+    """Quote one ExecStart token. systemd splits the command line with
+    shell-like quoting rules, and expands '%' as a specifier prefix even
+    inside quotes — so '%' must be doubled regardless."""
+    return shlex.quote(arg).replace("%", "%%")
 
 
 def systemd_oncalendar(task: dict) -> tuple[str, str] | None:
@@ -122,7 +132,7 @@ def emit_systemd(task: dict, install_path: str, out: Path) -> str | None:
     if sched is None:
         return f"skip {name}: trigger '{task.get('trigger')}' unsupported for systemd"
     desc = str(task.get("description", "")).replace("\n", " ")
-    exec_line = " ".join(argv)
+    exec_line = " ".join(systemd_quote(a) for a in argv)
     service = (
         f"[Unit]\nDescription={desc}\n\n"
         f"[Service]\nType=oneshot\nExecStart={exec_line}\n"
@@ -142,24 +152,21 @@ def emit_systemd(task: dict, install_path: str, out: Path) -> str | None:
     return None
 
 
-def _plist_calendar(task: dict) -> str | None:
+def _plist_calendar(task: dict) -> dict | None:
     trig = str(task.get("trigger", ""))
     m = re.fullmatch(r"Daily (\d{1,2}):(\d{2})", trig)
     if m:
-        return (f"    <key>Hour</key><integer>{int(m.group(1))}</integer>\n"
-                f"    <key>Minute</key><integer>{int(m.group(2))}</integer>")
+        return {"Hour": int(m.group(1)), "Minute": int(m.group(2))}
     m = re.fullmatch(r"Weekly (\w+) (\d{1,2}):(\d{2})", trig)
     if m:
         dow = DOW.get(m.group(1).lower())
         if dow:
-            return (f"    <key>Weekday</key><integer>{dow[1]}</integer>\n"
-                    f"    <key>Hour</key><integer>{int(m.group(2))}</integer>\n"
-                    f"    <key>Minute</key><integer>{int(m.group(3))}</integer>")
+            return {"Weekday": dow[1], "Hour": int(m.group(2)),
+                    "Minute": int(m.group(3))}
     m = re.fullmatch(r"Monthly day=(\d{1,2}) (\d{1,2}):(\d{2})", trig)
     if m:
-        return (f"    <key>Day</key><integer>{int(m.group(1))}</integer>\n"
-                f"    <key>Hour</key><integer>{int(m.group(2))}</integer>\n"
-                f"    <key>Minute</key><integer>{int(m.group(3))}</integer>")
+        return {"Day": int(m.group(1)), "Hour": int(m.group(2)),
+                "Minute": int(m.group(3))}
     return None
 
 
@@ -169,30 +176,24 @@ def emit_launchd(task: dict, install_path: str, out: Path) -> str | None:
     if argv is None:
         return f"skip {name}: kind={task.get('kind')} has no POSIX equivalent"
     label = f"com.claude-bundle.{name}"
-    prog = "\n".join(f"    <string>{a}</string>" for a in argv)
     rep = iso_seconds(task.get("repeat_every", ""))
     trig = str(task.get("trigger", ""))
+    # Built as a dict and serialized by plistlib: hand-written plist XML did not
+    # escape values, so a path containing '&' or '<' produced invalid XML.
+    plist: dict = {"Label": label, "ProgramArguments": argv}
     if trig == "AtStartup":
-        sched = "  <key>RunAtLoad</key>\n  <true/>"
+        plist["RunAtLoad"] = True
     elif rep:  # a repeating task -> interval (aligned start dropped for launchd)
-        sched = f"  <key>StartInterval</key>\n  <integer>{rep}</integer>"
+        plist["StartInterval"] = rep
     else:
         cal = _plist_calendar(task)
         if cal is None:
             return f"skip {name}: trigger '{trig}' unsupported for launchd"
-        sched = f"  <key>StartCalendarInterval</key>\n  <dict>\n{cal}\n  </dict>"
-    plist = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-        '<plist version="1.0">\n<dict>\n'
-        f"  <key>Label</key>\n  <string>{label}</string>\n"
-        f"  <key>ProgramArguments</key>\n  <array>\n{prog}\n  </array>\n"
-        f"{sched}\n</dict>\n</plist>\n"
-    )
+        plist["StartCalendarInterval"] = cal
     d = out / "launchd"
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"{label}.plist").write_text(plist, encoding="utf-8")
+    with open(d / f"{label}.plist", "wb") as f:
+        plistlib.dump(plist, f)
     return None
 
 

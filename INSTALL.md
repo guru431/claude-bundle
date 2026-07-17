@@ -22,7 +22,17 @@ agent instructions.
 | Profile | What you get | Extra software needed | Maps to |
 |---|---|---|---|
 | **Lite** | `CLAUDE.md`, `settings.json`, skill templates, slash command — config only | **None** beyond VS Code + the Claude Code extension | Tier 1 *minus* the optional Python hooks |
-| **Full** | Lite + Python hooks + Karpathy wiki vault + cron pipeline + `claude-switch.ps1` + Codex `AGENTS.md` mirror | Python 3.10+, Git for Windows, ≥1 LLM provider key, (optional) Telegram bot + your Windows password | Tier 1 + Tier 2 |
+| **Full** | Lite + Python hooks + Karpathy wiki vault + cron pipeline + `claude-switch.ps1` + Codex `AGENTS.md` mirror | Python 3.10+, Git for Windows, an LLM backend (see below), (optional) Telegram bot + your Windows password | Tier 1 + Tier 2 |
+
+### What Full actually requires
+
+| Prerequisite | Required? | Notes |
+|---|---|---|
+| Python 3.10+, Git for Windows | **yes** | the pipeline and the syncer are Python + Bash |
+| An LLM backend | **yes** — but a key is not the only option | a **key** for DeepSeek or OpenCode Go, **or** `WIKI_LLM_PROVIDER=claude`, which shells out to the `claude` CLI you already signed in to in step 1 — no key, but it spends your Claude subscription |
+| Windows password (DPAPI, step 10) | only for Password-mode tasks | switch every task to `logon_type: interactive` to skip it (they then run only while you're logged in) |
+| Telegram bot + chat_id | **no** | alerts only; without it failures just land in `cron/logs/` |
+| `claude-switch.ps1`, Codex `AGENTS.md` mirror | **no** | optional companions (steps 15–16) |
 
 ### Install paths at a glance
 
@@ -30,9 +40,9 @@ agent instructions.
 |---|---|---|---|
 | Lite — automated (`install.ps1 -Profile lite`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/`, `.bundle-version` stamp (no `.env`) | Windows PowerShell, VS Code + Claude Code ext | runs `self-test.ps1` automatically |
 | Lite — manual (Copy-Item snippet) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/` | Windows PowerShell | manual: `/help`, `/skills` in chat |
-| Full — automated (`install.ps1 -Profile full`) | Lite set + `hooks/`, `wiki/`, `bin/`, `cron/` + `.env` from template + registry bootstrap (optional `save-cred`/`sync`) | Python 3.10+, Git for Windows, ≥1 LLM key | runs `self-test.ps1` automatically |
+| Full — automated (`install.ps1 -Profile full`) | Lite set + `hooks/`, `wiki/`, `bin/`, `cron/` + `.env` from template + registry bootstrap (optional `save-cred`/`sync`) | Python 3.10+, Git for Windows, an LLM backend | runs `self-test.ps1` automatically |
 | POSIX — lite (`install-lite.sh`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/`, `.bundle-version` stamp | bash (macOS/Linux) | manual: `/help`, `/skills` in chat |
-| POSIX — full (`cp` + `gen-scheduler.py`) | Lite set + `wiki/`, `cron/` + `.env` + generated systemd/launchd units | Python 3.10+, bash, systemd or launchd, ≥1 LLM key | `gen-scheduler.py` prints enable cmds; check `journalctl --user` / `cron/logs/*.log` |
+| POSIX — full (`cp` + `gen-scheduler.py`) | Lite set + `wiki/`, `cron/` + `.env` + generated systemd/launchd units | Python 3.10+, bash, systemd or launchd, an LLM backend | `gen-scheduler.py` prints enable cmds; check `journalctl --user` / `cron/logs/*.log` |
 
 - Choose **Lite** if you just want consistent rules, permissions, and
   plugins across machines and don't want to install anything. It is the
@@ -46,11 +56,12 @@ In the step-by-step sections the **Tier 1 / Tier 2** names stay.
 Lite = Tier 1 steps 1–3, 5, 6 (skip the hooks in step 4).
 Full = all of Tier 1 + all of Tier 2.
 
-**Shortcut (Windows):** `powershell -File scripts/install.ps1` runs the
-whole sequence below — copy config, stamp `.bundle-version`, create
-`.env`, bootstrap the registry, optionally `save-cred` + `sync`, then
-self-test. Pass `-Profile lite|full`; `-NonInteractive` skips the
-elevation steps. **macOS/Linux lite:** `scripts/install-lite.sh`. The
+**Shortcut (Windows):** `powershell -File scripts/install.ps1` prompts for
+the profile and **defaults to lite** — press Enter and you get the config
+only. Answer `full` (or pass `-Profile full`) to run the whole sequence
+below: copy config, stamp `.bundle-version`, create `.env`, bootstrap the
+registry, optionally `save-cred` + `sync`, then self-test.
+`-NonInteractive` skips the elevation steps. **macOS/Linux lite:** `scripts/install-lite.sh`. The
 manual steps below stay as the reference.
 
 ---
@@ -98,10 +109,20 @@ In a Claude chat:
 ### 4. (Optional) Wire the hooks
 
 The default `settings.json` does NOT enable the two example hooks
-(`block-iptables-save-to-rules.py`, `md2pdf-on-edit.py`). To enable
-them, see `home-claude/settings.example-with-hooks.json` — it shows the
-`hooks` block you need to merge into your `settings.json`. Replace
-`<user>` and the Python path placeholders with real values.
+(`block-iptables-save-to-rules.py`, `md2pdf-on-edit.py`). To enable them,
+merge them in from `home-claude/settings.example-with-hooks.json`.
+
+**Take only the `PreToolUse` and `PostToolUse` entries here.** That file is
+a full-tier reference: its `SessionStart`, `SessionEnd`, and `PreCompact`
+entries point into `~/.claude/cron/`, which doesn't exist until Tier 2
+step 8 — merge them now and every session start fires a hook against a
+missing file. They're wired later, in step 8. (Lite skips this step
+entirely: both hooks are Python scripts.)
+
+Replace `<user>` with your Windows username and `<python-exe>` with the
+absolute path to a real Python interpreter (`where python`) — it's the
+executable Claude Code spawns, so a placeholder or an env var won't do.
+See `home-claude/hooks/README.md` for the per-entry tier table.
 
 ### 5. (Optional) Adapt the skill templates
 
@@ -134,10 +155,11 @@ Edit to your preference (or remove the key for English default).
   `pip install -r requirements.txt` (installs `requests` + `PyYAML`,
   used by the cron LLM calls and `registry.yaml` parsing — without
   `requests` every LLM call fails with a misleading "DeepSeek error")
-- At least one LLM provider key (see [`docs/llm-routing.md`](docs/llm-routing.md)):
+- An LLM backend (see [`docs/llm-routing.md`](docs/llm-routing.md)) — one of:
   - **DeepSeek** PAYG account (https://platform.deepseek.com) — cheapest reliable option
   - **OpenCode Go** subscription (https://opencode.ai) — flat-rate bundle of ~12 models
-  - Or be willing to use Claude opt-in (will consume your subscription)
+  - **`WIKI_LLM_PROVIDER=claude`** — no key needed; it calls the `claude`
+    CLI you already authenticated in step 1, and consumes your subscription
 - Telegram bot + chat_id (optional, for failure alerts):
   - Create the bot via [@BotFather](https://t.me/BotFather)
   - Send `/start` to your bot, then visit
@@ -184,10 +206,12 @@ fed two ways: it self-collects from `~/.claude/projects/*` JSONLs (works
 out of the box), and — if you opt in — the `SessionStart` / `SessionEnd`
 / `PreCompact` lifecycle hooks also stage session tails into
 `wiki/daily/.pending/`. These are NOT enabled by the default
-`settings.json`. To turn them on, merge the matching commented blocks
-from `home-claude/settings.example-with-hooks.json` into your
-`settings.json` (replace the `<python-exe>` placeholder). They can only
-be registered through `settings.json`, never via cron.
+`settings.json`. To turn them on, merge the `SessionStart`, `SessionEnd`,
+and `PreCompact` entries from `home-claude/settings.example-with-hooks.json`
+into your `settings.json` (replace `<python-exe>` with a real interpreter
+path and `<user>` with your username). Only do this **after** the copy
+above — they run scripts out of `~/.claude/cron/hooks/`. They can only be
+registered through `settings.json`, never via cron.
 
 ### 9. Create `.env` from the example
 
@@ -195,11 +219,16 @@ The pipeline reads `.env` from the DEPLOYED location — `~/.claude/.env`
 (next to the `cron/` you copied in step 8), NOT from the bundle
 repository root:
 
+The copy is guarded: on a re-run an existing `.env` holds your real keys,
+and the template would overwrite them with empty values.
+
 ```powershell
 $bundleRoot = "<path-to-bundle>"
-Copy-Item "$bundleRoot\config\llm-providers.example.env" `
-          "$env:USERPROFILE\.claude\.env"
-notepad "$env:USERPROFILE\.claude\.env"
+$envDst = "$env:USERPROFILE\.claude\.env"
+if (-not (Test-Path $envDst)) {
+    Copy-Item "$bundleRoot\config\llm-providers.example.env" $envDst
+}
+notepad $envDst
 ```
 
 Fill in:
@@ -269,10 +298,19 @@ at the bundle's source copy if you keep the bundle around.
 
 ### 12. Populate your project list + privacy policy
 
-Edit `~/.claude/bundle.local.yaml` (the installer copied it from
-`config/bundle.local.example.yaml`). It lives next to `.env` and is
-**reinstall-safe** — unlike editing `cron/hooks/utils.py`, a later
-reinstall won't wipe it:
+`install.ps1` creates `~/.claude/bundle.local.yaml` for you; on this
+manual path, copy it yourself (guarded, so a re-run keeps your policy):
+
+```powershell
+$manifestDst = "$env:USERPROFILE\.claude\bundle.local.yaml"
+if (-not (Test-Path $manifestDst)) {
+    Copy-Item "$bundleRoot\config\bundle.local.example.yaml" $manifestDst
+}
+notepad $manifestDst
+```
+
+It lives next to `.env` and is **reinstall-safe** — unlike editing
+`cron/hooks/utils.py`, a later reinstall won't wipe it:
 
 ```yaml
 project_map:
@@ -294,19 +332,24 @@ slug from each session heading, so distinct projects still get distinct
 folders. Only headings it can't parse to an ASCII slug fall back to
 `wiki/projects/main/`. If you later notice most pages piling up in
 `main/`, `wiki-lint` flags it as a "project-collapse" warning — that's the
-cue to populate `known_projects`.
+cue to populate `known_projects:` here.
 
 Preview exactly what the pipeline would read, per project, without
 spending a token: `python ~/.claude/cron/wiki/wiki-flush-sessions.py
---dry-run` (it prints the effective policy first). On the very first
-nights, set `WIKI_BACKLOG_MAX=0` in `.env` if you'd rather not sweep the
-historical backlog until you've dialled in `allow_projects`. Details:
+--dry-run` (it prints the effective policy first). Sweeping the
+historical backlog is off by default; once `allow_projects` says what you
+mean, set `WIKI_BACKLOG_MAX=<n>` in `.env` to backfill old sessions.
+Details:
 [`docs/cron-architecture.md`](docs/cron-architecture.md#per-project-privacy-policy-bundlelocalyaml).
 
 ### 13. Run the syncer
 
+Run the DEPLOYED syncer, not the one in the bundle checkout: each reads
+the `registry.yaml` next to itself, so the source copy would ignore the
+placeholders you just filled in in step 11.
+
 ```cmd
-"<path-to-bundle>\home-claude\cron\admin\sync.cmd"
+"%USERPROFILE%\.claude\cron\admin\sync.cmd"
 ```
 
 This auto-elevates to UAC once for the whole batch, then idempotently
@@ -379,7 +422,7 @@ Quick reference for the failures people hit first. Running
 | Cron log: `DEEPSEEK_KEY env var not set` / 402 | `.env` missing or unfunded key | step 9 — copy the template, fill a working key |
 | `self-test.ps1`: "Python not found", checks skipped | Python not on PATH | install Python 3.10+ or set `$env:CLAUDE_HOOK_PYTHON` |
 | Password-mode task: `Last Result` 127, no log | `script:` on a mapped drive (no session 0) | use UNC `\\host\share\...` or local `C:\...`; bootstrap warns about this |
-| Wiki pages all land in `projects/main` | headings that yield no ASCII slug (e.g. all-Cyrillic) fall back to `main` — an empty `KNOWN_PROJECTS` alone won't do it | populate `KNOWN_PROJECTS`; `wiki-lint` flags it as "project-collapse" |
+| Wiki pages all land in `projects/main` | headings that yield no ASCII slug (e.g. all-Cyrillic) fall back to `main` — an empty `known_projects` alone won't do it | populate `known_projects:` in `~/.claude/bundle.local.yaml` (step 12); `wiki-lint` flags it as "project-collapse" |
 
 ### "Login required" when running cron tasks
 You skipped step 10 (`save-cred.cmd`). Password-mode tasks need the

@@ -42,8 +42,11 @@ false positive with `git commit --no-verify`.
   wired in `home-claude/settings.json`. Reference wiring lives in
   `home-claude/settings.example-with-hooks.json`.
 - `PROJECT_MAP` and `KNOWN_PROJECTS` in
-  `home-claude/cron/hooks/utils.py` must stay **empty** — they're for
-  users to fill, not for the bundle to ship populated.
+  `home-claude/cron/hooks/utils.py` must stay **empty** — they are fallback
+  defaults only. Users declare their real project map in the deployed
+  `~/.claude/bundle.local.yaml` (`project_map:` / `known_projects:`), which
+  a reinstall never overwrites; never ship these constants populated, and
+  never point users at them.
 - Wiki vault under `home-claude/wiki/` must ship **empty** (only
   `index.md`, `README.md`, and `.gitkeep` files).
 - The `config/llm-providers.example.env` template is committed but

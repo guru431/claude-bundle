@@ -37,6 +37,10 @@ DATE = datetime.now().strftime("%Y-%m-%d")
 # Set to True to send Telegram alerts on lint errors.
 ENABLE_TELEGRAM_ALERTS = False
 
+# Written by wiki-build-index.py, and they link nearly every page. Counting them
+# as inbound links would make the orphan check come up clean after every build.
+GENERATED_INDEXES = {"index.md", "projects/index.md", "kb/index.md"}
+
 
 def find_all_pages() -> dict[str, list[Path]]:
     """Find every .md file in the wiki (except auxiliary ones).
@@ -62,48 +66,97 @@ def find_all_pages() -> dict[str, list[Path]]:
 
 
 def extract_wikilinks(text: str) -> list[str]:
-    """Extract all [[wikilinks]] from text."""
+    """Extract all [[wikilinks]] from text, keeping any folder path.
+
+    The path is preserved so that [[projects/a/foo]] can be resolved against
+    its real location instead of matching any page whose stem is 'foo'.
+    """
     links = []
     for match in re.finditer(r'\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]', text):
         link = match.group(1).strip()
-        link = link.split("/")[-1]
         # Drop an Obsidian anchor ([[page#Section]] → 'page'); a same-page
         # [[#Section]] reduces to empty and is not a page reference.
-        link = link.split("#", 1)[0].strip()
+        link = link.split("#", 1)[0].strip().strip("/")
         if not link:
             continue
         links.append(link)
     return links
 
 
+def link_target(link: str) -> str:
+    """Normalize a link to how a page is addressed: no .md, no leading slash."""
+    return link.removesuffix(".md")
+
+
+def vault_targets() -> tuple[set[str], dict[str, int]]:
+    """Everything a wikilink may point at.
+
+    Returns (full paths relative to WIKI_ROOT without .md, stem → how many
+    pages carry that stem). index/CLAUDE/log pages are link targets even
+    though find_all_pages skips them as lint subjects.
+    """
+    paths: set[str] = set()
+    stems: dict[str, int] = {}
+    skip = {".obsidian", "daily", ".pending"}
+    for f in WIKI_ROOT.rglob("*.md"):
+        rel = f.relative_to(WIKI_ROOT)
+        if any(p in skip for p in rel.parts):
+            continue
+        paths.add(rel.with_suffix("").as_posix())
+        stems[f.stem] = stems.get(f.stem, 0) + 1
+    return paths, stems
+
+
 def check_broken_links(pages: dict[str, list[Path]]) -> list[str]:
-    """Check 1: broken [[wikilinks]]."""
-    errors = []
-    all_names = set(pages.keys())
-    all_names.update(["index", "CLAUDE", "log"])
+    """Check 1: wikilinks that do not resolve to exactly one page.
+
+    WARN, not ERROR: the flush/compile prompts allow linking to a page that
+    does not exist yet, so a hard failure here would redden every nightly run
+    and train everyone to ignore the lint. A typo and an anticipated page are
+    not distinguishable from here.
+    """
+    warnings = []
+    targets, stems = vault_targets()
 
     for name, paths in pages.items():
         for path in paths:
             text = path.read_text(encoding="utf-8", errors="replace")
-            links = extract_wikilinks(text)
-            for link in links:
-                if link not in all_names:
-                    errors.append(f"ERROR: broken link [[{link}]] in {path.relative_to(WIKI_ROOT)}")
+            rel = path.relative_to(WIKI_ROOT)
+            for link in extract_wikilinks(text):
+                target = link_target(link)
+                if target in targets:
+                    continue
+                # A bare stem resolves only when it is unique vault-wide; a
+                # path-qualified link must match a real path (no stem fallback,
+                # or [[projects/a/foo]] would silently land on projects/b/foo).
+                n = 0 if "/" in target else stems.get(target, 0)
+                if n == 1:
+                    continue
+                if n > 1:
+                    warnings.append(
+                        f"WARN: ambiguous link [[{link}]] in {rel}: {n} pages share that name — "
+                        f"qualify it with the folder"
+                    )
+                else:
+                    warnings.append(f"WARN: unresolved link [[{link}]] in {rel} (page does not exist yet?)")
 
-    return errors
+    return warnings
 
 
 def check_orphan_pages(pages: dict[str, list[Path]]) -> list[str]:
-    """Check 2: orphan pages (no one links to them)."""
+    """Check 2: orphan pages — no human/LLM-authored page links to them."""
     warnings = []
     all_links: set[str] = set()
 
     for f in WIKI_ROOT.rglob("*.md"):
-        parts = f.relative_to(WIKI_ROOT).parts
-        if ".obsidian" in parts or "daily" in parts:
+        rel = f.relative_to(WIKI_ROOT)
+        if ".obsidian" in rel.parts or "daily" in rel.parts:
+            continue
+        if rel.as_posix() in GENERATED_INDEXES:
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
-        all_links.update(extract_wikilinks(text))
+        for link in extract_wikilinks(text):
+            all_links.add(link_target(link).split("/")[-1])
 
     for name in pages:
         if name not in all_links:
@@ -286,8 +339,9 @@ def main():
 
     log(f"=== Lint complete ===")
 
-    # Lint errors (broken links, ambiguous names, index desync) are a hard
-    # failure: skip the heartbeat and exit non-zero so the cron monitor sees it.
+    # Lint errors (ambiguous page names, index desync) are a hard failure: skip
+    # the heartbeat and exit non-zero so the cron monitor sees it. Link
+    # resolution is only ever a WARN — see check_broken_links.
     if stats["errors"] > 0:
         sys.exit(1)
     mark_phase_success("lint")

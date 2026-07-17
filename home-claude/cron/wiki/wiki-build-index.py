@@ -20,7 +20,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-from utils import WIKI_ROOT, parse_frontmatter, mark_phase_success  # noqa: E402
+from utils import WIKI_ROOT, parse_frontmatter, mark_phase_success, is_dry_run  # noqa: E402
 
 PROJECTS_DIR = WIKI_ROOT / "projects"
 KB_DIR = WIKI_ROOT / "kb"
@@ -214,6 +214,11 @@ def update_main_index(projects_count: int, pages_count: int, kb_counts: dict[str
 
 
 def main():
+    # Every build_* function writes; there is nothing to preview without them,
+    # so --dry-run stops here rather than rebuilding indexes and the heartbeat.
+    if is_dry_run():
+        print("DRY RUN — indexes would be rebuilt, no writes.")
+        return
     projects_count, pages_count = build_projects_index()
     kb_counts = build_kb_index()
     update_main_index(projects_count, pages_count, kb_counts)

@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from utils import llm_call, parse_jsonl_messages  # noqa: E402
+from utils import dir_to_project, llm_call, parse_jsonl_messages, project_allowed  # noqa: E402
 
 # Character budget for the transcript tail fed to the LLM. The slice keeps
 # the END of the conversation — the freshest messages matter most for handoff.
@@ -32,6 +32,13 @@ def main() -> int:
     session_id = sys.argv[2]
 
     if not os.path.exists(transcript):
+        return 0
+
+    # This sends a transcript tail to an external provider, so it answers to the
+    # same privacy policy as the nightly collectors — an excluded project must
+    # not leave the machine through the handoff path either.
+    project = dir_to_project(os.path.basename(os.path.dirname(transcript)))
+    if not project_allowed(project):
         return 0
 
     messages = parse_jsonl_messages(transcript, last_n=80)
@@ -59,14 +66,20 @@ def main() -> int:
 
     out_dir = Path(os.path.dirname(transcript)) / "memory"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "handoff.md"
+    # One file per session: two sessions compacting in the same project used to
+    # overwrite each other's handoff. The write is atomic (tmp + replace) so a
+    # SessionStart racing this process reads a whole file or nothing at all.
+    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
+    out_path = out_dir / f"handoff-{safe_id}.md"
+    tmp_path = out_dir / f".handoff-{safe_id}.md.tmp"
 
-    out_path.write_text(
+    tmp_path.write_text(
         f"# Handoff — session {session_id}\n"
         f"_Generated {datetime.now().isoformat(timespec='seconds')}_\n\n"
         f"{summary}\n",
         encoding="utf-8",
     )
+    tmp_path.replace(out_path)
     return 0
 
 

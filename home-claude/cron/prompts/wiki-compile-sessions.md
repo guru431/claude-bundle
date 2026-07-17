@@ -26,7 +26,11 @@ The slug for this project is given in the prompt header — use it as-is.
 - **One page = one atomic concept.** If two unrelated things ended up in
   the daily log under the same heading, split them into two pages.
 - **Each page MUST contain at least 2 `[[wikilinks]]`** to related pages
-  (real or anticipated). That’s how navigation works without an index.
+  (real or anticipated — a page that doesn’t exist yet is allowed, and the
+  weekly lint only warns about it). That’s how navigation works without an index.
+- **Wikilinks resolve by full path first.** A bare `[[name]]` resolves only if
+  that name is unique across the vault, so link to pages outside this project’s
+  folder as `[[projects/<slug>/<page>]]` or `[[kb/<section>/<page>]]`.
 - **Prefer `action: update`** over `create` when an existing page covers the
   same topic. Only create when no existing page is a good home.
 - **No frontmatter in your `content`.** The calling script adds the YAML

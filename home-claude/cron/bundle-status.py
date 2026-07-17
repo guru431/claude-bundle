@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
     ALLOW_PROJECTS, SKIP_DIRS, SKIP_JSONL_PROJECTS, PROJECT_MAP,
     BUNDLE_ROOT, WIKI_ROOT, PENDING_DIR, STATE_PATH, LLM_PROVIDER,
-    DEEPSEEK_API_KEY, OPENCODE_API_KEY, load_state,
+    DEEPSEEK_API_KEY, OPENCODE_API_KEY,
 )
 
 
@@ -56,7 +56,13 @@ def main() -> int:
     print(f"  provider (WIKI_LLM_PROVIDER): {LLM_PROVIDER}")
     (ok if DEEPSEEK_API_KEY else na)(f"DEEPSEEK_KEY: {'set' if DEEPSEEK_API_KEY else 'not set'}")
     (ok if OPENCODE_API_KEY else na)(f"OPENCODE_GO_API_KEY: {'set' if OPENCODE_API_KEY else 'not set'}")
-    if LLM_PROVIDER in ("deepseek", "opencode") and not (DEEPSEEK_API_KEY or OPENCODE_API_KEY):
+    # Check the key the SELECTED chain needs (see PROVIDERS/llm_call in utils):
+    # "deepseek" falls back to OpenCode, so either key works; "opencode" has NO
+    # fallback, so a DeepSeek key alone leaves it unable to make a single call.
+    if LLM_PROVIDER == "opencode" and not OPENCODE_API_KEY:
+        bad("provider=opencode but OPENCODE_GO_API_KEY not set (this chain has no DeepSeek "
+            "fallback) — nightly LLM phases will no-op")
+    elif LLM_PROVIDER == "deepseek" and not (DEEPSEEK_API_KEY or OPENCODE_API_KEY):
         bad("no LLM provider key set — nightly LLM phases will no-op")
     tg = bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
     (ok if tg else na)(f"Telegram alerts: {'configured' if tg else 'not configured (failures log only)'}")
@@ -79,7 +85,14 @@ def main() -> int:
     print("\n[pipeline state]")
     pend = len(list(PENDING_DIR.glob("*.md"))) if PENDING_DIR.is_dir() else 0
     print(f"  pending queue (wiki/daily/.pending): {pend} file(s)")
-    processed = load_state().get("flush", {}).get("processed_jsonls", [])
+    # Read the state file directly rather than via load_state(): that helper
+    # persists a legacy log.md → .processed.json migration as a side effect,
+    # and this script promises to change nothing.
+    try:
+        state = json.loads(STATE_PATH.read_text(encoding="utf-8")) if STATE_PATH.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    processed = state.get("flush", {}).get("processed_jsonls", [])
     print(f"  processed JSONLs (.processed.json): {len(processed)}")
     last = STATE_PATH.with_name("last_success.json")
     if last.is_file():

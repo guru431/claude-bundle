@@ -101,6 +101,25 @@ You provide them. Two ways:
    can summarize the style into a profile. Re-run periodically as your
    corpus grows.
 
+   **Other people are in that corpus.** Sent-mail and chat exports carry
+   your correspondents' words, names, addresses, and whatever they told you
+   in confidence — they never consented to any of it being fed to a model.
+   Before building a profile:
+   - **Minimize** — extract only your own messages; drop quoted replies,
+     threads, signatures, and attachments. You are profiling *your* style;
+     their text is not evidence of it.
+   - **Redact** what survives the cut — names, addresses, phone numbers,
+     account IDs.
+   - **Process locally by default** — a local model (Ollama, llama.cpp)
+     keeps the corpus on your machine. Sending it to a hosted API is a
+     deliberate choice to make, not the default: check whether the provider
+     trains on your input, and don't make it for a corpus whose other
+     authors you'd have to ask.
+   - Skip corpora you shouldn't be mining at all — work mail under an
+     employer's retention or DPA rules, group chats with an expectation of
+     privacy, anything covering third parties' health, finances, or legal
+     matters.
+
 Files needed under your `<voice-root>` (any path that suits you):
 
 ```

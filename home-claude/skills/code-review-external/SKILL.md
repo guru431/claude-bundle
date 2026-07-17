@@ -115,7 +115,25 @@ for the described pattern semantically, not just at the cited line.
 | LAN IP in the value (192.168.x, 10.x, 172.16-31.x) | Downgrade P1→P2 (internal network) |
 | `path.join(__dirname, '..', x)` without user input | Skip — false-positive path traversal |
 | Public SSH key (`ssh-rsa AAAA...`) | Skip — public key |
-| Description contains "theoretically", "could potentially" | Downgrade P1→P3 |
+
+### 3b) Severity comes from evidence, not from wording
+
+Hedged phrasing ("theoretically", "could potentially", "may allow") is a
+**confidence signal about the reviewer, not about the bug** — an attacker
+doesn't care how tentatively the finding was written. Never downgrade on
+the wording alone. Re-rank on the code you just read:
+
+- **Reachable** — can untrusted input actually get there? Trace the callers;
+  if nothing reaches it, that's the reason to downgrade, not the adverb.
+- **Evidence** — did the reviewer cite the specific line, sink, and input
+  path? A hedged finding **with** concrete evidence keeps its severity.
+- **Impact** — what does exploiting it cost you (RCE / data loss / auth
+  bypass vs. a log line)?
+
+Hedging with **no** evidence and no reachable path you can confirm — that's
+a P3 (or a rejected hallucination), because the evidence is missing, not
+because of how it was phrased. When reachability is genuinely unclear, keep
+the severity and say it's unverified; don't quietly bury it in P3.
 
 ### 4) Report to the user
 

@@ -73,8 +73,11 @@ fi
 
 # --- collect diff/files to check ---
 if [ -n "$RANGE" ]; then
-  diff_content=$(git diff --unified=0 "$RANGE" -- . ':(exclude).githooks/' 2>/dev/null || true)
-  added=$(git diff --name-only --diff-filter=A "$RANGE" || true)
+  # Per-commit patches, not the net tree diff: a secret added in one outgoing
+  # commit and removed in a later one is invisible to `git diff A..B` but still
+  # ships in the published history. --diff-filter=AR: a rename to .env is an R.
+  diff_content=$(git log -p --unified=0 "$RANGE" -- . ':(exclude).githooks/' 2>/dev/null || true)
+  added=$(git log --name-only --diff-filter=AR --pretty=format: "$RANGE" -- . | sort -u || true)
 else
   # First push to a public repo: scan the CONTENT of all tracked files.
   # `git grep --cached` on an empty index would return empty and miss secrets.

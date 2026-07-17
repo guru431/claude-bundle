@@ -263,3 +263,40 @@ def test_gen_scheduler_skips_windows_only_task(tmp_path: Path):
     assert emitted, f"gen-scheduler wrote no unit files:\n{r.stdout}"
     leaked = [n for n in emitted if "ClaudeTaskMonitor" in n]
     assert not leaked, f"platform: windows task leaked into POSIX units: {leaked}"
+
+
+def _load_gen_scheduler():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "gen_scheduler", ROOT / "scripts" / "gen-scheduler.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_gen_scheduler_escapes_and_passes_script_args(tmp_path: Path):
+    """An install path with a space or '&' must not corrupt the emitted units,
+    and registry `script_args` must reach the command line: the launchd plist
+    was hand-built XML (invalid on '&') and ExecStart was an unquoted join."""
+    import plistlib
+    gs = _load_gen_scheduler()
+    task = {"name": "T", "kind": "bash", "trigger": "Daily 03:00",
+            "script": "<bundle-install-path>/cron/x.sh",
+            "script_args": ["--flag", "a b", "x&y"]}
+    argv = gs.exec_argv(task, "/opt/Claude & Team")
+    assert argv == ["/bin/bash", "/opt/Claude & Team/cron/x.sh",
+                    "--flag", "a b", "x&y"], argv
+
+    assert gs.emit_launchd(task, "/opt/Claude & Team", tmp_path) is None
+    plist_path = tmp_path / "launchd" / "com.claude-bundle.T.plist"
+    with open(plist_path, "rb") as f:
+        obj = plistlib.load(f)  # raises on malformed XML
+    assert obj["ProgramArguments"] == argv
+
+    assert gs.emit_systemd(task, "/opt/Claude & Team", tmp_path) is None
+    exec_line = next(l for l in (tmp_path / "systemd" / "T.service")
+                     .read_text(encoding="utf-8").splitlines()
+                     if l.startswith("ExecStart="))
+    # Each token must survive shell-style splitting as one word.
+    import shlex
+    assert shlex.split(exec_line[len("ExecStart="):].replace("%%", "%")) == argv

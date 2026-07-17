@@ -268,17 +268,65 @@ function Set-Permissions($obj) {
     return $obj
 }
 
+# The env keys this switcher OWNS — the union of everything the Set-* mode
+# functions below write. Anything else inside `env` belongs to the project and
+# must survive a backend switch untouched.
+$SWITCHER_ENV_KEYS = @(
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "DISABLE_TELEMETRY",
+    "DISABLE_COST_WARNINGS",
+    "API_TIMEOUT_MS"
+)
+
 function Set-Env($obj, $envObj) {
+    # Merge, never replace: overwrite only the keys we own, drop the owned keys
+    # this mode does not set (e.g. ANTHROPIC_API_KEY when switching to a Bearer
+    # backend), and leave every foreign key exactly where it was.
+    $envCur = $null
+    if ($obj.PSObject.Properties.Match("env").Count -gt 0) { $envCur = $obj.env }
+    if ($null -eq $envCur) { $envCur = [pscustomobject]@{} }
+
+    foreach ($k in $SWITCHER_ENV_KEYS) {
+        if ($envCur.PSObject.Properties.Match($k).Count -gt 0 -and
+            $envObj.PSObject.Properties.Match($k).Count -eq 0) {
+            $envCur.PSObject.Properties.Remove($k)
+        }
+    }
+    foreach ($p in $envObj.PSObject.Properties) {
+        $envCur | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+    }
+
     if ($obj.PSObject.Properties.Match("env").Count -gt 0) {
-        $obj.env = $envObj
+        $obj.env = $envCur
     } else {
-        $obj | Add-Member -NotePropertyName "env" -NotePropertyValue $envObj -Force
+        $obj | Add-Member -NotePropertyName "env" -NotePropertyValue $envCur -Force
     }
     return $obj
 }
 
 function Clear-Env($obj) {
-    if ($obj.PSObject.Properties.Match("env").Count -gt 0) {
+    # Remove only the keys we own. The `env` property itself goes away only when
+    # nothing is left in it — otherwise foreign keys would be destroyed.
+    if ($obj.PSObject.Properties.Match("env").Count -eq 0) { return $obj }
+    $envCur = $obj.env
+    if ($null -eq $envCur) {
+        $obj.PSObject.Properties.Remove("env")
+        return $obj
+    }
+    foreach ($k in $SWITCHER_ENV_KEYS) {
+        if ($envCur.PSObject.Properties.Match($k).Count -gt 0) {
+            $envCur.PSObject.Properties.Remove($k)
+        }
+    }
+    if (@($envCur.PSObject.Properties).Count -eq 0) {
         $obj.PSObject.Properties.Remove("env")
     }
     return $obj
@@ -295,6 +343,85 @@ function Require-Key([string[]]$names) {
     Write-Host "Set it in your environment, in a .env next to this script, or in ~/.claude/.env" -ForegroundColor DarkYellow
     Write-Host "See config/llm-providers.example.env for the full list." -ForegroundColor DarkYellow
     exit 2
+}
+
+function Invoke-GitQuiet([string[]]$gitArgs) {
+    # Run git, discard all output, return its exit code. $ErrorActionPreference is
+    # relaxed locally: under "Stop" PS 5.1 turns a native command's stderr into a
+    # terminating error, and git writes to stderr on perfectly expected misses.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & git @gitArgs 2>&1 | Out-Null
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
+function Get-GitOutput([string[]]$gitArgs) {
+    # First line of git's stdout, or $null if git failed. Same stderr caveat.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $out = & git @gitArgs 2>$null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        return ($out | Select-Object -First 1)
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
+function Assert-SettingsGitSafe {
+    # settings.local.json is about to receive a REAL API key. Claude Code usually
+    # ignores local settings, but a tracked or hand-created file is a live leak
+    # path into the user's repo — so verify instead of assuming.
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Host "WARN: git not found — cannot verify that $settingsPath is git-ignored." -ForegroundColor Yellow
+        return
+    }
+    if ((Invoke-GitQuiet @("-C", $settingsDir, "rev-parse", "--git-dir")) -ne 0) {
+        return  # not a git repo at all — nothing to protect
+    }
+
+    if ((Invoke-GitQuiet @("-C", $settingsDir, "ls-files", "--error-unmatch", "--", $settingsPath)) -eq 0) {
+        Write-Host ""
+        Write-Host "ERROR: $settingsPath is TRACKED by git." -ForegroundColor Red
+        Write-Host "Writing the API key there would commit it. Config NOT changed." -ForegroundColor Red
+        Write-Host "Fix: git rm --cached -- `"$settingsPath`", add it to .gitignore, then re-run." -ForegroundColor DarkYellow
+        exit 3
+    }
+
+    if ((Invoke-GitQuiet @("-C", $settingsDir, "check-ignore", "-q", "--", $settingsPath)) -eq 0) {
+        return  # already ignored — good
+    }
+
+    # Untracked but not ignored: a plain `git add .` would stage the key. Exclude
+    # it locally (.git/info/exclude), which never touches the repo's own
+    # .gitignore and so is safe in a repo we don't own.
+    $gitDir = Get-GitOutput @("-C", $settingsDir, "rev-parse", "--absolute-git-dir")
+    $prefix = Get-GitOutput @("-C", $settingsDir, "rev-parse", "--show-prefix")
+    if (-not $gitDir) {
+        Write-Host "WARN: $settingsPath is not git-ignored and .git could not be located." -ForegroundColor Yellow
+        return
+    }
+    $rel = "/" + $prefix + (Split-Path -Leaf $settingsPath)
+
+    $excludePath = Join-Path $gitDir "info\exclude"
+    $excludeDir  = Split-Path -Parent $excludePath
+    if (-not (Test-Path $excludeDir)) { New-Item -ItemType Directory -Path $excludeDir -Force | Out-Null }
+
+    $lines = @()
+    $lead  = ""
+    if (Test-Path $excludePath) {
+        $cur = [System.IO.File]::ReadAllText($excludePath)
+        $lines = $cur -split "`r?`n"
+        if ($cur -and -not $cur.EndsWith("`n")) { $lead = "`n" }
+    }
+    if ($lines -notcontains $rel) {
+        [System.IO.File]::AppendAllText($excludePath, $lead + $rel + "`n", [System.Text.UTF8Encoding]::new($false))
+        Write-Host "NOTE: '$rel' was not git-ignored — added it to $excludePath" -ForegroundColor Yellow
+    }
 }
 
 function Test-TcpPort([string]$targetHost, [int]$port, [int]$timeoutMs = 3000) {
@@ -680,6 +807,13 @@ switch ($Mode) {
 # Set-CCR / Set-Ollama return $null when the backend is unreachable and can't be
 # activated — don't write the config then (Claude Code would fail every request).
 if ($null -eq $cfg) { return }
+
+# A non-empty env block carries a real API key — refuse to write it into a file
+# git tracks, and make sure git ignores it before it lands on disk.
+if ($cfg.PSObject.Properties.Match("env").Count -gt 0 -and
+    @($cfg.env.PSObject.Properties).Count -gt 0) {
+    Assert-SettingsGitSafe
+}
 
 Save-Settings $cfg
 $after = Get-CurrentMode (Read-Settings)

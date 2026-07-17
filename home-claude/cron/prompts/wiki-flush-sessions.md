@@ -34,7 +34,10 @@ Plain markdown bullets. No headings, no preamble, no closing.
 - Each bullet is self-contained — a reader who didn’t see the source must
   understand what happened and why it matters.
 - Use `[[wikilinks]]` for the names of concepts, tools, people, or other
-  projects when natural. The link target doesn’t have to exist yet.
+  projects when natural. The link target doesn’t have to exist yet — the
+  weekly lint reports an unresolved target as a warning, not an error.
+- A bare `[[name]]` only resolves when that name is unique across the vault.
+  When the target lives in a known folder, qualify it: `[[projects/<slug>/<page>]]`.
 - Prefer concrete identifiers (file path, command, exact error string) over
   vague references (“the script”, “the error”).
 - Cite the source briefly when useful: `(source: jsonl 2024-…)`.

@@ -39,12 +39,85 @@ LOG_FILE="$LOG_DIR/healthcheck_${DATE}.log"
 echo "=== Claude Healthcheck $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$LOG_FILE"
 
 # --- Local metrics (always runs) ---
+# Collectors are probed with `command -v` rather than chained with `||`: a
+# pipeline's exit status is the LAST command's (head), so `ps ... | head || fb`
+# would never reach the fallback on a host where ps is missing.
+local_uptime() {
+    if command -v uptime >/dev/null 2>&1; then
+        uptime 2>&1
+    else
+        powershell.exe -NoProfile -Command '
+            $os = Get-CimInstance Win32_OperatingSystem
+            $up = (Get-Date) - $os.LastBootUpTime
+            $cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
+            Write-Output ("up {0}d {1}h {2}m, cpu load {3}%" -f $up.Days, $up.Hours, $up.Minutes, $cpu)' 2>&1
+    fi
+}
+
+local_memory() {
+    if command -v free >/dev/null 2>&1; then
+        free -h 2>&1
+    elif command -v vm_stat >/dev/null 2>&1; then
+        vm_stat 2>&1
+        sysctl vm.swapusage 2>&1
+    else
+        powershell.exe -NoProfile -Command '
+            Get-CimInstance Win32_OperatingSystem | Select-Object `
+                @{N="RAM_TotalMB";E={[math]::Round($_.TotalVisibleMemorySize/1KB)}}, `
+                @{N="RAM_FreeMB";E={[math]::Round($_.FreePhysicalMemory/1KB)}}, `
+                @{N="Swap_TotalMB";E={[math]::Round($_.TotalVirtualMemorySize/1KB)}}, `
+                @{N="Swap_FreeMB";E={[math]::Round($_.FreeVirtualMemory/1KB)}} |
+                Format-Table -AutoSize | Out-String' 2>&1
+    fi
+}
+
+local_top_procs() {
+    # PowerShell is probed before plain `ps aux` because Git Bash's ps returns 0
+    # but prints no CPU column — that output cannot show a runaway process.
+    if ps -eo pcpu,pmem,comm --sort=-pcpu >/dev/null 2>&1; then
+        ps -eo pcpu,pmem,comm --sort=-pcpu 2>/dev/null | head -6
+    elif command -v powershell.exe >/dev/null 2>&1; then
+        powershell.exe -NoProfile -Command '
+            Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 `
+                Name, CPU, @{N="WS_MB";E={[math]::Round($_.WS/1MB)}} |
+                Format-Table -AutoSize | Out-String' 2>&1
+    else
+        ps aux 2>/dev/null | head -6
+    fi
+}
+
 LOCAL_DATA="=== Local host ===
 $(uname -a 2>/dev/null || systeminfo | head -5)
+
+--- uptime / load ---
+$(local_uptime)
+
+--- memory / swap ---
+$(local_memory)
+
+--- top processes by cpu ---
+$(local_top_procs)
 
 --- disk ---
 $(df -h 2>/dev/null || powershell.exe -Command 'Get-CimInstance Win32_LogicalDisk | Select-Object Caption,FreeSpace,Size | Format-Table -AutoSize')
 "
+
+# --- Deterministic severity: highest local disk usage vs threshold ---
+# The LLM writes the EXPLANATION; it never decides whether to page. Paging is
+# driven by this check alone, so a reworded verdict can't silence an alert.
+DISK_THRESHOLD="${HEALTHCHECK_DISK_PCT:-85}"
+MAX_DISK_PCT=0
+MAX_DISK_FS=""
+while read -r pct fs; do
+    [ -n "$pct" ] || continue
+    case "$pct" in *[!0-9]*) continue ;; esac
+    if [ "$pct" -gt "$MAX_DISK_PCT" ]; then
+        MAX_DISK_PCT="$pct"
+        MAX_DISK_FS="$fs"
+    fi
+done <<EOF
+$(df -P 2>/dev/null | awk 'NR > 1 && $5 ~ /%/ { gsub(/%/, "", $5); print $5, $6 }')
+EOF
 
 # --- Optional: remote Linux server via SSH ---
 # Set REMOTE_SSH_HOST in the bundle .env (read above) or in the process env
@@ -118,6 +191,28 @@ if [ $rc -ne 0 ] || [ -z "$ANALYSIS" ]; then
     bash "$BUNDLE_ROOT/cron/telegram-send.sh" "healthcheck: LLM analysis failed ($DATE)" >>"$LOG_FILE" 2>&1
     echo "=== End ===" >> "$LOG_FILE"
     exit 1
+fi
+
+# --- Alert on the verdict ---
+# Without this the analysis only ever reached the log: an urgent finding was
+# invisible unless someone opened cron/logs/ by hand. Severity comes from the
+# deterministic disk check above; the LLM text is the alert body (truncated to
+# stay under Telegram's 4096-char limit).
+echo "Disk check: max ${MAX_DISK_PCT}% on ${MAX_DISK_FS:-?} (threshold ${DISK_THRESHOLD}%)" >> "$LOG_FILE"
+
+if [ "$MAX_DISK_PCT" -ge "$DISK_THRESHOLD" ]; then
+    ALERT_MSG="healthcheck ($DATE): disk ${MAX_DISK_PCT}% on ${MAX_DISK_FS} (threshold ${DISK_THRESHOLD}%)
+
+$(printf '%s' "$ANALYSIS" | head -c 3000)"
+    bash "$BUNDLE_ROOT/cron/telegram-send.sh" "$ALERT_MSG" >>"$LOG_FILE" 2>&1
+    tg_rc=$?
+    if [ $tg_rc -eq 0 ]; then
+        echo "Alert sent to Telegram" >> "$LOG_FILE"
+    else
+        echo "ALERT DELIVERY FAILED: telegram-send.sh exited $tg_rc — verdict not delivered" >> "$LOG_FILE"
+    fi
+else
+    echo "No alert: disk below threshold" >> "$LOG_FILE"
 fi
 
 echo "" >> "$LOG_FILE"

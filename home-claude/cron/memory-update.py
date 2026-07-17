@@ -135,14 +135,33 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
 
         if bits:
             joined = "\n---\n".join(bits)
+            # Two project dirs can resolve to the SAME name (dir_to_project's
+            # trailing-segment fallback) — merge, or the second dir would
+            # silently drop the first one's messages.
+            prev = proj_messages.get(proj_name)
+            if prev:
+                joined = prev + "\n---\n" + joined
             proj_messages[proj_name] = joined[:USER_MSG_CAP_PER_PROJECT]
 
     return proj_messages
 
 
 def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) -> str:
-    parts = [f"### {proj}\n{msgs}" for proj, msgs in proj_messages.items()]
+    # Sorted, not filesystem-iteration order: the cap must always bite the same
+    # tail instead of whichever projects happened to be walked last.
+    parts = [f"### {proj}\n{proj_messages[proj]}" for proj in sorted(proj_messages)]
     text = "\n\n".join(parts)
+    if len(text) <= cap:
+        return text
+
+    start, kept = 0, 0
+    for part in parts:
+        if start >= cap:
+            break
+        kept += 1
+        start += len(part) + 2  # +2 for the "\n\n" separator
+    log(f"build_summary: capped at {cap} chars — dropped {len(text) - cap} chars; "
+        f"{len(parts) - kept} of {len(parts)} project(s) dropped entirely")
     return text[:cap]
 
 
@@ -185,15 +204,18 @@ JSON only, no markdown wrapper, no commentary."""
 
     obj = extract_first_json_object(out)
     if not obj:
+        # An unparseable answer is a failed run, not an empty one — same
+        # signal as a depleted provider so the monitor/alert path fires.
         log(f"USER.md: JSON not found in response ({out[:200]!r})")
-        return True
+        return False
     try:
         data = json.loads(obj)
     except json.JSONDecodeError as e:
         log(f"USER.md: parse error: {e}")
-        return True
+        return False
 
-    add = (data.get("add") or "").strip()
+    raw_add = data.get("add")
+    add = raw_add.strip() if isinstance(raw_add, str) else ""
     if not add:
         log("USER.md: nothing new extracted")
         return True
@@ -206,14 +228,15 @@ JSON only, no markdown wrapper, no commentary."""
 
 
 def update_cross_notes(proj_messages: dict[str, str]) -> None:
-    # OPT-IN: this phase only runs when something has produced
-    # cron/scan-results/scan_<date>.json (a daily project-scan summary; the
-    # bundle does not ship such a generator). Without that file the phase is
-    # skipped — wire up your own scanner or ignore the skip message.
+    # OPT-IN: set MEMORY_CROSS_NOTES=1 to enable. The extraction is built from
+    # the raw user messages, so no scan file is actually consumed — the legacy
+    # cron/scan-results/scan_<date>.json sentinel is still honored as a
+    # fallback so existing installs keep working.
     scan_file = SCAN_DIR / f"scan_{DATE}.json"
-    if not scan_file.exists():
-        log(f"cross-notes: no {scan_file.name} — skipping "
-            "(opt-in: provide cron/scan-results/scan_<date>.json to enable)")
+    enabled = os.environ.get("MEMORY_CROSS_NOTES", "").strip().lower() in {"1", "true", "yes"}
+    if not enabled and not scan_file.exists():
+        log("cross-notes: disabled — skipping "
+            "(opt-in: set MEMORY_CROSS_NOTES=1)")
         return
     if len(proj_messages) < 2:
         log("cross-notes: fewer than 2 active projects — skipping")
@@ -258,6 +281,10 @@ JSON only, no markdown wrapper."""
         return
 
     links = data.get("links") or []
+    # A bare string would be written out one character per bullet — reject it.
+    if not isinstance(links, list):
+        log(f"cross-notes: 'links' is {type(links).__name__}, not a list — skipping")
+        return
     if not links:
         log("cross-notes: no new links")
         return

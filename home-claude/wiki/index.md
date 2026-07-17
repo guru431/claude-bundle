@@ -35,11 +35,11 @@ beyond the file path being 3 levels deep (`<section>/<subsection>/<file>.md`).
 ## Bootstrapping your own projects
 
 1. Pick a short slug for each of your projects: `myapp`, `infra`, `docs-site`.
-2. Update `~/.claude/cron/hooks/utils.py::PROJECT_MAP` so the flush
-   pipeline knows how to map your `~/.claude/projects/<dir>` directory names
-   to your wiki project slugs.
-3. Update `~/.claude/cron/hooks/utils.py::KNOWN_PROJECTS` with the same
-   list — the path normalizer uses it to resolve ambiguous LLM-emitted paths.
+2. Fill `project_map:` in `~/.claude/bundle.local.yaml` so the flush pipeline
+   knows how to map your `~/.claude/projects/<dir>` directory names to your
+   wiki project slugs.
+3. Fill `known_projects:` in the same file with that slug list — the path
+   normalizer uses it to resolve ambiguous LLM-emitted paths.
 4. Optionally create the directory `wiki/projects/<slug>/` upfront; the
    pipeline will create it on first write if it doesn't exist.
 

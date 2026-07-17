@@ -141,11 +141,29 @@ publishes nothing.
 |---|---|---|---|---|
 | Wiki flush + compile (`ClaudeWikiFlush`, `ClaudeWikiCompileSessions`, `ClaudeWikiCompileKB`) | session/source text → your LLM provider (DeepSeek / OpenCode Go) | yes (PAYG tokens) | no | on (KB compile off) |
 | `ClaudeMemoryUpdate` | your user messages (up to ~40 KB/night) + a slice of `~/.claude/memory/` → your LLM provider | yes (PAYG tokens) | no | on |
-| `ClaudeHealthcheck` | prompt → your LLM provider | yes (PAYG tokens) | no | on |
+| `ClaudeHealthcheck` | host metrics → your LLM provider (see below) | yes (PAYG tokens) | no | on |
 | `ClaudeGitPushAll` | your git remotes | no | yes (`git push`) | off (opt-in) |
 | `ClaudeTaskMonitor` / alerts | failure summary → Telegram Bot API | no | no | on |
 | `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
 | `ClaudeMd2PdfSync` | nothing (local render) | no | no | off |
+
+### What `ClaudeHealthcheck` actually sends
+
+Its prompt is not a bare question — it carries the metrics it just
+collected, and they leave your machine for whichever provider
+`WIKI_LLM_PROVIDER` points at. Out of the box that's **local host
+identification and resource state** (OS/kernel/hostname banner plus
+disk/resource figures). Two optional blocks widen it:
+
+- `REMOTE_SSH_HOST` set → the same class of data from that Linux host
+  over SSH (hostname, uptime/load, memory, disk).
+- `WIN_REMOTE_HOST` set → disk figures from that Windows host over WinRM.
+
+So enabling remote checks means **your servers' hostnames and resource
+state get sent to a third-party LLM every morning**. Both vars are empty
+by default in `config/llm-providers.example.env`; leave them empty and the
+task stays local-host-only. If even the local banner is too much, disable
+the task — it has no local-only mode.
 
 ## Ordering & the wiki-pipeline orchestrator
 
@@ -211,15 +229,37 @@ python ~/.claude/cron/wiki/wiki-flush-sessions.py --dry-run
 python ~/.claude/cron/memory-update.py           --dry-run
 ```
 
-Both print the effective policy line first.
+Both print the effective policy line first. A manifest that exists but
+can't be honored (invalid YAML, PyYAML missing, a field of the wrong
+type) denies every project rather than falling back to the permissive
+default — a policy you can't read is not a policy you can ignore.
+
+### What the policy is NOT
+
+The allowlist gates **which sources are read**. It is not a DLP boundary,
+and two limits are worth knowing before you rely on it:
+
+- **`USER.md` is global.** `ClaudeMemoryUpdate` passes the current
+  `~/.claude/memory/USER.md` into its prompt so the LLM can avoid
+  re-adding facts already there. Entries carry no per-project
+  provenance, so a fact extracted while a project was allowed keeps
+  being sent after you exclude it. Excluding a project stops NEW
+  extraction from it; prune `USER.md` by hand if you need the old facts
+  gone.
+- **No redaction pass.** The memory prompts deliberately ask for exact
+  paths, identifiers, hosts and ports (that's what makes the notes
+  useful), and nothing strips secrets before the text reaches the
+  provider. Keep genuinely sensitive projects out via `allow_projects` /
+  `skip_projects` rather than expecting the pipeline to sanitize them.
 
 ### First run — controlling the historical backlog
 
-On the first nights, flush also sweeps up to `WIKI_BACKLOG_MAX` (default
-50) older, never-processed transcripts per night, on top of the last 48h.
-Set `WIKI_BACKLOG_MAX=0` in `.env` to disable the historical sweep while
-you dial in `allow_projects` from the `--dry-run` preview, then raise it
-once you're happy with the scope.
+Flush reads the last 48h of transcripts. It sweeps older, never-processed
+ones only if you ask: `WIKI_BACKLOG_MAX` defaults to **0**, so a first run
+can't ship your whole archive to an LLM before you've seen the
+`--dry-run` preview. Once `allow_projects` says what you mean, set
+`WIKI_BACKLOG_MAX=<n>` in `.env` to backfill history `<n>` transcripts
+per night.
 
 ## Adapting for your machine
 

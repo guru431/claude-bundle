@@ -9,6 +9,8 @@ set -eu
 cd "$(dirname "$0")/.."   # repo root
 
 git config core.hooksPath .githooks
+# POSIX git SILENTLY skips a non-executable hook — no warning, zero protection.
+chmod +x .githooks/pre-commit 2>/dev/null || true
 echo "[ok] core.hooksPath = .githooks — pre-commit secret-guard is active"
 
 # Seed a LOCAL, untracked .sanitize-patterns.md reference (never committed — both

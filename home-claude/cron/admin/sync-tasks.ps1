@@ -15,16 +15,72 @@
 #   powershell -ExecutionPolicy Bypass -File .\sync-tasks.ps1            # apply
 #   powershell -ExecutionPolicy Bypass -File .\sync-tasks.ps1 -DryRun    # no changes
 #   powershell -ExecutionPolicy Bypass -File .\sync-tasks.ps1 -Only foo  # one task
+#   powershell -ExecutionPolicy Bypass -File .\sync-tasks.ps1 -Adopt     # take over
+#                                        same-named tasks that lack the marker
 
 param(
     [switch]$DryRun,
     [switch]$Force,
+    [switch]$Adopt,
     [string[]]$Only,
     [string]$RegistryPath,
-    [string]$LogPath
+    [string]$LogPath,
+    [string]$ArgsFile
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ── -ArgsFile: switches handed over by sync.cmd ───────────────────────────────
+# sync.cmd cannot splice user arguments onto the elevated command line without
+# letting cmd.exe re-parse them (a '&' would start a second command, running as
+# admin). It writes them verbatim to a temp file and passes only the path here.
+# Every token is validated against the switches below; anything unrecognized is
+# a hard error rather than something forwarded blindly.
+function Read-ArgsFile([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+    if (-not $raw) { return @() }
+    $line = ($raw -split "`r?`n")[0]   # sync.cmd writes exactly one line
+    $tokens = @()
+    $cur = ''
+    $inQuote = $false
+    $has = $false
+    foreach ($c in $line.ToCharArray()) {
+        if ($c -eq '"') { $inQuote = -not $inQuote; $has = $true; continue }
+        if (-not $inQuote -and ($c -eq ' ' -or $c -eq "`t")) {
+            if ($has) { $tokens += $cur; $cur = ''; $has = $false }
+            continue
+        }
+        $cur += [string]$c; $has = $true
+    }
+    if ($has) { $tokens += $cur }
+    return $tokens
+}
+if ($ArgsFile) {
+    $tokens = @(Read-ArgsFile $ArgsFile)
+    $i = 0
+    while ($i -lt $tokens.Count) {
+        $t = $tokens[$i]; $i++
+        if     ($t -eq '-DryRun') { $DryRun = $true }
+        elseif ($t -eq '-Force')  { $Force  = $true }
+        elseif ($t -eq '-Adopt')  { $Adopt  = $true }
+        elseif ($t -eq '-Only' -or $t -eq '-RegistryPath' -or $t -eq '-LogPath') {
+            if ($i -ge $tokens.Count -or $tokens[$i].StartsWith('-')) {
+                Write-Host "ERROR: $t requires a value" -ForegroundColor Red
+                exit 1
+            }
+            $v = $tokens[$i]; $i++
+            if     ($t -eq '-Only')         { $Only = @($Only | Where-Object { $_ }) + @($v -split ',' | Where-Object { $_ }) }
+            elseif ($t -eq '-RegistryPath') { $RegistryPath = $v }
+            else                            { $LogPath = $v }
+        }
+        else {
+            Write-Host "ERROR: unsupported argument '$t'" -ForegroundColor Red
+            Write-Host "       Allowed: -DryRun -Force -Adopt -Only <names> -RegistryPath <path> -LogPath <path>" -ForegroundColor Red
+            exit 1
+        }
+    }
+}
 
 # ── default log path: %TEMP%\sync-tasks_<timestamp>.log ──────────────────────
 if (-not $LogPath) {
@@ -383,6 +439,15 @@ function Normalize-TaskArgs([string]$s) {
 # ISO-8601 duration (PT4H, P1D, ...) → TimeSpan, so a repetition compare is
 # normalization-proof: Task Scheduler may re-emit P1D as PT24H (same span).
 # Empty / unparseable → TimeSpan.Zero (treated as "no repetition").
+# Task Scheduler re-emits UserId qualified (DOMAIN\user) even when the registry
+# asked for a bare name, so a verbatim compare would re-register on every run.
+# Compare the bare leaf unless BOTH sides name a domain.
+function Test-UserChanged([string]$current, [string]$wanted) {
+    if (-not $wanted) { return $false }
+    if ($current -match '\\' -and $wanted -match '\\') { return ($current -ne $wanted) }
+    return ((($current -split '\\')[-1]) -ne (($wanted -split '\\')[-1]))
+}
+
 function ConvertTo-DurationSpan([string]$iso) {
     if (-not $iso) { return [TimeSpan]::Zero }
     try { return [System.Xml.XmlConvert]::ToTimeSpan($iso) } catch { return [TimeSpan]::Zero }
@@ -474,10 +539,22 @@ foreach ($task in $reg.tasks) {
     $description = $marker + " | " + $task.description
 
     $current = Get-CurrentSummary $task.name
+
+    # A same-named task that this registry never created belongs to somebody
+    # else: Register-ScheduledTask -Force would silently replace it, breaking the
+    # documented "tasks outside the registry are left alone" contract. Taking one
+    # over must be a deliberate act (-Adopt).
+    if ($current -and -not $Adopt -and ("$($current.description)" -notlike "*$marker*")) {
+        Write-Host ("[skipped: foreign task] " + $task.name + " — existing task has no '" + $marker + "' marker; not overwriting. Re-run with -Adopt to take it over.") -ForegroundColor DarkYellow
+        $summary.skipped++
+        continue
+    }
+
     $action_needs_change = $true
     $enabled_needs_change = $false
     $desc_needs_change = $false
     $logontype_needs_change = $false
+    $user_needs_change = $false
     $swa_needs_change = $false
     $runlevel_needs_change = $false
     $hidden_needs_change = $false
@@ -504,6 +581,7 @@ foreach ($task in $reg.tasks) {
         # Full description compare (covers both the marker and the description text).
         $desc_needs_change = ([string]$current.description -ne $description)
         $logontype_needs_change = ($current.logonType -ne $logonType)
+        $user_needs_change = Test-UserChanged "$($current.user)" "$($task.user)"
         $swa_needs_change = (-not [bool]$current.startWhenAvailable)
         $wantedRunLevel = if ($task.runlevel -eq 'highest') { 'Highest' } else { 'Limited' }
         $runlevel_needs_change = ("$($current.runLevel)" -ne $wantedRunLevel)
@@ -551,7 +629,7 @@ foreach ($task in $reg.tasks) {
         }
     }
     $verb = if ($current) {
-        if ($Force -or $action_needs_change -or $enabled_needs_change -or $desc_needs_change -or $logontype_needs_change -or $swa_needs_change -or $runlevel_needs_change -or $hidden_needs_change -or $timeout_needs_change -or $trigger_needs_change -or $triggertype_needs_change -or $dow_needs_change -or $delay_needs_change -or $restart_needs_change -or $repeat_needs_change) { 'updated' } else { 'unchanged' }
+        if ($Force -or $action_needs_change -or $enabled_needs_change -or $desc_needs_change -or $logontype_needs_change -or $user_needs_change -or $swa_needs_change -or $runlevel_needs_change -or $hidden_needs_change -or $timeout_needs_change -or $trigger_needs_change -or $triggertype_needs_change -or $dow_needs_change -or $delay_needs_change -or $restart_needs_change -or $repeat_needs_change) { 'updated' } else { 'unchanged' }
     } else { 'created' }
 
     Write-Host ("[{0,-9}] {1}" -f $verb, $task.name) -ForegroundColor (

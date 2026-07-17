@@ -11,7 +11,8 @@ repo_root=$(git rev-parse --show-toplevel)
 fail=0
 
 # 1) Block sensitive filenames being newly added (allow *.example* templates)
-added=$(git diff --cached --name-only --diff-filter=A || true)
+# --diff-filter=AR: a rename (`git mv safe.txt .env`) is an R, not an A.
+added=$(git diff --cached --name-only --diff-filter=AR || true)
 if [ -n "$added" ]; then
   bad=$(printf '%s\n' "$added" \
     | grep -iE '(^|/)(\.env(\.[A-Za-z0-9]+)?$|.*\.pem$|.*\.key$|.*\.p12$|.*\.pfx$|id_rsa|id_ed25519|id_dsa|vault\.env|\.sanitize-patterns(\.[A-Za-z0-9]+)?$)' \

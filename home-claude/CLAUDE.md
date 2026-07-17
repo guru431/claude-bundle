@@ -49,10 +49,15 @@ into project incident logs. Findings are deferred observations for review.
 - Running dev tools: `php`, `python`, `npm`, `composer`
 - Commands that have NO dedicated tool equivalent
 
-### Bash Path Format on Windows (Git Bash sandbox):
-- Always use a variable: `D="<drive>:/path/to/project"` then `"$D/file"`
-- Path style: `<drive>:/folder/subfolder` (drive letter + colon + forward slashes)
-- NEVER try `/<drive>/...` or `\backslash\` paths
+### Path Format on Windows — one style per shell:
+- **PowerShell / CMD** → backslashes with the drive letter: `C:\folder\sub`
+- **Git Bash** → the POSIX mount form: `/c/folder/sub` (this is what
+  `which` prints inside Git Bash, so it pastes back verbatim; CMD's `where`
+  prints the `C:\...` form instead — don't paste that into Git Bash)
+- Never mix the two in one command. Don't hand a `\backslash\` path to Git
+  Bash, and don't hand a `/c/...` path to PowerShell
+- In Git Bash, resolve the root once into a variable:
+  `D="/c/path/to/project"` then `"$D/file"`
 - NEVER use `cd` — always use absolute paths
 
 ### Bash Sandbox Limitations (VS Code extension):
@@ -69,7 +74,7 @@ into project incident logs. Findings are deferred observations for review.
 
 ### Exa MCP (if connected)
 - Prefer Exa MCP over the built-in WebSearch / WebFetch
-- 1000 requests / month on the free tier
+- The free tier is metered — check Exa's current limits before relying on it
 
 ## Coding Discipline (Karpathy rules)
 
@@ -125,14 +130,17 @@ into project incident logs. Findings are deferred observations for review.
 ### Python on Windows:
 - Resolve the path once: `where python` or `python --version`
 - In Git Bash the path is usually `"/c/Program Files/Python<ver>/python"`
-  or just `python`
+  or just `python` — the `/c/...` form, per the path rule above
 - Use Python for data processing when shell pipes fail
   (they often do in the sandbox)
 
 ### File Encoding — BOM Rules (Windows):
-- **PowerShell (.ps1)** — ALWAYS UTF-8 with BOM. PS 5.1 reads files without
-  BOM as CP1251; Cyrillic bytes produce smart-quote characters that break
-  string parsing. After writing, add BOM via Python:
+- **PowerShell (.ps1)** — ALWAYS UTF-8 with BOM. Without a BOM, PS 5.1 reads
+  the file in the system ANSI code page (whichever one your Windows locale
+  sets — CP1251 on a Russian install, CP1252 on a Western one, ...), never as
+  UTF-8. Any non-ASCII byte is then mis-decoded — e.g. Cyrillic text turns
+  into smart-quote characters that break string parsing. After writing, add
+  BOM via Python:
   ```bash
   python -c "
   f=r'path/to/file.ps1'
@@ -142,9 +150,10 @@ into project incident logs. Findings are deferred observations for review.
   "
   ```
 - **Bash scripts (.sh)** — UTF-8 WITHOUT BOM (BOM breaks `#!/bin/bash`)
-- **CMD/BAT (.cmd, .bat)** — save as CP1251 (Windows ANSI) for Cyrillic;
+- **CMD/BAT (.cmd, .bat)** — for non-ASCII text, save in your system's ANSI
+  code page (CP1251 for Cyrillic, CP1252 for Western European, ...);
   UTF-8 only if `@chcp 65001` is at the top
-- **RULE**: after writing any `.ps1` with Cyrillic content — immediately add BOM
+- **RULE**: after writing any `.ps1` with non-ASCII content — immediately add BOM
 
 ## Codex CLI coexistence (optional)
 
@@ -186,8 +195,8 @@ investigation, search for prior work in this order:
    prior symptom → cause → fix breakdowns.
 2. **Global incident index** — a compact list of past incidents across
    all your projects. Typical location:
-   `~/.claude/memory/incidents.md` (build it up over time; the wiki
-   pipeline can append one-line entries automatically).
+   `~/.claude/memory/incidents.md`. You build it up by hand as you go —
+   nothing in the pipeline writes to it.
 3. **Re-investigate from scratch** — only if neither source has a match.
 
 After you resolve a new incident, write it up as an atomic page

@@ -16,8 +16,10 @@ automation — 12 scheduled tasks (four disabled by default) that flush
 Claude Code sessions into the wiki overnight. The installer also offers to
 wire two optional companion tools: an LLM provider switcher
 (`claude-switch.ps1`) and an `AGENTS.md` mirror for Codex CLI. Needs
-Python 3.10+, Git, and at least one LLM provider key. (Tier 1 + Tier 2
-below.)
+Python 3.10+, Git, and an LLM backend for the nightly jobs — either a
+provider key (DeepSeek / OpenCode Go) or `WIKI_LLM_PROVIDER=claude`,
+which reuses the `claude` CLI you're already signed in to and needs no
+key. (Tier 1 + Tier 2 below.)
 
 Both profiles were extracted from a real working setup, then sanitized
 of all private hosts, paths, tokens, and project names.
@@ -119,10 +121,11 @@ claude-bundle/
 | `skills/*/SKILL.md` | Optional: `code-review-external` template (second-opinion review), `personal-voice` template (write text in your voice by register) |
 | `commands/code-review-ext.md` | Optional: `/code-review-ext` slash wrapper |
 
-After install: `/plugin install superpowers context7` gives you ~130
-built-in skills and slash commands like `/brainstorm`, `/writing-plans`,
+After install: `/plugin install superpowers context7` gives you a large
+set of skills and slash commands like `/brainstorm`, `/writing-plans`,
 `/systematic-debugging`, `/subagent-driven-development`,
-`/verification-before-completion`.
+`/verification-before-completion`. Run `/skills` after installing to see
+what the current plugin versions actually ship.
 
 ### Full tier — `~/.claude/wiki/` and `~/.claude/cron/`
 
@@ -241,11 +244,14 @@ status).
 - Windows 10/11 (Task Scheduler + DPAPI for the Password-mode tasks)
 - Git for Windows (Git Bash)
 - Python 3.10+
-- At least one LLM provider key:
-  - DeepSeek (PAYG, cheapest reliable option), OR
-  - OpenCode Go (flat-rate subscription)
-  - Claude can be used but is **opt-in** for cron — see [`docs/llm-routing.md`](docs/llm-routing.md)
-- Telegram bot + chat_id (optional, for alerts)
+- An LLM backend for the nightly jobs — one of:
+  - DeepSeek key (PAYG, cheapest reliable option), OR
+  - OpenCode Go key (flat-rate subscription), OR
+  - `WIKI_LLM_PROVIDER=claude` — **no key**; shells out to the `claude`
+    CLI you're already signed in to, so it consumes your subscription.
+    Opt-in for cron — see [`docs/llm-routing.md`](docs/llm-routing.md)
+- Telegram bot + chat_id (optional, for alerts — the pipeline runs fine
+  without it, failures just go to the logs)
 
 Linux / macOS **lite** tier is fully supported via
 `scripts/install-lite.sh` (config only, OS-agnostic). For the **full**
@@ -262,7 +268,7 @@ portable; only the Windows Task Scheduler layer is replaced.
 | Cron LLM call logs `DEEPSEEK_KEY env var not set` | no `.env` (or wrong key name) | copy `config/llm-providers.example.env` → `~/.claude/.env`, fill a key |
 | `self-test.ps1` warns "Python not found" / skips checks | Python not on PATH | install Python 3.10+, or set `$env:CLAUDE_HOOK_PYTHON` |
 | Password-mode task exits 127, no log | `script:` on a mapped drive (absent in session 0) | use a UNC `\\host\share\...` or local `C:\...` path; `bootstrap-registry.ps1` warns about this |
-| All wiki pages land in `projects/main` | headings that yield no ASCII slug (e.g. all-Cyrillic names) fall back to `main` — an empty `KNOWN_PROJECTS` alone won't do it, distinct ASCII headings still split into distinct folders | populate `KNOWN_PROJECTS` in `utils.py`; `wiki-lint` flags this as "project-collapse" |
+| All wiki pages land in `projects/main` | headings that yield no ASCII slug (e.g. all-Cyrillic names) fall back to `main` — an empty `known_projects` alone won't do it, distinct ASCII headings still split into distinct folders | populate `known_projects:` in `~/.claude/bundle.local.yaml`; `wiki-lint` flags this as "project-collapse" |
 
 More detail in [`INSTALL.md` § Troubleshooting](INSTALL.md).
 
@@ -273,5 +279,5 @@ More detail in [`INSTALL.md` § Troubleshooting](INSTALL.md).
 ## Provenance
 
 Extracted from one developer's `~/.claude/` and meta-repo. Sanitization
-checklist in [`CHANGELOG.md`](CHANGELOG.md). If something still looks
-personal, please [open an issue](../../issues).
+checklist in [`CLAUDE.md`](CLAUDE.md) § Sanitization checklist. If
+something still looks personal, please [open an issue](../../issues).

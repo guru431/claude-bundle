@@ -36,6 +36,10 @@ if ($InstallPath) {
     $home_claude = Join-Path $root 'home-claude'
     $deployed = $false
 }
+# Every deployment check derives from this one path, so -InstallPath can never
+# silently validate a different tree than the one the installer wrote to. With
+# no -InstallPath the only deployment that can exist is the documented default.
+$deployRoot = if ($deployed) { $home_claude } else { Join-Path $env:USERPROFILE '.claude' }
 
 $script:pass = 0
 $script:fail = 0
@@ -63,18 +67,22 @@ $py = Find-Python
 
 Write-Host ""
 Write-Host "=== claude-bundle self-test ===" -ForegroundColor Cyan
-Write-Host "Root:   $root"
+Write-Host "Root:    $root"
+Write-Host "Checking: $home_claude $(if ($deployed) { '(deployed tree)' } else { '(bundle source)' })"
+Write-Host "Deployment: $deployRoot"
 Write-Host "Python: $(if ($py) { $py } else { '(not found)' })"
 
-# Version banner: source VERSION vs the version stamped into a deployment.
+# Version banner: source VERSION vs the version stamped into the deployment the
+# installer actually wrote (install.ps1 stamps $InstallPath\.bundle-version, so
+# reading a hardcoded ~/.claude would compare against the wrong deployment).
 $verFile = Join-Path $root 'VERSION'
 $srcVer = if (Test-Path $verFile) { (Get-Content $verFile -Raw).Trim() } else { '(none)' }
-$deployedFile = Join-Path $env:USERPROFILE '.claude/.bundle-version'
+$deployedFile = Join-Path $deployRoot '.bundle-version'
 $deployedVer = if (Test-Path $deployedFile) { (Get-Content $deployedFile -Raw).Trim() } else { $null }
 Write-Host "Version: $srcVer (source)$(if ($deployedVer) { " | $deployedVer (deployed)" })"
 Write-Host ""
 if ($deployedVer -and $deployedVer -ne $srcVer) {
-    Warn "deployed bundle version ($deployedVer) differs from source ($srcVer) — re-run the installer to update"
+    Warn "deployed bundle version ($deployedVer at $deployedFile) differs from source ($srcVer) — re-run the installer to update"
 }
 
 # ── 1. JSON validity ─────────────────────────────────────────────────────────
@@ -114,19 +122,37 @@ if ($py) {
     elseif ($out -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped registry.yaml parse" }
     else { Bad "registry.yaml parse error: $out" }
 
-    # The committed manifest template must be valid YAML too (source-tree file;
-    # $root is always the bundle source, even for a deployed -InstallPath run).
-    $mani = Join-Path $root 'config/bundle.local.example.yaml'
-    if (Test-Path $mani) {
-        $mcode = "import sys,yaml; d=yaml.safe_load(open(sys.argv[1],encoding='utf-8')); sys.exit(0 if isinstance(d,dict) else 3)"
+    # Manifest schema. Checked for the committed template (source-tree file; $root
+    # is always the bundle source) AND for the DEPLOYED bundle.local.yaml when one
+    # exists — a policy key that is not a YAML list silently disables the privacy
+    # policy in utils.py, so a wrong type there must FAIL rather than pass quietly.
+    $mcode = @'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1], encoding='utf-8'))
+if d is None:
+    sys.exit(0)
+if not isinstance(d, dict):
+    print('not a YAML mapping'); sys.exit(3)
+for k in ('allow_projects', 'skip_projects', 'skip_dirs'):
+    v = d.get(k)
+    if v is not None and not isinstance(v, list):
+        print('%s must be a YAML list, got %s' % (k, type(v).__name__)); sys.exit(4)
+sys.exit(0)
+'@
+    $manifests = @{ 'bundle.local.example.yaml (template)' = (Join-Path $root 'config/bundle.local.example.yaml') }
+    $maniDeployed = Join-Path $deployRoot 'bundle.local.yaml'
+    if (Test-Path $maniDeployed) { $manifests["bundle.local.yaml (deployed: $maniDeployed)"] = $maniDeployed }
+    foreach ($label in $manifests.Keys) {
+        $mani = $manifests[$label]
+        if (-not (Test-Path $mani)) { continue }
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         $mout = (& $py -c $mcode $mani 2>&1 | Out-String).Trim()
         $mrc = $LASTEXITCODE
         $ErrorActionPreference = $prevEAP
-        if ($mrc -eq 0) { Ok "bundle.local.example.yaml parses (mapping)" }
-        elseif ($mout -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped manifest template parse" }
-        else { Bad "bundle.local.example.yaml invalid: $mout" }
+        if ($mrc -eq 0) { Ok "$label — valid schema" }
+        elseif ($mout -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped manifest parse: $label" }
+        else { Bad "$label invalid: $mout" }
     }
 }
 
@@ -207,10 +233,10 @@ if ($py) {
     }
 }
 # PROJECTS_ROOT is required by git-push-all / md2pdf-sync when the bundle is
-# deployed at the documented default ~/.claude. Only warn there (not when
-# self-test runs from the bundle source tree).
-if ($root -match '[\\/]\.claude$' -and -not $env:PROJECTS_ROOT) {
-    Warn "PROJECTS_ROOT unset — git-push-all.sh / md2pdf-sync.py refuse to run under ~/.claude without it (see config/llm-providers.example.env)"
+# deployed at the documented default ~/.claude. Gate on the tree under test
+# ($home_claude), not $root — $root is the source checkout and never matches.
+if ($home_claude -match '[\\/]\.claude$' -and -not $env:PROJECTS_ROOT) {
+    Warn "PROJECTS_ROOT unset — git-push-all.sh / md2pdf-sync.py refuse to run under $home_claude without it (see config/llm-providers.example.env)"
 }
 
 # ── 9. Doc/registry task-count guard (source tree only) ──────────────────────

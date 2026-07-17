@@ -23,7 +23,7 @@ do NOT solve it inline, but do NOT lose it either:
    # Findings — <project>
    Side observations collected during work. Review monthly. Stale >90 days → alert.
    ```
-2. Add an entry **at the top** of the file (newest first):
+2. Add an entry **at the top** of the file (newest first) in this format:
    ```
    ## YYYY-MM-DD · Title [P1|P2|P3]
    **Context:** where/how it was spotted (file, session, command)
@@ -38,6 +38,9 @@ do NOT solve it inline, but do NOT lose it either:
 
 **Closing a finding:** change status to `done` / `wontfix`, add
 `**Resolved:** YYYY-MM-DD — what was done`.
+
+**Not the same as incidents:** incidents are root-caused failures that go
+into project incident logs. Findings are deferred observations for review.
 
 ## Tool Selection Rules (Windows + Git Bash)
 
@@ -54,10 +57,15 @@ do NOT solve it inline, but do NOT lose it either:
 - Running dev tools: `php`, `python`, `npm`, `composer`
 - Commands that have NO dedicated tool equivalent
 
-### Bash Path Format on Windows (Git Bash):
-- Use a variable: `D="<drive>:/path/to/project"` then `"$D/file"`
-- Path style: `<drive>:/folder/subfolder` (drive letter + colon + forward slashes)
-- NEVER try `/<drive>/...` or `\backslash\` paths
+### Path Format on Windows — one style per shell:
+- **PowerShell / CMD** → backslashes with the drive letter: `C:\folder\sub`
+- **Git Bash** → the POSIX mount form: `/c/folder/sub` (this is what
+  `which` prints inside Git Bash, so it pastes back verbatim; CMD's `where`
+  prints the `C:\...` form instead — don't paste that into Git Bash)
+- Never mix the two in one command. Don't hand a `\backslash\` path to Git
+  Bash, and don't hand a `/c/...` path to PowerShell
+- In Git Bash, resolve the root once into a variable:
+  `D="/c/path/to/project"` then `"$D/file"`
 - NEVER use `cd` — always use absolute paths
 
 ## Coding Discipline (Karpathy rules)
@@ -88,6 +96,8 @@ do NOT solve it inline, but do NOT lose it either:
   ```
 - "Fix bug" → reproduce with test → make it pass
 - "Refactor X" → ensure tests pass before AND after
+- Strong criteria let you loop independently. Weak criteria
+  ("make it work") require clarification first
 
 ## Error Recovery — MAXIMUM 2 attempts
 
@@ -98,9 +108,12 @@ do NOT solve it inline, but do NOT lose it either:
 
 ## File Encoding — BOM Rules (Windows)
 
-- **PowerShell (.ps1)** — ALWAYS UTF-8 with BOM. PS 5.1 reads files without
-  BOM as CP1251; Cyrillic bytes produce smart-quote characters that break
-  string parsing. After writing, add BOM via Python:
+- **PowerShell (.ps1)** — ALWAYS UTF-8 with BOM. Without a BOM, PS 5.1 reads
+  the file in the system ANSI code page (whichever one your Windows locale
+  sets — CP1251 on a Russian install, CP1252 on a Western one, ...), never as
+  UTF-8. Any non-ASCII byte is then mis-decoded — e.g. Cyrillic text turns
+  into smart-quote characters that break string parsing. After writing, add
+  BOM via Python:
   ```bash
   python -c "
   f=r'path/to/file.ps1'
@@ -110,9 +123,10 @@ do NOT solve it inline, but do NOT lose it either:
   "
   ```
 - **Bash scripts (.sh)** — UTF-8 WITHOUT BOM (BOM breaks `#!/bin/bash`)
-- **CMD/BAT (.cmd, .bat)** — save as CP1251 (Windows ANSI) for Cyrillic;
+- **CMD/BAT (.cmd, .bat)** — for non-ASCII text, save in your system's ANSI
+  code page (CP1251 for Cyrillic, CP1252 for Western European, ...);
   UTF-8 only if `@chcp 65001` is at the top
-- **RULE**: after writing any `.ps1` with Cyrillic content — immediately add BOM
+- **RULE**: after writing any `.ps1` with non-ASCII content — immediately add BOM
 
 ## Secrets / tokens / .env
 
@@ -165,5 +179,9 @@ verify with `schtasks /query /tn <name> /fo list /v`.
   15–40 lines linking back to the project's `CLAUDE.md` plus per-project
   gotchas. The full rules stay in `CLAUDE.md`. See
   `AGENTS-per-project.template.md` in the bundle.
-- MCP servers can be configured in `~/.codex/config.toml` and shared with
-  Claude Code via `~/.claude/.mcp.json` — same servers, two clients.
+- **MCP config is per-tool — there is no shared file.** Codex reads its
+  servers from `~/.codex/config.toml` (TOML, Codex's own schema). Claude
+  Code keeps user/local-scope servers in `~/.claude.json` and project-scope
+  servers in `<project>/.mcp.json` (JSON). To run the same server under
+  both, declare it separately in each tool's own format and keep the two
+  in step by hand.

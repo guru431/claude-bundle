@@ -8,9 +8,9 @@
 #
 # Exposes:
 #   SECRET_SCAN_PATTERN   — the bare ERE alternation (very low false-positive)
-#   secret_scan_diff      — scan a unified diff for token-shaped strings.
-#                           Reads diff text from stdin if given, otherwise
-#                           falls back to `git diff --cached`.
+#   secret_scan_diff      — scan the ADDED lines of a unified diff for
+#                           token-shaped strings. Reads diff text from stdin if
+#                           given, otherwise falls back to `git diff --cached`.
 #                           Prints offending matches and returns non-zero on
 #                           any hit; returns 0 (silent) when clean.
 
@@ -26,7 +26,10 @@ secret_scan_diff() {
     else
         _ssd_diff=$(cat)
     fi
-    _ssd_hits=$(printf '%s\n' "$_ssd_diff" | grep -nE -e "$SECRET_SCAN_PATTERN" || true)
+    # Added lines only: a commit that REMOVES a leaked token must not be blocked,
+    # or the leak could never be remediated. '+++' is a file header, not content.
+    _ssd_hits=$(printf '%s\n' "$_ssd_diff" | grep -E '^\+' | grep -vE '^\+\+\+' \
+        | grep -nE -e "$SECRET_SCAN_PATTERN" || true)
     if [ -n "$_ssd_hits" ]; then
         printf '%s\n' "$_ssd_hits"
         return 1

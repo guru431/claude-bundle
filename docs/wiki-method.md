@@ -28,29 +28,45 @@ wiki/
 Page-level rules:
 
 - Paths are **exactly 3 levels deep**: `<section>/<subsection>/<file>.md`.
-  The normalizer in `cron/hooks/utils.py::normalize_wiki_path` rejects
-  4-level paths (LLMs love to invent them).
-- Each page starts with a YAML frontmatter `sources:` list that tracks
-  which source files were processed into it (with hashes). The pipeline
-  reads this to skip already-processed sources.
+  The normalizer in `cron/hooks/utils.py::normalize_wiki_path` enforces
+  that deterministically: a deeper path an LLM invented is **flattened**
+  (`a/b/c/d.md` → `a/b/c-d.md`, joining the extra segments with `-`), and
+  only genuinely invalid paths are rejected outright — a top level other
+  than `kb`/`projects`, a `kb` subsection other than
+  `concepts`/`tools`/`people`, a script-managed `index.md` / `_log.md`,
+  or a surviving `..` traversal segment. A few subsections are rewritten
+  rather than rejected (`kb/models/` → `kb/tools/`, `projects/unknown/` →
+  `projects/main/`).
+- Each page starts with a YAML frontmatter `sources:` list recording which
+  source files were processed into it. In practice each entry carries the
+  source `path` and a `processed` timestamp — the `hash`/`mtime` fields the
+  helper supports are not filled in by the shipped compilers. The list is
+  provenance, not the dedup key (see phase 2).
 - Atomic pages contain at least 2 `[[wikilinks]]` to other pages — that's
-  how navigation works without an index. The build-index script also
-  uses these links to surface "what links here".
+  how navigation works without an index. (Reverse links — "what links
+  here" — are **not** computed by any shipped script; you get them from
+  Obsidian or a grep.)
 
-## The pipeline (4 phases)
+## The pipeline — two tracks
 
 Each phase runs as a cron-scheduled script. The default schedule is in
-`cron/registry.yaml`.
+`cron/registry.yaml`. There are two independent tracks: the **session
+ingestion track** (phases 1–3 below — on by default, and the three the
+`wiki-pipeline.py` orchestrator chains) and an **optional KB track**
+(`wiki-compile-kb.py`, off by default, fed by sources you supply).
 
 ### Phase 1 — flush (`wiki-flush-sessions.py`)
 
 Reads several sources — JSONL transcripts under `~/.claude/projects/*`,
-memory feedback files, plans, `history.jsonl`, and per-project
-incident/session notes — and calls the configured LLM to distill them
-into one dated daily log, `wiki/daily/YYYY-MM-DD.md`, grouped by project
-(not per-session drafts). Already-processed JSONL sessions are tracked in
-a processed-state store (`.processed.json`) so the same session isn't
-flushed twice; re-read text sources are filtered by mtime.
+memory feedback files, plans, and per-project incident/session notes —
+and calls the configured LLM to distill them into one dated daily log,
+`wiki/daily/YYYY-MM-DD.md`, grouped by project (not per-session drafts).
+`~/.claude/history.jsonl` is read too, but only to count sessions per
+project for a log line ("Source D (history): activity recorded for N
+projects") — none of it reaches the LLM or the daily log.
+Already-processed JSONL sessions are tracked in a processed-state store
+(`.processed.json`) so the same session isn't flushed twice; re-read text
+sources are filtered by mtime.
 
 ### Phase 2 — compile sessions (`wiki-compile-sessions.py`)
 
@@ -63,22 +79,18 @@ phase. Asks an LLM to extract:
 - Architectural decisions → `projects/<slug>/architecture-*.md`
 
 The LLM returns JSON; the script normalizes wiki paths and deduplicates
-**two ways** — against each page's `sources:` frontmatter (by source
-hash) and against a processed-state store that records which dailies are
-already compiled — then writes new pages with proper frontmatter
-(`sources:` array with `path`/`hash`/`processed`/`mtime`).
+**by path**, against a processed-state store (`.processed.json`) that
+records which dailies are already compiled. It then writes pages whose
+`sources:` frontmatter records the source `path` and a `processed`
+timestamp. Content hashing exists in `utils.py` (`source_hash()`,
+`source_already_processed()`) but no shipped script calls it — an edited
+daily is not re-detected by content, only by whether its date was already
+compiled.
 
 The "Karpathy" part: the **LLM only writes pages**. It doesn't pick which
 pages get read later — that's done by `[[wikilinks]]` and `grep`.
 
-### Phase 3 — compile KB (`wiki-compile-kb.py`)
-
-Same shape as compile-sessions, but the source is external content
-(YouTube transcripts, articles, papers) rather than your own session
-history. You provide the source — the bundle doesn't ship a YouTube
-pipeline; just the compiler that turns prepared text into `kb/*` pages.
-
-### Phase 4 — build index (`wiki-build-index.py`)
+### Phase 3 — build index (`wiki-build-index.py`)
 
 Reads every page in `wiki/`, rebuilds `projects/index.md` and
 `kb/index.md` (categorized page lists), and refreshes the stats table
@@ -87,6 +99,19 @@ compile-sessions as it applies page changes, not by this script.
 
 Optionally run `wiki-lint.py` periodically to find broken `[[wikilinks]]`,
 orphan pages, missing frontmatter, etc.
+
+### The optional KB track (`wiki-compile-kb.py`)
+
+Same shape as compile-sessions, but the source is external content
+(YouTube transcripts, articles, papers) rather than your own session
+history. You provide the source — the bundle doesn't ship a YouTube
+pipeline; just the compiler that turns prepared text into `kb/*` pages.
+
+It is **not** part of the session track: it ships disabled
+(`ClaudeWikiCompileKB`, `enabled: false`) and `wiki-pipeline.py`
+deliberately leaves it out of its chain. Enable and schedule it
+separately if you want it; build-index picks up whatever `kb/*` pages
+exist regardless of who wrote them.
 
 ## How sessions get into the wiki — the hooks
 
@@ -120,16 +145,20 @@ Yours-specific (you fill in):
 
 ## Why this instead of RAG
 
-- **No embedding drift** — `[[wikilinks]]` are stable forever
-- **No retrieval misses** — you grep, you find
+- **No embedding drift** — a `[[wikilink]]` resolves by name, so it never
+  goes stale as a model changes. It does break if you rename the page it
+  points at (that's what `wiki-lint.py` finds), and it's ambiguous when
+  two folders hold the same file stem
+- **Retrieval is exact, not semantic** — grep finds what you literally
+  ask for; it won't find the page you didn't know to ask about
 - **No vector DB to maintain** — files in folders
 - **Cheap** — LLM only on the write path, not on every read
 - **Human-readable** — Obsidian opens it natively, so does any text editor
 
-The trade-off: discoverability depends on you (or your agent) writing
-good link names and picking the right page titles. RAG would handle
-"this query semantically matches that page" automatically; here you
-need to know the page exists or to leave a discoverable wikilink.
+That's the trade: you swap RAG's fuzzy "this query semantically matches
+that page" for exactness and zero infrastructure, and pay for it in
+discoverability — you (or your agent) need to know the page exists, or to
+have left a discoverable wikilink and a title worth grepping for.
 
 ## Reading the existing system as inspiration
 

@@ -12,6 +12,9 @@
 #   powershell -File scripts/install.ps1                       # interactive (lite default)
 #   powershell -File scripts/install.ps1 -Profile full
 #   powershell -File scripts/install.ps1 -Profile lite -InstallPath D:\claude
+#     ^ -InstallPath is a copy / run-from location ONLY. Claude Code reads
+#       CLAUDE.md + settings.json exclusively from ~/.claude, so config placed
+#       elsewhere never takes effect; only full-tier cron/wiki files run from it.
 #   powershell -File scripts/install.ps1 -Profile full -NonInteractive
 #   powershell -File scripts/install.ps1 -Force                # overwrite existing ~/.claude config
 #   powershell -File scripts/install.ps1 -Profile full -DryRun # print the plan, change nothing
@@ -69,7 +72,8 @@ function Get-InstallDriveType($path) {
 }
 
 # One-time consequences summary before the full tier does anything heavy.
-# All checks WARN and continue, EXCEPT a Windows-Store Python stub (hard stop).
+# All checks WARN and continue, EXCEPT a Windows-Store Python stub and missing
+# runtime deps (both hard stops — the full tier cannot work without them).
 function Preflight-Full {
     Info ""
     Info "--- Preflight (full tier) ---------------------------------------"
@@ -86,7 +90,16 @@ function Preflight-Full {
     } else {
         Good "python: $($pyCmd.Source)"
         & $pyCmd.Source -c 'import requests, yaml' 2>$null
-        if ($LASTEXITCODE -ne 0) { $issues += 'python deps missing (requests / PyYAML) — pip install -r requirements-dev.txt' }
+        if ($LASTEXITCODE -ne 0) {
+            # Not optional for the full tier: cron/hooks/utils.py imports requests
+            # at call time and registry parsing needs PyYAML, so warn-and-continue
+            # would leave a deployment that only fails at 03:00. requirements.txt
+            # holds the runtime deps (requirements-dev.txt is just pytest).
+            Write-Host "ERROR: python runtime deps missing (requests / PyYAML)." -ForegroundColor Red
+            Write-Host "       The full tier cannot run without them. Install first:" -ForegroundColor Red
+            Write-Host "       pip install -r requirements.txt" -ForegroundColor Red
+            exit 1
+        }
     }
     # (2) git present.
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $issues += 'git not found — task sync / mirror push need it' }
@@ -122,7 +135,8 @@ Info ""
 # there — a custom path can't change that (F7). Warn so nobody expects config
 # (or the session store) to move with -InstallPath.
 $defaultHome = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.claude'))
-if ([System.IO.Path]::GetFullPath($InstallPath) -ne $defaultHome) {
+$customPath = ([System.IO.Path]::GetFullPath($InstallPath) -ne $defaultHome)
+if ($customPath) {
     Warn "InstallPath is not the default ~/.claude:"
     Warn "  Claude Code only ever reads CLAUDE.md / settings.json from ~/.claude,"
     Warn "  and always keeps session history + memory there. A custom InstallPath"
@@ -219,6 +233,10 @@ if (Test-Path $verFile) {
 # ── 3. Lite tier: done here (no .env, no full source self-test) ──────────────
 if ($Profile -eq 'lite') {
     Info ""
+    if ($customPath) {
+        Warn "Files were copied to $InstallPath, but Claude Code reads config only from"
+        Warn "$defaultHome — this lite install will NOT take effect until it lives there."
+    }
     Info "Lite install done. In a Claude Code chat, run:"
     Info "  /plugin marketplace add anthropics/claude-plugins-official"
     Info "  /plugin install superpowers"
@@ -277,7 +295,7 @@ if ($DryRun -and -not (Test-Path (Join-Path $InstallPath 'cron/registry.yaml')))
 }
 
 # ── 5. Credentials + task sync (need elevation; optional) ────────────────────
-$syncRan = $false
+$syncStatus = 'no'
 if ($NonInteractive) {
     Warn "skipped save-cred + sync (need elevation / interaction). Run by hand:"
     Warn "  $InstallPath\cron\admin\save-cred.cmd   (non-elevated, stashes your password)"
@@ -288,9 +306,30 @@ if ($NonInteractive) {
     if (AskYN 'Stash your Windows password for Password-mode tasks now (save-cred.cmd)?' $true) {
         & (Join-Path $InstallPath 'cron/admin/save-cred.cmd')
     }
-    if (AskYN 'Register the scheduled tasks now (sync.cmd — prompts for UAC)?' $true) {
+    # Scope confirmation BEFORE registration, not in the closing report: once the
+    # tasks are registered the nightly flush reads whatever the policy allows,
+    # and the shipped default allows every project under ~/.claude/projects.
+    $scopeOk = $true
+    if (Test-Path $manifestDst) {
+        $manifestTxt = Get-Content $manifestDst -Raw
+        if ($manifestTxt -match '(?m)^\s*allow_projects:\s*\[\s*\]\s*$') {
+            Warn "Privacy scope: allow_projects is empty in $manifestDst, which means ALL projects"
+            Warn "  under ~/.claude/projects are read and their content is sent to your LLM provider."
+            Warn "  List the projects you want in allow_projects first if that isn't what you want."
+            $scopeOk = AskYN 'Register tasks with that scope (all projects)?' $false
+        }
+    }
+    if ($scopeOk -and (AskYN 'Register the scheduled tasks now (sync.cmd — prompts for UAC)?' $true)) {
         & (Join-Path $InstallPath 'cron/admin/sync.cmd')
-        $syncRan = $true
+        # sync.cmd waits for the elevated run and propagates its exit code, so a
+        # cancelled UAC prompt or a registration error must not report success.
+        $syncRc = $LASTEXITCODE
+        if ($syncRc -eq 0) { $syncStatus = 'yes'; Good "sync.cmd registered the scheduled tasks" }
+        else {
+            $syncStatus = "FAILED (sync.cmd exit $syncRc)"
+            Warn "sync.cmd exited $syncRc — tasks are probably NOT registered (UAC cancelled or a registration error)."
+            Warn "  Re-run by hand: $InstallPath\cron\admin\sync.cmd"
+        }
     }
 }
 
@@ -345,7 +384,10 @@ if (Test-Path $regDeployed) {
     $taskCount = ([regex]::Matches($rtxt, '(?m)^\s+-\s+name:')).Count
     Info "registry.yaml task count: $taskCount"
 }
-Info "sync run this session: $(if ($syncRan) { 'yes' } else { 'no' })"
+if ($customPath) {
+    Warn "InstallPath is not $defaultHome — Claude Code will NOT read CLAUDE.md / settings.json from $InstallPath (the cron/wiki files do run from there)"
+}
+Info "sync run this session: $syncStatus"
 Info "claude-switch.ps1 in deployment: $(if ($switcherInstalled) { 'yes' } else { 'no (invoke from the bundle checkout)' })"
 Info "codex/AGENTS.md mirrored to ~/.codex: $(if ($codexMirrored) { 'yes' } else { 'no' })"
 

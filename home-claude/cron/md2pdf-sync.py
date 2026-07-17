@@ -39,6 +39,13 @@ sys.stderr.reconfigure(encoding="utf-8")
 # md2pdf-sync.py lives at <bundle>/cron/, so the meta-repo root is one level up.
 BUNDLE_ROOT = Path(__file__).resolve().parents[1]
 
+# A Task Scheduler Password task starts in session 0 with no user env, so the
+# bundle .env must be loaded before any os.environ.get() below is evaluated.
+sys.path.insert(0, str(Path(__file__).parent / "hooks"))
+from utils import _load_dotenv  # noqa: E402
+
+_load_dotenv()
+
 # Scan target. PROJECTS_ROOT (e.g. from the bundle .env) overrides the default
 # of "parent dir" — when the bundle is deployed to ~/.claude the parent is the
 # user profile, not a projects workspace.
@@ -138,7 +145,9 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             log(f"telegram-send failed: {e}")
 
-    return 0
+    # Non-zero so Task Scheduler records the run as failed and task-monitor
+    # picks it up; processing itself stays best-effort (all files attempted).
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

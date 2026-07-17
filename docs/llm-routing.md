@@ -22,8 +22,12 @@ one billing relationship.
 
 Cron LLM calls are **batch**. They process JSONL transcripts, write wiki
 pages, and run maintenance. You want the cheapest reliable model that
-doesn't burn through your Claude subscription. DeepSeek V4-Flash at
-~$0.27/M input is hard to beat.
+doesn't burn through your Claude subscription. DeepSeek V4-Flash is hard
+to beat on that axis — its published rate has only moved down since this
+bundle was written, so check the
+[current pricing](https://api-docs.deepseek.com/quick_start/pricing/)
+rather than trusting a number frozen in a doc (as of 2026-07 it was in
+the low tens of cents per M input tokens).
 
 ## claude-switch modes — when to use what
 
@@ -131,7 +135,10 @@ If you have a Claude subscription and **don't** want to spend separately:
   providers below.
 
 If you want cheap + reliable for batch:
-- DeepSeek V4-Flash direct PAYG. ~$6/mo at moderate volume. Set
+- DeepSeek V4-Flash direct PAYG. Illustrative only: ~$6/mo at the author's
+  moderate volume, at the rates of the time — your bill depends on your
+  session volume and the
+  [current rate](https://api-docs.deepseek.com/quick_start/pricing/). Set
   `DEEPSEEK_KEY` in `.env`. Default config picks this up.
 
 If you want one bill for many models:

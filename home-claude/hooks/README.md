@@ -1,8 +1,23 @@
 # User-level hooks
 
 Two optional hooks. They are **not** wired in `settings.json` by default —
-if you want them, see `home-claude/settings.example-with-hooks.json` and copy
-the `hooks` block into your `settings.json`.
+if you want them, see `home-claude/settings.example-with-hooks.json` and merge
+the entries you need into your `settings.json`.
+
+> **That example file is a FULL-tier reference — do not paste its `hooks`
+> block wholesale.** JSON can't carry comments, so the tier split is spelled
+> out here instead:
+>
+> | Entry in the example | Runs | Needs |
+> |---|---|---|
+> | `PreToolUse` → `block-iptables-save-to-rules.py` | Tier 1 | a real Python interpreter |
+> | `PostToolUse` → `md2pdf-on-edit.py` | Tier 1 | a real Python interpreter + your own `bin/md2pdf.py` |
+> | `SessionStart` / `SessionEnd` / `PreCompact` → `cron/hooks/*.py` | **Tier 2 only** | the full-tier `~/.claude/cron/` install |
+>
+> **Lite** (config only, no Python): take **none** of them — both hooks here
+> are Python scripts. **Tier 1 + Python:** take the first two, drop the last
+> three — without `~/.claude/cron/` those commands point at files that don't
+> exist and every session start fails the hook. **Full:** take all five.
 
 ## block-iptables-save-to-rules.py
 
@@ -25,24 +40,32 @@ it's harmless either way.
 
 Requires you to provide your own `~/.claude/bin/md2pdf.py` — a small wrapper
 around any MD→PDF converter (pandoc, weasyprint, mdpdf, ...). Without it the
-hook is a silent no-op.
+hook skips the file and says so via `systemMessage`
+(`md2pdf-on-edit: skipped — converter missing at ...`) — it does nothing to
+the PDF, but it doesn't fail silently either.
 
-Failure reports are surfaced in the UI via `systemMessage` so a stale PDF
+Timeouts and converter failures are surfaced the same way, so a stale PDF
 doesn't slip through unnoticed.
 
 ## Wiring them up
 
-`settings.example-with-hooks.json` shows the `hooks` block to merge into
-your `settings.json`. Replace the placeholders before pasting:
+`settings.example-with-hooks.json` shows the entries to merge into your
+`settings.json` (see the tier table at the top — take only the entries your
+tier supports). Replace the placeholders before pasting:
 
-- `<python-exe>` — absolute path to your Python interpreter
-  (e.g. `C:/Program Files/Python312/python.exe`). Or set
-  `CLAUDE_HOOK_PYTHON` in your environment and leave the command alone.
+- `<python-exe>` — the absolute path to a real Python interpreter, e.g.
+  `C:/Program Files/Python312/python.exe`. This is the executable Claude
+  Code spawns, so it **must** be a real path — `CLAUDE_HOOK_PYTHON` cannot
+  substitute for it (that variable is read *by* the already-running hook,
+  which can only start once this path is correct). Find yours with
+  `where python`.
 - `<user>` — your Windows username.
 
 ## Adjusting
 
-- The `md2pdf-on-edit.py` script picks up `$CLAUDE_HOOK_PYTHON` first, then
-  falls back to `sys.executable` (the interpreter running the hook).
+- `CLAUDE_HOOK_PYTHON` chooses the interpreter `md2pdf-on-edit.py` uses to
+  run `bin/md2pdf.py` — it does not affect how the hook itself is launched.
+  If unset, the hook falls back to `sys.executable` (whatever `<python-exe>`
+  resolved to). Set it only when the converter needs a *different* Python.
 - Both hooks read JSON from stdin per the Claude Code hook protocol and emit
   JSON to stdout. They never raise on malformed input — they pass through.

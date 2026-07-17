@@ -8,8 +8,12 @@ The bundle has two install profiles — figure out which one the user wants:
   skill templates, slash command. = Tier 1 below **minus** the Python
   hooks. Deployable on a machine with no Python/Git/Node.
 - **Full**: Lite + Python hooks + wiki vault + cron pipeline +
-  claude-switch + AGENTS.md mirror. = Tier 1 + Tier 2. Needs Python
-  3.10+, Git, and ≥1 LLM provider key.
+  claude-switch + AGENTS.md mirror (the last two are optional companions).
+  = Tier 1 + Tier 2. Needs Python 3.10+, Git, and an LLM backend for the
+  nightly jobs — a DeepSeek / OpenCode Go key, **or**
+  `WIKI_LLM_PROVIDER=claude`, which needs no key (it calls the already
+  signed-in `claude` CLI, spending the user's subscription). Telegram is
+  optional — alerts only.
 
 If the user said "lite", "minimal", "just the config", "no software", or
 just "set up Claude Code" — do **Lite** (Tier 1, but skip copying
@@ -134,8 +138,11 @@ The pipeline reads `.env` from the DEPLOYED location — `$DST/.env`
 (i.e. `~/.claude/.env`, next to the copied `cron/`), not from the
 bundle repository root:
 
+Never overwrite an existing `.env` — it holds the user's real keys and
+the template would blank them:
+
 ```bash
-cp "$SRC/config/llm-providers.example.env" "$DST/.env"
+[ -f "$DST/.env" ] || cp "$SRC/config/llm-providers.example.env" "$DST/.env"
 ```
 
 Ask the user (use AskUserQuestion):
@@ -144,10 +151,12 @@ Ask the user (use AskUserQuestion):
 >   2) OpenCode Go (flat subscription, more model variety)
 >   3) Claude (consumes your subscription — opt-in only)
 
-Get the relevant key from the user. Write it into `~/.claude/.env`:
+For options 1–2, get the key from the user and write it into
+`~/.claude/.env`. Option 3 needs no key:
 - DeepSeek: `DEEPSEEK_KEY=sk-...`
 - OpenCode Go: `OPENCODE_GO_API_KEY=sk-...`
-- Claude opt-in: `WIKI_LLM_PROVIDER=claude` (uses claude CLI directly)
+- Claude opt-in: `WIKI_LLM_PROVIDER=claude` — no key; calls the `claude`
+  CLI already authenticated in Tier 1
 
 Also ask about Telegram (optional):
 > Do you want Telegram alerts on cron failures? If yes — paste your
@@ -175,10 +184,14 @@ If the user wants to skip and use Interactive-mode only — edit
 
 ### 8. Populate project map + privacy policy
 
-Edit `$DST/bundle.local.yaml` (created from
-`config/bundle.local.example.yaml`) — NOT `cron/hooks/utils.py`. The
-manifest is reinstall-safe; edits to `utils.py` are overwritten by a
-future reinstall.
+Create it if this manual path hasn't (only `install.ps1` copies it), then
+edit `$DST/bundle.local.yaml` — NOT `cron/hooks/utils.py`. The manifest
+is reinstall-safe; edits to `utils.py` are overwritten by a future
+reinstall.
+
+```bash
+[ -f "$DST/bundle.local.yaml" ] || cp "$SRC/config/bundle.local.example.yaml" "$DST/bundle.local.yaml"
+```
 
 Ask the user:
 > List the project slugs you want in the wiki — one short slug per
@@ -209,8 +222,11 @@ Read `~/.claude/cron/registry.yaml`. Replace:
 
 ### 10. Run the syncer
 
+Run the DEPLOYED syncer — it reads the `registry.yaml` next to itself,
+so the bundle checkout's copy would ignore the placeholders from step 9.
+
 ```cmd
-"<abs-path-to-bundle>\home-claude\cron\admin\sync.cmd"
+"%USERPROFILE%\.claude\cron\admin\sync.cmd"
 ```
 
 It auto-elevates to UAC once for the whole batch. Watch
@@ -284,7 +300,8 @@ Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/12 tasks
         with Task Scheduler. LLM provider: <provider>. Telegram alerts:
         <yes/no>.   (omit this line for a lite-only deploy)
 Open items: <list of placeholders that still need real values, e.g.
-        "PROJECT_MAP in utils.py still empty — add your slugs">.
+        "project_map: in ~/.claude/bundle.local.yaml still empty — add your
+        slugs">.
 ```
 
 ## Edge cases

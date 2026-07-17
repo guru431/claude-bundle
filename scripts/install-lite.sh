@@ -11,20 +11,39 @@
 #
 # Usage:
 #   scripts/install-lite.sh                 # installs into ~/.claude
-#   CLAUDE_HOME=/custom/path scripts/install-lite.sh
+#   CLAUDE_CONFIG_DIR=/custom/path scripts/install-lite.sh
+#
+# CLAUDE_CONFIG_DIR is the config root Claude Code itself honors — a custom path
+# only takes effect if the same variable is exported for the client too.
 set -eu
 
 here="$(cd "$(dirname "$0")/.." && pwd)"   # repo root
 src="$here/home-claude"
-dst="${CLAUDE_HOME:-$HOME/.claude}"
+dst="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+stamp="$(date +%Y%m%d-%H%M%S)"
+
+# Back up a non-empty existing file before overwriting it, using the same naming
+# scheme install.ps1 uses (<file>.bak-yyyyMMdd-HHmmss). A re-run must never
+# silently destroy an edited config.
+install_file() {
+    if [ -s "$2" ]; then
+        cp "$2" "$2.bak-$stamp"
+        echo "[ok] backed up $(basename "$2") -> $(basename "$2").bak-$stamp"
+    fi
+    cp "$1" "$2"
+}
 
 mkdir -p "$dst"
-cp "$src/CLAUDE.md"     "$dst/"
-cp "$src/settings.json" "$dst/"
+install_file "$src/CLAUDE.md"     "$dst/CLAUDE.md"
+install_file "$src/settings.json" "$dst/settings.json"
 for d in skills commands; do
     [ -d "$src/$d" ] && cp -R "$src/$d" "$dst/"
 done
 echo "[ok] copied CLAUDE.md, settings.json, skills/, commands/ -> $dst"
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$dst" != "$HOME/.claude" ]; then
+    echo "[warn] custom config root: Claude Code reads it only when CLAUDE_CONFIG_DIR=$dst"
+    echo "[warn] is exported in its environment too (export it from your shell profile)."
+fi
 
 if [ -f "$here/VERSION" ]; then
     cp "$here/VERSION" "$dst/.bundle-version"

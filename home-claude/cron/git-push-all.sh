@@ -26,8 +26,6 @@ DRY_RUN="${GIT_PUSH_ALL_DRY_RUN:-0}"
 git_commit() {
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would commit: $*" >> "$LOG_FILE"
-        git diff --cached --name-status >> "$LOG_FILE" 2>&1
-        git reset -q HEAD >> "$LOG_FILE" 2>&1   # unstage — dry-run leaves no index
     else
         git commit "$@" >> "$LOG_FILE" 2>&1
     fi
@@ -46,6 +44,29 @@ git_push() {
 # unstage it (the file stays marked deleted in the working tree but never
 # reaches the commit/push) and alert. Real deletions must be done by hand.
 PROTECTED_RE='(^|/)(FINDINGS\.md|AGENTS\.md|CLAUDE\.md|registry\.yaml|project-knowledge-base\.yaml)$'
+
+# Sensitive paths, same family as the `git add --all` pathspec exclusions below.
+# The pathspec only stops US from staging them; a file the USER already staged
+# by hand stays in the index and would be swept into the auto-commit.
+SENSITIVE_RE='(^|/)\.env(\.[^/]+)?$'
+
+# Hard-fail (never silently unstage — that would hide the user's own intent) a
+# repo whose index already contains a sensitive path. Returns non-zero so the
+# caller counts the repo as failed and skips it.
+guard_staged_sensitive() {
+    local label="$1"
+    local staged
+    staged=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null | grep -E "$SENSITIVE_RE")
+    [ -z "$staged" ] && return 0
+    echo "[$label] SENSITIVE path already staged — repo skipped, nothing committed:" >> "$LOG_FILE"
+    echo "$staged" | sed 's/^/    /' >> "$LOG_FILE"
+    if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+        bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: sensitive path staged in [$label] — repo skipped (not committed, not pushed):
+$staged
+(unstage it by hand, or gitignore it)" >> "$LOG_FILE" 2>&1
+    fi
+    return 1
+}
 
 guard_protected_deletions() {
     local label="$1"
@@ -180,23 +201,36 @@ for dir in "$REPOS_DIR"/*/; do
     fi
 
     if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-        # Safety: exclude any path matching .env / .env.* / **/.env*  via pathspec
-        # so a file that appears between status and add can never sneak in.
-        # If you actually want this repo to track .env*, gitignore it explicitly
-        # or stage the file by hand once.
-        git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
-        guard_protected_deletions "$repo"
-        if ! guard_secrets "$repo"; then
-            skipped=$((skipped + 1))
+        if ! guard_staged_sensitive "$repo"; then
+            failed=$((failed + 1))
+            failed_repos="${failed_repos:+$failed_repos, }$repo"
             continue
         fi
-        if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
-            echo "[$repo] nothing to commit after .env exclusion" >> "$LOG_FILE"
-            skipped=$((skipped + 1))
-            continue
+        if [ "$DRY_RUN" = "1" ]; then
+            # Dry-run must leave the real index byte-identical: preview from the
+            # working tree instead of an add/reset cycle, which would destroy
+            # whatever the user had staged.
+            echo "[$repo] [DRY] would auto-commit (working tree):" >> "$LOG_FILE"
+            git status --porcelain >> "$LOG_FILE" 2>&1
+        else
+            # Safety: exclude any path matching .env / .env.* / **/.env*  via pathspec
+            # so a file that appears between status and add can never sneak in.
+            # If you actually want this repo to track .env*, gitignore it explicitly
+            # or stage the file by hand once.
+            git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
+            guard_protected_deletions "$repo"
+            if ! guard_secrets "$repo"; then
+                skipped=$((skipped + 1))
+                continue
+            fi
+            if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
+                echo "[$repo] nothing to commit after .env exclusion" >> "$LOG_FILE"
+                skipped=$((skipped + 1))
+                continue
+            fi
+            git_commit -m "Auto-commit: $(date +%Y-%m-%d)"
+            echo "[$repo] auto-committed changes" >> "$LOG_FILE"
         fi
-        git_commit -m "Auto-commit: $(date +%Y-%m-%d)"
-        echo "[$repo] auto-committed changes" >> "$LOG_FILE"
     fi
 
     # Refresh the remote-tracking ref before comparing. Without a fetch, a
@@ -232,16 +266,25 @@ if [ -d "$WIKI_DIR/.git" ]; then
         branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
         if [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
             if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-                git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
-                guard_protected_deletions "wiki"
-                if ! guard_secrets "wiki"; then
-                    skipped=$((skipped + 1))
-                elif [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
-                    echo "[wiki] nothing to commit after .env exclusion" >> "$LOG_FILE"
-                    skipped=$((skipped + 1))
+                if ! guard_staged_sensitive "wiki"; then
+                    failed=$((failed + 1))
+                    failed_repos="${failed_repos:+$failed_repos, }wiki"
+                elif [ "$DRY_RUN" = "1" ]; then
+                    # See the main loop: dry-run never touches the real index.
+                    echo "[wiki] [DRY] would auto-commit (working tree):" >> "$LOG_FILE"
+                    git status --porcelain >> "$LOG_FILE" 2>&1
                 else
-                    git_commit -m "wiki: auto-commit $(date +%Y-%m-%d)"
-                    echo "[wiki] auto-committed changes" >> "$LOG_FILE"
+                    git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
+                    guard_protected_deletions "wiki"
+                    if ! guard_secrets "wiki"; then
+                        skipped=$((skipped + 1))
+                    elif [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
+                        echo "[wiki] nothing to commit after .env exclusion" >> "$LOG_FILE"
+                        skipped=$((skipped + 1))
+                    else
+                        git_commit -m "wiki: auto-commit $(date +%Y-%m-%d)"
+                        echo "[wiki] auto-committed changes" >> "$LOG_FILE"
+                    fi
                 fi
             fi
             # Refresh the remote ref before comparing (see the main loop above).

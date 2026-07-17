@@ -33,33 +33,72 @@ PROJECTS_BASE = Path.home() / ".claude" / "projects"
 # in-code values stay the empty template default, so with no manifest the
 # pipeline behaves exactly as before. PyYAML is optional — without it the
 # manifest is skipped (empty defaults), never a hard failure.
-def _load_manifest() -> dict:
+def _load_manifest() -> tuple[dict, bool]:
+    """Return (manifest, broken). broken=True means a manifest EXISTS but could
+    not be honored — the caller must then deny every project rather than fall
+    back to the permissive empty default. Silently ignoring an unreadable
+    privacy policy is the one failure mode this file must not have.
+    """
+    path = BUNDLE_ROOT / "bundle.local.yaml"
+    if not path.is_file():
+        return {}, False
     try:
         import yaml
     except ImportError:
-        return {}
-    path = BUNDLE_ROOT / "bundle.local.yaml"
-    if not path.is_file():
-        return {}
+        print("ERROR: bundle.local.yaml exists but PyYAML is not installed — "
+              "the privacy policy cannot be read, so every project is denied. "
+              "Install requirements.txt or remove the manifest.", file=sys.stderr)
+        return {}, True
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception as e:  # a broken manifest must not kill module import
-        print(f"WARNING: bundle.local.yaml unreadable ({e}) — ignoring", file=sys.stderr)
-        return {}
-    return data if isinstance(data, dict) else {}
+        print(f"ERROR: bundle.local.yaml unreadable ({e}) — every project denied "
+              "until it parses.", file=sys.stderr)
+        return {}, True
+    if data is None:
+        return {}, False
+    if not isinstance(data, dict):
+        print(f"ERROR: bundle.local.yaml must be a YAML mapping, got "
+              f"{type(data).__name__} — every project denied.", file=sys.stderr)
+        return {}, True
+    return data, False
 
 
-_MANIFEST = _load_manifest()
+_MANIFEST, _MANIFEST_BROKEN = _load_manifest()
+
+
+def _manifest_str_list(key: str) -> list:
+    """Read a manifest list field, rejecting a wrong type loudly.
+
+    A bare string here is the dangerous case: set("myproject") silently becomes
+    a set of single characters, so the policy matches nothing and the whole
+    exclusion quietly stops working.
+    """
+    value = _MANIFEST.get(key)
+    if value is None:
+        return []
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return value
+    print(f"ERROR: bundle.local.yaml '{key}' must be a list of strings, got "
+          f"{type(value).__name__} — every project denied until it is fixed.",
+          file=sys.stderr)
+    globals()["_MANIFEST_BROKEN"] = True
+    return []
 
 # Map the FULL Claude Code project-dir name → wiki project slug. Directory
 # format: the encoded cwd with `\`, `/`, `:` replaced by `-`. Configure via
 # bundle.local.yaml `project_map:`; the empty default falls back to the
 # trailing `-`-segment (see dir_to_project).
-PROJECT_MAP: dict[str, str] = dict(_MANIFEST.get("project_map") or {})
+_project_map_raw = _MANIFEST.get("project_map") or {}
+if not isinstance(_project_map_raw, dict):
+    print(f"ERROR: bundle.local.yaml 'project_map' must be a mapping, got "
+          f"{type(_project_map_raw).__name__} — ignoring.", file=sys.stderr)
+    _project_map_raw = {}
+PROJECT_MAP: dict[str, str] = dict(_project_map_raw)
 
 # Wiki project slugs the path/section normalizer recognizes (bundle.local.yaml
 # `known_projects:`).
-KNOWN_PROJECTS: list[str] = list(_MANIFEST.get("known_projects") or [])
+KNOWN_PROJECTS: list[str] = _manifest_str_list("known_projects")
 
 # ── Unified per-project privacy policy (honored by EVERY pipeline source) ────
 # One declarative policy, applied identically by every collector (JSONL, memory
@@ -71,12 +110,12 @@ KNOWN_PROJECTS: list[str] = list(_MANIFEST.get("known_projects") or [])
 #   allow_projects: allowlist — EMPTY means "all projects allowed" (the shipped
 #                   default); set it to make a small, explicit set the ONLY
 #                   sources the pipeline ever reads (safe first-run posture).
-SKIP_DIRS: set[str] = set(_MANIFEST.get("skip_dirs") or [])
-SKIP_PROJECTS: set[str] = set(_MANIFEST.get("skip_projects") or [])
-ALLOW_PROJECTS: set[str] = set(_MANIFEST.get("allow_projects") or [])
+SKIP_DIRS: set[str] = set(_manifest_str_list("skip_dirs"))
+SKIP_PROJECTS: set[str] = set(_manifest_str_list("skip_projects"))
+ALLOW_PROJECTS: set[str] = set(_manifest_str_list("allow_projects"))
 # Backward-compatible name (older configs / imports): folded into the single
 # gate below so it keeps excluding what it always did.
-SKIP_JSONL_PROJECTS: set[str] = set(_MANIFEST.get("skip_jsonl_projects") or []) | SKIP_PROJECTS
+SKIP_JSONL_PROJECTS: set[str] = set(_manifest_str_list("skip_jsonl_projects")) | SKIP_PROJECTS
 
 
 def project_allowed(project: str) -> bool:
@@ -85,7 +124,13 @@ def project_allowed(project: str) -> bool:
     False when the project is denied by skip_projects / skip_jsonl_projects, or
     when a non-empty allow_projects allowlist doesn't list it. Empty allowlist =
     allow all (the shipped default). See bundle.local.yaml.
+
+    A manifest that exists but cannot be parsed/typed denies EVERYTHING: the
+    alternative is to silently ignore the user's stated policy and ship every
+    project to an external provider, which is the worse way to be wrong.
     """
+    if _MANIFEST_BROKEN:
+        return False
     if project in SKIP_JSONL_PROJECTS:
         return False
     if ALLOW_PROJECTS and project not in ALLOW_PROJECTS:
@@ -112,8 +157,13 @@ def load_state() -> dict:
     """
     if STATE_PATH.exists():
         try:
-            return json.loads(STATE_PATH.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            loaded = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                # Syntactically valid but structurally wrong ([] or a string)
+                # would sail through here and blow up later in .get()/setdefault().
+                raise ValueError(f"state root is {type(loaded).__name__}, not a dict")
+            return loaded
+        except (json.JSONDecodeError, OSError, ValueError):
             # Corrupt state file — rebuild from the log.md journal instead of
             # silently resetting dedup (which would re-feed the whole backlog
             # to the LLM). Returned in memory; the next state_add persists it.
@@ -151,21 +201,34 @@ def quarantine_raw(source_id: str, reason: str, raw: str) -> None:
 
 
 def mark_phase_success(phase: str) -> None:
-    """Best-effort per-phase heartbeat for stale-pipeline monitoring; never raises."""
+    """Best-effort per-phase heartbeat for stale-pipeline monitoring; never raises.
+
+    Shares the state lock with state_add/state_remove: this is a read-modify-write
+    of one shared file, so two phases finishing together would otherwise drop one
+    another's entry. The temp file is per-process for the same reason.
+    """
+    lock = _acquire_state_lock()
+    if lock is None:
+        print(f"WARNING: mark_phase_success({phase}) skipped — no state lock",
+              file=sys.stderr)
+        return
     try:
         p = STATE_PATH.with_name("last_success.json")
         data = {}
         if p.exists():
             try:
-                data = json.loads(p.read_text(encoding="utf-8"))
+                loaded = json.loads(p.read_text(encoding="utf-8"))
+                data = loaded if isinstance(loaded, dict) else {}
             except Exception:
                 data = {}
         data[phase] = datetime.now().isoformat(timespec="seconds")
-        tmp = p.with_name(p.name + ".tmp")
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(p)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"WARNING: mark_phase_success({phase}) failed: {e}", file=sys.stderr)
+    finally:
+        lock.unlink(missing_ok=True)
 
 
 def state_get(section: str, key: str) -> set[str]:
@@ -179,7 +242,11 @@ def _acquire_state_lock(timeout: float = 60.0) -> Path | None:
     A slow flush run can overlap the compile runs scheduled after it; without
     a lock the later save_state() would silently drop keys written in between
     (load → modify → save race). Stale locks (>10 min) are broken. Returns the
-    lock path, or None on timeout — callers proceed unlocked rather than die.
+    lock path, or None on timeout.
+
+    None means "do not write": proceeding unlocked would reintroduce exactly the
+    lost update this lock exists to prevent, and a skipped state write is safe —
+    the phase is simply redone on the next scheduled run.
     """
     lock = STATE_PATH.with_name(STATE_PATH.name + ".lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -198,17 +265,25 @@ def _acquire_state_lock(timeout: float = 60.0) -> Path | None:
             except OSError:
                 pass
             if time.time() >= deadline:
-                print("WARNING: state lock timeout, proceeding unlocked", file=sys.stderr)
+                print("WARNING: state lock timeout — skipping this state write "
+                      "(a live writer holds it; the phase retries next run)",
+                      file=sys.stderr)
                 return None
             time.sleep(1.0)
 
 
 def state_add(section: str, key: str, items) -> None:
-    """Append new items to state[section][key] (order-preserving, deduped)."""
+    """Append new items to state[section][key] (order-preserving, deduped).
+
+    A no-op when the lock can't be taken — re-running the phase is cheaper than
+    a lost update, which would silently re-feed processed sources to the LLM.
+    """
     items = list(items)
     if not items:
         return
     lock = _acquire_state_lock()
+    if lock is None:
+        return
     try:
         state = load_state()
         bucket = state.setdefault(section, {}).setdefault(key, [])
@@ -229,6 +304,8 @@ def state_remove(section: str, key: str, items) -> None:
     if not items:
         return
     lock = _acquire_state_lock()
+    if lock is None:
+        return  # see state_add: never write state we don't hold the lock for
     try:
         state = load_state()
         bucket = state.get(section, {}).get(key)
@@ -308,6 +385,24 @@ def dir_to_project(dirname: str) -> str:
     if dirname in PROJECT_MAP:
         return PROJECT_MAP[dirname]
     return dirname.rsplit("-", 1)[-1] or dirname
+
+
+def slug_collisions() -> dict[str, list[str]]:
+    """Return {slug: [encoded dirs]} for slugs claimed by more than one cwd.
+
+    A collision is not cosmetic: the colliding directories share one wiki
+    bucket, and allow_projects/skip_projects can only speak about the slug —
+    so allowing one of them silently allows the other too. Reported by the
+    flush policy line and --dry-run; fix by pinning either dir in project_map.
+    """
+    by_slug: dict[str, list[str]] = {}
+    if not PROJECTS_BASE.exists():
+        return {}
+    for proj_dir in PROJECTS_BASE.iterdir():
+        if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
+            continue
+        by_slug.setdefault(dir_to_project(proj_dir.name), []).append(proj_dir.name)
+    return {slug: dirs for slug, dirs in by_slug.items() if len(dirs) > 1}
 
 
 def is_subagent_jsonl(jsonl_path: str) -> bool:
@@ -825,10 +920,15 @@ def dump_frontmatter(data: dict) -> str:
 
 
 def read_page(path: Path) -> tuple[dict, str]:
-    """Read a wiki page → (frontmatter_dict, body)."""
+    """Read a wiki page → (frontmatter_dict, body).
+
+    Tolerant decode: one page with a corrupt byte must not abort a nightly run
+    mid-loop. The preview readers already use errors="replace" — apply had
+    stayed strict, so a page could pass preview and then raise on write.
+    """
     if not path.exists():
         return {}, ""
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8", errors="replace")
     return parse_frontmatter(text)
 
 
@@ -1434,6 +1534,13 @@ def _llm_opencode(prompt: str, timeout: int = 600, fallback_from: str | None = N
             )
             _audit_attempt("opencode", OPENCODE_MODEL, resp.status_code,
                            int((time.monotonic() - t0) * 1000), fallback_from)
+            if resp.status_code == 402:
+                # Same contract as _llm_deepseek: an out-of-credit provider is
+                # dead for the rest of the run, so don't pay the latency of
+                # calling it again for every remaining project.
+                print(f"  OpenCode Go 402 insufficient_balance: {resp.text[:200]}", file=sys.stderr)
+                _DEPLETED_PROVIDERS.add("opencode")
+                return None
             if resp.status_code in (429, 529):
                 if attempt == max_retries - 1:
                     _DEPLETED_PROVIDERS.add("opencode")  # retries exhausted — don't repeat this run
@@ -1485,13 +1592,18 @@ def _llm_mock(prompt: str, timeout: int = 600) -> str | None:
 
 
 def _llm_claude(prompt: str, timeout: int = 600) -> str | None:
-    """Claude CLI fallback (claude -p --model sonnet)."""
+    """Claude CLI fallback (claude -p --model sonnet).
+
+    Honors CLAUDE_BIN: a Password-mode task runs in session 0, where the user's
+    PATH doesn't exist and a bare `claude` simply isn't found.
+    """
     for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
         os.environ.pop(env_key, None)
 
+    claude_bin = os.environ.get("CLAUDE_BIN") or "claude"
     try:
         result = subprocess.run(
-            ["claude", "-p", "--model", "sonnet", "--output-format", "text", "-"],
+            [claude_bin, "-p", "--model", "sonnet", "--output-format", "text", "-"],
             input=prompt,
             capture_output=True,
             text=True,

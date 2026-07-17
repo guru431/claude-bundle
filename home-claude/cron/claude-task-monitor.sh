@@ -304,7 +304,14 @@ EOF
 )
 
     bash "$CRON_DIR/telegram-send.sh" "$ALERT_MSG" >>"$LOG_FILE" 2>&1
-    echo "Alert sent to Telegram" >> "$LOG_FILE"
+    TG_RC=$?
+    if [ "$TG_RC" -eq 0 ]; then
+        echo "Alert sent to Telegram" >> "$LOG_FILE"
+    else
+        # "Alert sent" used to be logged unconditionally — a failed delivery
+        # read as a delivered one, which is the worst outcome for a monitor.
+        echo "ALERT DELIVERY FAILED: telegram-send.sh exited $TG_RC — alert NOT delivered" >> "$LOG_FILE"
+    fi
 else
     echo "All tasks OK, no alert needed" >> "$LOG_FILE"
 fi

@@ -31,6 +31,59 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $srcHome = Join-Path $root 'home-claude'
+$instFull = [System.IO.Path]::GetFullPath($InstallPath)
+
+# Install manifest (.bundle-manifest.json): what this run wrote, so uninstall.ps1
+# can remove exactly that and nothing else. Paths are relative to $InstallPath.
+$script:written = New-Object System.Collections.Generic.List[string]
+$script:preserved = New-Object System.Collections.Generic.List[string]
+
+function Get-RelPath($full) {
+    return [System.IO.Path]::GetFullPath($full).Substring($instFull.Length).TrimStart('\', '/').Replace('\', '/')
+}
+
+# Record what a copy wrote. $src is the bundle-side file or directory, $dst its
+# destination: for a directory, every source file maps to one written
+# destination file — which is exactly what `Copy-Item -Recurse -Force` wrote, so
+# files the user already had under $dst are never claimed as ours.
+function Add-Written($src, $dst) {
+    if (-not (Test-Path $dst)) { return }
+    if (Test-Path $dst -PathType Leaf) { $script:written.Add((Get-RelPath $dst)); return }
+    $base = (Get-Item $src).FullName
+    foreach ($f in (Get-ChildItem $src -Recurse -File)) {
+        # Skip __pycache__: byte-code is a regenerable artifact, and the self-test
+        # recompiles it right after the manifest is written — tracking it would
+        # make every uninstall report a phantom "changed since install".
+        if ($f.FullName -match '[\\/]__pycache__[\\/]') { continue }
+        $p = Join-Path $dst $f.FullName.Substring($base.Length).TrimStart('\', '/')
+        if (Test-Path $p) { $script:written.Add((Get-RelPath $p)) }
+    }
+}
+
+# Hashes are taken here, not in Add-Written: a file can still change after its
+# copy (bootstrap-registry.ps1 rewrites registry.yaml), and the uninstaller
+# compares against the tree as it looked when the install finished.
+function Write-Manifest($tier) {
+    if ($DryRun) { Info "[dry-run] would write .bundle-manifest.json ($($script:written.Count) files)"; return }
+    $files = @()
+    foreach ($p in ($script:written | Select-Object -Unique)) {
+        if ($script:preserved -contains $p) { continue }   # yours, not ours to remove
+        $full = Join-Path $InstallPath $p
+        if (-not (Test-Path $full)) { continue }
+        $files += [pscustomobject]@{ path = $p; sha256 = (Get-FileHash $full -Algorithm SHA256).Hash }
+    }
+    $mf = [pscustomobject]@{
+        bundle_version = $bundleVer
+        installed_at   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        tier           = $tier
+        install_path   = $instFull
+        written        = @($files)
+        preserved      = @($script:preserved | Select-Object -Unique)
+    }
+    $json = ($mf | ConvertTo-Json -Depth 4)
+    [System.IO.File]::WriteAllText((Join-Path $InstallPath '.bundle-manifest.json'), $json, [System.Text.UTF8Encoding]::new($false))
+    Good "wrote .bundle-manifest.json ($($files.Count) files — uninstall with scripts/uninstall.ps1)"
+}
 
 function Info($m) { Write-Host $m -ForegroundColor Cyan }
 function Good($m) { Write-Host "[ok]   $m" -ForegroundColor Green }
@@ -175,11 +228,13 @@ else { New-Item -ItemType Directory -Force -Path $InstallPath | Out-Null }
 if ($DryRun) {
     Info "[dry-run] would copy CLAUDE.md, settings.json, skills/, commands/ -> $InstallPath"
 } else {
-    Copy-Item (Join-Path $srcHome 'CLAUDE.md')     $InstallPath -Force
-    Copy-Item (Join-Path $srcHome 'settings.json') $InstallPath -Force
+    foreach ($f in @('CLAUDE.md', 'settings.json')) {
+        Copy-Item (Join-Path $srcHome $f) $InstallPath -Force
+        Add-Written (Join-Path $srcHome $f) (Join-Path $InstallPath $f)
+    }
     foreach ($d in @('skills', 'commands')) {
         $s = Join-Path $srcHome $d
-        if (Test-Path $s) { Copy-Item $s $InstallPath -Recurse -Force }
+        if (Test-Path $s) { Copy-Item $s $InstallPath -Recurse -Force; Add-Written $s (Join-Path $InstallPath $d) }
     }
     Good "copied CLAUDE.md, settings.json, skills/, commands/"
 }
@@ -210,11 +265,14 @@ if ($Profile -eq 'full') {
         }
         foreach ($d in @('hooks', 'wiki', 'bin', 'cron')) {
             $s = Join-Path $srcHome $d
-            if (Test-Path $s) { Copy-Item $s $InstallPath -Recurse -Force }
+            if (Test-Path $s) { Copy-Item $s $InstallPath -Recurse -Force; Add-Written $s (Join-Path $InstallPath $d) }
         }
         Good "copied hooks/, wiki/, bin/, cron/ (full tier)"
         foreach ($dst in $preserve.Keys) {
             Copy-Item $preserve[$dst] $dst -Force; Remove-Item $preserve[$dst] -Force
+            # Restored from your copy, so the manifest lists it as preserved, not
+            # written — the uninstaller must never remove it.
+            $script:preserved.Add((Get-RelPath $dst))
             Good "preserved your existing $((Split-Path $dst -Leaf)) (reinstall-safe)"
         }
     }
@@ -222,16 +280,19 @@ if ($Profile -eq 'full') {
 
 # ── 2. Stamp the deployed version (both tiers) ───────────────────────────────
 $verFile = Join-Path $root 'VERSION'
+$bundleVer = if (Test-Path $verFile) { (Get-Content $verFile -Raw).Trim() } else { '(none)' }
 if (Test-Path $verFile) {
-    if ($DryRun) { Info "[dry-run] would stamp .bundle-version = $((Get-Content $verFile -Raw).Trim())" }
+    if ($DryRun) { Info "[dry-run] would stamp .bundle-version = $bundleVer" }
     else {
         Copy-Item $verFile (Join-Path $InstallPath '.bundle-version') -Force
-        Good "stamped .bundle-version = $((Get-Content $verFile -Raw).Trim())"
+        Add-Written $verFile (Join-Path $InstallPath '.bundle-version')
+        Good "stamped .bundle-version = $bundleVer"
     }
 }
 
 # ── 3. Lite tier: done here (no .env, no full source self-test) ──────────────
 if ($Profile -eq 'lite') {
+    Write-Manifest 'lite'
     Info ""
     if ($customPath) {
         Warn "Files were copied to $InstallPath, but Claude Code reads config only from"
@@ -266,6 +327,8 @@ if ($DryRun) {
     Good "created .env from template"
     Warn "edit $envDst — set at least DEEPSEEK_KEY or OPENCODE_GO_API_KEY for the full tier"
 }
+# Your keys live here — manifest it as preserved so the uninstaller leaves it.
+if (Test-Path $envDst) { $script:preserved.Add('.env') }
 
 # ── 3c. bundle.local.yaml from the template (full only; never overwritten) ────
 # Project map + privacy policy live here (not in cron/hooks/utils.py) so they
@@ -280,6 +343,7 @@ if ($DryRun) {
     Copy-Item $manifestTpl $manifestDst -Force
     Good "created bundle.local.yaml from template (project map + privacy policy — reinstall-safe)"
 }
+if (Test-Path $manifestDst) { $script:preserved.Add('bundle.local.yaml') }
 
 # ── 4. Bootstrap registry placeholders (full) ────────────────────────────────
 $user = Ask 'Windows user for the scheduled tasks' $env:USERNAME
@@ -345,6 +409,7 @@ if ($DryRun) {
     $swSrc = Join-Path $root 'scripts/claude-switch.ps1'
     if ((Test-Path $swSrc) -and (AskYN 'Copy claude-switch.ps1 into the deployment (survives deleting the bundle checkout)?' $true)) {
         Copy-Item $swSrc (Join-Path $InstallPath 'claude-switch.ps1') -Force
+        Add-Written $swSrc (Join-Path $InstallPath 'claude-switch.ps1')
         Good "copied claude-switch.ps1 -> $InstallPath\claude-switch.ps1"
         $switcherInstalled = $true
     }
@@ -357,6 +422,9 @@ if ($DryRun) {
         $codexMirrored = $true
     }
 }
+
+# ── 5c. Install manifest (full; written last so it covers steps 4–5b too) ────
+Write-Manifest 'full'
 
 # ── 6. Open items (full; read-only summary of what still needs attention) ────
 Info ""

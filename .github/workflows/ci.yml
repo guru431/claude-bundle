@@ -62,11 +62,32 @@ jobs:
           print('bundle.local.example.yaml: valid mapping')
           PY
 
+      - name: Registry schema guard (fields / kind / trigger grammar)
+        run: python scripts/check-registry.py
+
       - name: Doc/registry task-count guard
         run: python scripts/check-doc-counts.py
 
+      - name: Env template / docs reference guard
+        run: python scripts/check-env-ref.py
+
       - name: AGENTS/CLAUDE mirror guard (structural)
         run: python scripts/check-agents-sync.py
+
+      - name: Executable-bit guard
+        run: |
+          # Pins the CURRENT exec-bit set exactly: a dropped +x (hook/installer
+          # stops being runnable after clone) and a stray +x both fail here.
+          # NB: the tree is deliberately NOT uniform — most *.sh are 644 and the
+          # *.py checkers are 644 too. This freezes today's state; changing which
+          # files are executable is a separate, intentional decision.
+          expected=".githooks/pre-commit .githooks/pre-push home-claude/cron/github-push.sh scripts/enable-guard.sh"
+          actual=$(git ls-files -s | awk '$1=="100755"{print $4}' | sort | xargs)
+          if [ "$actual" != "$expected" ]; then
+            echo "exec-bit drift!"; echo "  expected: $expected"; echo "  actual:   $actual"
+            exit 1
+          fi
+          echo "exec bits: pinned set unchanged"
 
       - name: Secret guard (high-confidence token formats)
         run: |

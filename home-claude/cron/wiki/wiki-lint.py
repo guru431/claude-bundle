@@ -144,9 +144,16 @@ def check_broken_links(pages: dict[str, list[Path]]) -> list[str]:
 
 
 def check_orphan_pages(pages: dict[str, list[Path]]) -> list[str]:
-    """Check 2: orphan pages — no human/LLM-authored page links to them."""
+    """Check 2: orphan pages — no human/LLM-authored page links to them.
+
+    Resolution matches check_broken_links: a link counts for a page if it names
+    the page's full path, or is a bare stem that is unique vault-wide. Comparing
+    only the last path segment (as this once did) made [[projects/a/foo]] vouch
+    for projects/b/foo — the busier a vault got, the fewer orphans it could see.
+    """
     warnings = []
     all_links: set[str] = set()
+    _, stems = vault_targets()
 
     for f in WIKI_ROOT.rglob("*.md"):
         rel = f.relative_to(WIKI_ROOT)
@@ -156,11 +163,17 @@ def check_orphan_pages(pages: dict[str, list[Path]]) -> list[str]:
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
         for link in extract_wikilinks(text):
-            all_links.add(link_target(link).split("/")[-1])
+            all_links.add(link_target(link))
 
-    for name in pages:
-        if name not in all_links:
-            warnings.append(f"WARN: orphan page: {name}")
+    for name, paths in pages.items():
+        for path in paths:
+            full = path.relative_to(WIKI_ROOT).with_suffix("").as_posix()
+            if full in all_links:
+                continue
+            # A bare stem only vouches for a page when nothing else shares it.
+            if stems.get(name, 0) == 1 and name in all_links:
+                continue
+            warnings.append(f"WARN: orphan page: {full}")
 
     return warnings
 
@@ -178,13 +191,22 @@ def check_empty_pages(pages: dict[str, list[Path]]) -> list[str]:
 
 
 def check_ambiguous_names(pages: dict[str, list[Path]]) -> list[str]:
-    """Check 8: same stem in multiple folders — wikilink target is ambiguous."""
-    errors = []
+    """Check 8: same stem in multiple folders — bare wikilinks to it are ambiguous.
+
+    WARN, not ERROR. The page-naming convention (incident-*/solution-* under
+    each project) makes two projects hitting the same topic normal — the vault
+    is *supposed* to hold projects/a/incident-timeout and projects/b/one. Only
+    an unqualified LINK to such a name is a problem, and check_broken_links
+    already reports that. Failing the run for the pages themselves demanded
+    vault-globally-unique filenames, which the convention cannot honor.
+    """
+    warnings = []
     for name, paths in pages.items():
         if len(paths) > 1:
             locs = ", ".join(str(p.relative_to(WIKI_ROOT)) for p in paths)
-            errors.append(f"ERROR: ambiguous page name '{name}' → {len(paths)} files: {locs}")
-    return errors
+            warnings.append(f"WARN: page name '{name}' is used {len(paths)} times: {locs} — "
+                            f"link to it by full path, not a bare [[{name}]]")
+    return warnings
 
 
 def check_unprocessed_articles() -> list[str]:
@@ -218,7 +240,12 @@ def check_index_sync(pages: dict[str, list[Path]]) -> list[str]:
             continue
         index_text = index_path.read_text(encoding="utf-8")
         for f in d.glob("*.md"):
-            if f"[[{f.stem}]]" not in index_text:
+            # wiki-build-index.py emits the qualified form [[kb/<sec>/<stem>|<stem>]].
+            # A bare [[stem]] still counts, so a hand-written or pre-existing
+            # index isn't reported as desynced just for being older.
+            if not any(form in index_text for form in (
+                f"[[{subdir}/{f.stem}|", f"[[{subdir}/{f.stem}]]", f"[[{f.stem}]]",
+            )):
                 errors.append(f"ERROR: {f.stem} missing from index {index_path.relative_to(WIKI_ROOT)}")
 
     return errors
@@ -339,9 +366,9 @@ def main():
 
     log(f"=== Lint complete ===")
 
-    # Lint errors (ambiguous page names, index desync) are a hard failure: skip
-    # the heartbeat and exit non-zero so the cron monitor sees it. Link
-    # resolution is only ever a WARN — see check_broken_links.
+    # Lint errors (index desync) are a hard failure: skip the heartbeat and exit
+    # non-zero so the cron monitor sees it. Link resolution and colliding page
+    # names are only ever WARNs — see check_broken_links / check_ambiguous_names.
     if stats["errors"] > 0:
         sys.exit(1)
     mark_phase_success("lint")

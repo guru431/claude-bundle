@@ -115,7 +115,12 @@ def build_projects_index() -> tuple[int, int]:
             items.sort(key=lambda x: x[0])
             lines.append(f"### {cat} ({len(items)})")
             for stem, upd in items:
-                lines.append(f"- [[{stem}]] · {upd}")
+                # Full path + alias, not a bare [[stem]]. The naming convention
+                # (incident-*/solution-* per project) makes the same stem in two
+                # projects normal, and a bare stem then resolves to whichever
+                # page the linter happens to pick — or to neither. The alias
+                # keeps the rendered list identical.
+                lines.append(f"- [[projects/{project}/{stem}|{stem}]] · {upd}")
             lines.append("")
 
     lines.append("---")
@@ -168,7 +173,9 @@ def build_kb_index() -> dict[str, int]:
             lines.append("- (empty)")
         else:
             for stem, upd in recent[sec]:
-                lines.append(f"- [[{stem}]] · {upd}")
+                # Qualified for the same reason as the project index above: one
+                # topic can legitimately be a concept AND a tool.
+                lines.append(f"- [[kb/{sec}/{stem}|{stem}]] · {upd}")
         lines.append("")
 
     for sec in sections:
@@ -177,7 +184,7 @@ def build_kb_index() -> dict[str, int]:
             lines.append("- (empty)")
         else:
             for stem, _ in all_items[sec]:
-                lines.append(f"- [[{stem}]]")
+                lines.append(f"- [[kb/{sec}/{stem}|{stem}]]")
         lines.append("")
 
     lines.append("---")

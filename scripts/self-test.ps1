@@ -252,6 +252,39 @@ if ($py -and -not $deployed) {
     }
 }
 
+# ── 11. Registry schema guard (source tree only) ─────────────────────────────
+# Validates every task's required fields / kind / trigger grammar, so a typo
+# that gen-scheduler.py would silently skip fails here instead
+# (scripts/check-registry.py). Exit 2 = PyYAML missing → WARN, matching the
+# registry.yaml parse step above.
+if ($py -and -not $deployed) {
+    $cr = Join-Path $root 'scripts/check-registry.py'
+    if (Test-Path $cr) {
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $out = (& $py $cr 2>&1 | Out-String).Trim()
+        $rc = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        if ($rc -eq 0) { Ok "registry.yaml schema valid" }
+        elseif ($rc -eq 2) { Warn "PyYAML not installed — skipped registry schema check" }
+        else { Bad "registry.yaml schema errors:`n$out" }
+    }
+}
+
+# ── 12. Env template / docs reference guard (source tree only) ───────────────
+# Every var declared in config/llm-providers.example.env must be documented, and
+# every var the docs tell users to set must exist in the template
+# (scripts/check-env-ref.py). Docs aren't copied into a deployment, so skip
+# when -InstallPath.
+if ($py -and -not $deployed) {
+    $ce = Join-Path $root 'scripts/check-env-ref.py'
+    if (Test-Path $ce) {
+        $out = & $py $ce 2>&1
+        if ($LASTEXITCODE -eq 0) { Ok "env template matches the docs" }
+        else { Bad "env/doc reference drift:`n$out" }
+    }
+}
+
 # ── 10. Secret-guard hook activation (WARN; bundle source tree only) ─────────
 # The pre-commit secret-guard is inert until `git config core.hooksPath .githooks`
 # is set. Only meaningful from the bundle repo (the hook is never copied into a

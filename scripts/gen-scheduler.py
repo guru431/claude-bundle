@@ -45,6 +45,15 @@ DOW = {
     "sun": ("Sun", 0), "sunday": ("Sun", 0),
 }
 
+# The registry trigger grammar. Single source of truth: scripts/check-registry.py
+# imports these to validate registry.yaml, so a task this generator would
+# silently skip fails the check instead. Keep in sync with the `trigger:` section
+# of home-claude/cron/registry.yaml and Build-XmlTrigger in cron/admin/sync-tasks.ps1.
+TRIGGER_DAILY = re.compile(r"Daily (\d{1,2}):(\d{2})")
+TRIGGER_WEEKLY = re.compile(r"Weekly (\w+) (\d{1,2}):(\d{2})")
+TRIGGER_MONTHLY = re.compile(r"Monthly day=(\d{1,2}) (\d{1,2}):(\d{2})")
+TRIGGER_SIMPLE = ("AtLogOn", "AtStartup")
+
 
 def load_tasks() -> list[dict]:
     text = REGISTRY.read_text(encoding="utf-8")
@@ -103,18 +112,18 @@ def systemd_oncalendar(task: dict) -> tuple[str, str] | None:
     """Return (kind, value) where kind is 'OnCalendar' or 'OnBootSec', or None."""
     trig = str(task.get("trigger", ""))
     rep_h = iso_hours(task.get("repeat_every", ""))
-    m = re.fullmatch(r"Daily (\d{1,2}):(\d{2})", trig)
+    m = TRIGGER_DAILY.fullmatch(trig)
     if m:
         h, mi = int(m.group(1)), m.group(2)
         if rep_h:  # every rep_h hours starting at h (systemd step syntax)
             return ("OnCalendar", f"*-*-* {h:02d}/{rep_h}:{mi}:00")
         return ("OnCalendar", f"*-*-* {h:02d}:{mi}:00")
-    m = re.fullmatch(r"Weekly (\w+) (\d{1,2}):(\d{2})", trig)
+    m = TRIGGER_WEEKLY.fullmatch(trig)
     if m:
         dow = DOW.get(m.group(1).lower())
         if dow:
             return ("OnCalendar", f"{dow[0]} *-*-* {int(m.group(2)):02d}:{m.group(3)}:00")
-    m = re.fullmatch(r"Monthly day=(\d{1,2}) (\d{1,2}):(\d{2})", trig)
+    m = TRIGGER_MONTHLY.fullmatch(trig)
     if m:
         return ("OnCalendar", f"*-*-{int(m.group(1)):02d} {int(m.group(2)):02d}:{m.group(3)}:00")
     if trig == "AtStartup":
@@ -154,16 +163,16 @@ def emit_systemd(task: dict, install_path: str, out: Path) -> str | None:
 
 def _plist_calendar(task: dict) -> dict | None:
     trig = str(task.get("trigger", ""))
-    m = re.fullmatch(r"Daily (\d{1,2}):(\d{2})", trig)
+    m = TRIGGER_DAILY.fullmatch(trig)
     if m:
         return {"Hour": int(m.group(1)), "Minute": int(m.group(2))}
-    m = re.fullmatch(r"Weekly (\w+) (\d{1,2}):(\d{2})", trig)
+    m = TRIGGER_WEEKLY.fullmatch(trig)
     if m:
         dow = DOW.get(m.group(1).lower())
         if dow:
             return {"Weekday": dow[1], "Hour": int(m.group(2)),
                     "Minute": int(m.group(3))}
-    m = re.fullmatch(r"Monthly day=(\d{1,2}) (\d{1,2}):(\d{2})", trig)
+    m = TRIGGER_MONTHLY.fullmatch(trig)
     if m:
         return {"Day": int(m.group(1)), "Hour": int(m.group(2)),
                 "Minute": int(m.group(3))}

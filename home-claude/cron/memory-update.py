@@ -55,6 +55,9 @@ BASH = os.environ.get("BASH_EXE") or r"C:\Program Files\Git\bin\bash.exe"
 USER_MSG_CAP_PER_PROJECT = 8000
 PROMPT_TOTAL_CAP = 40000
 
+# Separator between individual user messages inside one project's section.
+MSG_SEP = "\n---\n"
+
 # The memory files are append-only but small relative to the LLM context. Feed
 # them in full so the dedup pass sees ALL prior facts; only fall back to the
 # tail when a file has grown unusually large.
@@ -82,10 +85,48 @@ def send_telegram(msg: str) -> None:
         log(f"telegram-send failed: {e}")
 
 
+def cap_newest_messages(bits: list[str], proj_name: str,
+                        cap: int = USER_MSG_CAP_PER_PROJECT) -> str:
+    """Join a project's user messages, keeping the NEWEST ones that fit.
+
+    `bits` is chronological, so a plain bits[:cap] slice of the joined text
+    keeps the OLDEST messages and silently discards the freshest input of the
+    day — the opposite of what a daily memory pass wants. Cut from the tail,
+    on message boundaries, and say what was dropped: a cap nobody can observe
+    looks exactly like "there was nothing to extract".
+    """
+    kept: list[str] = []
+    total = 0
+    for txt in reversed(bits):
+        add = len(txt) + (len(MSG_SEP) if kept else 0)
+        if total + add > cap:
+            break
+        kept.append(txt)
+        total += add
+    kept.reverse()
+
+    if not kept:
+        # One message alone exceeds the cap. Its tail is still better context
+        # than dropping the project outright — this is the only place a cut
+        # lands mid-message, so it gets its own log line.
+        log(f"  {proj_name}: newest message alone exceeds {cap} chars — "
+            f"keeping its last {cap} chars, {len(bits) - 1} older message(s) dropped")
+        return bits[-1][-cap:]
+
+    dropped = len(bits) - len(kept)
+    if dropped:
+        log(f"  {proj_name}: capped at {cap} chars — kept the {len(kept)} newest "
+            f"of {len(bits)} message(s), dropped {dropped} older one(s)")
+    return MSG_SEP.join(kept)
+
+
 def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
     """Collect user messages from JSONLs modified in the last N hours, by project."""
     cutoff = datetime.now().timestamp() - hours * 3600
-    proj_messages: dict[str, str] = {}
+    # Accumulate as a list per project and cap once at the end: two dirs can
+    # resolve to the same project name, and capping each dir's chunk separately
+    # would let the merge order decide what survives.
+    proj_bits: dict[str, list[str]] = {}
 
     # We don't filter by directory name here — every project dir under
     # ~/.claude/projects/ is considered. Customize the glob if you only
@@ -134,16 +175,12 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
                 bits.append(txt)
 
         if bits:
-            joined = "\n---\n".join(bits)
             # Two project dirs can resolve to the SAME name (dir_to_project's
             # trailing-segment fallback) — merge, or the second dir would
             # silently drop the first one's messages.
-            prev = proj_messages.get(proj_name)
-            if prev:
-                joined = prev + "\n---\n" + joined
-            proj_messages[proj_name] = joined[:USER_MSG_CAP_PER_PROJECT]
+            proj_bits.setdefault(proj_name, []).extend(bits)
 
-    return proj_messages
+    return {proj: cap_newest_messages(bits, proj) for proj, bits in proj_bits.items()}
 
 
 def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) -> str:
@@ -154,15 +191,23 @@ def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) ->
     if len(text) <= cap:
         return text
 
-    start, kept = 0, 0
+    # Keep whole project sections only. A raw text[:cap] slice would hand the
+    # LLM a section truncated mid-sentence and pass it off as that project's
+    # full day.
+    kept, used = 0, 0
     for part in parts:
-        if start >= cap:
+        need = len(part) + (2 if kept else 0)  # +2 for the "\n\n" separator
+        if used + need > cap:
             break
         kept += 1
-        start += len(part) + 2  # +2 for the "\n\n" separator
-    log(f"build_summary: capped at {cap} chars — dropped {len(text) - cap} chars; "
+        used += need
+    if not kept:
+        log(f"build_summary: the first project section alone exceeds {cap} chars — "
+            f"truncating it; {len(parts) - 1} other project(s) dropped entirely")
+        return parts[0][:cap]
+    log(f"build_summary: capped at {cap} chars — dropped {len(text) - used} chars; "
         f"{len(parts) - kept} of {len(parts)} project(s) dropped entirely")
-    return text[:cap]
+    return "\n\n".join(parts[:kept])
 
 
 def update_user_md(proj_messages: dict[str, str]) -> bool:

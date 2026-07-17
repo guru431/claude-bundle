@@ -13,6 +13,9 @@
 #                           given, otherwise falls back to `git diff --cached`.
 #                           Prints offending matches and returns non-zero on
 #                           any hit; returns 0 (silent) when clean.
+#   secret_scan_text      — same, but for RAW file/blob content on stdin (no
+#                           diff markers). Used by .githooks/pre-push, which
+#                           reads whole blobs out of the object store.
 
 # High-confidence secret/token formats: PEM private keys, GitHub PATs/tokens,
 # AWS access keys, Slack tokens, OpenAI-style keys, CCR keys, JWTs, and
@@ -32,6 +35,17 @@ secret_scan_diff() {
         | grep -nE -e "$SECRET_SCAN_PATTERN" || true)
     if [ -n "$_ssd_hits" ]; then
         printf '%s\n' "$_ssd_hits"
+        return 1
+    fi
+    return 0
+}
+
+secret_scan_text() {
+    # Raw content on stdin — no '^+' filtering, every line is "added" here.
+    # -I: binary input yields no matches, so a blob can be piped in as-is.
+    _sst_hits=$(grep -nIE -e "$SECRET_SCAN_PATTERN" || true)
+    if [ -n "$_sst_hits" ]; then
+        printf '%s\n' "$_sst_hits"
         return 1
     fi
     return 0

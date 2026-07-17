@@ -278,6 +278,38 @@ JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
     return all_changes, complete, bodies_withheld
 
 
+def coalesce_changes(changes: list[dict]) -> list[dict]:
+    """Merge changes that target the same page, keeping emission order.
+
+    The model sometimes emits one page as two entries. apply_changes writes each
+    entry in turn and re-reads the page it just wrote, so the second entry
+    replaced the first's body wholesale and that content was lost with no
+    reject and no log line. Joining them here keeps both.
+
+    Entries that are malformed, or whose path/content is unusable, are passed
+    through untouched so apply_changes still rejects them with its own reason.
+    """
+    out: list[dict] = []
+    by_path: dict[str, dict] = {}
+    for change in changes:
+        if not isinstance(change, dict):
+            out.append(change)
+            continue
+        key = normalize_wiki_path(change.get("path", ""))
+        content = change.get("content", "")
+        if not key or not content:
+            out.append(change)
+            continue
+        prev = by_path.get(key)
+        if prev is None:
+            merged = dict(change)  # copy: don't mutate the parsed LLM output
+            by_path[key] = merged
+            out.append(merged)
+            continue
+        prev["content"] = prev.get("content", "").rstrip() + "\n\n" + content.lstrip()
+    return out
+
+
 def apply_changes(changes: list[dict], source_daily: str, project: str,
                   blind_update: bool = False) -> tuple[list[str], list[str]]:
     """Apply changes: preserve frontmatter, record source, update _log.md.
@@ -295,7 +327,7 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
     applied = []
     rejected: list[str] = []
     log_entries: list[str] = []
-    for change in changes:
+    for change in coalesce_changes(changes):
         if not isinstance(change, dict):
             rejected.append(f"non-dict entry: {str(change)[:80]}")
             continue  # defensive: a malformed LLM array may yield non-dict entries
@@ -441,12 +473,16 @@ def main():
                     hard_failure = True
                 if complete and not rejected:
                     # Record the pair immediately — on retry of this daily, a
-                    # succeeded project is skipped rather than re-compiled. An
-                    # all-rejected drop (above) is deterministic, so marking it
-                    # too avoids re-running the LLM on it every night forever.
+                    # succeeded project is skipped rather than re-compiled.
+                    # Anything rejected keeps the pair unmarked (the branches
+                    # above), so a drop is never silently finalized here.
                     state_add("compile_sessions", "compiled_pairs", [marker])
                     compiled_pairs.add(marker)
-                    drop = "" if applied else f" — 0 applied of {len(changes)} (content dropped)"
+                    # Nothing applied AND nothing rejected means every change was
+                    # a blind_update whose content the page already had. That is
+                    # a no-op, not a loss — calling it "content dropped" sent
+                    # people hunting for data that was never missing.
+                    drop = "" if applied else f" — 0 applied of {len(changes)} (already present)"
                     log(f"  [{project}] → {len(applied)} changes{drop}")
                 else:
                     # A part failed — the pair stays unmarked, the retry redoes

@@ -1,0 +1,134 @@
+#!/bin/sh
+# pre-push secret-guard for a PUBLIC repository.
+# pre-commit only sees what it was present for: a secret committed BEFORE the
+# guard was enabled, or with `--no-verify`, still reaches the remote on push.
+# This hook scans the objects a push would actually publish — the ones the
+# remotes do not have yet.
+#
+# Activate once per clone:   git config core.hooksPath .githooks
+# Bypass a confirmed false positive:   git push --no-verify
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+fail=0
+
+# Blobs above this are not hand-written text (bundled assets, archives, dumps);
+# a pasted key lives in a small file. Keeps a first push of a fat repo bounded.
+max_blob_bytes=1048576
+# Above this many new blobs, say so — a first push scans the whole history.
+progress_threshold=2000
+
+# Shared with .githooks/pre-commit and the nightly cron/git-push-all.sh sweep —
+# one source of truth for the regex lives in home-claude/cron/lib/secret-scan.sh.
+lib="$repo_root/home-claude/cron/lib/secret-scan.sh"
+if [ ! -f "$lib" ]; then
+  echo "WARNING: $lib not found — skipping generic token scan." >&2
+  exit 0
+fi
+# shellcheck source=/dev/null
+. "$lib"
+
+# 1) Collect the refs being pushed. stdin: <local ref> <local sha> <remote ref> <remote sha>
+shas=""
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  # An all-zeros local sha is a branch DELETION — it publishes no objects.
+  case "$local_sha" in
+    *[!0]*) shas="$shas $local_sha" ;;
+    *) continue ;;
+  esac
+done
+[ -n "$shas" ] || exit 0
+
+tmpdir=$(mktemp -d 2>/dev/null || echo "$repo_root/.pre-push.tmp")
+mkdir -p "$tmpdir"
+objects="$tmpdir/objects"
+blobs="$tmpdir/blobs"
+
+# 2) New objects only: everything reachable from what we push, minus everything
+# any remote already has. A brand-new repo has no remote refs, so this is the
+# whole history — correct, and what a first push actually publishes.
+# `awk NF>1` keeps only objects that carry a path (blobs and trees); commits
+# and tags print bare. shellcheck disable=SC2086 — $shas must word-split.
+# shellcheck disable=SC2086
+git rev-list --objects $shas --not --remotes 2>/dev/null | awk 'NF>1' > "$objects" || true
+
+# One batch-check pass instead of `git cat-file -t` per object (that is a
+# process spawn each, and a first push has thousands). Drops trees and blobs
+# over the cap before anything gets read.
+awk '{print $1}' "$objects" \
+  | git cat-file --batch-check='%(objectname) %(objecttype) %(objectsize)' 2>/dev/null \
+  | awk -v max="$max_blob_bytes" '$2 == "blob" && $3 <= max {print $1}' > "$blobs" || true
+[ -s "$blobs" ] || { rm -rf "$tmpdir"; exit 0; }
+
+count=$(wc -l < "$blobs" | tr -d ' ')
+if [ "$count" -gt "$progress_threshold" ]; then
+  echo "pre-push: scanning $count new blobs (no remote has them yet)..."
+fi
+
+# Personal denylist — concrete values from untracked .sanitize-patterns
+sp="$repo_root/.sanitize-patterns"
+pat="$tmpdir/patterns"
+: > "$pat"
+if [ -f "$sp" ]; then
+  # tr -d '\r': a CRLF-saved .sanitize-patterns (the default on Windows) would
+  # leave a trailing \r on every regex and silently disable the whole denylist.
+  grep -vE '^[[:space:]]*$' "$sp" 2>/dev/null | tr -d '\r' > "$pat" || true
+fi
+
+# 3) Fast path: one `cat-file --batch` stream through one grep, instead of two
+# process spawns per blob (~160ms each on Windows — minutes on a first push).
+# Deliberately OVER-eager: -a scans binary too, the stream ignores the size cap
+# and the .githooks/ exclusion. Anything it flags is re-checked precisely in
+# step 4, which is the only step that can fail the push. So a false alarm here
+# costs seconds, never a wrong verdict — and a clean push exits right now.
+suspect=0
+if git cat-file --batch < "$blobs" 2>/dev/null | grep -qaE -e "$SECRET_SCAN_PATTERN"; then
+  suspect=1
+fi
+if [ "$suspect" -eq 0 ] && [ -s "$pat" ]; then
+  if git cat-file --batch < "$blobs" 2>/dev/null | grep -qaiEf "$pat"; then
+    suspect=1
+  fi
+fi
+if [ "$suspect" -eq 0 ]; then
+  rm -rf "$tmpdir"
+  exit 0
+fi
+
+# 4) Something in there matched — now spend the per-blob spawns to name it.
+# Redirect, not a pipe: a pipe runs the loop in a subshell and every `fail=1`
+# is lost when it exits.
+while read -r sha; do
+  path=$(grep -m1 "^$sha " "$objects" | cut -d' ' -f2- || true)
+  # .githooks/ documents token FORMATS on purpose — same exclusion as
+  # pre-commit and the CI secret guard.
+  case "$path" in .githooks/*) continue ;; esac
+
+  if ! hits=$(git cat-file blob "$sha" 2>/dev/null | secret_scan_text); then
+    echo "BLOCKED: possible secret/token format in $path (blob $sha):"
+    printf '%s\n' "$hits" | sed 's/^/  /'
+    fail=1
+  fi
+
+  if [ -s "$pat" ]; then
+    hits=$(git cat-file blob "$sha" 2>/dev/null | grep -inIEf "$pat" || true)
+    if [ -n "$hits" ]; then
+      echo "BLOCKED: personal data (matched .sanitize-patterns) in $path (blob $sha):"
+      printf '%s\n' "$hits" | sed 's/^/  /'
+      fail=1
+    fi
+  fi
+done < "$blobs"
+
+rm -rf "$tmpdir"
+
+if [ "$fail" -ne 0 ]; then
+  echo ""
+  echo "Push aborted — this is a PUBLIC repository."
+  echo "These objects are already committed: rewrite the history that carries them"
+  echo "(git rebase -i / git filter-repo) — deleting the line in a NEW commit still"
+  echo "publishes the old one. Rotate anything real that leaked."
+  echo "For a confirmed false positive: git push --no-verify"
+  exit 1
+fi
+exit 0

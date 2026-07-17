@@ -265,6 +265,116 @@ def test_gen_scheduler_skips_windows_only_task(tmp_path: Path):
     assert not leaked, f"platform: windows task leaked into POSIX units: {leaked}"
 
 
+def test_compile_empty_response_is_a_noop(bundle: Path):
+    """A valid-but-empty LLM answer ('[]') means "nothing worth extracting".
+
+    It must no-op cleanly: exit 0, write no page, and leave an existing page
+    untouched. An empty array is indistinguishable from a parse give-up
+    (parse_llm_json returns [] on failure), so the danger is treating "no
+    changes" as "wipe what's there".
+    """
+    wiki = bundle / "wiki"
+    keep = wiki / "projects" / "myproject" / "keeper.md"
+    keep.parent.mkdir(parents=True, exist_ok=True)
+    keep.write_text("# Keeper\n\nPre-existing content.\n", encoding="utf-8")
+    before = keep.read_text(encoding="utf-8")
+
+    resp = bundle / "empty_response.json"
+    resp.write_text("[]", encoding="utf-8")
+
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0, f"empty [] should be a clean no-op:\n{r.stdout}\n{r.stderr}"
+    assert keep.read_text(encoding="utf-8") == before, "empty response destroyed an existing page"
+    assert not list((bundle / "cron" / "logs" / "rejected").glob("*")), \
+        "empty [] was quarantined as if it were a failure"
+
+
+def test_compile_rejects_wrong_schema(bundle: Path):
+    """Entries that parse as JSON but don't match the {path, content} contract
+    must be rejected and quarantined, not written as empty/garbage pages, and
+    the pair must not be finalized (exit != 0 so the retry redoes it)."""
+    resp = bundle / "schema_response.json"
+    resp.write_text(json.dumps([
+        {"path": "projects/myproject/no-content.md", "action": "create"},  # content missing
+        {"content": "orphaned content with no path"},                      # path missing
+        ["not", "an", "object"],                                           # not a dict
+    ]), encoding="utf-8")
+
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode != 0, \
+        f"a schema-violating payload must be a hard failure:\n{r.stdout}\n{r.stderr}"
+    assert not (bundle / "wiki" / "projects" / "myproject" / "no-content.md").exists(), \
+        "wrote a page for an entry that carried no content"
+    assert list((bundle / "cron" / "logs" / "rejected").glob("*")), \
+        f"schema-violating payload was dropped without quarantine:\n{r.stdout}"
+
+
+def test_flush_merges_colliding_slugs(bundle: Path, tmp_path: Path):
+    """Two project dirs can resolve to ONE slug (dir_to_project's trailing-
+    segment fallback). Both sessions must be processed and merged — the second
+    dir must not silently displace the first, and neither may be skipped."""
+    home = tmp_path / "home_collide"
+    projects = home / ".claude" / "projects"
+    filler = "x" * 600
+
+    def seed(dirname: str, marker: str):
+        d = projects / dirname
+        d.mkdir(parents=True)
+        lines = []
+        for i in range(12):
+            lines.append(json.dumps({"type": "user",
+                "message": {"role": "user", "content": f"{marker} msg {i} {filler}"}}))
+            lines.append(json.dumps({"type": "assistant",
+                "message": {"role": "assistant", "content": f"reply {i} {filler}"}}))
+        (d / f"{marker}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # Different absolute paths, same trailing segment → both become "myapp".
+    seed("C--Users-test-work-myapp", "first")
+    seed("D--clients-other-myapp", "second")
+
+    resp = bundle / "collide_response.md"
+    resp.write_text("- A durable fact. [[index]]\n", encoding="utf-8")
+    env = {"WIKI_LLM_MOCK_RESPONSE": str(resp),
+           "USERPROFILE": str(home), "HOME": str(home)}
+
+    r = _run(bundle / "cron" / "wiki" / "wiki-flush-sessions.py", env, cwd=bundle)
+    assert r.returncode == 0, f"flush failed:\n{r.stdout}\n{r.stderr}"
+    state = json.loads((bundle / "wiki" / ".processed.json").read_text(encoding="utf-8"))
+    processed = state.get("flush", {}).get("processed_jsonls", [])
+    # Both sessions recorded, both under the one shared slug.
+    assert any("first.jsonl" in k for k in processed), f"first dir's session lost: {processed}"
+    assert any("second.jsonl" in k for k in processed), f"second dir's session lost: {processed}"
+
+
+def test_compile_coalesces_same_path_changes(bundle: Path):
+    """Two changes targeting ONE page must merge, not overwrite.
+
+    apply_changes re-reads the page it just wrote and replaces the body, so a
+    model that split one page across two entries lost the first entry with no
+    reject and no log line.
+    """
+    import importlib.util
+    sys.path.insert(0, str(bundle / "cron" / "hooks"))
+    spec = importlib.util.spec_from_file_location(
+        "wcs", bundle / "cron" / "wiki" / "wiki-compile-sessions.py")
+    wcs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wcs)
+
+    out = wcs.coalesce_changes([
+        {"path": "projects/demo/incident-x.md", "content": "## Symptom\nIt broke."},
+        {"path": "projects/demo/incident-x.md", "content": "## Fix\nRestart it."},
+        {"path": "projects/demo/other.md", "content": "unrelated"},
+    ])
+    assert len(out) == 2, f"same-path entries not coalesced: {out}"
+    merged = next(c for c in out if c["path"].endswith("incident-x.md"))
+    assert "It broke." in merged["content"], "first entry's content was lost"
+    assert "Restart it." in merged["content"], "second entry's content was lost"
+    assert merged["content"].index("Symptom") < merged["content"].index("Fix"), \
+        "coalescing reordered the model's output"
+
+
 def _load_gen_scheduler():
     import importlib.util
     spec = importlib.util.spec_from_file_location(

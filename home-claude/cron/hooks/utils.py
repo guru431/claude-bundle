@@ -163,11 +163,21 @@ def load_state() -> dict:
                 # would sail through here and blow up later in .get()/setdefault().
                 raise ValueError(f"state root is {type(loaded).__name__}, not a dict")
             return loaded
-        except (json.JSONDecodeError, OSError, ValueError):
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
             # Corrupt state file — rebuild from the log.md journal instead of
             # silently resetting dedup (which would re-feed the whole backlog
             # to the LLM). Returned in memory; the next state_add persists it.
-            print(f"WARNING: {STATE_PATH.name} unreadable, rebuilding from log.md",
+            # Copy the bad file aside FIRST: that next state_add overwrites it,
+            # destroying the only evidence of why dedup reset — exactly when
+            # someone needs it. Quarantine shares the rejected/ dir so the
+            # retention sweep ages it out like any other debug artifact.
+            try:
+                quarantine_raw(STATE_PATH.name, "corrupt-state",
+                               STATE_PATH.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                pass  # unreadable on disk too — the warning below is all we have
+            print(f"WARNING: {STATE_PATH.name} unreadable ({exc}), "
+                  f"quarantined to cron/logs/rejected/, rebuilding from log.md",
                   file=sys.stderr)
             return _migrated_state_from_log() or {}
     migrated = _migrated_state_from_log()
@@ -664,6 +674,7 @@ _load_dotenv()
 # OPENCODE_GO_API_KEY / OPENCODE_GO_KEY).
 PROVIDERS: dict[str, dict] = {
     "deepseek": {  # primary: DeepSeek V4-Flash, OpenAI-compatible, cheapest
+        "label": "DeepSeek",
         "key_env": ["DEEPSEEK_KEY"],
         "base_url_env": "DEEPSEEK_BASE_URL",
         "base_url_default": "https://api.deepseek.com/v1",
@@ -672,8 +683,12 @@ PROVIDERS: dict[str, dict] = {
         "max_tokens": 8192,
         "temperature": 0.3,
         "max_retries": 3,
+        "backoff_base": 30,   # seconds, multiplied by the attempt number
+        "retry_sleep": 15,    # seconds, after a transport exception
+        "offbox": True,
     },
     "opencode": {  # fallback: OpenCode Go gateway (mimo-v2.5-pro)
+        "label": "OpenCode Go",
         "key_env": ["OPENCODE_GO_API_KEY", "OPENCODE_GO_KEY"],
         "base_url_env": None,
         "base_url_default": "https://opencode.ai/zen/go/v1",
@@ -682,10 +697,36 @@ PROVIDERS: dict[str, dict] = {
         "max_tokens": 32768,
         "temperature": 0.3,
         "max_retries": 5,
+        "backoff_base": 60,
+        "retry_sleep": 30,
+        "offbox": True,
+    },
+    "local": {  # local-only: any OpenAI-compatible server on this machine
+        "label": "local",
+        "key_env": ["LOCAL_LLM_KEY"],
+        "base_url_env": "LOCAL_LLM_BASE_URL",
+        "base_url_default": "http://localhost:11434/v1",
+        "model_env": "LOCAL_LLM_MODEL",
+        "model_default": "",
+        "max_tokens": 8192,
+        "temperature": 0.3,
+        "max_retries": 2,
+        "backoff_base": 5,
+        "retry_sleep": 5,
+        "offbox": False,      # never leaves this machine
+        "key_optional": True,  # most local servers accept any/no bearer token
     },
     # "claude" has no entry: it shells out to the `claude` CLI (manual/opt-in
     # mode only) and needs no key/url/model here.
 }
+
+# Off-box fallback. Set WIKI_OFFBOX_FALLBACK=0 to forbid llm_call from ever
+# reaching a provider outside this machine. Without it, a local run whose
+# server hiccups silently ships the prompt to a cloud gateway — the transcript
+# leaves the box precisely because the local pipeline failed, which is the
+# opposite of what someone running local-only asked for.
+OFFBOX_FALLBACK = os.environ.get("WIKI_OFFBOX_FALLBACK", "1").strip().lower() \
+    not in ("0", "false", "no")
 
 
 def _env_first(names: list[str], default: str = "") -> str:
@@ -801,10 +842,16 @@ def _log_provider_once() -> None:
     if _provider_logged:
         return
     _provider_logged = True
-    if LLM_PROVIDER == "opencode":
-        print(f"  [llm] provider=opencode model={OPENCODE_MODEL} base={OPENCODE_BASE_URL}", file=sys.stderr)
-    elif LLM_PROVIDER == "deepseek":
-        print(f"  [llm] provider=deepseek model={DEEPSEEK_MODEL} base={DEEPSEEK_BASE_URL} (fallback=opencode)", file=sys.stderr)
+    if LLM_PROVIDER in PROVIDERS:
+        _, base, model = _provider_cfg(LLM_PROVIDER)
+        extra = ""
+        if LLM_PROVIDER == "deepseek":
+            # Print the fallback policy, not just the primary: "why did my
+            # local-only prompt reach a cloud gateway" is answered here.
+            extra = " (fallback=opencode)" if OFFBOX_FALLBACK else " (fallback=off, WIKI_OFFBOX_FALLBACK=0)"
+        elif not PROVIDERS[LLM_PROVIDER].get("offbox", True):
+            extra = " (local-only)"
+        print(f"  [llm] provider={LLM_PROVIDER} model={model} base={base}{extra}", file=sys.stderr)
     elif LLM_PROVIDER == "claude":
         print("  [llm] provider=claude model=sonnet", file=sys.stderr)
     elif LLM_PROVIDER == "mock":
@@ -1401,53 +1448,73 @@ def llm_call(prompt: str, timeout: int = 600) -> str | None:
     Provider chain (NO silent fallback to Claude — it consumes the Max plan):
       - "deepseek" (default): DeepSeek V4-Flash direct → fallback OpenCode Go → None.
       - "opencode":           OpenCode Go mimo-v2.5-pro → None.
+      - "local":              an OpenAI-compatible server on this machine → None.
       - "claude":             only when WIKI_LLM_PROVIDER=claude (manual mode).
 
     Cron scripts should NOT automatically fall back to Claude — better to skip
     a run than to burn a 5h subscription window.
+
+    The deepseek → opencode fallback is suppressed when WIKI_OFFBOX_FALLBACK=0,
+    so a local-only run can never ship a transcript off the machine just
+    because the primary provider failed.
     """
     _log_provider_once()
     if LLM_PROVIDER == "mock":
         return _llm_mock(prompt, timeout)
     if LLM_PROVIDER == "claude":
         return _llm_claude(prompt, timeout)
-    if LLM_PROVIDER == "opencode":
-        return _llm_opencode(prompt, timeout)
-    out = _llm_deepseek(prompt, timeout)
+    if LLM_PROVIDER in PROVIDERS and LLM_PROVIDER != "deepseek":
+        return _llm_openai_compat(LLM_PROVIDER, prompt, timeout)
+    out = _llm_openai_compat("deepseek", prompt, timeout)
     if out is not None:
         return out
+    if not OFFBOX_FALLBACK:
+        print("  DeepSeek failed → returning None "
+              "(WIKI_OFFBOX_FALLBACK=0 forbids the off-box fallback)", file=sys.stderr)
+        return None
     print("  DeepSeek failed, falling back to OpenCode Go", file=sys.stderr)
-    out = _llm_opencode(prompt, timeout, fallback_from="deepseek")
+    out = _llm_openai_compat("opencode", prompt, timeout, fallback_from="deepseek")
     if out is not None:
         return out
     print("  OpenCode Go also failed → returning None (claude fallback disabled)", file=sys.stderr)
     return None
 
 
-def _llm_deepseek(prompt: str, timeout: int = 600, fallback_from: str | None = None) -> str | None:
-    """DeepSeek API (OpenAI-compatible /chat/completions).
+def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
+                       fallback_from: str | None = None) -> str | None:
+    """POST /chat/completions against any OpenAI-compatible provider.
 
-    Returns None on auth error, 402 insufficient_balance, network failure or
-    empty content. DeepSeek V4-Flash is a thinking model: the answer comes
-    from choices[0].message.content; reasoning_content is a separate field
-    and is intentionally ignored.
+    One adapter for every row in PROVIDERS. These used to be a function per
+    provider, which meant the 402/429/529 contract was copy-pasted and drifted
+    (OpenCode's 402 once didn't trip the circuit breaker while DeepSeek's did).
+    Per-provider differences that actually exist live in the table, not here.
+
+    Returns None on missing key, 402 insufficient_balance, network failure or
+    empty content. Thinking models put the answer in choices[0].message.content;
+    reasoning_content is a separate field and is intentionally ignored, and a
+    <think> block that leaks into content is stripped.
     """
     import requests
 
-    if not DEEPSEEK_API_KEY:
-        print("  DEEPSEEK_KEY env var not set", file=sys.stderr)
+    cfg = PROVIDERS[provider]
+    label = cfg["label"]
+    key, base_url, model = _provider_cfg(provider)
+
+    if not key and not cfg.get("key_optional"):
+        print(f"  {cfg['key_env'][0]} env var not set", file=sys.stderr)
+        return None
+    if not model:
+        print(f"  {cfg['model_env']} env var not set (no default for {label})", file=sys.stderr)
         return None
 
-    if _is_depleted("deepseek"):
+    if _is_depleted(provider):
         return None
 
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    cfg = PROVIDERS["deepseek"]
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": cfg["max_tokens"],
         "temperature": cfg["temperature"],
@@ -1459,116 +1526,48 @@ def _llm_deepseek(prompt: str, timeout: int = 600, fallback_from: str | None = N
         try:
             t0 = time.monotonic()
             resp = requests.post(
-                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                f"{base_url}/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=timeout,
             )
-            _audit_attempt("deepseek", DEEPSEEK_MODEL, resp.status_code,
+            _audit_attempt(provider, model, resp.status_code,
                            int((time.monotonic() - t0) * 1000), fallback_from)
             if resp.status_code == 402:
-                print(f"  DeepSeek 402 insufficient_balance: {resp.text[:200]}", file=sys.stderr)
-                _DEPLETED_PROVIDERS.add("deepseek")  # don't repeat the 402 this run
+                # An out-of-credit provider is dead for the rest of the run, so
+                # don't pay the latency of calling it again for every remaining
+                # project.
+                print(f"  {label} 402 insufficient_balance: {resp.text[:200]}", file=sys.stderr)
+                _DEPLETED_PROVIDERS.add(provider)
                 return None
             if resp.status_code in (429, 529):
                 if attempt == max_retries - 1:
-                    _DEPLETED_PROVIDERS.add("deepseek")  # retries exhausted — don't repeat this run
-                    print(f"  DeepSeek {resp.status_code} retries exhausted → marking depleted for this run", file=sys.stderr)
+                    _DEPLETED_PROVIDERS.add(provider)  # retries exhausted — don't repeat this run
+                    print(f"  {label} {resp.status_code} retries exhausted → marking depleted for this run", file=sys.stderr)
                     return None
-                wait = 30 * (attempt + 1)
-                print(f"  DeepSeek {resp.status_code}, retry {attempt+1}/{max_retries} in {wait}s", file=sys.stderr)
+                wait = cfg["backoff_base"] * (attempt + 1)
+                kind = "overloaded (529)" if resp.status_code == 529 else "rate limit (429)"
+                print(f"  {label} {kind}, retry {attempt+1}/{max_retries} in {wait}s", file=sys.stderr)
                 time.sleep(wait)
                 continue
             if resp.status_code != 200:
-                print(f"  DeepSeek API error {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+                print(f"  {label} API error {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
                 return None
             data = resp.json()
-            content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-            content = content.strip()
-            if not content:
-                print("  DeepSeek empty content (reasoning_only?)", file=sys.stderr)
-                return None
-            return content
-        except Exception as e:
-            _audit_attempt("deepseek", DEEPSEEK_MODEL, f"exception:{type(e).__name__}", None, fallback_from)
-            print(f"  DeepSeek error: {e}", file=sys.stderr)
-            if attempt < max_retries - 1:
-                time.sleep(15)
-                continue
-            return None
-    return None
-
-
-def _llm_opencode(prompt: str, timeout: int = 600, fallback_from: str | None = None) -> str | None:
-    """OpenCode Go gateway (OpenAI-compatible)."""
-    import requests
-
-    if not OPENCODE_API_KEY:
-        print("  OPENCODE_GO_API_KEY env var not set", file=sys.stderr)
-        return None
-
-    if _is_depleted("opencode"):
-        return None
-
-    headers = {
-        "Authorization": f"Bearer {OPENCODE_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    cfg = PROVIDERS["opencode"]
-    payload = {
-        "model": OPENCODE_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": cfg["max_tokens"],
-        "temperature": cfg["temperature"],
-    }
-
-    max_retries = cfg["max_retries"]
-    for attempt in range(max_retries):
-        try:
-            t0 = time.monotonic()
-            resp = requests.post(
-                f"{OPENCODE_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=timeout,
-            )
-            _audit_attempt("opencode", OPENCODE_MODEL, resp.status_code,
-                           int((time.monotonic() - t0) * 1000), fallback_from)
-            if resp.status_code == 402:
-                # Same contract as _llm_deepseek: an out-of-credit provider is
-                # dead for the rest of the run, so don't pay the latency of
-                # calling it again for every remaining project.
-                print(f"  OpenCode Go 402 insufficient_balance: {resp.text[:200]}", file=sys.stderr)
-                _DEPLETED_PROVIDERS.add("opencode")
-                return None
-            if resp.status_code in (429, 529):
-                if attempt == max_retries - 1:
-                    _DEPLETED_PROVIDERS.add("opencode")  # retries exhausted — don't repeat this run
-                    print(f"  OpenCode Go {resp.status_code} retries exhausted → marking depleted for this run", file=sys.stderr)
-                    return None
-                wait = 60 * (attempt + 1)
-                label = "overloaded (529)" if resp.status_code == 529 else "rate limit (429)"
-                print(f"  OpenCode Go {label}, retry {attempt+1}/{max_retries} in {wait}s", file=sys.stderr)
-                time.sleep(wait)
-                continue
-            if resp.status_code != 200:
-                print(f"  OpenCode Go API error {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
-                return None
-            data = resp.json()
-            # Defensive .get() chain (like _llm_deepseek): a missing choices/
-            # message/content means "no answer" (return None) so the fallback
-            # fires — an empty string would pass as a valid result and block it.
+            # Defensive .get() chain: a missing choices/message/content means
+            # "no answer" (return None) so the fallback fires — an empty string
+            # would pass as a valid result and block it.
             content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
             content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
             if not content:
-                print("  OpenCode Go empty content (reasoning_only?)", file=sys.stderr)
+                print(f"  {label} empty content (reasoning_only?)", file=sys.stderr)
                 return None
             return content
         except Exception as e:
-            _audit_attempt("opencode", OPENCODE_MODEL, f"exception:{type(e).__name__}", None, fallback_from)
-            print(f"  OpenCode Go error: {e}", file=sys.stderr)
+            _audit_attempt(provider, model, f"exception:{type(e).__name__}", None, fallback_from)
+            print(f"  {label} error: {e}", file=sys.stderr)
             if attempt < max_retries - 1:
-                time.sleep(30)
+                time.sleep(cfg["retry_sleep"])
                 continue
             return None
     return None

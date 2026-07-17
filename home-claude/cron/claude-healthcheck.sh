@@ -186,11 +186,17 @@ rc=$?
 
 echo "$ANALYSIS" >> "$LOG_FILE"
 
+LLM_FAILED=0
 if [ $rc -ne 0 ] || [ -z "$ANALYSIS" ]; then
+    # Report the LLM failure, but do NOT exit here. The disk check below is the
+    # deterministic half of this script, and it used to sit *behind* this exit:
+    # a depleted provider silenced the disk alert entirely, which is exactly
+    # what the comment above the check promises can't happen. A full disk is
+    # still a full disk when the narrator is down.
     echo "FATAL: LLM analysis failed (rc=$rc, empty=$([ -z "$ANALYSIS" ] && echo yes || echo no))" >> "$LOG_FILE"
     bash "$BUNDLE_ROOT/cron/telegram-send.sh" "healthcheck: LLM analysis failed ($DATE)" >>"$LOG_FILE" 2>&1
-    echo "=== End ===" >> "$LOG_FILE"
-    exit 1
+    ANALYSIS="(LLM analysis unavailable — the provider failed; disk severity below is measured, not inferred)"
+    LLM_FAILED=1
 fi
 
 # --- Alert on the verdict ---
@@ -217,3 +223,8 @@ fi
 
 echo "" >> "$LOG_FILE"
 echo "=== End ===" >> "$LOG_FILE"
+
+# The disk alert has fired (or not) on measured data by this point; only now
+# does the LLM failure decide the exit code, so the scheduler still records the
+# run as failed without that failure having suppressed the alert.
+[ "$LLM_FAILED" -eq 0 ] || exit 1

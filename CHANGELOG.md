@@ -3,6 +3,131 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.5.0] - 2026-07-17 — IDEAS batch resolved: 5 real bugs fixed, ~10k lines of framework declined
+
+Resolves all 19 proposals from the 2026-07-13 idea batch (`IDEAS.md` I-01…I-19).
+Each was checked against the source rather than its own description, and that
+mattered: **several diagnoses were stale or wrong when written.** I-12 argued
+from "6 happy-path tests" (there were 7, and 5 were negative/regression tests);
+I-14 asked for compilers that already existed; I-15's headline benefit is
+impossible at the hook point it targets. The full verdict for every proposal,
+with reasons, is in the new `IDEAS-archive.md`. `IDEAS.md` is back to its header.
+
+Shipped ~600 lines; declined ~10k lines of proposed machinery on a 6.5k-line
+project. The rule applied: a framework that costs more credibility than the gap
+it closes is a regression in what this bundle sells.
+
+### Bug fixes (found while auditing the proposals, not proposed by them)
+
+- **The healthcheck's disk alert was suppressed by a failed LLM call.** The
+  `llm-call.py` invocation sat in front of the `df` threshold check and hit
+  `exit 1` on a depleted provider, so the deterministic half never ran. The
+  file's own comment promised "a reworded verdict can't silence an alert" — a
+  *failed* verdict silenced it entirely. The alert now fires on measured data;
+  the LLM failure only decides the exit code.
+- **`memory-update.py` silently discarded the freshest messages of the day.**
+  `joined[:8000]` kept the **head** of a chronological list, so a busy project
+  lost its newest input — with no log line. Messages are now capped from the
+  tail on message boundaries, colliding project dirs merge *before* the cap, and
+  every drop is reported. `build_summary` keeps whole project sections instead of
+  slicing mid-sentence and presenting it as that project's full day.
+- **Corrupt pipeline state was overwritten instead of preserved.** `load_state()`
+  rebuilt from `log.md` and the next `state_add` clobbered the bad file —
+  destroying the evidence of why dedup reset, exactly when it was needed. It is
+  now quarantined to `cron/logs/rejected/` first.
+- **`wiki-lint.py` failed the nightly run on a legitimate page name.** Two
+  projects naming a page `incident-timeout.md` is what the bundle's own
+  convention produces; the linter treated it as an ERROR and demanded
+  vault-globally-unique filenames. Demoted to WARN — only an unqualified *link*
+  is a problem, and `check_broken_links` already reports that.
+- **Orphan detection was namespace-blind.** It compared last path segments, so a
+  link to `projects/a/foo` vouched for `projects/b/foo` — the busier the vault,
+  the fewer orphans it could see. Now compares full paths.
+- **A compile log called a no-op "content dropped"**, sending people hunting for
+  data that was never missing (reachable only when every change was an already-
+  present `blind_update`), and a comment above it described marking behavior the
+  code does not have.
+
+### Added
+
+- **Local-only pipeline** (I-09). `WIKI_LLM_PROVIDER=local` targets any
+  OpenAI-compatible server you run (Ollama, llama.cpp, LM Studio, vLLM), and
+  **`WIKI_OFFBOX_FALLBACK=0`** forbids the off-box fallback. That fallback was
+  the whole gap: a local-only run shipped its prompt to a cloud gateway
+  *precisely when the local server hiccuped*. The `local` row has no default
+  model on purpose — a typo fails loudly. The active policy is printed in the
+  `[llm] provider=…` line.
+- **`scripts/uninstall.ps1` + `.bundle-manifest.json`** (I-08). The installer now
+  records what it wrote (sha256 per file) and what it preserved; the uninstaller
+  removes only that, skips files modified since install unless `-Force`, and
+  needs an explicit `-Confirm`. A public installer that couldn't remove itself
+  was a real gap.
+- **`.githooks/pre-push`** (I-10). Scans the blobs a push would actually publish
+  (`git rev-list --objects --not --remotes`), closing the hole pre-commit cannot
+  see: a secret committed before the guard was enabled, or via `--no-verify`.
+  Reuses the shared pattern through a new `secret_scan_text()` — one regex, one
+  place.
+- **`scripts/check-registry.py`** (I-14). Validates required fields, the `kind`
+  enum and the `trigger` grammar. A typo'd `trigger: Dialy 03:00` used to pass CI
+  and then be *silently skipped* by the generator. The grammar now lives once in
+  `gen-scheduler.py`; the validator imports it, so the two cannot drift.
+- **`scripts/check-env-ref.py`** (I-13) + an exec-bit guard in CI. Catches drift
+  between `config/llm-providers.example.env` and the docs; it immediately found
+  an undocumented `CLAUDE_BIN`.
+- **Handoff retention** (I-18). `projects/*/memory/handoff-*.md` — LLM summaries
+  of session content, one per compaction — accumulated **forever**; nothing ever
+  deleted them. Now swept on a 7-day window (`WIKI_HANDOFF_RETENTION_DAYS`).
+  `wiki/daily/.pending/` is deliberately *not* swept: those are queued tails
+  awaiting a flush, and retention on a queue is data loss.
+- **Four tests** (I-12), 7 → 11: an empty `[]` is a clean no-op that doesn't wipe
+  an existing page; a wrong-schema payload is rejected and quarantined; colliding
+  slugs merge; same-path changes coalesce.
+
+### Changed
+
+- **The two provider adapters are now one** (I-05). `_llm_deepseek` and
+  `_llm_opencode` were ~70-line near-clones whose duplicated 402/429/529 contract
+  had already drifted once. Replaced by one table-driven `_llm_openai_compat()` —
+  a net deletion, and the "single source of truth" the `PROVIDERS` comment always
+  claimed to be. Per-provider differences live in the table.
+- **Same-path changes coalesce before writing** (I-02). A model splitting one page
+  across two entries lost the first: the loop re-read the page it had just
+  written and replaced the body wholesale.
+- **Generated indexes emit qualified links** (I-06) —
+  `[[projects/<p>/<stem>|<stem>]]`, `[[kb/<sec>/<stem>|<stem>]]`. The rendered
+  list is unchanged; the links now resolve unambiguously.
+
+### Explicitly declined (see `IDEAS-archive.md` for the full reasoning)
+
+- **The DLP/redaction gateway** (I-01) — a starter pack implying coverage it
+  cannot warrant is worse than one documenting its boundary honestly.
+- **Versioned state schema + pydantic** (I-04) — a third dependency and ~500
+  lines for a file that is 4 keys of `list[str]`.
+- **`--json` and exit-code changes** (I-07) — verified as *not* bugs.
+  `bundle-status.py` is a manual view, not a scheduled task, and its always-0
+  exit is documented. `claude-task-monitor.sh` exits 0 because it succeeded:
+  it detected the failure and alerted. Non-zero would make the monitor alert
+  about itself.
+- **Hashed project identity** (I-11) — would make `wiki/projects/<hash>/`
+  unreadable, fighting the premise of a human-readable vault.
+- **Session-scoped handoff protocol** (I-15) — the race was already closed by
+  atomic replace, and "reuse the compact summary" is impossible at PreCompact,
+  which fires *before* the summary exists.
+- **Local FTS/BM25 index** (I-17) — a second derived representation of a
+  single-digit-MB vault, in a project whose thesis is "files in folders".
+- **Credential broker** (I-19) — `~/.claude/.env`, the source of every key, stays
+  plaintext on the same disk; brokering only the destination is theater.
+
+### Known gaps, recorded not fixed
+
+- `collect_plans()` buckets `~/.claude/plans/*.md` with no project attribution,
+  and `llm-call.py` / the healthcheck reach `llm_call` without the project gate.
+  Mitigate with `allow_projects` or `WIKI_LLM_PROVIDER=local`.
+- `$ClaudeHome` / `$PipelineRoot` are one `-InstallPath`: Claude Code reads config
+  only from `~/.claude`, so a custom path silently doesn't apply to the config
+  half. The installer carries 15 lines of warnings about it. Closer to a bug than
+  a feature; deserves its own change.
+
 ## [0.4.0] - 2026-07-17 — deep-audit batch: 66 findings resolved
 
 Resolves the 2026-07-13 deep-audit batch (`FINDINGS.md` F-01…F-66) in full.

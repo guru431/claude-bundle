@@ -123,7 +123,7 @@ changes the second time.
 | `ClaudeGitPushAll` | Daily 07:00 | auto-push your project repos (off by default — opt-in) |
 | `ClaudeHealthcheck` | Daily 09:00 | morning self-check |
 | `ClaudeTaskMonitor` | Daily 09:30 | alert on failed Task Scheduler jobs |
-| `ClaudeWarmWindow` | Daily 01:00 /4h | ping the Claude 5h window (off by default — read the billing note in the script) |
+| `ClaudeWarmWindow` | Daily 01:00 /4h | ping the Claude 5h window (off by default — read the billing note in the script; set `CLAUDE_BIN` in `.env` if the `claude` CLI isn't on PATH in session 0) |
 
 The pipeline writes to Telegram only on failure (no spam on success).
 Configure `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in your `.env` to
@@ -162,8 +162,43 @@ disk/resource figures). Two optional blocks widen it:
 So enabling remote checks means **your servers' hostnames and resource
 state get sent to a third-party LLM every morning**. Both vars are empty
 by default in `config/llm-providers.example.env`; leave them empty and the
-task stays local-host-only. If even the local banner is too much, disable
-the task — it has no local-only mode.
+task stays local-host-only. If even the local banner is too much, either
+disable the task or move the whole pipeline off-box-free with
+`WIKI_LLM_PROVIDER=local` (see below).
+
+The disk verdict itself is **not** the LLM's to make: severity comes from
+a `df` threshold, and the model only writes the explanation. A depleted
+provider therefore degrades the alert's prose, not the alert.
+
+### Keeping everything on this machine
+
+Every "sends data off-box" row above is really "sends data to whatever
+`WIKI_LLM_PROVIDER` names". Point it at `local` (any OpenAI-compatible
+server you run — Ollama, llama.cpp, LM Studio, vLLM) and none of them
+leave the box, at no token cost. Set **`WIKI_OFFBOX_FALLBACK=0`** as well:
+the default `deepseek` chain falls back to a cloud gateway on failure,
+which would ship the prompt off-box exactly when your local server broke.
+See `docs/llm-routing.md`.
+
+## Retention of session-derived artifacts
+
+`ClaudeLogRetention` (weekly) prunes three classes on separate windows:
+
+| Path | Default window | Override |
+|---|---|---|
+| `cron/logs/*.{log,jsonl}` | 30 days | `WIKI_LOG_RETENTION_DAYS` |
+| `cron/logs/rejected/*.txt` (raw LLM payloads) | 7 days | `WIKI_REJECTED_RETENTION_DAYS` |
+| `projects/*/memory/handoff-*.md` (LLM session summaries) | 7 days | `WIKI_HANDOFF_RETENTION_DAYS` |
+
+The last two are shorter because they echo private session text. Handoffs
+are unreadable to the pipeline after 24 hours anyway (`session-start.py`
+ignores older ones), so a longer window would only accumulate summaries
+nothing reads.
+
+`wiki/daily/.pending/*.md` is deliberately **not** pruned: those are queued
+session tails awaiting a flush that hasn't succeeded, so deleting them
+would discard work that never reached the wiki. A growing pending queue
+means a broken flush — `bundle-status.py` reports its depth.
 
 ## Ordering & the wiki-pipeline orchestrator
 

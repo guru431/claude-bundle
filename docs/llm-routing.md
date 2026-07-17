@@ -40,6 +40,13 @@ the low tens of cents per M input tokens).
 | `ollama` | local/LAN models, offline work | free (your hardware) | Ollama serves the Anthropic `/v1/messages` API natively — no proxy; host:port from `OLLAMA_HOST` (default `127.0.0.1:11434`); a dummy `ANTHROPIC_AUTH_TOKEN=ollama-local` overrides any stored OAuth session |
 | `ccr` | routing many models through one proxy | depends on the underlying provider | needs the [Claude Code Router](https://github.com/musistudio/claude-code-router) running |
 
+Each mode reads its credential from `.env` (see
+`config/llm-providers.example.env`): `anthropic` → `ANTHROPIC_API_KEY`
+(optional — OAuth usually suffices), `deepseek` → `DEEPSEEK_KEY`,
+`minimax` → `MINIMAX_API_KEY`, `opencode` → `OPENCODE_GO_API_KEY`,
+`ollama` → `OLLAMA_HOST` (no key), `ccr` → `CCR_API_KEY` plus an optional
+`CCR_HOST` (default `127.0.0.1:3456`).
+
 The CCR mode is the most powerful — one proxy, 12 models, same Anthropic-
 compatible surface. But it needs you to run `ccr` somewhere (locally or
 on a LAN host). The script auto-probes the CCR port and tries to launch
@@ -101,10 +108,29 @@ branch. This table below mirrors the registry — keep the two in sync
 |---|---|---|---|---|
 | `deepseek` | `DEEPSEEK_KEY` | `https://api.deepseek.com/v1` (`DEEPSEEK_BASE_URL`) | `deepseek-v4-flash` | `DEEPSEEK_MODEL` |
 | `opencode` | `OPENCODE_GO_API_KEY`, `OPENCODE_GO_KEY` | `https://opencode.ai/zen/go/v1` | `mimo-v2.5-pro` | `OPENCODE_GO_MODEL` |
+| `local` | `LOCAL_LLM_KEY` (optional) | `http://localhost:11434/v1` (`LOCAL_LLM_BASE_URL`) | *(none — must be set)* | `LOCAL_LLM_MODEL` |
 
-To add a provider for cron use: add a row to `PROVIDERS`, wire an
-`_llm_<name>()` caller into `llm_call()`, add the key name to
-`config/llm-providers.example.env`, and add a row here.
+Every row is served by one adapter, `_llm_openai_compat()`, because all
+three speak the same OpenAI-compatible `/chat/completions`. It used to be
+a function per provider, and the 402/429/529 contract drifted between the
+copies. To add a provider for cron use: add a row to `PROVIDERS`, add the
+key name to `config/llm-providers.example.env`, and add a row here — no
+new caller unless the provider speaks a different protocol.
+
+### Local-only runs
+
+`WIKI_LLM_PROVIDER=local` points the pipeline at any OpenAI-compatible
+server on your own machine (Ollama, llama.cpp, LM Studio, vLLM), so
+transcripts never leave the box. One catch worth knowing: the default
+`deepseek` chain falls back to the OpenCode Go gateway when DeepSeek
+fails, which would push a prompt off-box *because* the local side broke.
+**`WIKI_OFFBOX_FALLBACK=0` forbids that fallback**, turning "nothing
+leaves this machine" from a hope into a rule. The active policy is
+printed once per run in the `[llm] provider=…` line.
+
+The `local` row deliberately ships **no default model** — an unset
+`LOCAL_LLM_MODEL` fails loudly instead of quietly calling whatever
+happens to be named in someone else's default.
 
 If you want claude as a one-off — `WIKI_LLM_PROVIDER=claude python ...`.
 Don't make it the cron default.

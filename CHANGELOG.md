@@ -3,6 +3,17 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.6.1] - 2026-07-18 — CI green again
+
+### Fixed
+
+- **The two shell test scripts 0.6.0 added failed the ShellCheck CI step.**
+  `test_push_repo.sh` and `test_guard_protected.sh` source `git-push-all.sh`
+  through a runtime-computed path (SC1090), set `failed_repos` for the sourced
+  `push_repo()` to read (SC2034), and left one `origin/$(br ...)` unquoted
+  (SC2046). The first two are correct as written and now carry directives; the
+  third is a real quoting fix.
+
 ## [0.6.0] - 2026-07-18 — a month of fixes ported back from the private superset
 
 The bundle was extracted from a private meta-repo that keeps running ahead of

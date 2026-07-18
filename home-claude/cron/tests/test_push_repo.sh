@@ -17,6 +17,8 @@ chmod +x "$BUNDLE_ROOT/cron/telegram-send.sh"
 export LOG_FILE="$TMP/test.log"
 export GIT_PUSH_ALL_DRY_RUN=0   # real commit/push into a local bare origin
 
+# The path is computed at runtime, so shellcheck can't follow it.
+# shellcheck source=/dev/null
 GIT_PUSH_ALL_LIB=1 source "$SCRIPT"
 
 # Without the secret-scan lib, guard_secrets fail-closed skips EVERY repo — the
@@ -38,6 +40,8 @@ mkrepo() {  # <dir> — repo with its own bare origin and an initial pushed comm
     git -C "$d" push -q origin "$(git -C "$d" rev-parse --abbrev-ref HEAD)"
 }
 br() { git -C "$1" rev-parse --abbrev-ref HEAD; }
+# failed_repos is read by push_repo() in the sourced script, not here.
+# shellcheck disable=SC2034
 reset_counters() { pushed=0; skipped=0; failed=0; failed_repos=""; }
 
 # === Test 1: .env excluded from the auto-commit; code committed and pushed ===
@@ -61,7 +65,7 @@ echo b > "$R3/b.txt"; git -C "$R3" add -A; git -C "$R3" commit -qm second   # no
 echo "SECRET=x" > "$R3/.env"
 reset_counters; push_repo "$R3" "r3" "Auto-commit: test"
 [ "$pushed" = "1" ] || fail "T3: unpushed commit was not sent (pushed=$pushed)"
-[ "$(git -C "$R3" rev-parse HEAD)" = "$(git -C "$R3" rev-parse origin/$(br "$R3"))" ] || fail "T3: origin did not catch up with local"
+[ "$(git -C "$R3" rev-parse HEAD)" = "$(git -C "$R3" rev-parse "origin/$(br "$R3")")" ] || fail "T3: origin did not catch up with local"
 
 # === Test 4: detached HEAD → skip, no commit ===
 R4="$TMP/r4"; mkrepo "$R4"

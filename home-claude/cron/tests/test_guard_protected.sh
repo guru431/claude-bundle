@@ -14,7 +14,9 @@ printf '#!/bin/bash\nexit 0\n' > "$BUNDLE_ROOT/cron/telegram-send.sh"  # stub, s
 chmod +x "$BUNDLE_ROOT/cron/telegram-send.sh"
 export LOG_FILE="$TMP/test.log"
 
-# Load the functions only (no main sweep).
+# Load the functions only (no main sweep). The path is computed at runtime,
+# so shellcheck can't follow it.
+# shellcheck source=/dev/null
 GIT_PUSH_ALL_LIB=1 source "$SCRIPT"
 
 fail() { echo "FAIL: $1"; exit 1; }

@@ -71,8 +71,9 @@ and explicitly clears the env in `anthropic` mode to fall back to OAuth.
 
 ```
 WIKI_LLM_PROVIDER env var:
-  "deepseek"  →  DeepSeek V4-Flash  →  on failure, OpenCode Go  →  None
+  "deepseek"  →  DeepSeek V4-Flash  →  OpenCode Go  →  DeepInfra  →  None
   "opencode"  →  OpenCode Go (mimo-v2.5-pro)  →  None
+  "deepinfra" →  DeepInfra (deepseek-ai/DeepSeek-V3.1)  →  None
   "claude"    →  claude CLI (sonnet)  →  None  [opt-in only]
   "mock"      →  canned text from $WIKI_LLM_MOCK_RESPONSE  →  "[]"  [tests/CI]
 ```
@@ -86,6 +87,13 @@ The default is `deepseek`. **Claude is never the silent fallback** — the
 chain returns `None` (and the calling script logs an error) rather than
 silently chew through your Claude subscription. If a wiki compile fails
 because DeepSeek is down, that's a Telegram alert, not a $5 surprise.
+
+The chain order lives in `utils.py::DEFAULT_CHAIN` and applies only to the
+default provider. Setting `WIKI_LLM_PROVIDER` to any other registry key
+means "this provider only, no fallback" — an explicit choice must not
+silently route elsewhere. Two gateways sit behind the primary rather than
+one: with a single fallback, both being down at once leaves the pipeline
+dark for a whole night.
 
 This public default (DeepSeek direct primary, OpenCode Go fallback) is
 deliberate because DeepSeek PAYG is universally available with no
@@ -108,6 +116,7 @@ branch. This table below mirrors the registry — keep the two in sync
 |---|---|---|---|---|
 | `deepseek` | `DEEPSEEK_KEY` | `https://api.deepseek.com/v1` (`DEEPSEEK_BASE_URL`) | `deepseek-v4-flash` | `DEEPSEEK_MODEL` |
 | `opencode` | `OPENCODE_GO_API_KEY`, `OPENCODE_GO_KEY` | `https://opencode.ai/zen/go/v1` | `mimo-v2.5-pro` | `OPENCODE_GO_MODEL` |
+| `deepinfra` | `DEEPINFRA_KEY` | `https://api.deepinfra.com/v1/openai` (`DEEPINFRA_BASE_URL`) | `deepseek-ai/DeepSeek-V3.1` | `DEEPINFRA_MODEL` |
 | `local` | `LOCAL_LLM_KEY` (optional) | `http://localhost:11434/v1` (`LOCAL_LLM_BASE_URL`) | *(none — must be set)* | `LOCAL_LLM_MODEL` |
 
 Every row is served by one adapter, `_llm_openai_compat()`, because all

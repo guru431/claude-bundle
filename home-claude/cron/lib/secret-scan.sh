@@ -18,9 +18,14 @@
 #                           reads whole blobs out of the object store.
 
 # High-confidence secret/token formats: PEM private keys, GitHub PATs/tokens,
-# AWS access keys, Slack tokens, OpenAI-style keys, CCR keys, JWTs, and
-# Telegram bot tokens. Kept identical in meaning to .githooks/pre-commit.
-SECRET_SCAN_PATTERN='-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{16,}|ccr-[A-Za-z0-9]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|[0-9]{8,10}:[A-Za-z0-9_-]{35}'
+# AWS access keys, Slack tokens, OpenAI-style keys, CCR keys, JWTs, GCP service
+# account keys, and Telegram bot tokens. Kept identical in meaning to
+# .githooks/pre-commit.
+#
+# The GCP entry matches the `"private_key_id": "<40 hex>"` field rather than the
+# key body: a service-account JSON is normally committed whole, and its PEM body
+# is already covered above — but a truncated or reformatted export keeps the id.
+SECRET_SCAN_PATTERN='-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{16,}|ccr-[A-Za-z0-9]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|"private_key_id"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"|[0-9]{8,10}:[A-Za-z0-9_-]{35}'
 
 secret_scan_diff() {
     # Take diff text from stdin when piped, else read the staged diff.

@@ -8,6 +8,7 @@ ENABLE_TELEGRAM_ALERTS below).
 Schedule: Sunday at 02:00.
 """
 
+import difflib
 import os
 import subprocess
 import re
@@ -209,6 +210,182 @@ def check_ambiguous_names(pages: dict[str, list[Path]]) -> list[str]:
     return warnings
 
 
+def strip_frontmatter(text: str) -> str:
+    if not text.startswith("---"):
+        return text
+    end = text.find("\n---", 3)
+    return text[end + 4:] if end > 0 else text
+
+
+def strip_code(text: str) -> str:
+    """Drop fenced blocks and inline code.
+
+    Mandatory for the literal-\\n check: a page that *discusses* `\\r\\n` vs
+    `\\n` carries them legitimately — inside backticks. Without stripping code,
+    such a page shows up as a finding, and false positives are exactly what
+    destroys trust in a linter.
+    """
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    text = re.sub(r"`[^`\n]*`", " ", text)
+    return text
+
+
+# Built from chr() so the escaping level survives every copy of this file.
+BACKSLASH_N = chr(92) + "n"
+
+# Glue threshold: this many literal \n in ONE line before we call it a compiler
+# defect rather than legitimate content.
+#
+# Measured on a real 9969-page vault: "a single \n in a line" produced 37 hits,
+# all 37 false — unfenced code snippets (`f.write(... + "\\n")`), Windows paths
+# (`s:\\...\\network\\`, where `\n` is separator + letter), regex examples and
+# prose *about* escape sequences (`CRLF (\r\n)`). Max per line in that sample: 2.
+#
+# Real glue looks different: the page arrives as ONE long line
+# `# Title\n\n## Section\ntext` — dozens of literals. Hence a density threshold
+# within a line, not the mere presence of one.
+GLUED_LINE_MIN_HITS = 3
+GLUED_LINE_MIN_LEN = 200
+
+
+def check_literal_newlines(pages: dict[str, list[Path]]) -> list[str]:
+    """Check 10: escaped \\n instead of a real line break.
+
+    Symptom of a compiler defect: the page body arrives as a single line
+    `# Title\\n\\n## Section\\ntext` and reads as mush in Obsidian.
+
+    Catches ONLY glue (see GLUED_LINE_MIN_HITS): a lone literal is almost
+    always legitimate.
+    """
+    errors = []
+    for name, paths in pages.items():
+        for path in paths:
+            body = strip_code(strip_frontmatter(
+                path.read_text(encoding="utf-8", errors="replace")))
+            glued = [
+                line for line in body.splitlines()
+                if line.count(BACKSLASH_N) >= GLUED_LINE_MIN_HITS
+                and len(line) >= GLUED_LINE_MIN_LEN
+            ]
+            if glued:
+                n = sum(line.count(BACKSLASH_N) for line in glued)
+                errors.append(
+                    f"ERROR: page glued by literal \\n "
+                    f"({n}x across {len(glued)} lines): "
+                    f"{path.relative_to(WIKI_ROOT)}"
+                )
+    return errors
+
+
+def check_version_collision(pages: dict[str, list[Path]]) -> list[str]:
+    """Check 11: the page contains TWO VERSIONS OF ITSELF.
+
+    The compiler appends a whole page under `## Update (date)` — H1 included.
+    Result: two answers to one question with no indication which is current.
+    That is the point of this check: an agent needs current truth, not two
+    versions of a solution.
+
+    Matches only SIMILAR H1s. Verified on a sample: of 917 pages with several
+    H1s, about half were not glue but a "sections as H1" style
+    (`# Checklist` / `# Deleting a repo`). That is a different disease — it
+    creates no "which version is current" ambiguity, and reporting it with the
+    same message both misstates the problem and drowns the signal in noise.
+    """
+    warnings = []
+    for name, paths in pages.items():
+        for path in paths:
+            body = strip_code(strip_frontmatter(
+                path.read_text(encoding="utf-8", errors="replace")))
+            h1 = [h.lstrip("# ").strip().lower() for h in re.findall(r"^# .+$", body, re.M)]
+            if len(h1) < 2:
+                continue
+
+            # Second, independent glue signal: the appended copy brings its own
+            # sections along ("## Current state" twice), or the `## Update
+            # (date)` header the compiler prefixes it with. H1 similarity alone
+            # is not enough — on the sample it gave ~20% false positives
+            # (numbered sections as H1; headings sharing a single word).
+            sec: dict[tuple[str, str], int] = {}
+            for lvl, title in re.findall(r"^(#{2,}) (.+)$", body, re.M):
+                key = (lvl, title.strip().lower())
+                sec[key] = sec.get(key, 0) + 1
+            appended = any(c > 1 for c in sec.values()) or \
+                re.search(r"^##+ Update \(", body, re.M) is not None
+            if not appended:
+                continue
+
+            pair = None
+            for i in range(len(h1)):
+                for j in range(i + 1, len(h1)):
+                    if difflib.SequenceMatcher(None, h1[i], h1[j]).ratio() >= 0.6:
+                        pair = (h1[i], h1[j])
+                        break
+                if pair:
+                    break
+            if pair:
+                warnings.append(
+                    f"WARN: two versions of the page (H1 '{pair[0][:36]}' ≈ '{pair[1][:36]}'): "
+                    f"{path.relative_to(WIKI_ROOT)}"
+                )
+    return warnings
+
+
+def check_duplicate_sections(pages: dict[str, list[Path]]) -> list[str]:
+    """Check 12: a repeated heading at the same level.
+
+    Two `## Current state` on one page = two answers to one question with no
+    indication which is current. Level+text are compared: `## X` and `### X`
+    are legitimate nesting, not a duplicate.
+    """
+    warnings = []
+    for name, paths in pages.items():
+        for path in paths:
+            body = strip_code(strip_frontmatter(
+                path.read_text(encoding="utf-8", errors="replace")))
+            seen: dict[tuple[str, str], int] = {}
+            for lvl, title in re.findall(r"^(#{2,}) (.+)$", body, re.M):
+                key = (lvl, title.strip())
+                seen[key] = seen.get(key, 0) + 1
+            dups = [f"{lvl} {t}" for (lvl, t), c in seen.items() if c > 1]
+            if dups:
+                shown = ", ".join(dups[:3])
+                more = f" (+{len(dups) - 3})" if len(dups) > 3 else ""
+                warnings.append(
+                    f"WARN: duplicate sections [{shown}{more}]: "
+                    f"{path.relative_to(WIKI_ROOT)}"
+                )
+    return warnings
+
+
+_H1_LIST_ITEM = re.compile(r"^# (?:[-*]\s|\d+[.)]\s)", re.M)
+
+
+def check_h1_spam(pages: dict[str, list[Path]]) -> list[str]:
+    """Check 13: list items written as first-level headings (H1 spam).
+
+    A defect distinct from version glue (check_version_collision): the compiler
+    wrote list items as `# - Item` / `# 1. Item` — up to 28 H1s on one page, of
+    which exactly one is a real heading. Merging does not fix it: this is not
+    two versions of a page but broken markup of one.
+
+    The signal is ONLY an H1 carrying a list marker (`# - `, `# * `, `# 1. `).
+    Low FP: legitimate multi-H1 pages use section headings without markers.
+    Requires >=2 such lines so a stray `# - x` in prose stays quiet.
+    """
+    warnings = []
+    for name, paths in pages.items():
+        for path in paths:
+            body = strip_code(strip_frontmatter(
+                path.read_text(encoding="utf-8", errors="replace")))
+            n = len(_H1_LIST_ITEM.findall(body))
+            if n >= 2:
+                warnings.append(
+                    f"WARN: H1 spam (list written as headings, {n}x `# - `): "
+                    f"{path.relative_to(WIKI_ROOT)}"
+                )
+    return warnings
+
+
 def check_unprocessed_articles() -> list[str]:
     """Check 4: unprocessed articles in kb_news."""
     infos = []
@@ -334,6 +511,10 @@ def main():
         ("Ambiguous names", check_ambiguous_names, pages),
         ("Index out of sync", check_index_sync, pages),
         ("Project collapse", check_project_collapse, None),
+        ("Literal newlines", check_literal_newlines, pages),
+        ("Version collision", check_version_collision, pages),
+        ("Duplicate sections", check_duplicate_sections, pages),
+        ("H1 spam", check_h1_spam, pages),
     ]
 
     for name, func, arg in checks:

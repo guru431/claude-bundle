@@ -3,6 +3,63 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.6.0] - 2026-07-18 — a month of fixes ported back from the private superset
+
+The bundle was extracted from a private meta-repo that keeps running ahead of
+it. The last port was 2026-06-20; since then that repo spent a month on the wiki
+compiler, the nightly push sweep and provider reliability. This release brings
+back the parts that are not specific to one person's setup.
+
+### Added
+
+- **Four new `wiki-lint` checks** for the corruption the wiki compiler itself
+  produces: pages glued by literal `\n`, pages holding two versions of
+  themselves, repeated section headings, and list items written as H1s. Each
+  threshold was tuned against a ~10k-page vault, and the noisier variants were
+  rejected there — a linter that cries wolf gets muted, and a muted linter
+  catches nothing.
+- **`cron/wiki/wiki-conflict-resolve.py`** — the repair pass for the pages the
+  version-collision check finds. An LLM merge (the two versions state different
+  facts, often in different languages, so nothing merges mechanically), gated by
+  a fact-loss guard: lost wikilinks, lost numbers, vanished table rows or a
+  result 3x shorter than the source all refuse the write. Preview by default,
+  `--apply` to write.
+- **`cron/runs.py` — Semantic Artifact SLO.** An append-only ledger of terminal
+  task outcomes, so "exit code 0" stops being mistaken for "produced something
+  useful". `bundle-status.py` shows artifact health as its own section, and
+  `wiki-compile-sessions.py` records a verdict at the end of every run.
+- **`cron/tests/test_push_repo.sh` and `test_guard_protected.sh`** — regression
+  tests for the nightly push sweep, the one script that commits and pushes
+  unattended. Five scenarios, real git repos with local bare origins.
+- **DeepInfra as a second fallback** behind the primary provider. With one
+  fallback, both gateways being down at once blanked a whole night. The order
+  now lives in `utils.py::DEFAULT_CHAIN` as data, not in branching code.
+- **GCP service-account keys** (`"private_key_id": "<40 hex>"`) added to the
+  shared secret-scan pattern used by the pre-commit hook, the pre-push hook and
+  the nightly sweep.
+- **The doc linter now checks more than counts.** `check-doc-counts.py` gained
+  per-task trigger times, disclosure of disabled tasks, and the LLM provider
+  chain + default — the last read from `DEFAULT_CHAIN` in the code rather than
+  from a docstring, since a docstring drifts exactly like the docs it validates.
+
+### Fixed
+
+- **`write_page()` wrote LLM damage straight to disk.** A double-escaped model
+  response arrives as one line of literal `\n` and reads as mush in Obsidian.
+  Page bodies now go through a repair pass (unfold glued lines, drop `<previous
+  text>`-style placeholders, keep one H1, drop identical repeated sections) that
+  skips fenced code and code spans, so prose *about* escape sequences survives.
+- **`guard_secrets()` failed open.** If `lib/secret-scan.sh` was not sourced, the
+  scan was skipped and the sweep committed and pushed anyway — with no secret
+  check at all. It now fails closed: skip the repo and alert.
+- **The secret-scan lib was silently not loaded when the script was sourced.**
+  `SCRIPT_DIR` used `$0`, which is the *caller's* path under `source`. Now
+  `${BASH_SOURCE[0]}`. This is what made the fail-open case reachable from tests.
+- **An already-committed but unpushed commit was skipped** whenever the working
+  tree held nothing but `.env`. The per-repo logic was copy-pasted into two
+  blocks that had drifted; both are now one `push_repo()` function — which is
+  also what makes the new regression tests possible.
+
 ## [0.5.3] - 2026-07-18 — three real bugs out of a seventeen-finding review batch
 
 An automated review batch raised 17 findings. Three survived a read of the

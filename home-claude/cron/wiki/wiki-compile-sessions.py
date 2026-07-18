@@ -43,6 +43,9 @@ from utils import (  # noqa: E402
 )
 from untrusted import fence  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from runs import record_run  # noqa: E402
+
 # Allow nested Claude CLI invocation
 for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
     os.environ.pop(env_key, None)
@@ -529,6 +532,19 @@ def main():
     # left uncompiled) must surface as a non-zero exit for the cron monitor.
     if not hard_failure:
         mark_phase_success("compile")
+
+    # Terminal record for the artifact ledger (cron/runs.py). useful_items =
+    # pages actually changed, so a run that exits 0 having written nothing is
+    # recorded as empty-artifact instead of passing for healthy.
+    # delivery="n/a": this task writes to the vault, it delivers no message.
+    record_run(
+        task="ClaudeWikiCompileSessions",
+        process_rc=1 if hard_failure else 0,
+        useful_items=total_changes,
+        delivery="n/a",
+        note=f"{len(dailies)} daily log(s)",
+    )
+
     if hard_failure:
         sys.exit(1)
 

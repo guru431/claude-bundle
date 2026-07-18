@@ -747,6 +747,20 @@ PROVIDERS: dict[str, dict] = {
         "retry_sleep": 30,
         "offbox": True,
     },
+    "deepinfra": {  # last fallback: DeepInfra, OpenAI-compatible, pay-as-you-go
+        "label": "DeepInfra",
+        "key_env": ["DEEPINFRA_KEY"],
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "base_url_default": "https://api.deepinfra.com/v1/openai",
+        "model_env": "DEEPINFRA_MODEL",
+        "model_default": "deepseek-ai/DeepSeek-V3.1",
+        "max_tokens": 8192,
+        "temperature": 0.3,
+        "max_retries": 3,
+        "backoff_base": 30,
+        "retry_sleep": 15,
+        "offbox": True,
+    },
     "local": {  # local-only: any OpenAI-compatible server on this machine
         "label": "local",
         "key_env": ["LOCAL_LLM_KEY"],
@@ -765,6 +779,12 @@ PROVIDERS: dict[str, dict] = {
     # "claude" has no entry: it shells out to the `claude` CLI (manual/opt-in
     # mode only) and needs no key/url/model here.
 }
+
+# Fallback order used when WIKI_LLM_PROVIDER is left at the default. Data, not
+# code: adding a gateway is a row in PROVIDERS plus a name here. Any OTHER
+# explicit WIKI_LLM_PROVIDER value means "this provider only, no fallback" —
+# an explicit choice must not silently route elsewhere.
+DEFAULT_CHAIN = ["deepseek", "opencode", "deepinfra"]
 
 # Off-box fallback. Set WIKI_OFFBOX_FALLBACK=0 to forbid llm_call from ever
 # reaching a provider outside this machine. Without it, a local run whose
@@ -1025,10 +1045,172 @@ def read_page(path: Path) -> tuple[dict, str]:
     return parse_frontmatter(text)
 
 
+_LITERAL_NL = chr(92) + "n"  # '\' + 'n', built from chr() so the escaping level survives copies
+
+
+def _unescape_blob(body: str) -> str:
+    """Unfold chunks that arrived as one line carrying literal \\n.
+
+    The model sometimes double-escapes newlines in JSON (`\\\\n` instead of
+    `\\n`), and json.loads then legitimately hands back the literal '\\'+'n'.
+    The chunk is written as a single line and reads as mush in Obsidian.
+
+    Works PER LINE, not on the whole body. A "the body as a whole has few
+    newlines" test only caught fully corrupted pages and missed the main case:
+    under blind_update it is the APPENDED fragment that arrives escaped, while
+    the body — old, well-formed part included — has dozens of real newlines.
+
+    Literals inside code do not count: a line discussing `\\r\\n` vs `\\n` is
+    legitimate prose about escapes. Counting is done on the line with code
+    spans removed, replacement on the original; fenced blocks are skipped whole.
+    """
+    out: list[str] = []
+    in_fence = False
+    crlf = chr(92) + "r" + _LITERAL_NL
+    for line in body.split("\n"):
+        s = line.lstrip()
+        if s.startswith("```") or s.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        # >=2 literals outside code in ONE line means folded markdown, not
+        # prose: a mention of `\n` in text occurs one at a time.
+        probe = re.sub(r"`[^`]*`", " ", line)
+        if not in_fence and probe.count(_LITERAL_NL) >= 2:
+            line = line.replace(crlf, "\n").replace(_LITERAL_NL, "\n")
+        out.append(line)
+    return "\n".join(out)
+
+
+# Literal placeholders an LLM leaves instead of real text when "appending" to a
+# page: `<previous text>`, `<unchanged>`, `...(the rest)`, a template history
+# line `- YYYY-MM-DD: ...`. On the assembled page these are pure garbage — the
+# reader sees a placeholder where content was expected. Both English and Russian
+# wordings are matched: the vault language follows the user, not the code.
+_PLACEHOLDER_LINE_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:"
+    r"<\s*(?:previous|existing|prior|предыдущий|прежний|старый)[^>]*>"
+    r"|<\s*(?:unchanged|no\s+changes?|as\s+before|без\s+изменений)\s*>"
+    r"|\.\.\.\s*\(?\s*(?:the\s+rest|остальное|остальной)[^)]*\)?"
+    r"|YYYY-MM-DD\s*:\s*\.\.\."
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+
+def _drop_placeholder_lines(body: str) -> tuple[str, int]:
+    """Drop placeholder lines outside fenced code. Returns (body, how many)."""
+    out: list[str] = []
+    in_fence = False
+    dropped = 0
+    for line in body.split("\n"):
+        s = line.lstrip()
+        if s.startswith("```") or s.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if not in_fence and _PLACEHOLDER_LINE_RE.match(line):
+            dropped += 1
+            continue
+        out.append(line)
+    return "\n".join(out), dropped
+
+
+def _dedup_h1(body: str) -> tuple[str, int]:
+    """Keep one H1. A repeat of the same title is dropped, a foreign one demoted.
+
+    Two H1s on a page = "two versions of itself": it is unclear which describes
+    the current state. A page gets exactly one title.
+    """
+    out: list[str] = []
+    in_fence = False
+    first: str | None = None
+    fixed = 0
+    for line in body.split("\n"):
+        s = line.lstrip()
+        if s.startswith("```") or s.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if not in_fence and re.match(r"^# \S", line):
+            title = line[2:].strip()
+            if first is None:
+                first = title
+                out.append(line)
+                continue
+            fixed += 1
+            if title.casefold() == first.casefold():
+                continue  # exact duplicate title — just remove
+            out.append("## " + title)  # foreign H1 → subsection
+            continue
+        out.append(line)
+    return "\n".join(out), fixed
+
+
+def _split_sections(body: str) -> list[tuple[str | None, list[str]]]:
+    """Split the body on H2/H3 (outside fenced code). First chunk is the preamble."""
+    sections: list[tuple[str | None, list[str]]] = [(None, [])]
+    in_fence = False
+    for line in body.split("\n"):
+        s = line.lstrip()
+        if s.startswith("```") or s.startswith("~~~"):
+            in_fence = not in_fence
+        elif not in_fence and re.match(r"^#{2,3} \S", line):
+            sections.append((line, []))
+            continue
+        sections[-1][1].append(line)
+    return sections
+
+
+def _dedup_sections(body: str) -> tuple[str, int]:
+    """Remove repeated sections with the same heading AND the same content.
+
+    The nightly compiler appends snapshots; replaying one daily (a retry) left
+    two identical `## Current state` blocks on the page. Differing content is
+    left alone — that is history, and the caller separates it.
+    """
+    sections = _split_sections(body)
+    seen: set[tuple[str, str]] = set()
+    out: list[str] = []
+    dropped = 0
+    for heading, lines in sections:
+        if heading is None:
+            out.extend(lines)
+            continue
+        key = (heading.strip().casefold(), "\n".join(lines).strip())
+        if key[1] and key in seen:
+            dropped += 1
+            continue
+        seen.add(key)
+        out.append(heading)
+        out.extend(lines)
+    return "\n".join(out), dropped
+
+
+def sanitize_page_body(body: str, label: str = "") -> str:
+    """Validator run before writing a page: placeholders, H1 dupes, section dupes.
+
+    The page is not rejected wholesale (that would lose all the other content) —
+    defective chunks are cut out and reported on stderr so the fact is visible
+    in the nightly log.
+    """
+    body, ph = _drop_placeholder_lines(body)
+    body, h1 = _dedup_h1(body)
+    body, sec = _dedup_sections(body)
+    if ph or h1 or sec:
+        where = f" [{label}]" if label else ""
+        print(
+            f"  WARN sanitize_page{where}: placeholders={ph}, extra_h1={h1}, dup_sections={sec}",
+            file=sys.stderr,
+        )
+    return re.sub(r"\n{3,}", "\n\n", body)
+
+
 def write_page(path: Path, frontmatter: dict, body: str) -> None:
     """Write a wiki page with frontmatter. Sets `updated` automatically."""
     fm = dict(frontmatter)
     fm["updated"] = datetime.now().strftime("%Y-%m-%d")
+    body = sanitize_page_body(_unescape_blob(body), label=path.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     out = dump_frontmatter(fm) + body.lstrip("\n")
     # Atomic write (temp file + os.replace) so a crash mid-write can't leave a
@@ -1492,17 +1674,18 @@ def llm_call(prompt: str, timeout: int = 600) -> str | None:
     """Universal LLM call.
 
     Provider chain (NO silent fallback to Claude — it consumes the Max plan):
-      - "deepseek" (default): DeepSeek V4-Flash direct → fallback OpenCode Go → None.
-      - "opencode":           OpenCode Go mimo-v2.5-pro → None.
-      - "local":              an OpenAI-compatible server on this machine → None.
+      - "deepseek" (default): DeepSeek V4-Flash → OpenCode Go → DeepInfra → None.
+      - any other registry provider: that provider only → None.
       - "claude":             only when WIKI_LLM_PROVIDER=claude (manual mode).
 
     Cron scripts should NOT automatically fall back to Claude — better to skip
     a run than to burn a 5h subscription window.
 
-    The deepseek → opencode fallback is suppressed when WIKI_OFFBOX_FALLBACK=0,
-    so a local-only run can never ship a transcript off the machine just
-    because the primary provider failed.
+    Two off-box gateways behind the primary, not one: a single fallback leaves
+    the pipeline dark for a whole night whenever both the primary and its one
+    backup are down at the same time, which has happened. Every step here is
+    suppressed when WIKI_OFFBOX_FALLBACK=0, so a local-only run can never ship a
+    transcript off the machine just because the primary provider failed.
     """
     _log_provider_once()
     if LLM_PROVIDER == "mock":
@@ -1511,18 +1694,22 @@ def llm_call(prompt: str, timeout: int = 600) -> str | None:
         return _llm_claude(prompt, timeout)
     if LLM_PROVIDER in PROVIDERS and LLM_PROVIDER != "deepseek":
         return _llm_openai_compat(LLM_PROVIDER, prompt, timeout)
-    out = _llm_openai_compat("deepseek", prompt, timeout)
-    if out is not None:
-        return out
-    if not OFFBOX_FALLBACK:
-        print("  DeepSeek failed → returning None "
-              "(WIKI_OFFBOX_FALLBACK=0 forbids the off-box fallback)", file=sys.stderr)
-        return None
-    print("  DeepSeek failed, falling back to OpenCode Go", file=sys.stderr)
-    out = _llm_openai_compat("opencode", prompt, timeout, fallback_from="deepseek")
-    if out is not None:
-        return out
-    print("  OpenCode Go also failed → returning None (claude fallback disabled)", file=sys.stderr)
+
+    previous: str | None = None
+    for provider in DEFAULT_CHAIN:
+        if previous is not None:
+            if not OFFBOX_FALLBACK:
+                print(f"  {PROVIDERS[previous]['label']} failed → returning None "
+                      "(WIKI_OFFBOX_FALLBACK=0 forbids the off-box fallback)", file=sys.stderr)
+                return None
+            print(f"  {PROVIDERS[previous]['label']} failed, falling back to "
+                  f"{PROVIDERS[provider]['label']}", file=sys.stderr)
+        out = _llm_openai_compat(provider, prompt, timeout, fallback_from=previous)
+        if out is not None:
+            return out
+        previous = provider
+    print(f"  {PROVIDERS[previous]['label']} also failed → returning None "
+          "(claude fallback disabled)", file=sys.stderr)
     return None
 
 

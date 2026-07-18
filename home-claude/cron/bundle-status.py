@@ -28,6 +28,9 @@ from utils import (  # noqa: E402
     DEEPSEEK_API_KEY, OPENCODE_API_KEY,
 )
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from runs import read_runs, latest_by_task  # noqa: E402
+
 
 def ok(msg):   print(f"  [ok] {msg}")
 def na(msg):   print(f"  [--] {msg}")
@@ -107,6 +110,27 @@ def main() -> int:
     rej_dir = BUNDLE_ROOT / "cron" / "logs" / "rejected"
     rej = len(list(rej_dir.glob("*"))) if rej_dir.is_dir() else 0
     (na if rej == 0 else bad)(f"rejected quarantine (cron/logs/rejected): {rej} file(s)")
+
+    # ── artifact health (Semantic Artifact SLO) ──────────────────────────────
+    # Deliberately separate from the pipeline-state block above: that one is
+    # PROCESS health (did it run?), this one is ARTIFACT health (did the run
+    # produce anything of value, and was it delivered?). A task can be green on
+    # the first and empty on the second — that false-green gap is the point.
+    print("\n[artifact health]")
+    runs = read_runs()
+    if not runs:
+        na("no runs.jsonl yet — no task has recorded a terminal verdict "
+           "(cron/runs.py documents how to instrument one)")
+    else:
+        for task, rec in sorted(latest_by_task(runs).items()):
+            verdict = rec.get("verdict", "?")
+            mark = ok if verdict == "green" else bad
+            items = rec.get("useful_items")
+            detail = f"useful={items}" if items is not None else "useful=n/a"
+            size = rec.get("artifact_bytes")
+            if size is not None:
+                detail += f", {size}B"
+            mark(f"{task}: {verdict} ({detail}, last {rec.get('ts', '?')})")
 
     # ── wiki ─────────────────────────────────────────────────────────────────
     print("\n[wiki]")

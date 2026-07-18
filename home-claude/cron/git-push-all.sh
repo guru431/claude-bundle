@@ -13,7 +13,9 @@
 # Shared secret-scan snippet (single source of truth for the token regex,
 # also used by .githooks/pre-commit). Source it relative to THIS script's dir
 # so it works regardless of cwd. Optional: a missing lib only disables the scan.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# BASH_SOURCE (not $0): when the file is sourced from a test, $0 is the test's
+# path, SCRIPT_DIR pointed at cron/tests/ and the lib was silently not loaded.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$SCRIPT_DIR/lib/secret-scan.sh" ]; then
     # shellcheck source=lib/secret-scan.sh
     . "$SCRIPT_DIR/lib/secret-scan.sh"
@@ -92,9 +94,25 @@ $deleted
 guard_secrets() {
     local label="$1"
     local hits
-    # No lib sourced → scan unavailable; don't block the sweep.
-    command -v secret_scan_diff >/dev/null 2>&1 || return 0
-    hits=$(git diff --cached --unified=0 2>/dev/null | secret_scan_diff) && return 0
+    # No lib sourced → scan unavailable. Fail CLOSED: skip the repo and alert.
+    # Otherwise the unattended auto-commit would reach a remote with no secret
+    # check at all — the exact case this guard exists for.
+    if ! command -v secret_scan_diff >/dev/null 2>&1; then
+        echo "[$label] SECRET-SCAN unavailable (lib not loaded) — skipping repo (fail closed)" >> "$LOG_FILE"
+        git reset -q HEAD >> "$LOG_FILE" 2>&1
+        # -f, not -x: on SMB/mapped drives the exec bit is lost and the gate
+        # would silently never fire.
+        if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+            bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: secret-scan lib unavailable for [$label] — repo skipped (not committed, not pushed)." >> "$LOG_FILE" 2>&1
+        fi
+        return 1
+    fi
+    # secret_scan_diff prints offending matches (and returns non-zero) on a hit,
+    # prints nothing (returns 0) when clean. Gate explicitly on non-empty output
+    # instead of the pipeline exit code, so blocking never hinges on exit-code
+    # propagation through the pipe.
+    hits=$(git diff --cached --unified=0 2>/dev/null | secret_scan_diff)
+    [ -z "$hits" ] && return 0
     echo "[$label] SECRET-shaped token blocked from auto-commit:" >> "$LOG_FILE"
     printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
     git reset -q HEAD >> "$LOG_FILE" 2>&1
@@ -102,6 +120,80 @@ guard_secrets() {
         bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret in staged changes for [$label] — skipped (not committed, not pushed). Check by hand." >> "$LOG_FILE" 2>&1
     fi
     return 1
+}
+
+# Unified per-repo run: auto-commit (with the .env exclusion + the protected-
+# deletion guard) + push origin <branch>. Replaces the copy-pasted blocks
+# (main loop / wiki), which had already drifted apart. Updates the global
+# counters pushed/skipped/failed/failed_repos. Does the cd into "$dir" itself.
+# Args: <dir> <label> <commit_msg>
+push_repo() {
+    local dir="$1" label="$2" commit_msg="$3"
+    if ! cd "$dir"; then
+        echo "[$label] ERROR: cannot cd $dir, skipping" >> "$LOG_FILE"
+        skipped=$((skipped + 1)); return
+    fi
+    local branch
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    # "HEAD" = detached HEAD: committing would create orphan commits and the
+    # push would fail every night.
+    if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+        echo "[$label] no branch (detached HEAD?), skipping" >> "$LOG_FILE"
+        skipped=$((skipped + 1)); return
+    fi
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        if ! guard_staged_sensitive "$label"; then
+            failed=$((failed + 1))
+            failed_repos="${failed_repos:+$failed_repos, }$label"
+            return
+        fi
+        if [ "$DRY_RUN" = "1" ]; then
+            # Dry-run must leave the real index byte-identical: preview from the
+            # working tree instead of an add/reset cycle, which would destroy
+            # whatever the user had staged.
+            echo "[$label] [DRY] would auto-commit (working tree):" >> "$LOG_FILE"
+            git status --porcelain >> "$LOG_FILE" 2>&1
+        else
+            # Safety: exclude any path matching .env / .env.* / **/.env* via
+            # pathspec so a file that appears between status and add can never
+            # sneak in. If you actually want this repo to track .env*, gitignore
+            # it explicitly or stage the file by hand once.
+            git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
+            guard_protected_deletions "$label"
+            if ! guard_secrets "$label"; then
+                skipped=$((skipped + 1)); return
+            fi
+            if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
+                echo "[$label] nothing to commit after .env exclusion" >> "$LOG_FILE"
+            else
+                git_commit -m "$commit_msg"
+                echo "[$label] auto-committed changes" >> "$LOG_FILE"
+            fi
+        fi
+    fi
+    # The push check always runs: it catches commits that are already committed
+    # but not pushed. The old copy-pasted blocks skipped those whenever the
+    # working tree held nothing but .env.
+    # Refresh the remote-tracking ref before comparing. Without a fetch, a
+    # force-push on origin leaves refs/remotes/origin/<branch> stale, the hashes
+    # match, and a needed push is silently skipped. Skipped in dry-run to stay
+    # side-effect free; errors (offline/no remote) ignored so the sweep goes on.
+    [ "$DRY_RUN" = "1" ] || git fetch -q origin "$branch" >> "$LOG_FILE" 2>&1 || true
+    local local_hash remote_hash
+    local_hash=$(git rev-parse "$branch" 2>/dev/null)
+    remote_hash=$(git rev-parse "origin/$branch" 2>/dev/null)
+    if [ "$local_hash" = "$remote_hash" ]; then
+        echo "[$label] up to date" >> "$LOG_FILE"
+        skipped=$((skipped + 1)); return
+    fi
+    if git_push origin "$branch"; then
+        echo "[$label] pushed $branch" >> "$LOG_FILE"
+        pushed=$((pushed + 1))
+    else
+        echo "[$label] FAILED to push" >> "$LOG_FILE"
+        failed=$((failed + 1))
+        failed_repos="${failed_repos:+$failed_repos, }$label"
+    fi
 }
 
 # Lib mode: function definitions only (for tests), no main sweep.
@@ -187,126 +279,14 @@ failed_repos=""
 
 for dir in "$REPOS_DIR"/*/; do
     [ -d "$dir/.git" ] || continue
-    repo=$(basename "$dir")
-
-    cd "$dir" || continue
-
-    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-    # "HEAD" = detached HEAD: committing would create orphan commits and the
-    # push would fail every night.
-    if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
-        echo "[$repo] no branch (detached HEAD?), skipping" >> "$LOG_FILE"
-        skipped=$((skipped + 1))
-        continue
-    fi
-
-    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-        if ! guard_staged_sensitive "$repo"; then
-            failed=$((failed + 1))
-            failed_repos="${failed_repos:+$failed_repos, }$repo"
-            continue
-        fi
-        if [ "$DRY_RUN" = "1" ]; then
-            # Dry-run must leave the real index byte-identical: preview from the
-            # working tree instead of an add/reset cycle, which would destroy
-            # whatever the user had staged.
-            echo "[$repo] [DRY] would auto-commit (working tree):" >> "$LOG_FILE"
-            git status --porcelain >> "$LOG_FILE" 2>&1
-        else
-            # Safety: exclude any path matching .env / .env.* / **/.env*  via pathspec
-            # so a file that appears between status and add can never sneak in.
-            # If you actually want this repo to track .env*, gitignore it explicitly
-            # or stage the file by hand once.
-            git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
-            guard_protected_deletions "$repo"
-            if ! guard_secrets "$repo"; then
-                skipped=$((skipped + 1))
-                continue
-            fi
-            if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
-                echo "[$repo] nothing to commit after .env exclusion" >> "$LOG_FILE"
-                skipped=$((skipped + 1))
-                continue
-            fi
-            git_commit -m "Auto-commit: $(date +%Y-%m-%d)"
-            echo "[$repo] auto-committed changes" >> "$LOG_FILE"
-        fi
-    fi
-
-    # Refresh the remote-tracking ref before comparing. Without a fetch, a
-    # force-push on origin leaves refs/remotes/origin/<branch> stale, the hashes
-    # match, and a needed push is silently skipped. Skipped in dry-run to stay
-    # side-effect free; errors (offline/no remote) ignored so the sweep goes on.
-    [ "$DRY_RUN" = "1" ] || git fetch -q origin "$branch" >> "$LOG_FILE" 2>&1 || true
-    local_hash=$(git rev-parse "$branch" 2>/dev/null)
-    remote_hash=$(git rev-parse "origin/$branch" 2>/dev/null)
-
-    if [ "$local_hash" = "$remote_hash" ]; then
-        echo "[$repo] up to date" >> "$LOG_FILE"
-        skipped=$((skipped + 1))
-        continue
-    fi
-
-    if git_push origin "$branch"; then
-        echo "[$repo] pushed $branch" >> "$LOG_FILE"
-        pushed=$((pushed + 1))
-    else
-        echo "[$repo] FAILED to push" >> "$LOG_FILE"
-        failed=$((failed + 1))
-        failed_repos="${failed_repos:+$failed_repos, }$repo"
-    fi
+    push_repo "$dir" "$(basename "$dir")" "Auto-commit: $(date +%Y-%m-%d)"
 done
 
 # Special-case: wiki/ is a nested git repo inside the bundle (e.g. Obsidian
 # Git plugin requires .git at the vault root). The plugin handles commits
 # during the day; this block is a fallback when Obsidian is closed.
 WIKI_DIR="$BUNDLE_ROOT/wiki"
-if [ -d "$WIKI_DIR/.git" ]; then
-    if cd "$WIKI_DIR"; then
-        branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-        if [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
-            if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-                if ! guard_staged_sensitive "wiki"; then
-                    failed=$((failed + 1))
-                    failed_repos="${failed_repos:+$failed_repos, }wiki"
-                elif [ "$DRY_RUN" = "1" ]; then
-                    # See the main loop: dry-run never touches the real index.
-                    echo "[wiki] [DRY] would auto-commit (working tree):" >> "$LOG_FILE"
-                    git status --porcelain >> "$LOG_FILE" 2>&1
-                else
-                    git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
-                    guard_protected_deletions "wiki"
-                    if ! guard_secrets "wiki"; then
-                        skipped=$((skipped + 1))
-                    elif [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
-                        echo "[wiki] nothing to commit after .env exclusion" >> "$LOG_FILE"
-                        skipped=$((skipped + 1))
-                    else
-                        git_commit -m "wiki: auto-commit $(date +%Y-%m-%d)"
-                        echo "[wiki] auto-committed changes" >> "$LOG_FILE"
-                    fi
-                fi
-            fi
-            # Refresh the remote ref before comparing (see the main loop above).
-            [ "$DRY_RUN" = "1" ] || git fetch -q origin "$branch" >> "$LOG_FILE" 2>&1 || true
-            local_hash=$(git rev-parse "$branch" 2>/dev/null)
-            remote_hash=$(git rev-parse "origin/$branch" 2>/dev/null)
-            if [ "$local_hash" = "$remote_hash" ]; then
-                echo "[wiki] up to date" >> "$LOG_FILE"
-                skipped=$((skipped + 1))
-            elif git_push origin "$branch"; then
-                echo "[wiki] pushed $branch" >> "$LOG_FILE"
-                pushed=$((pushed + 1))
-            else
-                echo "[wiki] FAILED to push" >> "$LOG_FILE"
-                failed=$((failed + 1))
-                failed_repos="${failed_repos:+$failed_repos, }wiki"
-            fi
-        fi
-    else
-        echo "[wiki] ERROR: cannot cd to $WIKI_DIR, skipping" >> "$LOG_FILE"
-    fi
-fi
+[ -d "$WIKI_DIR/.git" ] && push_repo "$WIKI_DIR" "wiki" "wiki: auto-commit $(date +%Y-%m-%d)"
 
 echo "=== Done: pushed=$pushed skipped=$skipped failed=$failed ===" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE"

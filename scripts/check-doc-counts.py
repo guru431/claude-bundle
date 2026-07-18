@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
-"""Guard against doc/registry scheduled-task-count drift.
+"""Guard against doc/registry drift.
 
-The task count is hand-copied into several docs (README, INSTALL,
-AGENT-INSTRUCTIONS, docs/cron-architecture). Historically it drifted every time
-a task was added or disabled. This script derives the authoritative numbers from
-cron/registry.yaml and fails if any *live* doc still claims a stale number.
+Facts about the automation are hand-copied into several docs (README, INSTALL,
+AGENT-INSTRUCTIONS, docs/cron-architecture). Historically they drifted every
+time a task was added, disabled or rescheduled. This script derives the
+authoritative values from cron/registry.yaml and cron/hooks/utils.py and fails
+if any *live* doc still claims a stale one.
 
-Runs in the ubuntu CI job and from scripts/self-test.ps1. No third-party deps
-required: it uses PyYAML when present, else a small line state machine.
+Checks:
+  1. task count / disabled count      (registry.yaml)
+  2. task names in the schedule table (registry.yaml)
+  3. per-task trigger times           (registry.yaml)
+  4. disabled tasks disclosed as off  (registry.yaml)
+  5. LLM provider chain + default     (utils.py — the code, not its docstring)
 
-Exit 0 = docs agree with the registry; exit 1 = a mismatch (printed as
+Deterministic, no LLM and no third-party deps: PyYAML when present, else a
+small line state machine. The name is historical — it started as a count check.
+
+Runs in the ubuntu CI job and from scripts/self-test.ps1.
+
+Exit 0 = docs agree with the source of truth; exit 1 = a mismatch (printed as
 file:line with the offending phrase).
 """
 from __future__ import annotations
@@ -71,6 +81,35 @@ def registry_counts() -> tuple[int, int, list[str]]:
         return total, len(disabled), disabled
 
 
+def registry_tasks() -> list[dict]:
+    """Every task as a dict with at least name/trigger/enabled.
+
+    Same dual loader as registry_counts(): PyYAML when available, else a line
+    state machine, so CI without third-party deps still runs the checks.
+    """
+    text = REGISTRY.read_text(encoding="utf-8")
+    try:
+        import yaml
+        return list(yaml.safe_load(text)["tasks"])
+    except Exception:
+        tasks: list[dict] = []
+        for raw in text.splitlines():
+            m = re.match(r"^\s*-\s+name:\s*(.+?)\s*$", raw)
+            if m:
+                tasks.append({"name": m.group(1).strip().strip("'\""),
+                              "trigger": "", "enabled": True})
+                continue
+            if not tasks:
+                continue
+            m = re.match(r"^\s*trigger:\s*(.+?)\s*$", raw)
+            if m:
+                tasks[-1]["trigger"] = m.group(1).strip().strip("'\"")
+                continue
+            if re.match(r"^\s*enabled:\s*false\s*$", raw):
+                tasks[-1]["enabled"] = False
+        return tasks
+
+
 def registry_task_names() -> set[str]:
     """All task names from the registry (same YAML/line loader as counts)."""
     text = REGISTRY.read_text(encoding="utf-8")
@@ -110,6 +149,138 @@ def arch_table_task_names(text: str) -> set[str]:
 
 def _line(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
+
+
+# A line that talks about the past ("was moved to", "before 0.4.0") states a
+# historical fact, not a current claim — comparing it to today's registry
+# manufactures findings. Same idea as excluding CHANGELOG.md from DOCS.
+HISTORY_RE = re.compile(r"(?i)\b(was|were|used to|previously|until|before|since)\b")
+# Wording that already tells the reader a task does not run on its own. A bare
+# "off" counts: the checks below only read TABLE ROWS, where the docs state the
+# default in a column ("off", "off (opt-in)") rather than in a full sentence.
+DISCLOSED_OFF_RE = re.compile(r"(?i)\boff\b|disabled|opt-in|not enabled")
+
+
+def check_triggers(problems: list[str], tasks: list[dict]) -> None:
+    """A time claimed next to a task name must match the registry trigger.
+
+    Matching is by task NAME plus a HH:MM on the same line, in either order:
+    the schedule lives in `| task | Daily 02:30 |` tables and in inline prose,
+    and a name-then-time regex would silently skip half of them. Tasks with a
+    timeless trigger (AtStartup/AtLogOn) are not compared.
+    """
+    by_time = {}
+    for t in tasks:
+        m = re.search(r"\d{2}:\d{2}", str(t.get("trigger", "")))
+        if m:
+            by_time[t["name"]] = (m.group(0), t["trigger"])
+    for rel in DOCS:
+        p = ROOT / rel
+        if not p.is_file():
+            continue
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            if HISTORY_RE.search(line):
+                continue
+            times = re.findall(r"\b\d{2}:\d{2}\b", line)
+            if not times:
+                continue
+            for name, (reg_time, trigger) in by_time.items():
+                if not re.search(rf"\b{re.escape(name)}\b", line):
+                    continue
+                if reg_time not in times:
+                    problems.append(f"{rel}:{i}: `{name}` is shown at "
+                                    f"{', '.join(times)}, registry trigger is "
+                                    f"'{trigger}'")
+
+
+def check_disabled_disclosed(problems: list[str], tasks: list[dict]) -> None:
+    """A task that ships disabled must be documented as such where it is listed.
+
+    Otherwise the docs promise a nightly job that never fires — the failure mode
+    is silent, because nothing errors: the task simply never runs.
+    """
+    off = [t["name"] for t in tasks if t.get("enabled") is False]
+    if not off:
+        return
+    arch = ROOT / "docs" / "cron-architecture.md"
+    if not arch.is_file():
+        return
+    for i, line in enumerate(arch.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.lstrip().startswith("|") or HISTORY_RE.search(line):
+            continue
+        for name in off:
+            if re.search(rf"`{re.escape(name)}`", line) and not DISCLOSED_OFF_RE.search(line):
+                problems.append(f"docs/cron-architecture.md:{i}: `{name}` is listed "
+                                f"as scheduled, but registry.yaml has enabled: false "
+                                f"(say 'off by default')")
+
+
+def check_provider_chain(problems: list[str]) -> None:
+    """The provider chain in the docs against the actual code in utils.py.
+
+    The chain is read from DEFAULT_CHAIN and the WIKI_LLM_PROVIDER default —
+    the code — not from utils.py's own docstring: a docstring is prose and can
+    drift exactly like the docs it would be validating.
+    """
+    utils = ROOT / "home-claude" / "cron" / "hooks" / "utils.py"
+    if not utils.is_file():
+        problems.append("home-claude/cron/hooks/utils.py missing — provider chain unchecked")
+        return
+    src = utils.read_text(encoding="utf-8")
+
+    m = re.search(r"^DEFAULT_CHAIN\s*=\s*\[([^\]]*)\]", src, re.M)
+    if not m:
+        problems.append("utils.py: DEFAULT_CHAIN not found (did llm_call change "
+                        "shape?) — the provider-chain check is blind")
+        return
+    code_chain = re.findall(r'"(\w+)"', m.group(1))
+
+    m = re.search(r'LLM_PROVIDER\s*=\s*os\.environ\.get\(\s*"WIKI_LLM_PROVIDER"\s*,\s*"(\w+)"', src)
+    code_default = m.group(1) if m else None
+
+    # Provider names as they are spelled in prose. A bare arrow means nothing on
+    # its own (docs draw data flow with arrows too), so a line must also talk
+    # about a fallback/chain before it counts as a claim about ordering.
+    aliases = [("deepseek", r"DeepSeek"), ("opencode", r"OpenCode\s*Go|\bOCG\b"),
+               ("deepinfra", r"DeepInfra"), ("local", r"\blocal\b")]
+    chain_ctx = re.compile(r"(?i)fallback|chain")
+    for rel in DOCS + ["docs/llm-routing.md"]:
+        p = ROOT / rel
+        if not p.is_file():
+            continue
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            if HISTORY_RE.search(line) or "→" not in line or not chain_ctx.search(line):
+                continue
+            hits = []
+            for prov, rx in aliases:
+                mm = re.search(rx, line)
+                if mm:
+                    hits.append((mm.start(), prov))
+            if len(hits) < 2:
+                continue
+            doc_chain = [prov for _, prov in sorted(hits)]
+            # Compare only against the providers this line actually mentions —
+            # a doc may legitimately describe a two-step excerpt of the chain.
+            expected = [prov for prov in code_chain if prov in doc_chain]
+            if doc_chain != expected:
+                problems.append(f"{rel}:{i}: chain documented as "
+                                f"{' → '.join(doc_chain)}, utils.py::DEFAULT_CHAIN "
+                                f"is {' → '.join(code_chain)}")
+
+    if code_default:
+        for rel in DOCS + ["docs/llm-routing.md"]:
+            p = ROOT / rel
+            if not p.is_file():
+                continue
+            text = p.read_text(encoding="utf-8")
+            # "default" must be adjacent to THIS occurrence: one line can hold
+            # both a default and a manual override, and both are correct.
+            for mm in re.finditer(r"(?i)default\s*(?:is\s*)?[`'\"]?"
+                                  r"(?:WIKI_LLM_PROVIDER=)?(\w+)[`'\"]?", text):
+                val = mm.group(1).lower()
+                if val in {c.lower() for c in code_chain} and val != code_default:
+                    problems.append(f"{rel}:{_line(text, mm.start())}: default provider "
+                                    f"documented as '{val}', utils.py has '{code_default}'")
 
 
 def check() -> int:
@@ -156,8 +327,13 @@ def check() -> int:
             problems.append(f"docs/cron-architecture.md: registry task `{n}` is "
                             f"missing from the task table")
 
+    tasks = registry_tasks()
+    check_triggers(problems, tasks)
+    check_disabled_disclosed(problems, tasks)
+    check_provider_chain(problems)
+
     if problems:
-        print("DOC-COUNT DRIFT — update the docs (or the registry):")
+        print("DOC DRIFT — update the docs (or the registry / utils.py):")
         for pr in problems:
             print("  " + pr)
         return 1

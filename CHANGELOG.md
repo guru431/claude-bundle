@@ -3,6 +3,40 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.5.3] - 2026-07-18 — three real bugs out of a seventeen-finding review batch
+
+An automated review batch raised 17 findings. Three survived a read of the
+source; the other fourteen are recorded in the archive with the reason each was
+rejected, so the next automated pass doesn't re-raise them. Two of the three are
+silent-data-loss paths, which is why they're worth a release.
+
+### Fixed
+
+- **`state_get()` could wipe state that `state_add()` had just recorded.** It
+  calls `load_state()` without holding the state lock, and `load_state()`
+  persists a `log.md` migration when `.processed.json` is absent. That unlocked
+  write could land on top of a locked `state_add()` that ran in between,
+  dropping its items — dedup then re-feeds an already-processed backlog to the
+  LLM. `load_state()` grew a `persist` flag; the read-only accessor passes
+  `persist=False`.
+- **`wiki-compile-sessions.py` could erase facts when a project's data was split
+  into parts.** Each part merges its output into `existing_pages` so the next
+  part sees it, but the merge keyed by the *raw* LLM path while
+  `load_existing_pages()` keys by the on-disk stem. `normalize_wiki_path()`
+  rewrites filenames (`projects/proj-topic.md` → `projects/proj/topic.md`), so
+  for those the keys never matched: the later part saw the pre-run body and
+  rewrote the page, discarding what the earlier part had written. The merge now
+  keys by the normalized stem.
+- **`wiki-compile-kb.py` duplicated frontmatter on CRLF responses.** The strip
+  guard matched `---\n` literally, so an LLM answer carrying `\r\n` skipped it
+  and the frontmatter was written into the page body. Both the guard and the
+  regex are now `\r?\n`.
+
+### Repo hygiene
+
+- `FINDINGS.md` / `IDEAS.md` and their archives are now gitignored — they're
+  maintainer-side backlog, not part of the shipped bundle.
+
 ## [0.5.2] - 2026-07-17 — the syncer's turn to stop hanging on WMI
 
 0.5.1 fixed a WMI hang in `install.ps1` and recorded the identical hang in the

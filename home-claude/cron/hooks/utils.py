@@ -185,13 +185,17 @@ STATE_PATH = WIKI_ROOT / ".processed.json"
 LOG_MD = WIKI_ROOT / "log.md"
 
 
-def load_state() -> dict:
+def load_state(persist: bool = True) -> dict:
     """Load the processed-state JSON.
 
     If the state file is absent but a legacy log.md exists, build the state
     from it. That migration is persisted on a normal run, but NOT during a dry
     run (--dry-run / --no-llm promise "no state changes") — there it is
     returned in memory only, so dedup is still accurate without writing a file.
+
+    persist=False also suppresses that write. Callers that do NOT hold the state
+    lock must pass it: an unlocked save_state() here can land on top of a locked
+    state_add() that ran in between and wipe the items it just recorded.
     """
     if STATE_PATH.exists():
         try:
@@ -221,7 +225,7 @@ def load_state() -> dict:
     migrated = _migrated_state_from_log()
     if migrated is None:
         return {}
-    if not is_dry_run():
+    if persist and not is_dry_run():
         save_state(migrated)
     return migrated
 
@@ -280,8 +284,12 @@ def mark_phase_success(phase: str) -> None:
 
 
 def state_get(section: str, key: str) -> set[str]:
-    """Return the recorded items for state[section][key] as a set."""
-    return set(load_state().get(section, {}).get(key, []))
+    """Return the recorded items for state[section][key] as a set.
+
+    Read-only: this runs without the state lock, so it must not let load_state
+    persist a log.md migration (that write would race state_add).
+    """
+    return set(load_state(persist=False).get(section, {}).get(key, []))
 
 
 def _acquire_state_lock(timeout: float = 60.0) -> Path | None:

@@ -271,7 +271,14 @@ JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
         # page touched twice is extended rather than rewritten from scratch.
         for chg in result:
             if isinstance(chg, dict) and chg.get("path") and chg.get("content"):
-                existing_pages[Path(chg["path"]).stem] = chg["content"]
+                # Key by the NORMALIZED stem: normalize_wiki_path can rewrite the
+                # filename (projects/proj-topic.md → projects/proj/topic.md), and
+                # load_existing_pages keys by the on-disk stem. Keying by the raw
+                # path there would miss the merge, so the next part would rewrite
+                # the page from its pre-run body — the exact loss this guards.
+                norm = normalize_wiki_path(chg["path"])
+                if norm:
+                    existing_pages[Path(norm).stem] = chg["content"]
         if part_idx < len(parts) - 1:
             time.sleep(5)
 

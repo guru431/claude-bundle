@@ -177,8 +177,10 @@ def apply_changes(changes: list[dict], existing_pages: dict[str, str],
 
         full_path = WIKI_ROOT / rel_path
 
-        if content.lstrip().startswith("---\n"):
-            m = re.match(r"^\s*---\n.*?\n---\n", content, re.DOTALL)
+        # CRLF-tolerant: an LLM answer carrying \r\n would otherwise skip the
+        # strip and leave its frontmatter duplicated inside the page body.
+        if re.match(r"\s*---\r?\n", content):
+            m = re.match(r"^\s*---\r?\n.*?\n---\r?\n", content, re.DOTALL)
             if m:
                 content = content[m.end():]
 

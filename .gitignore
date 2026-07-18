@@ -43,3 +43,9 @@ __pycache__/
 .processed.json.lock
 home-claude/wiki/log.md
 home-claude/cron/logs/
+
+# Agent-side backlog files (private to maintainer, never published)
+FINDINGS.md
+FINDINGS-archive.md
+IDEAS.md
+IDEAS-archive.md

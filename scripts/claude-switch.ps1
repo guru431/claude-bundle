@@ -28,8 +28,13 @@
 #   .\claude-switch.ps1 ccr glm-5.2          # CCR + specific model
 #   .\claude-switch.ps1 status               # show current mode without changing
 #
-# Optional parameter:
+# Optional parameters:
 #   -ProjectPath <path>   # path to the project (default: this .claude/ or cwd/.claude)
+#   -AllowInsecureHttp    # permit plaintext http:// to a NON-loopback ollama/ccr
+#                         # host. Off by default: loopback uses http://, any remote
+#                         # host uses https:// unless this switch is given (loud warn).
+#                         # CCR_HOST / OLLAMA_HOST accept host:port, [ipv6]:port, or
+#                         # a bare IPv6 literal; port must be 1..65535.
 #
 # Config (set in process/user env or in the .env next to this script):
 #   DEEPSEEK_KEY           — DeepSeek direct (PAYG, https://platform.deepseek.com)
@@ -51,7 +56,11 @@ param(
     [Parameter(Position=1)]
     [string]$Model = $null,
 
-    [string]$ProjectPath = $null
+    [string]$ProjectPath = $null,
+
+    # Allow plaintext http:// to a NON-loopback backend. Off by default: a remote
+    # host:port would otherwise send the Bearer key, prompts and code in the clear.
+    [switch]$AllowInsecureHttp
 )
 
 $ErrorActionPreference = "Stop"
@@ -82,17 +91,81 @@ function Get-EnvVar($name) {
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
 function Split-HostPort([string]$value, [string]$varName, [int]$defaultPort) {
-    # Split on the LAST colon so IPv6 hosts (which contain colons) keep theirs.
-    $idx = $value.LastIndexOf(":")
-    if ($idx -lt 0) { return @($value, $defaultPort) }
-    $h = $value.Substring(0, $idx)
-    $p = $value.Substring($idx + 1)
+    # Bracket-aware host:port parser. Handles:
+    #   [::1]:3456 / [2001:db8::1]:8080  -> host without brackets, explicit port
+    #   [::1]                            -> bracketed IPv6, default port
+    #   ::1 / 2001:db8::1                -> bare IPv6 (>=2 colons, no bracket)  -> default port
+    #   127.0.0.1:3456 / host:3456       -> IPv4/hostname + port
+    #   127.0.0.1 / host                 -> IPv4/hostname, default port
+    $value = $value.Trim()
+    $h = $null
+    $p = $null
+
+    if ($value.StartsWith("[")) {
+        $close = $value.IndexOf("]")
+        if ($close -lt 0) {
+            Write-Host "ERROR: $varName has '[' without ']' (got '$value')." -ForegroundColor Red
+            exit 2
+        }
+        $h = $value.Substring(1, $close - 1)
+        $rest = $value.Substring($close + 1)
+        if ($rest.StartsWith(":")) { $p = $rest.Substring(1) }
+        elseif ($rest -ne "")      { Write-Host "ERROR: $varName malformed after ']' (got '$value')." -ForegroundColor Red; exit 2 }
+    }
+    elseif (($value.ToCharArray() | Where-Object { $_ -eq ':' } | Measure-Object).Count -ge 2) {
+        # Two or more colons and no brackets => bare IPv6 literal, no port given.
+        $h = $value
+    }
+    else {
+        $idx = $value.LastIndexOf(":")
+        if ($idx -lt 0) { $h = $value }
+        else { $h = $value.Substring(0, $idx); $p = $value.Substring($idx + 1) }
+    }
+
+    if ([string]::IsNullOrEmpty($h)) {
+        Write-Host "ERROR: $varName has empty host (got '$value')." -ForegroundColor Red
+        exit 2
+    }
+    if ($null -eq $p -or $p -eq "") { return @($h, $defaultPort) }
+
     $port = 0
-    if (-not [int]::TryParse($p, [ref]$port)) {
-        Write-Host "ERROR: $varName must be host:port (got '$value')." -ForegroundColor Red
+    if (-not [int]::TryParse($p, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+        Write-Host "ERROR: $varName port must be 1..65535 (got '$value')." -ForegroundColor Red
         exit 2
     }
     return @($h, $port)
+}
+
+function Test-IsLoopbackHost([string]$h) {
+    # Recognise loopback so plaintext http:// is only ever used locally.
+    if ([string]::IsNullOrWhiteSpace($h)) { return $false }
+    $hl = $h.Trim().Trim('[',']').ToLower()
+    if ($hl -eq "localhost" -or $hl -eq "::1") { return $true }
+    $ip = $null
+    if ([System.Net.IPAddress]::TryParse($hl, [ref]$ip)) {
+        return [System.Net.IPAddress]::IsLoopback($ip)
+    }
+    return $false
+}
+
+function New-BackendUrl([string]$h, [int]$port, [string]$varName) {
+    # Build the base URL, enforcing transport policy:
+    #   loopback host        -> http:// is fine (never leaves the machine)
+    #   non-loopback + https  (default for remote)
+    #   non-loopback + http   ONLY with -AllowInsecureHttp (loud warning)
+    # IPv6 literals are re-bracketed for the URL authority.
+    $isLoopback = Test-IsLoopbackHost $h
+    $authorityHost = $h
+    if ($h.Contains(":") -and -not $h.StartsWith("[")) { $authorityHost = "[$h]" }  # bare IPv6 -> bracket
+
+    if ($isLoopback) {
+        return "http://${authorityHost}:${port}"
+    }
+    if ($AllowInsecureHttp) {
+        Write-Host "WARN: $varName is remote and -AllowInsecureHttp is set — key/prompts/code will go in PLAINTEXT to $authorityHost." -ForegroundColor Red
+        return "http://${authorityHost}:${port}"
+    }
+    return "https://${authorityHost}:${port}"
 }
 
 $ccrHostPort = Get-EnvVar "CCR_HOST"
@@ -175,6 +248,12 @@ if (-not $ollamaHostPort) { $ollamaHostPort = "127.0.0.1:11434" }
 $ollamaHost, $ollamaPort = Split-HostPort $ollamaHostPort "OLLAMA_HOST" 11434
 $OLLAMA_MODELS = @("gemma4:12b", "qwen3.5:9b", "qwen3.6:35b-a3b-q4_K_M", "gpt-oss:20b")
 
+# Request timeout written into every backend env block. Default 3000000 ms (50 min)
+# suits slow self-hosted / proxied models; override via API_TIMEOUT_MS env if you
+# want a tighter ceiling. Kept high by default so long generations don't get cut off.
+$apiTimeoutMs = Get-EnvVar "API_TIMEOUT_MS"
+if ([string]::IsNullOrWhiteSpace($apiTimeoutMs)) { $apiTimeoutMs = "3000000" }
+
 # ─────────────────────────────────────────────────────────────────────────────
 # JSON helpers (PS 5.1 ConvertTo-Json mis-indents — roll our own)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,6 +262,16 @@ function Read-Settings {
     $raw = Get-Content $settingsPath -Raw -Encoding UTF8
     if ([string]::IsNullOrWhiteSpace($raw)) { return [pscustomobject]@{} }
     return $raw | ConvertFrom-Json
+}
+
+function Format-JsonString([string]$s) {
+    # JSON string escaping used for BOTH values and property NAMES (an unescaped
+    # key like `bad"key` would otherwise produce invalid settings.local.json).
+    $s = $s.Replace('\','\\').Replace('"','\"').Replace("`b",'\b').Replace("`f",'\f').Replace("`n",'\n').Replace("`r",'\r').Replace("`t",'\t')
+    # Escape any remaining control chars U+0000..U+001F as \uXXXX per the JSON
+    # spec. Runs AFTER Replace('\') so the new \u sequences are not double-escaped.
+    $s = [regex]::Replace($s, '[\x00-\x1f]', { param($m) '\u{0:x4}' -f [int][char]$m.Value[0] })
+    return '"' + $s + '"'
 }
 
 function Format-JsonValue($obj, [int]$depth) {
@@ -195,13 +284,7 @@ function Format-JsonValue($obj, [int]$depth) {
         return $obj.ToString([System.Globalization.CultureInfo]::InvariantCulture)
     }
     if ($obj -is [string]) {
-        $s = $obj.Replace('\','\\').Replace('"','\"').Replace("`b",'\b').Replace("`f",'\f').Replace("`n",'\n').Replace("`r",'\r').Replace("`t",'\t')
-        # Escape any remaining control chars U+0000..U+001F as \uXXXX per the JSON
-        # spec — without this a stray control byte (e.g. in a key or .env value)
-        # yields an invalid settings.local.json. Runs AFTER Replace('\') so the new
-        # \u sequences are not double-escaped.
-        $s = [regex]::Replace($s, '[\x00-\x1f]', { param($m) '\u{0:x4}' -f [int][char]$m.Value[0] })
-        return '"' + $s + '"'
+        return Format-JsonString $obj
     }
     if ($obj -is [array] -or $obj -is [System.Collections.IList]) {
         if ($obj.Count -eq 0) { return "[]" }
@@ -213,7 +296,7 @@ function Format-JsonValue($obj, [int]$depth) {
         if ($keys.Count -eq 0) { return "{}" }
         $parts = foreach ($k in $keys) {
             $v = Format-JsonValue $obj[$k] ($depth + 1)
-            $childIndent + '"' + $k + '": ' + $v
+            $childIndent + (Format-JsonString ([string]$k)) + ': ' + $v
         }
         return "{`n" + ($parts -join ",`n") + "`n" + $indent + "}"
     }
@@ -222,16 +305,30 @@ function Format-JsonValue($obj, [int]$depth) {
         if ($props.Count -eq 0) { return "{}" }
         $parts = foreach ($p in $props) {
             $v = Format-JsonValue $p.Value ($depth + 1)
-            $childIndent + '"' + $p.Name + '": ' + $v
+            $childIndent + (Format-JsonString ([string]$p.Name)) + ': ' + $v
         }
         return "{`n" + ($parts -join ",`n") + "`n" + $indent + "}"
     }
-    return '"' + $obj.ToString().Replace('\','\\').Replace('"','\"') + '"'
+    return Format-JsonString ($obj.ToString())
 }
 
 function Save-Settings($obj) {
     $json = Format-JsonValue $obj 0
-    [System.IO.File]::WriteAllText($settingsPath, $json, [System.Text.UTF8Encoding]::new($false))
+    $enc  = [System.Text.UTF8Encoding]::new($false)
+    # Atomic replace: write a temp file, back up the current file, then move temp
+    # into place. A crash mid-write can't leave a half-written settings.local.json.
+    $tmp = $settingsPath + ".tmp"
+    [System.IO.File]::WriteAllText($tmp, $json, $enc)
+    if (Test-Path $settingsPath) {
+        Copy-Item -LiteralPath $settingsPath -Destination ($settingsPath + ".bak") -Force
+    }
+    # Move-Item -Force replaces the destination; on failure the temp is cleaned up.
+    try {
+        Move-Item -LiteralPath $tmp -Destination $settingsPath -Force
+    } catch {
+        if (Test-Path $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+        throw
+    }
     Write-Host "Saved:  $settingsPath" -ForegroundColor DarkGray
 }
 
@@ -465,9 +562,9 @@ function Set-Minimax($obj, [string]$modelName) {
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
         DISABLE_TELEMETRY                        = "true"
         DISABLE_COST_WARNINGS                    = "true"
-        API_TIMEOUT_MS                           = "3000000"
+        API_TIMEOUT_MS                           = $apiTimeoutMs
     }
-    Write-Host "Mode: MiniMax-direct → $modelName (api.minimax.io/anthropic, key=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
+    Write-Host "Mode: MiniMax-direct → $modelName (api.minimax.io/anthropic, key loaded)" -ForegroundColor Green
     return Set-Env $obj $envObj
 }
 
@@ -488,9 +585,9 @@ function Set-OpencodeDirect($obj, [string]$modelName) {
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
         DISABLE_TELEMETRY                        = "true"
         DISABLE_COST_WARNINGS                    = "true"
-        API_TIMEOUT_MS                           = "3000000"
+        API_TIMEOUT_MS                           = $apiTimeoutMs
     }
-    Write-Host "Mode: OpenCode-direct → $modelName (opencode.ai/zen/go/v1, key=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
+    Write-Host "Mode: OpenCode-direct → $modelName (opencode.ai/zen/go/v1, key loaded)" -ForegroundColor Green
     return Set-Env $obj $envObj
 }
 
@@ -514,9 +611,9 @@ function Set-DeepseekDirect($obj, [string]$modelName) {
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
         DISABLE_TELEMETRY                        = "true"
         DISABLE_COST_WARNINGS                    = "true"
-        API_TIMEOUT_MS                           = "3000000"
+        API_TIMEOUT_MS                           = $apiTimeoutMs
     }
-    Write-Host "Mode: DeepSeek-direct → $modelName (api.deepseek.com/anthropic, key=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
+    Write-Host "Mode: DeepSeek-direct → $modelName (api.deepseek.com/anthropic, key loaded)" -ForegroundColor Green
     return Set-Env $obj $envObj
 }
 
@@ -524,7 +621,7 @@ function Set-Ollama($obj, [string]$modelName) {
     # Ollama speaks the Anthropic /v1/messages API natively — direct, no proxy.
     # No key needed for a local Ollama, but Claude Code prefers a stored OAuth
     # session over env; a dummy ANTHROPIC_AUTH_TOKEN (Bearer) overrides it.
-    $ollamaUrl = "http://${ollamaHost}:${ollamaPort}"
+    $ollamaUrl = New-BackendUrl $ollamaHost $ollamaPort "OLLAMA_HOST"
 
     # Probe — is Ollama actually reachable?
     $ollamaUp = Test-TcpPort $ollamaHost $ollamaPort
@@ -547,7 +644,7 @@ function Set-Ollama($obj, [string]$modelName) {
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
         DISABLE_TELEMETRY                        = "true"
         DISABLE_COST_WARNINGS                    = "true"
-        API_TIMEOUT_MS                           = "3000000"
+        API_TIMEOUT_MS                           = $apiTimeoutMs
     }
     Write-Host "Mode: Ollama-local -> $modelName ($ollamaUrl)" -ForegroundColor Green
     return Set-Env $obj $envObj
@@ -555,16 +652,17 @@ function Set-Ollama($obj, [string]$modelName) {
 
 function Set-CCR($obj, [string]$modelName) {
     $key = Require-Key "CCR_API_KEY"
-    $ccrUrl  = "http://${ccrHost}:${ccrPort}"
+    $ccrUrl  = New-BackendUrl $ccrHost $ccrPort "CCR_HOST"
 
     # Probe — is CCR actually reachable?
     $ccrUp = Test-TcpPort $ccrHost $ccrPort
 
     if (-not $ccrUp) {
         Write-Host "WARN: ccr not reachable at $ccrUrl" -ForegroundColor Yellow
-        # Auto-launch only if ccr.cmd is locally available
+        # Auto-launch only if ccr.cmd is locally available AND the target is loopback
+        # (never try to "start" a proxy that lives on another host).
         $ccrCmd = "$env:APPDATA\npm\ccr.cmd"
-        if (Test-Path $ccrCmd) {
+        if ((Test-IsLoopbackHost $ccrHost) -and (Test-Path $ccrCmd)) {
             Write-Host "Starting CCR locally..." -ForegroundColor Yellow
             Start-Process -FilePath $ccrCmd -ArgumentList "start" -WindowStyle Hidden
             Start-Sleep -Seconds 4
@@ -595,9 +693,9 @@ function Set-CCR($obj, [string]$modelName) {
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
         DISABLE_TELEMETRY                        = "true"
         DISABLE_COST_WARNINGS                    = "true"
-        API_TIMEOUT_MS                           = "3000000"
+        API_TIMEOUT_MS                           = $apiTimeoutMs
     }
-    Write-Host "Mode: ccr → $modelName ($ccrUrl, APIKEY=...$($key.Substring([Math]::Max(0,$key.Length-3))))" -ForegroundColor Green
+    Write-Host "Mode: ccr → $modelName ($ccrUrl, APIKEY set)" -ForegroundColor Green
     return Set-Env $obj $envObj
 }
 
@@ -740,7 +838,7 @@ if ($Mode -eq "ccr" -and [string]::IsNullOrWhiteSpace($Model)) {
 }
 if ($Mode -eq "ccr" -and -not ($CCR_MODELS -contains $Model)) {
     Write-Host "Unknown ccr model: '$Model'. Available: $($CCR_MODELS -join ', ')" -ForegroundColor Red
-    return
+    exit 2
 }
 
 if ($Mode -eq "deepseek") {
@@ -752,7 +850,7 @@ if ($Mode -eq "deepseek") {
     }
     if (-not ($DEEPSEEK_MODELS -contains $Model)) {
         Write-Host "Unknown deepseek model: '$Model'. Available: $($DEEPSEEK_MODELS -join ', ') (aliases: flash, pro)" -ForegroundColor Red
-        return
+        exit 2
     }
 }
 
@@ -765,7 +863,7 @@ if ($Mode -eq "minimax") {
     }
     if (-not ($MINIMAX_DIRECT_MODELS -contains $Model)) {
         Write-Host "Unknown minimax model: '$Model'. Available: $($MINIMAX_DIRECT_MODELS -join ', ') (aliases: m3, m27)" -ForegroundColor Red
-        return
+        exit 2
     }
 }
 
@@ -776,7 +874,7 @@ if ($Mode -eq "opencode") {
     }
     if (-not ($OPENCODE_DIRECT_MODELS -contains $Model)) {
         Write-Host "Unknown opencode model: '$Model'. Available: $($OPENCODE_DIRECT_MODELS -join ', ')" -ForegroundColor Red
-        return
+        exit 2
     }
 }
 
@@ -787,7 +885,7 @@ if ($Mode -eq "ollama") {
     }
     if (-not ($OLLAMA_MODELS -contains $Model)) {
         Write-Host "Unknown ollama model: '$Model'. Available: $($OLLAMA_MODELS -join ', ')" -ForegroundColor Red
-        return
+        exit 2
     }
 }
 
@@ -806,7 +904,8 @@ switch ($Mode) {
 
 # Set-CCR / Set-Ollama return $null when the backend is unreachable and can't be
 # activated — don't write the config then (Claude Code would fail every request).
-if ($null -eq $cfg) { return }
+# Exit nonzero so callers/CI can tell "backend down" from a successful switch.
+if ($null -eq $cfg) { exit 4 }
 
 # A non-empty env block carries a real API key — refuse to write it into a file
 # git tracks, and make sure git ignores it before it lands on disk.

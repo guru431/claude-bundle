@@ -55,13 +55,23 @@ $usesPassword = ($reg -match '(?m)^\s*logon_type:\s*password') -or ($reg -notmat
 if ($InstallPath -match '^\\\\') {
     Write-Host "[ok]   InstallPath is UNC — safe for Password-mode tasks." -ForegroundColor Green
 } elseif ($InstallPath -match '^([A-Za-z]):\\') {
-    # Query the ACTUAL drive type (mirrors sync-tasks.ps1): DriveType 4 = network,
-    # 3 = local fixed. Don't infer "mapped" from "not C:".
+    # Query the ACTUAL drive type (mirrors sync-tasks.ps1 / install.ps1). Don't
+    # infer "mapped" from "not C:".
+    #
+    # System.IO.DriveInfo, NOT Get-CimInstance Win32_LogicalDisk: on a wedged WMI
+    # service that query blocks forever with no timeout and no output. It hung the
+    # full install on an advisory check that only ever prints a warning, which is
+    # why install.ps1 and sync-tasks.ps1 were both moved off it — this copy was
+    # left behind and reintroduced the same hang before any placeholder was filled.
     $drive = $Matches[1].ToUpper()
     $driveType = $null
     try {
-        $d = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='${drive}:'" -ErrorAction Stop
-        $driveType = $d.DriveType
+        $d = New-Object System.IO.DriveInfo $drive
+        $driveType = switch ($d.DriveType) {
+            ([System.IO.DriveType]::Network) { 4 }
+            ([System.IO.DriveType]::Fixed)   { 3 }
+            default                          { $null }
+        }
     } catch { $driveType = $null }
     if ($driveType -eq 4) {
         Write-Host "[warn] InstallPath is on drive ${drive}:\ — a MAPPED NETWORK drive." -ForegroundColor Yellow

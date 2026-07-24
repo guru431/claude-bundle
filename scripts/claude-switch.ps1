@@ -30,6 +30,12 @@
 #
 # Optional parameters:
 #   -ProjectPath <path>   # path to the project (default: this .claude/ or cwd/.claude)
+#   -SeedPermissions      # ALSO write a default `permissions` block when the
+#                         # target settings.local.json has none yet. Off by
+#                         # default: switching an LLM backend has nothing to do
+#                         # with what commands Claude Code may run unattended,
+#                         # and the block below allows Bash/PowerShell with no
+#                         # prompt. Existing permissions are never touched.
 #   -AllowInsecureHttp    # permit plaintext http:// to a NON-loopback ollama/ccr
 #                         # host. Off by default: loopback uses http://, any remote
 #                         # host uses https:// unless this switch is given (loud warn).
@@ -57,6 +63,10 @@ param(
     [string]$Model = $null,
 
     [string]$ProjectPath = $null,
+
+    # Seed the default permissions block into a settings.local.json that has none.
+    # Opt-in: see $STANDARD_PERMISSIONS below for what it grants.
+    [switch]$SeedPermissions,
 
     # Allow plaintext http:// to a NON-loopback backend. Off by default: a remote
     # host:port would otherwise send the Bearer key, prompts and code in the clear.
@@ -172,9 +182,27 @@ $ccrHostPort = Get-EnvVar "CCR_HOST"
 if (-not $ccrHostPort) { $ccrHostPort = "127.0.0.1:3456" }
 $ccrHost, $ccrPort = Split-HostPort $ccrHostPort "CCR_HOST" 3456
 
+function Test-SamePath([string]$a, [string]$b) {
+    if (-not $a -or -not $b) { return $false }
+    try {
+        $ra = [System.IO.Path]::GetFullPath($a).TrimEnd('\', '/')
+        $rb = [System.IO.Path]::GetFullPath($b).TrimEnd('\', '/')
+        return $ra.Equals($rb, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch { return $false }
+}
+
+# The GLOBAL Claude Code config dir. It is also named `.claude`, so the
+# "am I deployed inside a project?" test below must exclude it explicitly: the
+# installer puts a durable copy of this script there, and the leaf-name check
+# alone made that copy write %USERPROFILE%\.claude\settings.local.json instead
+# of the settings of the project the user is actually in.
+$globalClaudeHome = $env:CLAUDE_CONFIG_DIR
+if (-not $globalClaudeHome) { $globalClaudeHome = Join-Path $HOME ".claude" }
+
 if ($ProjectPath) {
     $settingsDir = Join-Path $ProjectPath ".claude"
-} elseif ((Split-Path -Leaf $PSScriptRoot) -eq ".claude") {
+} elseif ((Split-Path -Leaf $PSScriptRoot) -eq ".claude" -and
+          -not (Test-SamePath $PSScriptRoot $globalClaudeHome)) {
     # Per-project deployment: this script lives in <project>/.claude/ and
     # switches its own project's settings.local.json (sitting next to it).
     $settingsDir = $PSScriptRoot
@@ -187,11 +215,13 @@ $settingsPath = Join-Path $settingsDir "settings.local.json"
 # (after the "status" branch returns). Reading the current mode tolerates a
 # missing dir/file, so "status" stays a true read-only, no-side-effect command.
 
-# Standard permissions block (stable across all modes).
+# OPTIONAL default permissions block, written only with -SeedPermissions.
 # WARNING: "Bash(*)" / "PowerShell(*)" allow arbitrary command execution with
 # no prompt. This is convenient on a single-user trusted machine but is a
 # footgun on shared or public setups — narrow this allowlist (and add a deny
 # list) before reusing it elsewhere.
+# It is NOT written by default: choosing an LLM backend must not, as a side
+# effect, widen what Claude Code is allowed to run unattended in that project.
 $STANDARD_PERMISSIONS = [pscustomobject]@{
     allow = @(
         "Bash",
@@ -355,11 +385,13 @@ function Get-CurrentMode($obj) {
 }
 
 function Set-Permissions($obj) {
-    # Seed the default block ONLY when no permissions exist yet. Claude Code
-    # appends "Always allow" grants (and any deny/ask lists) to
+    # Seed the default block ONLY when asked for AND when no permissions exist
+    # yet. Claude Code appends "Always allow" grants (and any deny/ask lists) to
     # settings.local.json — overwriting the block on every backend switch
     # would silently destroy what the user has accumulated.
+    if (-not $SeedPermissions) { return $obj }
     if ($obj.PSObject.Properties.Match("permissions").Count -eq 0) {
+        Write-Host "Seeding the default permissions block (-SeedPermissions): allows Bash/PowerShell with no prompt." -ForegroundColor Yellow
         $obj | Add-Member -NotePropertyName "permissions" -NotePropertyValue $STANDARD_PERMISSIONS -Force
     }
     return $obj
@@ -469,27 +501,27 @@ function Get-GitOutput([string[]]$gitArgs) {
     }
 }
 
-function Assert-SettingsGitSafe {
-    # settings.local.json is about to receive a REAL API key. Claude Code usually
-    # ignores local settings, but a tracked or hand-created file is a live leak
-    # path into the user's repo — so verify instead of assuming.
+function Assert-SettingsGitSafe([string]$targetPath = $settingsPath) {
+    # $targetPath is about to hold (or already holds) a REAL API key. Claude Code
+    # usually ignores local settings, but a tracked or hand-created file is a live
+    # leak path into the user's repo — so verify instead of assuming.
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        Write-Host "WARN: git not found — cannot verify that $settingsPath is git-ignored." -ForegroundColor Yellow
+        Write-Host "WARN: git not found — cannot verify that $targetPath is git-ignored." -ForegroundColor Yellow
         return
     }
     if ((Invoke-GitQuiet @("-C", $settingsDir, "rev-parse", "--git-dir")) -ne 0) {
         return  # not a git repo at all — nothing to protect
     }
 
-    if ((Invoke-GitQuiet @("-C", $settingsDir, "ls-files", "--error-unmatch", "--", $settingsPath)) -eq 0) {
+    if ((Invoke-GitQuiet @("-C", $settingsDir, "ls-files", "--error-unmatch", "--", $targetPath)) -eq 0) {
         Write-Host ""
-        Write-Host "ERROR: $settingsPath is TRACKED by git." -ForegroundColor Red
+        Write-Host "ERROR: $targetPath is TRACKED by git." -ForegroundColor Red
         Write-Host "Writing the API key there would commit it. Config NOT changed." -ForegroundColor Red
-        Write-Host "Fix: git rm --cached -- `"$settingsPath`", add it to .gitignore, then re-run." -ForegroundColor DarkYellow
+        Write-Host "Fix: git rm --cached -- `"$targetPath`", add it to .gitignore, then re-run." -ForegroundColor DarkYellow
         exit 3
     }
 
-    if ((Invoke-GitQuiet @("-C", $settingsDir, "check-ignore", "-q", "--", $settingsPath)) -eq 0) {
+    if ((Invoke-GitQuiet @("-C", $settingsDir, "check-ignore", "-q", "--", $targetPath)) -eq 0) {
         return  # already ignored — good
     }
 
@@ -499,10 +531,10 @@ function Assert-SettingsGitSafe {
     $gitDir = Get-GitOutput @("-C", $settingsDir, "rev-parse", "--absolute-git-dir")
     $prefix = Get-GitOutput @("-C", $settingsDir, "rev-parse", "--show-prefix")
     if (-not $gitDir) {
-        Write-Host "WARN: $settingsPath is not git-ignored and .git could not be located." -ForegroundColor Yellow
+        Write-Host "WARN: $targetPath is not git-ignored and .git could not be located." -ForegroundColor Yellow
         return
     }
-    $rel = "/" + $prefix + (Split-Path -Leaf $settingsPath)
+    $rel = "/" + $prefix + (Split-Path -Leaf $targetPath)
 
     $excludePath = Join-Path $gitDir "info\exclude"
     $excludeDir  = Split-Path -Parent $excludePath
@@ -907,11 +939,18 @@ switch ($Mode) {
 # Exit nonzero so callers/CI can tell "backend down" from a successful switch.
 if ($null -eq $cfg) { exit 4 }
 
-# A non-empty env block carries a real API key — refuse to write it into a file
-# git tracks, and make sure git ignores it before it lands on disk.
-if ($cfg.PSObject.Properties.Match("env").Count -gt 0 -and
-    @($cfg.env.PSObject.Properties).Count -gt 0) {
-    Assert-SettingsGitSafe
+# A real API key is involved if the NEW env block carries one, or if the file
+# already on disk does — Save-Settings copies that file to settings.local.json.bak
+# before replacing it, so switching a key-based backend to `anthropic` clears the
+# main file but leaves the OLD key sitting in an untracked, unignored backup that
+# `git add .` would happily stage. Both paths are therefore checked, and the
+# check runs BEFORE anything is written.
+$hasNewKey = $cfg.PSObject.Properties.Match("env").Count -gt 0 -and
+             @($cfg.env.PSObject.Properties).Count -gt 0
+$hasOldKey = $currentMode -notlike "anthropic*"
+if ($hasNewKey -or $hasOldKey) {
+    Assert-SettingsGitSafe $settingsPath
+    Assert-SettingsGitSafe ($settingsPath + ".bak")
 }
 
 Save-Settings $cfg

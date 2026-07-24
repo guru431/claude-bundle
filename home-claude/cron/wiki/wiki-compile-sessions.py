@@ -7,6 +7,7 @@ LLM to create/update per-project wiki pages.
 Schedule: daily at 04:00 (after flush at 02:30).
 """
 
+import hashlib
 import json
 import os
 import re
@@ -68,9 +69,23 @@ MAX_PAGES_WITH_CONTENT = 30
 MAX_PART_SIZE = 80000
 
 
-def pair_marker(daily_stem: str, project: str) -> str:
+def daily_fingerprint(text: str) -> str:
+    """Short content fingerprint of a daily log, as READ by this run.
+
+    Both markers below carry it, which is what makes the compile phase safe to
+    overlap with a still-running flush. Without it the sequence "compile reads
+    the daily → flush appends a delta → compile marks the daily compiled"
+    finalized a section this process never saw, and the delta was lost for good.
+    Pinning the marker to the content means an append simply doesn't match any
+    marker any more, so the next run recompiles (apply_changes dedups, so the
+    overlap is a no-op).
+    """
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def pair_marker(daily_stem: str, project: str, fingerprint: str) -> str:
     """State key for a granular (daily, project) pair marker."""
-    return f"{daily_stem}#{project}"
+    return f"{daily_stem}#{project}@{fingerprint}"
 
 
 def get_compiled_dailies() -> set[str]:
@@ -87,21 +102,32 @@ def get_compiled_pairs() -> set[str]:
     return state_get("compile_sessions", "compiled_pairs")
 
 
-def find_uncompiled_dailies(compiled: set[str]) -> list[Path]:
-    """Find daily logs that haven't been compiled into the wiki yet."""
-    dailies = []
+def find_uncompiled_dailies(compiled: set[str]) -> list[tuple[Path, str, str]]:
+    """Find daily logs not compiled yet → [(path, fingerprint, text)].
+
+    The text is returned, not re-read later: everything downstream must reason
+    about exactly the bytes the fingerprint was taken over.
+    """
+    dailies: list[tuple[Path, str, str]] = []
     if not DAILY_DIR.exists():
         return dailies
     for f in sorted(DAILY_DIR.glob("????-??-??.md")):
-        date_str = f.stem
-        if date_str not in compiled:
-            dailies.append(f)
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            print(f"  WARN: cannot read {f.name}: {e}", file=sys.stderr)
+            continue
+        fp = daily_fingerprint(text)
+        # The bare stem is the LEGACY (pre-fingerprint) marker — still honored so
+        # upgrading the bundle doesn't recompile the whole daily archive.
+        if f"{f.stem}@{fp}" in compiled or f.stem in compiled:
+            continue
+        dailies.append((f, fp, text))
     return dailies
 
 
-def parse_daily_by_project(daily_path: Path) -> dict[str, str]:
+def parse_daily_by_project(text: str) -> dict[str, str]:
     """Split a daily log into sections per `## project_name`."""
-    text = daily_path.read_text(encoding="utf-8")
     by_project: dict[str, str] = {}
     current_project = None
     current_lines: list[str] = []
@@ -409,12 +435,18 @@ def main():
 
     if not dailies:
         log("Nothing to compile. Exiting.")
+        # Terminal ledger record for the idle run too (see cron/runs.py): the
+        # contract is one record per run, and this branch used to return before
+        # reaching it — so a healthy no-op looked identical to a task that never
+        # reported at all.
+        record_run(task="ClaudeWikiCompileSessions", process_rc=0,
+                   useful_items=None, delivery="n/a", note="no uncompiled dailies")
         return
 
     if is_dry_run():
         log("DRY RUN — dailies that WOULD be compiled (no LLM, no writes):")
-        for daily_path in dailies:
-            raw = parse_daily_by_project(daily_path)
+        for daily_path, _fp, daily_text in dailies:
+            raw = parse_daily_by_project(daily_text)
             projects = sorted({normalize_project_name(k) for k in raw})
             log(f"  {daily_path.name}: {len(raw)} section(s) → projects {projects}")
         log("DRY RUN — no pages written, no state changes.")
@@ -422,9 +454,9 @@ def main():
 
     total_changes = 0
     hard_failure = False
-    for daily_path in dailies:
+    for daily_path, daily_fp, daily_text in dailies:
         log(f"Processing: {daily_path.name}")
-        raw_by_project = parse_daily_by_project(daily_path)
+        raw_by_project = parse_daily_by_project(daily_text)
 
         # Collapse free-form section names ("project — extracted facts (...)")
         # to known project keys.
@@ -442,7 +474,7 @@ def main():
             # Granular dedup: this (daily, project) pair already compiled —
             # skip it, so one big failing project no longer drags its
             # already-succeeded neighbours through the LLM on every retry.
-            marker = pair_marker(daily_path.stem, project)
+            marker = pair_marker(daily_path.stem, project, daily_fp)
             if marker in compiled_pairs:
                 log(f"  [{project}] already compiled (pair marker) — skip")
                 continue
@@ -520,7 +552,8 @@ def main():
             log(f"  {failed}/{len(by_project)} project(s) failed — "
                 f"{daily_path.name} left uncompiled for retry")
         else:
-            state_add("compile_sessions", "compiled_dailies", [daily_path.stem])
+            state_add("compile_sessions", "compiled_dailies",
+                      [f"{daily_path.stem}@{daily_fp}"])
             with open(LOG_MD, "a", encoding="utf-8") as f:
                 f.write(f"- [compile-sessions] compiled: {daily_path.stem}.md ({len(by_project)} projects)\n")
 

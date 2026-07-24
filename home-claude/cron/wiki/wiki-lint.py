@@ -23,15 +23,15 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-from utils import BUNDLE_ROOT, WIKI_ROOT, LOG_MD, mark_phase_success  # noqa: E402
+from utils import BUNDLE_ROOT, WIKI_ROOT, LOG_MD, find_bash, mark_phase_success  # noqa: E402
 
 KBNEWS_DIR = BUNDLE_ROOT / "kb_news"
 TELEGRAM_SCRIPT = BUNDLE_ROOT / "cron" / "telegram-send.sh"
 CRON_LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 
-# Full bash path so the alert works in session 0 (Password task), where Git\bin
-# is not on PATH (same pattern as memory-update.py).
-BASH = os.environ.get("BASH_EXE") or r"C:\Program Files\Git\bin\bash.exe"
+# Absolute bash path (BASH_EXE > PATH > Git-for-Windows default) so the alert
+# works both in session 0, where Git\bin is not on PATH, and on POSIX.
+BASH = find_bash()
 
 DATE = datetime.now().strftime("%Y-%m-%d")
 
@@ -207,6 +207,26 @@ def check_ambiguous_names(pages: dict[str, list[Path]]) -> list[str]:
             locs = ", ".join(str(p.relative_to(WIKI_ROOT)) for p in paths)
             warnings.append(f"WARN: page name '{name}' is used {len(paths)} times: {locs} — "
                             f"link to it by full path, not a bare [[{name}]]")
+    return warnings
+
+
+def check_missing_frontmatter(pages: dict[str, list[Path]]) -> list[str]:
+    """Check: a page written without YAML frontmatter.
+
+    The README and docs/wiki-method.md both advertise this check; it did not
+    exist. It matters because the `sources:` block lives in the frontmatter —
+    a page without one has no record of what it was compiled from, so the
+    provenance the whole method rests on is missing for it. WARN, not ERROR:
+    a hand-written page is legitimate, just untracked.
+    """
+    warnings = []
+    for name, paths in pages.items():
+        for path in paths:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if not text.lstrip().startswith("---"):
+                warnings.append(
+                    f"WARN: no YAML frontmatter (no `sources:` provenance): "
+                    f"{path.relative_to(WIKI_ROOT)}")
     return warnings
 
 
@@ -473,7 +493,7 @@ def send_telegram_alert(message: str):
     """Send an alert to Telegram on errors."""
     if not ENABLE_TELEGRAM_ALERTS:
         return
-    if TELEGRAM_SCRIPT.exists() and Path(BASH).is_file():
+    if TELEGRAM_SCRIPT.exists() and BASH:
         try:
             subprocess.run(
                 [BASH, str(TELEGRAM_SCRIPT), message],
@@ -506,6 +526,7 @@ def main():
         ("Broken links", check_broken_links, pages),
         ("Orphan pages", check_orphan_pages, pages),
         ("Empty pages", check_empty_pages, pages),
+        ("Missing frontmatter", check_missing_frontmatter, pages),
         ("Unprocessed articles", check_unprocessed_articles, None),
         ("Duplicates", check_duplicate_names, pages),
         ("Ambiguous names", check_ambiguous_names, pages),

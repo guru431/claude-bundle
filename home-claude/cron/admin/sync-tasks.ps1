@@ -17,11 +17,19 @@
 #   powershell -ExecutionPolicy Bypass -File .\sync-tasks.ps1 -Only foo  # one task
 #   powershell -ExecutionPolicy Bypass -File .\sync-tasks.ps1 -Adopt     # take over
 #                                        same-named tasks that lack the marker
+#   powershell -ExecutionPolicy Bypass -File .\sync-tasks.ps1 -Unregister
+#                                        # remove every registry task that still
+#                                        # carries the marker (uninstall path)
+#
+# Exit codes: 0 = everything applied, 2 = at least one task FAILED to register,
+#             3 = at least one task was SKIPPED (invalid trigger, missing target,
+#             mapped drive, foreign task) — a partial sync must not read as success.
 
 param(
     [switch]$DryRun,
     [switch]$Force,
     [switch]$Adopt,
+    [switch]$Unregister,
     [string[]]$Only,
     [string]$RegistryPath,
     [string]$LogPath,
@@ -64,6 +72,7 @@ if ($ArgsFile) {
         if     ($t -eq '-DryRun') { $DryRun = $true }
         elseif ($t -eq '-Force')  { $Force  = $true }
         elseif ($t -eq '-Adopt')  { $Adopt  = $true }
+        elseif ($t -eq '-Unregister') { $Unregister = $true }
         elseif ($t -eq '-Only' -or $t -eq '-RegistryPath' -or $t -eq '-LogPath') {
             if ($i -ge $tokens.Count -or $tokens[$i].StartsWith('-')) {
                 Write-Host "ERROR: $t requires a value" -ForegroundColor Red
@@ -76,7 +85,7 @@ if ($ArgsFile) {
         }
         else {
             Write-Host "ERROR: unsupported argument '$t'" -ForegroundColor Red
-            Write-Host "       Allowed: -DryRun -Force -Adopt -Only <names> -RegistryPath <path> -LogPath <path>" -ForegroundColor Red
+            Write-Host "       Allowed: -DryRun -Force -Adopt -Unregister -Only <names> -RegistryPath <path> -LogPath <path>" -ForegroundColor Red
             exit 1
         }
     }
@@ -498,6 +507,45 @@ if ($launcher -match '<[^>]+>') {
     Write-Host "       Replace <bundle-install-path> / <user> in $RegistryPath before running." -ForegroundColor Red
     exit 1
 }
+# ── -Unregister: registry-driven removal ─────────────────────────────────────
+# The counterpart of the sync. Without it the only documented way to remove the
+# tasks was a hand-typed `schtasks /delete`, which is exactly the direct
+# manipulation this project forbids everywhere else — and it left registry.yaml
+# describing tasks that no longer exist. Only tasks carrying the marker are
+# removed: a same-named task somebody else created is not ours to delete.
+if ($Unregister) {
+    Write-Host ""
+    Write-Host "=== sync-tasks.ps1 -Unregister ===" -ForegroundColor Cyan
+    Write-Host "Registry: $RegistryPath"
+    Write-Host "DryRun:   $DryRun"
+    Write-Host ""
+    $removed = 0; $absent = 0; $foreign = 0; $failed = 0
+    foreach ($task in $reg.tasks) {
+        if ($Only -and ($Only -notcontains $task.name)) { continue }
+        $cur = Get-ScheduledTask -TaskName $task.name -ErrorAction SilentlyContinue
+        if (-not $cur) { Write-Host ("[absent   ] " + $task.name) -ForegroundColor DarkGray; $absent++; continue }
+        if ("$($cur.Description)" -notlike "*$marker*") {
+            Write-Host ("[skipped: foreign task] " + $task.name + " — no '" + $marker + "' marker, not deleting") -ForegroundColor DarkYellow
+            $foreign++
+            continue
+        }
+        if ($DryRun) { Write-Host ("[would remove] " + $task.name) -ForegroundColor Yellow; $removed++; continue }
+        try {
+            Unregister-ScheduledTask -TaskName $task.name -Confirm:$false -ErrorAction Stop
+            Write-Host ("[removed  ] " + $task.name) -ForegroundColor Green
+            $removed++
+        } catch {
+            Write-Host ("[FAILED   ] " + $task.name + " — " + $_.Exception.Message) -ForegroundColor Red
+            $failed++
+        }
+    }
+    Write-Host ""
+    Write-Host "=== Summary === removed: $removed  absent: $absent  foreign (kept): $foreign  failed: $failed" -ForegroundColor Cyan
+    try { Stop-Transcript | Out-Null } catch {}
+    if ($failed -gt 0) { exit 2 }
+    exit 0
+}
+
 if (-not (Test-Path $launcher)) {
     Write-Host "ERROR: launcher missing at $launcher" -ForegroundColor Red; exit 1
 }
@@ -538,6 +586,22 @@ foreach ($task in $reg.tasks) {
             $summary.skipped++
             continue
         }
+    }
+
+    # The target must exist. Registering a task whose script/executable is not
+    # there produces a perfectly valid scheduled task that fails every night with
+    # exit 127 and writes no log — a "registered successfully" that never ran.
+    # Checked here, at registration, where the answer is still actionable.
+    $targets = @()
+    if ($task.kind -eq 'exec') { $targets += $task.execute }
+    if ($task.script) { $targets += $task.script }
+    $missing = $targets | Where-Object {
+        $_ -and ($_ -match '[\\/]') -and -not (Test-Path -LiteralPath $_)
+    } | Select-Object -First 1
+    if ($missing) {
+        Write-Host ("[skipped: missing target] " + $task.name + " — '" + $missing + "' does not exist") -ForegroundColor DarkYellow
+        $summary.skipped++
+        continue
     }
 
     $description = $marker + " | " + $task.description
@@ -682,4 +746,12 @@ $summary.GetEnumerator() | Sort-Object Name | ForEach-Object {
     Write-Host ("  {0,-10} {1}" -f $_.Key, $_.Value)
 }
 if ($summary.failed -gt 0) { exit 2 }
+# A skipped task is a task the registry asked for and the scheduler did not get.
+# Exiting 0 made the installer print "registered" for a set that was quietly
+# incomplete — the caller must be able to tell a full sync from a partial one.
+if ($summary.skipped -gt 0) {
+    Write-Host ""
+    Write-Host "PARTIAL: $($summary.skipped) task(s) skipped — see the lines above." -ForegroundColor Yellow
+    exit 3
+}
 exit 0

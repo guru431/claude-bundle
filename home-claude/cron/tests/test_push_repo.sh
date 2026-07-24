@@ -84,4 +84,30 @@ reset_counters; push_repo "$R5" "r5" "Auto-commit: test"
 git -C "$R5" show --name-only --format= HEAD | grep -qx 'FINDINGS.md' && fail "T5: FINDINGS.md deletion was committed (guard broken)"
 git -C "$R5" show --name-only --format= HEAD | grep -qx 'app.py'      || fail "T5: app.py not committed"
 
-echo "PASS: push_repo (5 scenarios)"
+# === Test 6: a secret in an ALREADY-COMMITTED, unpushed commit blocks the push ==
+# The staged-diff guard never sees this one: the tree is clean, the commit was
+# made earlier (by hand, by a previous run, or with --no-verify). Before the
+# outgoing scan this went straight to `git push`.
+R6="$TMP/r6"; mkrepo "$R6"
+printf 'token = "ghp_%s"\n' "0123456789abcdefghij0123456789" > "$R6/leak.py"
+git -C "$R6" add -A; git -C "$R6" commit -qm "oops" >/dev/null 2>&1
+reset_counters; push_repo "$R6" "r6" "Auto-commit: test"
+[ "$pushed" = "0" ] || fail "T6: a secret in an unpushed commit was PUSHED (pushed=$pushed)"
+[ "$failed" = "1" ] || fail "T6: repo not counted as failed (failed=$failed)"
+[ "$(git -C "$R6" rev-parse "origin/$(br "$R6")")" != "$(git -C "$R6" rev-parse HEAD)" ] \
+    || fail "T6: origin received the leaking commit"
+
+# === Test 7: a rejecting pre-commit hook fails the repo (no phantom success) ===
+# The commit fails, the tree stays dirty, local == remote — which used to read as
+# "up to date" and let the whole sweep exit 0 with the work never leaving the box.
+R7="$TMP/r7"; mkrepo "$R7"
+mkdir -p "$R7/.git/hooks"
+printf '#!/bin/sh\nexit 1\n' > "$R7/.git/hooks/pre-commit"
+chmod +x "$R7/.git/hooks/pre-commit"
+echo change >> "$R7/app.py"
+reset_counters; push_repo "$R7" "r7" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T7: rejected commit not counted as failed (failed=$failed)"
+[ "$pushed" = "0" ] || fail "T7: pushed despite a failed commit (pushed=$pushed)"
+[ -n "$(git -C "$R7" status --porcelain)" ] || fail "T7: tree should still be dirty"
+
+echo "PASS: push_repo (7 scenarios)"

@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
     ALLOW_PROJECTS, SKIP_DIRS, SKIP_JSONL_PROJECTS, PROJECT_MAP,
     BUNDLE_ROOT, WIKI_ROOT, PENDING_DIR, STATE_PATH, LLM_PROVIDER,
-    DEEPSEEK_API_KEY, OPENCODE_API_KEY,
+    DEFAULT_CHAIN, PROVIDERS, _env_first,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -54,19 +54,30 @@ def main() -> int:
 
     # ── config ───────────────────────────────────────────────────────────────
     print("\n[config]")
-    (ok if (BUNDLE_ROOT / '.env').is_file() else bad)(
-        f".env: {'present' if (BUNDLE_ROOT / '.env').is_file() else 'MISSING (no provider keys / alerts)'}")
+    # The chain the SELECTED provider actually uses: only "deepseek" (the
+    # default) falls back; any other explicit choice is that provider alone.
+    chain = DEFAULT_CHAIN if LLM_PROVIDER == "deepseek" else [LLM_PROVIDER]
+    chain = [p for p in chain if p in PROVIDERS]
+    keys = {p: _env_first(PROVIDERS[p]["key_env"]) for p in chain}
+    # A key can perfectly well come from the process env instead of the file, so
+    # a missing .env is only a problem when the selected chain has no key at all.
+    have_env = (BUNDLE_ROOT / ".env").is_file()
+    if have_env:
+        ok(".env: present")
+    elif any(keys.values()):
+        na(".env: absent (provider keys come from the process environment)")
+    else:
+        bad(".env: MISSING (no provider keys / alerts)")
     print(f"  provider (WIKI_LLM_PROVIDER): {LLM_PROVIDER}")
-    (ok if DEEPSEEK_API_KEY else na)(f"DEEPSEEK_KEY: {'set' if DEEPSEEK_API_KEY else 'not set'}")
-    (ok if OPENCODE_API_KEY else na)(f"OPENCODE_GO_API_KEY: {'set' if OPENCODE_API_KEY else 'not set'}")
-    # Check the key the SELECTED chain needs (see PROVIDERS/llm_call in utils):
-    # "deepseek" falls back to OpenCode, so either key works; "opencode" has NO
-    # fallback, so a DeepSeek key alone leaves it unable to make a single call.
-    if LLM_PROVIDER == "opencode" and not OPENCODE_API_KEY:
-        bad("provider=opencode but OPENCODE_GO_API_KEY not set (this chain has no DeepSeek "
-            "fallback) — nightly LLM phases will no-op")
-    elif LLM_PROVIDER == "deepseek" and not (DEEPSEEK_API_KEY or OPENCODE_API_KEY):
-        bad("no LLM provider key set — nightly LLM phases will no-op")
+    # Derived from the PROVIDERS table, not a hardcoded pair: a new provider row
+    # used to be invisible here and its missing key read as "all good".
+    for p in chain:
+        name = PROVIDERS[p]["key_env"][0]
+        (ok if keys[p] else na)(f"{name} ({p}): {'set' if keys[p] else 'not set'}")
+    if chain and not any(keys.values()) and not all(
+            PROVIDERS[p].get("key_optional") for p in chain):
+        bad(f"no key set for the selected chain ({' → '.join(chain)}) — "
+            "nightly LLM phases will no-op")
     tg = bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
     (ok if tg else na)(f"Telegram alerts: {'configured' if tg else 'not configured (failures log only)'}")
 
@@ -81,8 +92,14 @@ def main() -> int:
     # ── launcher (Windows Task Scheduler) ────────────────────────────────────
     print("\n[launcher]")
     launcher = BUNDLE_ROOT / "bin" / "_run-hidden.vbs"
-    (ok if launcher.is_file() else bad)(
-        f"bin/_run-hidden.vbs: {'present' if launcher.is_file() else 'MISSING (Password-mode bash/python tasks cannot run)'}")
+    if os.name != "nt":
+        # The VBS launcher exists to hide a console window under Task Scheduler.
+        # There is no Task Scheduler here — systemd/launchd units come from
+        # scripts/gen-scheduler.py — so its absence is not a fault.
+        na("bin/_run-hidden.vbs: n/a on this platform (Windows Task Scheduler only)")
+    else:
+        (ok if launcher.is_file() else bad)(
+            f"bin/_run-hidden.vbs: {'present' if launcher.is_file() else 'MISSING (Password-mode bash/python tasks cannot run)'}")
 
     # ── pipeline state ───────────────────────────────────────────────────────
     print("\n[pipeline state]")
@@ -95,15 +112,23 @@ def main() -> int:
         state = json.loads(STATE_PATH.read_text(encoding="utf-8")) if STATE_PATH.is_file() else {}
     except (OSError, json.JSONDecodeError):
         state = {}
-    processed = state.get("flush", {}).get("processed_jsonls", [])
+    # Valid JSON whose root is a list/string parses fine and then raises on
+    # .get() — a status view must survive a corrupt state file, not crash on it.
+    if not isinstance(state, dict):
+        bad(f".processed.json root is {type(state).__name__}, not an object — treating as empty")
+        state = {}
+    flush_state = state.get("flush")
+    processed = flush_state.get("processed_jsonls", []) if isinstance(flush_state, dict) else []
     print(f"  processed JSONLs (.processed.json): {len(processed)}")
     last = STATE_PATH.with_name("last_success.json")
     if last.is_file():
         try:
             data = json.loads(last.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("root is not an object")
             joined = "; ".join(f"{k}={v}" for k, v in sorted(data.items()))
             print(f"  last phase success: {joined or '(none)'}")
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, ValueError):
             na("last_success.json unreadable")
     else:
         na("no phase has recorded a success yet (last_success.json absent)")

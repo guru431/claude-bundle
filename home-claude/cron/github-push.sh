@@ -72,18 +72,18 @@ if [ -n "$RANGE" ] && [ "$N" = "0" ]; then
 fi
 
 # --- collect diff/files to check ---
-if [ -n "$RANGE" ]; then
-  # Per-commit patches, not the net tree diff: a secret added in one outgoing
-  # commit and removed in a later one is invisible to `git diff A..B` but still
-  # ships in the published history. --diff-filter=AR: a rename to .env is an R.
-  diff_content=$(git log -p --unified=0 "$RANGE" -- . ':(exclude).githooks/' 2>/dev/null || true)
-  added=$(git log --name-only --diff-filter=AR --pretty=format: "$RANGE" -- . | sort -u || true)
-else
-  # First push to a public repo: scan the CONTENT of all tracked files.
-  # `git grep --cached` on an empty index would return empty and miss secrets.
-  diff_content=$(git ls-files -z | xargs -0 cat 2>/dev/null || true)
-  added=$(git ls-files || true)
-fi
+# Per-commit patches, not the net tree diff: a secret added in one outgoing
+# commit and removed in a later one is invisible to `git diff A..B` but still
+# ships in the published history. --diff-filter=AR: a rename to .env is an R.
+#
+# The FIRST push takes the same path with the branch itself as the range — the
+# whole reachable history is what gets published. Scanning the working tree
+# instead (the old behaviour) saw only the current state of each file, so a key
+# added and later deleted was published invisibly by the very command whose job
+# is to stop that.
+SCAN_RANGE="${RANGE:-$BRANCH}"
+diff_content=$(git log -p --unified=0 "$SCAN_RANGE" -- . ':(exclude).githooks/' 2>/dev/null || true)
+added=$(git log --name-only --diff-filter=AR --pretty=format: "$SCAN_RANGE" -- . | sort -u || true)
 
 fail=0
 
@@ -109,7 +109,10 @@ fi
 sp="$REPO/.sanitize-patterns"
 if [ -f "$sp" ]; then
   pat=$(mktemp 2>/dev/null || echo "$REPO/.sanitize-patterns.tmp")
-  grep -vE '^[[:space:]]*$' "$sp" > "$pat" 2>/dev/null || true
+  # tr -d '\r': a CRLF-saved .sanitize-patterns (the Windows default) leaves a
+  # trailing \r on every regex, so nothing ever matches and the whole personal
+  # denylist silently does nothing. Same treatment as .githooks/pre-push.
+  grep -vE '^[[:space:]]*$' "$sp" 2>/dev/null | tr -d '\r' > "$pat" || true
   if [ -s "$pat" ]; then
     hits=$(printf '%s\n' "$diff_content" | grep -inEf "$pat" || true)
     if [ -n "$hits" ]; then

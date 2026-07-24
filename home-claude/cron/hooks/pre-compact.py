@@ -12,9 +12,33 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import save_session_tail
+
+
+def handoff_paths(transcript_path: str, session_id: str) -> tuple[str, str]:
+    """(memory dir, in-flight marker path) for this session's handoff.
+
+    The marker is what lets the NEXT SessionStart tell "no handoff was ever
+    requested" from "the handoff is still being written". Without it the
+    post-compact session start almost always raced past the detached writer and
+    silently got no handoff at all.
+    """
+    mem_dir = os.path.join(os.path.dirname(transcript_path), "memory")
+    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
+    return mem_dir, os.path.join(mem_dir, f".handoff-{safe_id}.pending")
+
+
+def mark_in_flight(marker: str, mem_dir: str) -> bool:
+    try:
+        os.makedirs(mem_dir, exist_ok=True)
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(str(int(time.time())))
+        return True
+    except OSError:
+        return False
 
 
 def spawn_handoff_in_background(transcript_path: str, session_id: str) -> None:
@@ -27,6 +51,9 @@ def spawn_handoff_in_background(transcript_path: str, session_id: str) -> None:
     handoff_script = os.path.join(script_dir, "precompact-handoff.py")
     if not os.path.exists(handoff_script):
         return
+
+    mem_dir, marker = handoff_paths(transcript_path, session_id)
+    marked = mark_in_flight(marker, mem_dir)
 
     # Pick a Python executable. PYTHON_EXE env var lets you pin a specific
     # interpreter; otherwise fall back to the current one.
@@ -50,7 +77,14 @@ def spawn_handoff_in_background(transcript_path: str, session_id: str) -> None:
             creationflags=creationflags,
         )
     except (OSError, ValueError):
-        pass
+        # Nothing will ever clear the marker if the writer never started, and a
+        # stale marker would make the next SessionStart wait for a handoff that
+        # is not coming.
+        if marked:
+            try:
+                os.unlink(marker)
+            except OSError:
+                pass
 
 
 def main():

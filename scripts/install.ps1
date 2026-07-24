@@ -20,9 +20,11 @@
 #
 # Two roots, because they are two different things:
 #   -ClaudeHome   (default ~/.claude) — CLAUDE.md, settings.json, skills/,
-#                 commands/. Claude Code reads config ONLY from ~/.claude and
-#                 keeps sessions/plans/memory there; moving this is only useful
-#                 for a sandbox install.
+#                 commands/, hooks/. Claude Code does honor CLAUDE_CONFIG_DIR
+#                 for its config root, but only when that variable is exported
+#                 in the environment of the CLI/IDE itself; session history and
+#                 memory follow the same root. Pointing this elsewhere WITHOUT
+#                 exporting CLAUDE_CONFIG_DIR to the client is a sandbox install.
 #   -PipelineRoot (default = -ClaudeHome) — the full-tier cron/, wiki/, bin/,
 #                 .env, bundle.local.yaml. These derive their paths from their
 #                 own location, so they genuinely run from anywhere.
@@ -34,8 +36,11 @@
 param(
     [ValidateSet('lite', 'full')]
     [string]$Profile,
+    # Defaults to CLAUDE_CONFIG_DIR when set, matching both Claude Code itself
+    # and scripts/install-lite.sh — otherwise someone who moved their config
+    # root would silently get a second, unread copy in ~/.claude.
     [Alias('InstallPath')]
-    [string]$ClaudeHome = (Join-Path $env:USERPROFILE '.claude'),
+    [string]$ClaudeHome = $(if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }),
     [string]$PipelineRoot,
     [switch]$NonInteractive,
     [switch]$Force,
@@ -122,6 +127,32 @@ function Write-Manifest($tier) {
     Good "wrote .bundle-manifest.json ($($files.Count) files — uninstall with scripts/uninstall.ps1)"
 }
 
+# Ownership-aware upgrade. `Copy-Item -Recurse -Force` silently replaces YOUR
+# skill, hook, cron script or wiki page whenever its name matches one the bundle
+# ships — the CLAUDE.md/settings.json backup gate above never saw those paths.
+# Anything about to be replaced by DIFFERENT content is copied aside first, so an
+# upgrade can always be undone. Identical files are not backed up (a re-install
+# of the same version would otherwise create a full copy of the tree each time).
+$script:backupStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$script:backupDir = Join-Path $ClaudeHome ".bundle-backup-$script:backupStamp"
+$script:backedUp = New-Object System.Collections.Generic.List[string]
+
+function Backup-Overwrites($src, $dst, $label) {
+    if (-not (Test-Path $dst)) { return }
+    $srcBase = (Get-Item $src).FullName
+    foreach ($f in (Get-ChildItem $src -Recurse -File)) {
+        if ($f.FullName -match '[\\/]__pycache__[\\/]') { continue }
+        $rel = $f.FullName.Substring($srcBase.Length).TrimStart('\', '/')
+        $target = Join-Path $dst $rel
+        if (-not (Test-Path $target -PathType Leaf)) { continue }
+        if ((Get-FileHash $target -Algorithm SHA256).Hash -eq (Get-FileHash $f.FullName -Algorithm SHA256).Hash) { continue }
+        $bak = Join-Path $script:backupDir (Join-Path $label $rel)
+        New-Item -ItemType Directory -Force -Path (Split-Path $bak -Parent) | Out-Null
+        Copy-Item $target $bak -Force
+        $script:backedUp.Add("$label/$($rel.Replace('\','/'))")
+    }
+}
+
 function Info($m) { Write-Host $m -ForegroundColor Cyan }
 function Good($m) { Write-Host "[ok]   $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "[warn] $m" -ForegroundColor Yellow }
@@ -175,26 +206,50 @@ function Preflight-Full {
     Info ""
     Info "--- Preflight (full tier) ---------------------------------------"
     $issues = @()
-    # (1) real Python — the Windows-Store stub cannot run the cron pipeline.
-    $pyCmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $pyCmd) {
-        $issues += 'python not found on PATH — the cron pipeline needs Python 3.10+'
-    } elseif ($pyCmd.Source -match '\\WindowsApps\\') {
+    # (1) real Python. ALL THREE of "missing", "Store stub" and "too old" are hard
+    # stops: the full tier is a Python pipeline, and warn-and-continue produced an
+    # install that reported success and then failed at 02:30 every night. The
+    # interpreter checked here is the one the tasks will actually use — PYTHON_EXE
+    # when set (that is what registry.yaml / the cron scripts honor), else PATH.
+    $pySource = $null
+    if ($env:PYTHON_EXE -and (Test-Path $env:PYTHON_EXE)) {
+        $pySource = $env:PYTHON_EXE
+        Info "using PYTHON_EXE from the environment: $pySource"
+    } else {
+        $pyCmd = Get-Command python -ErrorAction SilentlyContinue
+        if ($pyCmd) { $pySource = $pyCmd.Source }
+    }
+    if (-not $pySource) {
+        Write-Host "ERROR: no Python found (PYTHON_EXE unset, 'python' not on PATH)." -ForegroundColor Red
+        Write-Host "       The full tier is a Python pipeline — install Python 3.10+ (python.org)," -ForegroundColor Red
+        Write-Host "       or set PYTHON_EXE to the interpreter you want the tasks to use." -ForegroundColor Red
+        exit 1
+    } elseif ($pySource -match '\\WindowsApps\\') {
         Write-Host "ERROR: 'python' resolves to the Windows-Store stub:" -ForegroundColor Red
-        Write-Host "       $($pyCmd.Source)" -ForegroundColor Red
+        Write-Host "       $pySource" -ForegroundColor Red
         Write-Host "       Install real Python 3.10+ (python.org) before the full tier." -ForegroundColor Red
         exit 1
     } else {
-        Good "python: $($pyCmd.Source)"
-        & $pyCmd.Source -c 'import requests, yaml' 2>$null
+        $pyVer = (& $pySource -c "import sys;print('%d.%d' % sys.version_info[:2])" 2>$null)
+        if ($pyVer -notmatch '^(\d+)\.(\d+)$') {
+            Write-Host "ERROR: $pySource did not report a version — it is not a usable interpreter." -ForegroundColor Red
+            exit 1
+        }
+        if ([int]$Matches[1] -lt 3 -or ([int]$Matches[1] -eq 3 -and [int]$Matches[2] -lt 10)) {
+            Write-Host "ERROR: Python $pyVer at $pySource is below the 3.10 the pipeline targets." -ForegroundColor Red
+            Write-Host "       Install 3.10+ or point PYTHON_EXE at a newer interpreter." -ForegroundColor Red
+            exit 1
+        }
+        Good "python: $pySource (3.10+ — reported $pyVer)"
+        & $pySource -c 'import requests, yaml' 2>$null
         if ($LASTEXITCODE -ne 0) {
             # Not optional for the full tier: cron/hooks/utils.py imports requests
             # at call time and registry parsing needs PyYAML, so warn-and-continue
             # would leave a deployment that only fails at 03:00. requirements.txt
             # holds the runtime deps (requirements-dev.txt is just pytest).
-            Write-Host "ERROR: python runtime deps missing (requests / PyYAML)." -ForegroundColor Red
+            Write-Host "ERROR: python runtime deps missing (requests / PyYAML) for $pySource." -ForegroundColor Red
             Write-Host "       The full tier cannot run without them. Install first:" -ForegroundColor Red
-            Write-Host "       pip install -r requirements.txt" -ForegroundColor Red
+            Write-Host "       `"$pySource`" -m pip install -r requirements.txt" -ForegroundColor Red
             exit 1
         }
     }
@@ -231,17 +286,20 @@ if ($Profile -eq 'full') {
 Info "Source:       $srcHome"
 Info ""
 
-# Claude Code ALWAYS reads CLAUDE.md + settings.json from ~/.claude and always
-# stores sessions + memory there — no flag can change that (F7). So a ClaudeHome
-# elsewhere is a sandbox, not a deployment. Say that, and point at the flag that
+# Claude Code reads CLAUDE.md + settings.json (and keeps sessions + memory) at
+# CLAUDE_CONFIG_DIR, defaulting to ~/.claude. Nothing this installer writes can
+# set that variable for the client, so unless the user exports it themselves, a
+# ClaudeHome elsewhere is a sandbox. Say that, and point at the flag that
 # actually does what someone asking for a custom path usually wants.
-$defaultHome = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.claude'))
+$defaultHome = [System.IO.Path]::GetFullPath($(
+    if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }))
 $customPath = ($homeFull -ne $defaultHome)
 if ($customPath) {
     Warn "ClaudeHome is not the default ~/.claude:"
-    Warn "  Claude Code only ever reads CLAUDE.md / settings.json from ~/.claude,"
-    Warn "  and always keeps session history + memory there. Config written here"
-    Warn "  will NOT take effect — this is a sandbox install."
+    Warn "  Claude Code reads CLAUDE.md / settings.json from CLAUDE_CONFIG_DIR"
+    Warn "  (default ~/.claude), and keeps session history + memory in the same"
+    Warn "  place. Config written here takes effect ONLY if you also export"
+    Warn "  CLAUDE_CONFIG_DIR=$ClaudeHome in the environment of the CLI/IDE."
     if (-not $rootsSplit) {
         Warn "  To run the pipeline from elsewhere while the config still works, use"
         Warn "  -PipelineRoot <path> instead (config stays in ~/.claude). See INSTALL.md."
@@ -296,6 +354,7 @@ if ($DryRun) {
     foreach ($d in @('skills', 'commands')) {
         $s = Join-Path $srcHome $d
         if (Test-Path $s) {
+            Backup-Overwrites $s (Join-Path $ClaudeHome $d) $d
             Copy-Item $s $ClaudeHome -Recurse -Force
             Add-Written $s (Join-Path $ClaudeHome $d) 'claude_home'
         }
@@ -307,7 +366,7 @@ if ($Profile -eq 'full') {
     # Hooks ship but stay opt-in (settings.json doesn't wire them) — copying the
     # scripts just makes them available; see settings.example-with-hooks.json.
     if ($DryRun) {
-        Info "[dry-run] would copy hooks/, wiki/, bin/, cron/ (full tier)"
+        Info "[dry-run] would copy hooks/ -> $ClaudeHome and wiki/, bin/, cron/ -> $PipelineRoot (full tier)"
         Info "[dry-run] would preserve an existing bootstrapped registry.yaml + manual wiki/index.md"
     } else {
         # Reinstall-safety (F5): the -Force cron/ + wiki/ copies would reset a
@@ -327,14 +386,26 @@ if ($Profile -eq 'full') {
             $t = [System.IO.Path]::GetTempFileName(); Copy-Item $idxPath $t -Force
             $preserve[$idxPath] = $t
         }
-        foreach ($d in @('hooks', 'wiki', 'bin', 'cron')) {
+        # hooks/ goes to ClaudeHome, not PipelineRoot: these are Claude Code
+        # lifecycle hooks, wired from settings.json — and Claude Code reads
+        # settings.json only from ~/.claude. Under -PipelineRoot they landed in a
+        # tree the shipped settings.example-with-hooks.json never points at, so a
+        # split-root install wired hooks to paths that did not exist.
+        $hooksSrc = Join-Path $srcHome 'hooks'
+        if (Test-Path $hooksSrc) {
+            Backup-Overwrites $hooksSrc (Join-Path $ClaudeHome 'hooks') 'hooks'
+            Copy-Item $hooksSrc $ClaudeHome -Recurse -Force
+            Add-Written $hooksSrc (Join-Path $ClaudeHome 'hooks') 'claude_home'
+        }
+        foreach ($d in @('wiki', 'bin', 'cron')) {
             $s = Join-Path $srcHome $d
             if (Test-Path $s) {
+                Backup-Overwrites $s (Join-Path $PipelineRoot $d) $d
                 Copy-Item $s $PipelineRoot -Recurse -Force
                 Add-Written $s (Join-Path $PipelineRoot $d) 'pipeline_root'
             }
         }
-        Good "copied hooks/, wiki/, bin/, cron/ (full tier) -> $PipelineRoot"
+        Good "copied hooks/ -> $ClaudeHome; wiki/, bin/, cron/ (full tier) -> $PipelineRoot"
         foreach ($dst in $preserve.Keys) {
             Copy-Item $preserve[$dst] $dst -Force; Remove-Item $preserve[$dst] -Force
             # Restored from your copy, so the manifest lists it as preserved, not
@@ -362,8 +433,8 @@ if ($Profile -eq 'lite') {
     Write-Manifest 'lite'
     Info ""
     if ($customPath) {
-        Warn "Files were copied to $ClaudeHome, but Claude Code reads config only from"
-        Warn "$defaultHome — this lite install will NOT take effect until it lives there."
+        Warn "Files were copied to $ClaudeHome, but Claude Code reads config from"
+        Warn "$defaultHome unless CLAUDE_CONFIG_DIR=$ClaudeHome is exported for it."
     }
     Info "Lite install done. In a Claude Code chat, run:"
     Info "  /plugin marketplace add anthropics/claude-plugins-official"
@@ -456,6 +527,15 @@ if ($NonInteractive) {
         # cancelled UAC prompt or a registration error must not report success.
         $syncRc = $LASTEXITCODE
         if ($syncRc -eq 0) { $syncStatus = 'yes'; Good "sync.cmd registered the scheduled tasks" }
+        elseif ($syncRc -eq 3) {
+            # Exit 3 = partial: some tasks were skipped (invalid trigger, missing
+            # target, mapped drive, foreign same-named task). Reporting that as
+            # "registered" was the whole problem — some of the pipeline simply
+            # would not run, and nothing said so.
+            $syncStatus = 'PARTIAL (some tasks skipped — see the sync output above)'
+            Warn "sync.cmd exited 3 — NOT every task was registered. Fix the skipped ones and re-run:"
+            Warn "  $PipelineRoot\cron\admin\sync.cmd"
+        }
         else {
             $syncStatus = "FAILED (sync.cmd exit $syncRc)"
             Warn "sync.cmd exited $syncRc — tasks are probably NOT registered (UAC cancelled or a registration error)."
@@ -474,18 +554,33 @@ if ($DryRun) {
     Info "[dry-run] would offer to copy claude-switch.ps1 into the deployment and mirror codex/AGENTS.md into ~/.codex"
 } else {
     $swSrc = Join-Path $root 'scripts/claude-switch.ps1'
+    # Next to the .env it reads. The switcher looks for a .env beside itself and
+    # then at ~/.claude/.env — on a split-root install the .env lives in
+    # PipelineRoot, so a copy parked in ClaudeHome would find neither and report
+    # every key as missing.
+    $swRoot = if ($rootsSplit) { $PipelineRoot } else { $ClaudeHome }
+    $swRootName = if ($rootsSplit) { 'pipeline_root' } else { 'claude_home' }
     if ((Test-Path $swSrc) -and (AskYN 'Copy claude-switch.ps1 into the deployment (survives deleting the bundle checkout)?' $true)) {
-        Copy-Item $swSrc (Join-Path $ClaudeHome 'claude-switch.ps1') -Force
-        Add-Written $swSrc (Join-Path $ClaudeHome 'claude-switch.ps1') 'claude_home'
-        Good "copied claude-switch.ps1 -> $ClaudeHome\claude-switch.ps1"
+        Copy-Item $swSrc (Join-Path $swRoot 'claude-switch.ps1') -Force
+        Add-Written $swSrc (Join-Path $swRoot 'claude-switch.ps1') $swRootName
+        Good "copied claude-switch.ps1 -> $swRoot\claude-switch.ps1"
         $switcherInstalled = $true
     }
     $codexSrc = Join-Path $root 'codex/AGENTS.md'
     $codexDir = Join-Path $env:USERPROFILE '.codex'
     if ((Test-Path $codexSrc) -and (AskYN 'Mirror codex/AGENTS.md into ~/.codex (for Codex CLI coexistence)?' (Test-Path $codexDir))) {
         New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
-        Copy-Item $codexSrc (Join-Path $codexDir 'AGENTS.md') -Force
-        Good "mirrored codex/AGENTS.md -> $codexDir\AGENTS.md"
+        $codexDst = Join-Path $codexDir 'AGENTS.md'
+        # ~/.codex is outside both roots, so the manifest cannot track this file
+        # and the uninstaller must never touch it. That makes an unrecoverable
+        # overwrite the only real risk here — so back up your version first.
+        if (Test-Path $codexDst) {
+            $codexBak = "$codexDst.bak-$script:backupStamp"
+            Copy-Item $codexDst $codexBak -Force
+            Warn "backed up your ~/.codex/AGENTS.md -> $codexBak (not tracked by the manifest)"
+        }
+        Copy-Item $codexSrc $codexDst -Force
+        Good "mirrored codex/AGENTS.md -> $codexDst"
         $codexMirrored = $true
     }
 }
@@ -520,10 +615,22 @@ if (Test-Path $regDeployed) {
     Info "registry.yaml task count: $taskCount"
 }
 if ($customPath) {
-    Warn "ClaudeHome is not $defaultHome — Claude Code will NOT read CLAUDE.md / settings.json from $ClaudeHome (the cron/wiki files do run from where they were placed)"
+    Warn "ClaudeHome is not $defaultHome — Claude Code reads CLAUDE.md / settings.json from $ClaudeHome only if CLAUDE_CONFIG_DIR is exported to it (the cron/wiki files do run from where they were placed)"
+}
+if ($script:backedUp.Count -gt 0) {
+    Warn "$($script:backedUp.Count) existing file(s) were replaced by this upgrade — your versions are in:"
+    Warn "  $script:backupDir"
+    foreach ($b in ($script:backedUp | Select-Object -First 10)) { Warn "    $b" }
+    if ($script:backedUp.Count -gt 10) { Warn "    ... and $($script:backedUp.Count - 10) more" }
 }
 if ($rootsSplit) {
     Info "Roots: config in $ClaudeHome, pipeline in $PipelineRoot"
+    # settings.example-with-hooks.json is written for the one-root layout, so on a
+    # split install the paths a user would copy out of it are wrong. Print the
+    # ones that actually exist in THIS deployment.
+    Info "Hook commands for this layout (settings.json in $ClaudeHome):"
+    Info "  PreToolUse/PostToolUse -> $ClaudeHome\hooks\<hook>.py"
+    Info "  SessionStart/SessionEnd/PreCompact -> $PipelineRoot\cron\hooks\<hook>.py"
 }
 Info "sync run this session: $syncStatus"
 Info "claude-switch.ps1 in deployment: $(if ($switcherInstalled) { 'yes' } else { 'no (invoke from the bundle checkout)' })"

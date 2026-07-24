@@ -130,12 +130,28 @@ new caller unless the provider speaks a different protocol.
 
 `WIKI_LLM_PROVIDER=local` points the pipeline at any OpenAI-compatible
 server on your own machine (Ollama, llama.cpp, LM Studio, vLLM), so
-transcripts never leave the box. One catch worth knowing: the default
-`deepseek` chain falls back to the OpenCode Go gateway when DeepSeek
-fails, which would push a prompt off-box *because* the local side broke.
-**`WIKI_OFFBOX_FALLBACK=0` forbids that fallback**, turning "nothing
-leaves this machine" from a hope into a rule. The active policy is
-printed once per run in the `[llm] provider=…` line.
+transcripts never leave the box.
+
+Two separate mechanisms, worth not confusing:
+
+- **`local` verifies its own endpoint.** The row is declared `offbox:
+  False`, and that promise is checked rather than assumed: the host in
+  `LOCAL_LLM_BASE_URL` must be loopback/`localhost`, or the call is
+  REFUSED and nothing is sent. A typo pointing at a remote host cannot
+  quietly turn "local-only" into "shipped to a stranger". To use a
+  deliberately non-loopback but trusted server (an inference box on your
+  LAN), name its host in `LOCAL_LLM_ALLOWED_HOSTS` (comma-separated) —
+  making it an explicit decision instead of an unnoticed URL.
+- **`WIKI_OFFBOX_FALLBACK=0` controls the FALLBACK CHAIN, nothing else.**
+  The default `deepseek` chain falls back to the OpenCode Go gateway when
+  DeepSeek fails, which would push a prompt off-box *because* the primary
+  broke; this flag forbids that. It is not a DLP switch: it does not
+  restrict where an explicitly chosen provider points. An explicit
+  `local` never falls back to anything in the first place — it is that
+  provider alone, or `None`.
+
+The active policy and the resolved base URL are printed once per run in
+the `[llm] provider=…` line.
 
 The `local` row deliberately ships **no default model** — an unset
 `LOCAL_LLM_MODEL` fails loudly instead of quietly calling whatever

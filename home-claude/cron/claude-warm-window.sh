@@ -8,13 +8,15 @@
 # the time you sit down to work it has already "aged" and the reset boundary
 # lands at a convenient time.
 #
-# ⚠️  BILLING WARNING (read before enabling): a programmatic `claude -p` on a
-# subscription may consume a CAPPED CREDIT billed at API rates (Anthropic
-# billing change of 2026-06-15 that splits `claude -p` / Agent SDK usage out of
-# the interactive subscription quota). Enable this task AT YOUR OWN COST — if
-# the split is in effect for your plan, every ping draws from that separate
-# capped credit, not from your interactive window. Disable (enabled:false in
-# the registry) if you don't want that.
+# ⚠️  BILLING WARNING (read before enabling): how a programmatic `claude -p` is
+# billed on a subscription is a MOVING TARGET, so check the current policy
+# yourself before turning this on — do not trust a date frozen in a comment:
+#   https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan
+# A previously announced split (programmatic usage moved onto a separate, capped
+# API-priced credit) was put on hold, so at the time of writing `claude -p` still
+# draws on the same subscription usage limits as interactive use — which means
+# every ping spends part of YOUR window. Either way this task costs you
+# something; enable it deliberately (enabled:false in the registry disables it).
 #
 # Why NOT --bare and NOT ANTHROPIC_API_KEY: --bare reads auth only from an API
 # key (it ignores OAuth/keychain) → "Not logged in"; and an API key would route

@@ -33,12 +33,40 @@ install_file() {
     cp "$1" "$2"
 }
 
+# `cp -R` replaces YOUR skill/command whenever its name matches a shipped one,
+# and the backup gate above only ever covered the two top-level config files.
+# Copy aside anything about to be replaced by different content, into one
+# timestamped directory, so an upgrade stays undoable.
+backup_dir="$dst/.bundle-backup-$stamp"
+backed_up=0
+backup_overwrites() {
+    src_dir="$1"; dst_dir="$2"
+    [ -d "$dst_dir" ] || return 0
+    while IFS= read -r f; do
+        rel="${f#"$src_dir"/}"
+        target="$dst_dir/$rel"
+        [ -f "$target" ] || continue
+        cmp -s "$f" "$target" && continue
+        mkdir -p "$(dirname "$backup_dir/$(basename "$dst_dir")/$rel")"
+        cp "$target" "$backup_dir/$(basename "$dst_dir")/$rel"
+        backed_up=$((backed_up + 1))
+    done <<EOF
+$(find "$src_dir" -type f)
+EOF
+}
+
 mkdir -p "$dst"
 install_file "$src/CLAUDE.md"     "$dst/CLAUDE.md"
 install_file "$src/settings.json" "$dst/settings.json"
 for d in skills commands; do
-    [ -d "$src/$d" ] && cp -R "$src/$d" "$dst/"
+    if [ -d "$src/$d" ]; then
+        backup_overwrites "$src/$d" "$dst/$d"
+        cp -R "$src/$d" "$dst/"
+    fi
 done
+if [ "$backed_up" -gt 0 ]; then
+    echo "[warn] $backed_up existing file(s) replaced — your versions are in $backup_dir"
+fi
 echo "[ok] copied CLAUDE.md, settings.json, skills/, commands/ -> $dst"
 if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$dst" != "$HOME/.claude" ]; then
     echo "[warn] custom config root: Claude Code reads it only when CLAUDE_CONFIG_DIR=$dst"

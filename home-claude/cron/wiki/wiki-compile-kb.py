@@ -41,6 +41,9 @@ from utils import (  # noqa: E402
 )
 from untrusted import fence  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from runs import record_run  # noqa: E402
+
 # Allow nested Claude CLI invocation
 for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
     os.environ.pop(env_key, None)
@@ -140,7 +143,22 @@ JSON only, no markdown wrapper, no commentary."""
     # parse_llm_json handles fenced output, broken escapes and truncation —
     # a greedy regex + bare json.loads choked on trailing commentary here.
     result = parse_llm_json(output)
-    return result or None
+    if result:
+        return result
+    # parse_llm_json returns [] for BOTH "unparseable" and "the model correctly
+    # answered []" — and the prompt explicitly allows []. Collapsing the two into
+    # None made a legitimate "nothing worth extracting" a permanent failure: the
+    # article never entered the state and was re-sent to the LLM every night.
+    if _is_empty_array(output):
+        return []
+    return None
+
+
+def _is_empty_array(raw: str) -> bool:
+    """True when the response is literally an empty JSON array (fence tolerated)."""
+    text = re.sub(r"^\s*```(?:json)?\s*", "", raw)
+    text = re.sub(r"\s*```\s*$", "", text).strip()
+    return text == "[]"
 
 
 def apply_changes(changes: list[dict], existing_pages: dict[str, str],
@@ -241,6 +259,8 @@ def main():
     # own source, just keep this task disabled in registry.yaml.
     if not KBNEWS_DIR.exists():
         log(f"No source directory at {KBNEWS_DIR} — nothing to compile, exiting.")
+        record_run(task="ClaudeWikiCompileKB", process_rc=0, useful_items=None,
+                   delivery="n/a", note="no kb_news/ source dir")
         return
 
     processed = get_processed_files()
@@ -251,6 +271,8 @@ def main():
 
     if not new_files:
         log("Nothing to process. Exiting.")
+        record_run(task="ClaudeWikiCompileKB", process_rc=0, useful_items=None,
+                   delivery="n/a", note="no new source files")
         return
 
     if is_dry_run():
@@ -270,7 +292,14 @@ def main():
         log(f"[{i+1}/{len(new_files)}] Processing: {rel}")
 
         changes = compile_article(article_path, existing_pages)
-        if changes:
+        if changes is not None and not changes:
+            # Valid empty result: the model read the article and found no entity
+            # worth a page. That is a successful no-op — mark it processed so it
+            # isn't re-sent every night (the failure path is `changes is None`).
+            state_add("compile_kb", "processed", [rel])
+            update_log(rel, ["(no entities)"])
+            log("  → 0 entities extracted (valid empty result) — marked processed")
+        elif changes:
             applied, rejected = apply_changes(changes, existing_pages, f"kb_news/{rel}")
             # Save the dropped payload for inspection BEFORE we mark it processed
             # (deterministic rejection is still recorded so it won't loop forever).
@@ -285,7 +314,18 @@ def main():
                 hard_failure = True
             # State (.processed.json) is the dedup source of truth; update_log
             # keeps the human-readable journal in log.md.
-            state_add("compile_kb", "processed", [rel])
+            #
+            # NOT marked when siblings applied but something was rejected: that
+            # is the case apply_changes' contract is about. Re-applying the
+            # applied siblings is idempotent (an unchanged body is "skipped"),
+            # so the retry costs one LLM call and can still recover the dropped
+            # entity, whereas finalizing here loses it for good. The all-rejected
+            # case IS marked — it is deterministic and would loop forever.
+            if applied and rejected:
+                print(f"  compile-kb {rel}: NOT marked processed — retry can still "
+                      f"recover the {len(rejected)} rejected change(s)", file=sys.stderr)
+            else:
+                state_add("compile_kb", "processed", [rel])
             if applied:
                 update_log(rel, applied)
                 total_created += len(applied)
@@ -317,6 +357,17 @@ def main():
     # must surface as a non-zero exit for the cron monitor.
     if not hard_failure:
         mark_phase_success("compile-kb")
+
+    # Terminal ledger record (cron/runs.py): useful_items = pages actually
+    # written, so a run that burned LLM calls and changed nothing is recorded as
+    # empty-artifact instead of passing for healthy.
+    record_run(
+        task="ClaudeWikiCompileKB",
+        process_rc=1 if hard_failure else 0,
+        useful_items=total_created,
+        delivery="n/a",
+        note=f"{len(new_files)} source file(s)",
+    )
     if hard_failure:
         sys.exit(1)
 

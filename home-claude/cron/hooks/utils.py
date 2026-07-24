@@ -75,6 +75,18 @@ def _load_manifest() -> tuple[dict, bool]:
 
 _MANIFEST, _MANIFEST_BROKEN = _load_manifest()
 
+# Every field the manifest may carry. A key outside this set is almost always a
+# typo (`skip_project:` for `skip_projects:`), and a typo'd privacy field is a
+# policy that silently does nothing — so it is reported rather than ignored.
+_MANIFEST_KNOWN_KEYS = {
+    "project_map", "known_projects", "skip_dirs", "skip_projects",
+    "allow_projects", "skip_jsonl_projects", "collect_plans",
+}
+for _unknown in sorted(set(_MANIFEST) - _MANIFEST_KNOWN_KEYS):
+    print(f"WARNING: bundle.local.yaml has unknown key '{_unknown}' — it is "
+          f"ignored. Known keys: {', '.join(sorted(_MANIFEST_KNOWN_KEYS))}.",
+          file=sys.stderr)
+
 
 def _manifest_str_list(key: str) -> list:
     """Read a manifest list field, rejecting a wrong type loudly.
@@ -98,10 +110,23 @@ def _manifest_str_list(key: str) -> list:
 # format: the encoded cwd with `\`, `/`, `:` replaced by `-`. Configure via
 # bundle.local.yaml `project_map:`; the empty default falls back to the
 # trailing `-`-segment (see dir_to_project).
+# A malformed project_map is NOT ignorable: the map is what makes two cwds with
+# the same trailing segment distinguishable, and the privacy policy can only
+# speak about the resolved slug. Silently dropping it merges projects the user
+# separated on purpose — so it fails closed like every other policy field.
 _project_map_raw = _MANIFEST.get("project_map") or {}
 if not isinstance(_project_map_raw, dict):
     print(f"ERROR: bundle.local.yaml 'project_map' must be a mapping, got "
-          f"{type(_project_map_raw).__name__} — ignoring.", file=sys.stderr)
+          f"{type(_project_map_raw).__name__} — every project denied until it is "
+          "fixed.", file=sys.stderr)
+    _MANIFEST_BROKEN = True
+    _project_map_raw = {}
+elif not all(isinstance(k, str) and isinstance(v, str)
+             for k, v in _project_map_raw.items()):
+    print("ERROR: bundle.local.yaml 'project_map' must map strings to strings "
+          "(quote values like `1.0` and `yes`) — every project denied until it "
+          "is fixed.", file=sys.stderr)
+    _MANIFEST_BROKEN = True
     _project_map_raw = {}
 PROJECT_MAP: dict[str, str] = dict(_project_map_raw)
 
@@ -129,14 +154,22 @@ SKIP_JSONL_PROJECTS: set[str] = set(_manifest_str_list("skip_jsonl_projects")) |
 
 def _manifest_bool(key: str, default: bool) -> bool:
     """Read a bool from the manifest; a non-bool value is a loud error, not a
-    silent truthy cast ('false' as a string would otherwise mean True)."""
+    silent truthy cast ('false' as a string would otherwise mean True).
+
+    Falling back to the default is not enough: these booleans gate what leaves
+    the machine, so a value nobody could parse denies everything, exactly like a
+    malformed list or map. One rule for the whole manifest — 'malformed policy
+    means no data moves' — instead of a per-field lottery.
+    """
     if key not in _MANIFEST:
         return default
     val = _MANIFEST.get(key)
     if isinstance(val, bool):
         return val
     print(f"ERROR: bundle.local.yaml '{key}' must be true/false, got "
-          f"{type(val).__name__} — using default {default}.", file=sys.stderr)
+          f"{type(val).__name__} — every project denied until it is fixed.",
+          file=sys.stderr)
+    globals()["_MANIFEST_BROKEN"] = True
     return default
 
 
@@ -394,8 +427,12 @@ def _migrated_state_from_log() -> dict | None:
         text = LOG_MD.read_text(encoding="utf-8")
     except OSError:
         return None
+    # `@<size>` is part of the key, not decoration: dropping it produces a
+    # size-less legacy key, which is_processed() treats as "processed at ANY
+    # size". After a corrupt-state rebuild a still-growing session JSONL would
+    # then never be re-read and its whole tail would be lost.
     flush = [m.group(1).strip()
-             for m in re.finditer(r"\[flush\][^\n]*?processed:\s*(\S+\.jsonl)", text)]
+             for m in re.finditer(r"\[flush\][^\n]*?processed:\s*(\S+\.jsonl(?:@\d+)?)", text)]
     dailies = [m.group(1)
                for m in re.finditer(r"\[compile-sessions\][^\n]*?(\d{4}-\d{2}-\d{2})\.md", text)]
     kb = []
@@ -572,6 +609,28 @@ def save_session_tail(data: dict, last_n: int = 30) -> tuple[str, str] | None:
     if messages:
         save_to_pending(session_id, messages, project)
     return transcript_path, session_id
+
+
+def find_bash() -> str | None:
+    """Absolute path to a usable bash, or None.
+
+    Order: BASH_EXE (explicit override) → PATH → the Git-for-Windows default.
+    The scripts that need bash used to hardcode the Windows path with only an
+    env-var escape hatch, so on Linux/macOS — where bash is simply `/bin/bash` —
+    every Telegram alert silently did nothing until someone set a Windows-shaped
+    variable. Task Scheduler's session 0 has no user PATH, which is why the
+    hardcoded fallback stays LAST rather than being removed.
+    """
+    import shutil
+
+    explicit = os.environ.get("BASH_EXE")
+    if explicit and os.path.isfile(explicit):
+        return explicit
+    found = shutil.which("bash")
+    if found:
+        return found
+    default = r"C:\Program Files\Git\bin\bash.exe"
+    return default if os.path.isfile(default) else None
 
 
 def today_str() -> str:
@@ -804,6 +863,36 @@ def _env_first(names: list[str], default: str = "") -> str:
     return default
 
 
+def _is_local_endpoint(url: str) -> bool:
+    """True when the URL points at this machine (loopback / localhost).
+
+    A provider row with `offbox: False` is a PROMISE that the prompt never
+    leaves the box, but the URL behind it comes from the environment — a typo or
+    a copied config can aim LOCAL_LLM_BASE_URL at a remote host and the promise
+    silently becomes false. So the promise is verified, not assumed.
+
+    LOCAL_LLM_ALLOWED_HOSTS (comma-separated) is the escape hatch for a
+    deliberately non-loopback but still trusted server (an inference box on your
+    own LAN): naming it is an explicit decision, unlike a URL nobody re-read.
+    """
+    from urllib.parse import urlparse
+    import ipaddress
+
+    host = (urlparse(url).hostname or "").strip().lower()
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        pass
+    allowed = {h.strip().lower()
+               for h in os.environ.get("LOCAL_LLM_ALLOWED_HOSTS", "").split(",")
+               if h.strip()}
+    return host in allowed
+
+
 def _provider_cfg(name: str) -> tuple[str, str, str]:
     """Resolve (api_key, base_url, model) for a registry provider."""
     p = PROVIDERS[name]
@@ -916,7 +1005,9 @@ def _log_provider_once() -> None:
             # local-only prompt reach a cloud gateway" is answered here.
             extra = " (fallback=opencode)" if OFFBOX_FALLBACK else " (fallback=off, WIKI_OFFBOX_FALLBACK=0)"
         elif not PROVIDERS[LLM_PROVIDER].get("offbox", True):
-            extra = " (local-only)"
+            extra = (" (local-only, endpoint verified)" if _is_local_endpoint(base)
+                     else " (local-only, but the endpoint is NOT local — every call "
+                          "will be REFUSED)")
         print(f"  [llm] provider={LLM_PROVIDER} model={model} base={base}{extra}", file=sys.stderr)
     elif LLM_PROVIDER == "claude":
         print("  [llm] provider=claude model=sonnet", file=sys.stderr)
@@ -1738,6 +1829,16 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
         return None
     if not model:
         print(f"  {cfg['model_env']} env var not set (no default for {label})", file=sys.stderr)
+        return None
+
+    # A provider declared local-only must actually be local. Refusing here is
+    # the whole point: the transcript is already in hand, and shipping it to a
+    # misconfigured remote host is the one mistake that cannot be undone.
+    if not cfg.get("offbox", True) and not _is_local_endpoint(base_url):
+        print(f"  {label} REFUSED: {base_url} is not a local endpoint, but this "
+              f"provider is declared local-only — nothing was sent. Point "
+              f"{cfg['base_url_env']} at loopback, or name the host in "
+              f"LOCAL_LLM_ALLOWED_HOSTS to allow it on purpose.", file=sys.stderr)
         return None
 
     if _is_depleted(provider):

@@ -69,12 +69,39 @@ if ($null -eq $mf.written) {
 # -DryRun always wins; without it, deleting still needs an explicit -Confirm/-Force.
 $apply = ($Confirm -or $Force) -and -not $DryRun
 
-# Roots come from the manifest, not from guesswork: the pipeline may sit
-# somewhere this script was never told about. Fall back to the manifest's own
-# ClaudeHome for pre-split manifests that carry neither field.
-$mfClaudeHome = if ($mf.claude_home) { $mf.claude_home } else { $ClaudeHome }
-$mfPipelineRoot = if ($mf.pipeline_root) { $mf.pipeline_root } else { $mfClaudeHome }
+# ClaudeHome is where the manifest ACTUALLY is, not what it claims: a corrupted
+# or hand-edited manifest must not be able to redirect deletions at an unrelated
+# tree. The pipeline root can only come from the file (by definition this script
+# was never told where it is), so it is normalized and every path under it is
+# containment-checked below.
+$mfClaudeHome = [System.IO.Path]::GetFullPath($ClaudeHome).TrimEnd('\', '/')
+if ($mf.claude_home -and
+    ([System.IO.Path]::GetFullPath($mf.claude_home).TrimEnd('\', '/') -ne $mfClaudeHome)) {
+    Warn "manifest records claude_home = $($mf.claude_home), but it was found in $mfClaudeHome — using the latter"
+}
+$mfPipelineRoot = $mfClaudeHome
+if ($mf.pipeline_root) {
+    try { $mfPipelineRoot = [System.IO.Path]::GetFullPath($mf.pipeline_root).TrimEnd('\', '/') }
+    catch {
+        Write-Host "ERROR: manifest pipeline_root is not a usable path: $($mf.pipeline_root)" -ForegroundColor Red
+        exit 1
+    }
+}
 $rootsSplit = ($mfClaudeHome -ne $mfPipelineRoot)
+
+function Resolve-ManifestPath($base, $rel) {
+    # A manifest entry may only name a RELATIVE path that stays inside its root.
+    # Absolute paths, drive letters and `..` segments are rejected outright:
+    # without this, one edited line in a JSON file turns an uninstaller into an
+    # arbitrary-file deleter running with the user's own rights.
+    if ([string]::IsNullOrWhiteSpace($rel)) { return $null }
+    if ($rel -match '^[\\/]' -or $rel -match '^[A-Za-z]:' -or $rel -match '^\\\\') { return $null }
+    if (($rel -split '[\\/]') -contains '..') { return $null }
+    try { $full = [System.IO.Path]::GetFullPath((Join-Path $base $rel)) } catch { return $null }
+    $prefix = $base.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $full.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+    return $full
+}
 
 Info ""
 Info "=== claude-bundle uninstaller ==="
@@ -96,42 +123,60 @@ function Resolve-Root($rootName) {
 $removed = 0
 $gone = 0
 $skipped = 0
+$rejected = 0
+# Parents of what we actually removed — the ONLY directories step 3 may prune.
+$touchedDirs = New-Object System.Collections.Generic.HashSet[string]
 foreach ($f in @($mf.written)) {
-    $full = Join-Path (Resolve-Root $f.root) $f.path
+    $full = Resolve-ManifestPath (Resolve-Root $f.root) $f.path
+    if (-not $full) {
+        Warn "manifest entry escapes its root — ignored: $($f.root)/$($f.path)"
+        $rejected++
+        continue
+    }
     if (-not (Test-Path $full -PathType Leaf)) { $gone++; continue }
     if ($f.sha256 -and (Get-FileHash $full -Algorithm SHA256).Hash -ne $f.sha256 -and -not $Force) {
         Warn "changed since install — keeping $($f.path) (use -Force to delete it anyway)"
         $skipped++
         continue
     }
+    $touchedDirs.Add((Split-Path $full -Parent)) | Out-Null
     if ($apply) { Remove-Item $full -Force; $removed++ }
     else { Info "[dry-run] would remove $($f.path)"; $removed++ }
 }
 
 # ── 3. Prune directories the removals emptied ───────────────────────────────
-# Deepest first, so a parent is empty by the time it is tested. A directory that
-# still holds anything (wiki notes, logs, .processed.json) is left alone.
+# ONLY directories we actually deleted a file from, and their parents up to (but
+# never including) the root. The old sweep walked BOTH roots whole and removed
+# every empty directory and every all-.pyc __pycache__ it met — including ones
+# the installer never wrote, in a tree that also holds the user's own files.
+# Deepest first, so a parent is empty by the time it is tested.
 $pruned = 0
 if ($apply) {
-    $roots = @($mfClaudeHome)
-    if ($rootsSplit) { $roots += $mfPipelineRoot }
-    foreach ($rootDir in $roots) {
-        if (-not (Test-Path $rootDir)) { continue }
-        # Byte-code caches first: Python regenerates them, and the installer's closing
-        # self-test compiles the tree it just deployed — so a full install always
-        # leaves these, and without this the dirs below never become empty. Only .pyc
-        # is ours to assume; a __pycache__ holding anything else is left alone.
-        foreach ($d in (Get-ChildItem $rootDir -Recurse -Directory -Filter '__pycache__')) {
-            if (-not (Get-ChildItem $d.FullName -Recurse -Force | Where-Object { $_.Extension -ne '.pyc' })) {
-                Remove-Item $d.FullName -Recurse -Force
-                $pruned++
-            }
+    $candidates = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($d in $touchedDirs) {
+        # Walk up to (never including) a root; stop the moment we leave both.
+        $cur = $d
+        while ($cur -and ($cur -ne $mfClaudeHome) -and ($cur -ne $mfPipelineRoot)) {
+            if (-not ($cur.StartsWith($mfClaudeHome, [System.StringComparison]::OrdinalIgnoreCase) -or
+                      $cur.StartsWith($mfPipelineRoot, [System.StringComparison]::OrdinalIgnoreCase))) { break }
+            $candidates.Add($cur) | Out-Null
+            $cur = Split-Path $cur -Parent
         }
-        foreach ($d in (Get-ChildItem $rootDir -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending)) {
-            if ((Test-Path $d.FullName) -and -not (Get-ChildItem $d.FullName -Force)) {
-                Remove-Item $d.FullName -Force
-                $pruned++
-            }
+    }
+    foreach ($d in ($candidates | Sort-Object { $_.Length } -Descending)) {
+        if (-not (Test-Path $d)) { continue }
+        # A __pycache__ under a directory we emptied is regenerable byte-code —
+        # the installer's own closing self-test creates it. Only .pyc content is
+        # ours to assume; anything else in there is left alone.
+        $cache = Join-Path $d '__pycache__'
+        if ((Test-Path $cache) -and
+            -not (Get-ChildItem $cache -Recurse -Force | Where-Object { $_.Extension -ne '.pyc' })) {
+            Remove-Item $cache -Recurse -Force
+            $pruned++
+        }
+        if (-not (Get-ChildItem $d -Force)) {
+            Remove-Item $d -Force
+            $pruned++
         }
     }
 }
@@ -150,10 +195,22 @@ if ($mf.preserved) {
 }
 Info ""
 Info "--- Summary -----------------------------------------------------"
-Info "removed: $removed   already gone: $gone   skipped (modified): $skipped   empty dirs pruned: $pruned"
+Info "removed: $removed   already gone: $gone   skipped (modified): $skipped   rejected (bad path): $rejected   empty dirs pruned: $pruned"
 if ($mf.tier -eq 'full') {
-    Warn "scheduled tasks are NOT unregistered by this script — remove them by hand (elevated):"
-    Warn "  schtasks /query /fo table | findstr /i claude     then: schtasks /delete /tn <name> /f"
+    # Registry-driven, not `schtasks /delete`: this project forbids touching the
+    # scheduler directly because it drifts from registry.yaml — telling users to
+    # do exactly that as the official uninstall step contradicted its own rule
+    # and left the registry describing tasks that no longer exist.
+    $syncTasks = Join-Path $mfPipelineRoot 'cron\admin\sync-tasks.ps1'
+    Warn "scheduled tasks are NOT unregistered by this script (that needs elevation)."
+    if (Test-Path $syncTasks) {
+        Warn "  Unregister them from the registry, elevated:"
+        Warn "    powershell -File `"$syncTasks`" -Unregister"
+        Warn "  (then delete $mfPipelineRoot\cron\registry.yaml if you are done with the pipeline)"
+    } else {
+        Warn "  cron/admin/sync-tasks.ps1 is already gone — list and remove the leftovers by hand:"
+        Warn "    schtasks /query /fo table | findstr /i claude     then: schtasks /delete /tn <name> /f"
+    }
 }
 if (-not $apply) {
     Info ""

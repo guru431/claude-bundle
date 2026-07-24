@@ -146,6 +146,13 @@ def emit_systemd(task: dict, install_path: str, out: Path) -> str | None:
         f"[Unit]\nDescription={desc}\n\n"
         f"[Service]\nType=oneshot\nExecStart={exec_line}\n"
     )
+    # timeout_hours is the registry's "kill it if it hangs" contract. Dropping it
+    # meant a wedged nightly job on POSIX ran forever, while the same registry on
+    # Windows capped it — same declaration, two behaviours. 0/absent = unlimited,
+    # matching Build-TaskXml's PT0S.
+    timeout_h = task.get("timeout_hours")
+    if isinstance(timeout_h, int) and not isinstance(timeout_h, bool) and timeout_h > 0:
+        service += f"RuntimeMaxSec={timeout_h * 3600}\n"
     if sched[0] == "OnBootSec":
         timer = (f"[Unit]\nDescription=Timer for {name}\n\n"
                  f"[Timer]\nOnBootSec={sched[1]}\nPersistent=true\n\n"
@@ -192,13 +199,47 @@ def emit_launchd(task: dict, install_path: str, out: Path) -> str | None:
     plist: dict = {"Label": label, "ProgramArguments": argv}
     if trig == "AtStartup":
         plist["RunAtLoad"] = True
-    elif rep:  # a repeating task -> interval (aligned start dropped for launchd)
-        plist["StartInterval"] = rep
+        # launchd has no boot-delay key, so an ignored startup_delay used to run
+        # the task the instant the agent loaded — before the network/mounts the
+        # delay exists to wait for. Express it as an explicit sleep instead.
+        delay = iso_seconds(task.get("startup_delay", ""))
+        if delay:
+            plist["ProgramArguments"] = [
+                "/bin/sh", "-c",
+                f"sleep {delay}; exec " + " ".join(shlex.quote(a) for a in argv),
+            ]
+    elif rep:
+        cal = _plist_calendar(task)
+        # A registry "Daily 01:00 every PT4H" is an ALIGNED schedule. StartInterval
+        # counts from whenever the agent was loaded, so the same declaration drifted
+        # to arbitrary clock times on macOS. When the period divides the day evenly,
+        # expand it into the explicit list of aligned times launchd does support.
+        if cal is not None and "Hour" in cal and rep % 3600 == 0 and 24 % (rep // 3600) == 0:
+            step = rep // 3600
+            plist["StartCalendarInterval"] = [
+                {**cal, "Hour": (cal["Hour"] + k) % 24}
+                for k in range(0, 24, step)
+            ]
+        elif cal is None and trig not in TRIGGER_SIMPLE:
+            return (f"skip {name}: repeat_every={task.get('repeat_every')} with "
+                    f"trigger '{trig}' has no launchd equivalent")
+        else:
+            # No aligned expansion is possible (period does not divide 24h, or the
+            # trigger carries no time of day) — fall back to an interval and SAY so,
+            # instead of quietly pretending the alignment survived.
+            plist["StartInterval"] = rep
+            print(f"  ! {name}: launchd StartInterval={rep}s counts from load time — "
+                  f"the aligned '{trig}' start time is not preserved")
     else:
         cal = _plist_calendar(task)
         if cal is None:
             return f"skip {name}: trigger '{trig}' unsupported for launchd"
         plist["StartCalendarInterval"] = cal
+    if task.get("timeout_hours"):
+        # No launchd equivalent of RuntimeMaxSec — say it rather than imply the
+        # registry's timeout is in force.
+        print(f"  ! {name}: timeout_hours={task['timeout_hours']} is not enforceable "
+              f"under launchd (no RuntimeMaxSec equivalent)")
     d = out / "launchd"
     d.mkdir(parents=True, exist_ok=True)
     with open(d / f"{label}.plist", "wb") as f:

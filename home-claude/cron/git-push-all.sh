@@ -122,6 +122,39 @@ guard_secrets() {
     return 1
 }
 
+# Outgoing-commit guard: scan everything this push would publish, not just the
+# diff we are about to stage. guard_secrets only ever sees the staged tree, so a
+# repo with a CLEAN working tree and an unpushed commit — committed by hand, by
+# an earlier run, or with --no-verify — went straight to `git push` with no
+# secret check at all. That is the same unattended-leak path the staged guard
+# exists to close, one step later in the pipeline.
+# Args: <label> <branch>. Returns non-zero → caller must not push.
+guard_outgoing_secrets() {
+    local label="$1" branch="$2"
+    if ! command -v secret_scan_diff >/dev/null 2>&1; then
+        echo "[$label] SECRET-SCAN unavailable (lib not loaded) — NOT pushing (fail closed)" >> "$LOG_FILE"
+        return 1
+    fi
+    local range hits
+    if git rev-parse --verify -q "origin/$branch" >/dev/null 2>&1; then
+        range="origin/$branch..$branch"
+    else
+        # First push of this branch: the whole reachable history is published.
+        range="$branch"
+    fi
+    # Per-commit patches, not the net diff: a token added in one outgoing commit
+    # and removed in a later one is invisible to `git diff A..B` yet still ships
+    # inside the published history.
+    hits=$(git log -p --unified=0 "$range" 2>/dev/null | secret_scan_diff)
+    [ -z "$hits" ] && return 0
+    echo "[$label] SECRET-shaped token in OUTGOING commits ($range) — push blocked:" >> "$LOG_FILE"
+    printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
+    if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+        bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret in unpushed commits of [$label] — NOT pushed. Rewrite the history that carries it and rotate the key." >> "$LOG_FILE" 2>&1
+    fi
+    return 1
+}
+
 # Unified per-repo run: auto-commit (with the .env exclusion + the protected-
 # deletion guard) + push origin <branch>. Replaces the copy-pasted blocks
 # (main loop / wiki), which had already drifted apart. Updates the global
@@ -165,9 +198,17 @@ push_repo() {
             fi
             if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
                 echo "[$label] nothing to commit after .env exclusion" >> "$LOG_FILE"
-            else
-                git_commit -m "$commit_msg"
+            elif git_commit -m "$commit_msg"; then
                 echo "[$label] auto-committed changes" >> "$LOG_FILE"
+            else
+                # A rejecting pre-commit hook or a missing user.email leaves the
+                # work staged and uncommitted. Reporting "auto-committed" and
+                # carrying on made the repo look up to date (local == remote) and
+                # the sweep exit 0 — the changes silently never left the machine.
+                echo "[$label] FAILED to commit (hook rejected / identity missing?) — repo skipped" >> "$LOG_FILE"
+                failed=$((failed + 1))
+                failed_repos="${failed_repos:+$failed_repos, }$label"
+                return
             fi
         fi
     fi
@@ -185,6 +226,13 @@ push_repo() {
     if [ "$local_hash" = "$remote_hash" ]; then
         echo "[$label] up to date" >> "$LOG_FILE"
         skipped=$((skipped + 1)); return
+    fi
+    # Something WILL be published — scan it. Covers commits that predate this
+    # run and never went through the staged-diff guard above.
+    if [ "$DRY_RUN" != "1" ] && ! guard_outgoing_secrets "$label" "$branch"; then
+        failed=$((failed + 1))
+        failed_repos="${failed_repos:+$failed_repos, }$label"
+        return
     fi
     if git_push origin "$branch"; then
         echo "[$label] pushed $branch" >> "$LOG_FILE"

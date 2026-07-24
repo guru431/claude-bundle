@@ -23,7 +23,11 @@ Steps:
 4. **Validate every P1** against the real code via Read — LLM reviewers
    hallucinate at a non-trivial rate, and line numbers drift on large
    files. Validate by content, not by line numbers.
-5. Apply the false-positive patterns from the skill (REDACTED
-   placeholders, LAN IPs, public SSH keys, "theoretically" disclaimers).
+5. Apply the false-positive patterns from the skill — and only those. The
+   skill's algorithm judges a finding on evidence, reachability and impact;
+   it explicitly says never to downgrade one for hedged wording. This step
+   used to list "theoretically disclaimers" as a false-positive pattern,
+   which let a confirmable vulnerability be dropped over how it was phrased.
+   Do not restate the rules here — read them from the skill.
 6. Hand the user a summary: valid P1 / rejected P1 (halluc) / P2 / P3 +
    1–2 sentences on what to prioritize next.

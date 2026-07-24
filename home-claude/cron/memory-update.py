@@ -31,12 +31,16 @@ from utils import (  # noqa: E402
     SKIP_JSONL_PROJECTS,
     dir_to_project,
     extract_first_json_object,
+    find_bash,
     is_dry_run,
     is_subagent_jsonl,
     llm_call,
     parse_jsonl_messages,
     project_allowed,
 )
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from runs import record_run  # noqa: E402
 
 # From utils, not re-derived here: one definition of "where Claude Code lives"
 # (see utils.CLAUDE_HOME) instead of four copies that can drift apart.
@@ -53,7 +57,7 @@ LOG_FILE = LOG_DIR / f"memory-update_{DATE}.log"
 # Telegram alert (one-liner on a fully-depleted night). Full bash path so the
 # alert works in session 0 (Password task), where Git\bin is not on PATH.
 TELEGRAM = Path(__file__).resolve().parent / "telegram-send.sh"
-BASH = os.environ.get("BASH_EXE") or r"C:\Program Files\Git\bin\bash.exe"
+BASH = find_bash()
 
 # Per-project user-message cap, then total prompt cap.
 USER_MSG_CAP_PER_PROJECT = 8000
@@ -81,7 +85,7 @@ def context_window(text: str, cap: int = CONTEXT_FILE_CAP) -> str:
 
 
 def send_telegram(msg: str) -> None:
-    if not (TELEGRAM.exists() and Path(BASH).is_file()):
+    if not (TELEGRAM.exists() and BASH):
         return
     try:
         subprocess.run([BASH, str(TELEGRAM), msg], timeout=30, check=False)
@@ -148,12 +152,20 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
             continue
 
         bits: list[str] = []
+        # Oldest session file first. glob() order is filesystem order, and
+        # cap_newest_messages then trusts `bits` to be chronological — in
+        # arbitrary order its "keep the newest" tail cut could drop today's
+        # session and keep yesterday's. Sorting by mtime makes the sequence
+        # match the assumption the cap is built on.
+        by_mtime: list[tuple[float, Path]] = []
         for jsonl in proj_dir.glob("*.jsonl"):
             try:
-                if jsonl.stat().st_mtime < cutoff:
-                    continue
+                mtime = jsonl.stat().st_mtime
             except OSError:
                 continue
+            if mtime >= cutoff:
+                by_mtime.append((mtime, jsonl))
+        for _mtime, jsonl in sorted(by_mtime, key=lambda x: (x[0], x[1].name)):
             # Subagent transcripts duplicate the parent session — skip them.
             if is_subagent_jsonl(str(jsonl)):
                 continue
@@ -195,31 +207,38 @@ def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) ->
     if len(text) <= cap:
         return text
 
-    # Keep whole project sections only. A raw text[:cap] slice would hand the
-    # LLM a section truncated mid-sentence and pass it off as that project's
-    # full day.
-    kept, used = 0, 0
-    for part in parts:
-        need = len(part) + (2 if kept else 0)  # +2 for the "\n\n" separator
-        if used + need > cap:
-            break
-        kept += 1
-        used += need
-    if not kept:
-        log(f"build_summary: the first project section alone exceeds {cap} chars — "
-            f"truncating it; {len(parts) - 1} other project(s) dropped entirely")
-        return parts[0][:cap]
-    log(f"build_summary: capped at {cap} chars — dropped {len(text) - used} chars; "
-        f"{len(parts) - kept} of {len(parts)} project(s) dropped entirely")
-    return "\n\n".join(parts[:kept])
+    # Over budget: give every project an EQUAL share instead of keeping whole
+    # sections in alphabetical order. The old cut dropped whole projects, always
+    # the same alphabetically-last ones, every busy night — with no state and no
+    # retry, those projects simply never reached memory. Each project now keeps
+    # its NEWEST messages within its share, cut on message boundaries (never
+    # mid-sentence), so nothing is dropped outright.
+    n = len(proj_messages)
+    per_project_overhead = 12  # "### <name>\n" + the "\n\n" between sections
+    share = max(500, cap // n - per_project_overhead)
+    out = []
+    for proj in sorted(proj_messages):
+        body = proj_messages[proj]
+        if len(body) > share:
+            body = cap_newest_messages(body.split(MSG_SEP), proj, cap=share)
+        out.append(f"### {proj}\n{body}")
+    summary = "\n\n".join(out)
+    log(f"build_summary: {len(text)} chars over the {cap} cap — every one of the "
+        f"{n} project(s) capped to ~{share} chars (newest kept), "
+        f"result {len(summary)} chars")
+    return summary
 
 
-def update_user_md(proj_messages: dict[str, str]) -> bool:
-    """Returns True if the LLM was reached (regardless of whether anything was
-    appended); False when llm_call returned nothing (providers depleted/failed)."""
+def update_user_md(proj_messages: dict[str, str]) -> int | None:
+    """Append newly-learned facts to USER.md.
+
+    Returns the number of characters appended (0 = the LLM answered but had
+    nothing new), or None when the LLM was never reached at all (providers
+    depleted / unparseable answer) — the caller turns that into a non-zero exit.
+    """
     if not proj_messages:
         log("USER.md: no user messages in the last 24h — skipping")
-        return True
+        return 0
 
     user_md = USER_MD.read_text(encoding="utf-8") if USER_MD.exists() else ""
     summary = build_summary(proj_messages)
@@ -249,31 +268,31 @@ JSON only, no markdown wrapper, no commentary."""
     out = llm_call(prompt, timeout=600)
     if not out:
         log("USER.md: llm_call returned empty")
-        return False
+        return None
 
     obj = extract_first_json_object(out)
     if not obj:
         # An unparseable answer is a failed run, not an empty one — same
         # signal as a depleted provider so the monitor/alert path fires.
         log(f"USER.md: JSON not found in response ({out[:200]!r})")
-        return False
+        return None
     try:
         data = json.loads(obj)
     except json.JSONDecodeError as e:
         log(f"USER.md: parse error: {e}")
-        return False
+        return None
 
     raw_add = data.get("add")
     add = raw_add.strip() if isinstance(raw_add, str) else ""
     if not add:
         log("USER.md: nothing new extracted")
-        return True
+        return 0
 
     USER_MD.parent.mkdir(parents=True, exist_ok=True)
     with open(USER_MD, "a", encoding="utf-8") as f:
         f.write(f"\n\n## Auto-extracted {DATE}\n{add}\n")
     log(f"USER.md: appended {len(add)} chars")
-    return True
+    return len(add)
 
 
 def update_cross_notes(proj_messages: dict[str, str]) -> None:
@@ -384,7 +403,7 @@ def main() -> int:
             f"({total} chars across {len(msgs)} project(s)); no memory files written.")
         return 0
 
-    llm_reached = update_user_md(msgs)
+    appended = update_user_md(msgs)
     update_cross_notes(msgs)
     log("=== End Memory Update ===")
     run_incident_extract()
@@ -392,7 +411,19 @@ def main() -> int:
     # If there were messages to process but the LLM was never reached
     # (all providers depleted/failed), the night is silently empty — make
     # it visible to the exit-code-based monitor instead of returning 0.
-    if msgs and not llm_reached:
+    failed = bool(msgs) and appended is None
+    # Terminal ledger record (cron/runs.py). useful_items is the appended size,
+    # or None when the LLM answered with nothing new — that is a normal night,
+    # not the empty-artifact false-green the SLO looks for.
+    record_run(
+        task="ClaudeMemoryUpdate",
+        process_rc=1 if failed else 0,
+        artifact_path=USER_MD if appended else None,
+        useful_items=appended or None,
+        delivery="n/a",
+        note=f"{len(msgs)} project(s) with messages",
+    )
+    if failed:
         log("ERROR: LLM providers depleted/failed — no memory extraction this run.")
         send_telegram("memory-update: LLM providers depleted/failed — no memory extraction tonight.")
         return 1

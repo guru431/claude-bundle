@@ -7,8 +7,13 @@
 #
 # The whole file is OPTIONAL. With no manifest (or an empty one) the pipeline
 # behaves exactly as the shipped template: no project mappings, and every
-# project allowed. Read by home-claude/cron/hooks/utils.py (needs PyYAML; if
-# PyYAML is missing the manifest is skipped, not an error).
+# project allowed.
+#
+# Read by home-claude/cron/hooks/utils.py, which needs PyYAML. Once this file
+# EXISTS it is a policy, and a policy that cannot be read is never ignored:
+# missing PyYAML, invalid YAML, an unknown-typed field or a non-string
+# project_map all DENY every project until fixed. Unknown keys are reported as
+# probable typos. Delete the file if you want the permissive default back.
 #
 # After editing, preview exactly what each source WOULD send without spending a
 # token or hitting the network:

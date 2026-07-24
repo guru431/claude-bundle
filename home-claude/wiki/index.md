@@ -29,8 +29,16 @@ and are the part that will actually fill up if you just use the system.
 ## How to navigate
 
 Use `[[wikilinks]]` everywhere. Obsidian, VS Code with the right extension,
-or `grep -r "\[\[name\]\]"` all work. No naming conventions are enforced
-beyond the file path being 3 levels deep (`<section>/<subsection>/<file>.md`).
+or `grep -r "\[\[name\]\]"` all work.
+
+Paths are enforced, not merely suggested: `normalize_wiki_path` in
+`cron/hooks/utils.py` rewrites every path the compilers emit to exactly 3
+levels (`<section>/<subsection>/<file>.md`), allows only `kb/` and `projects/`
+as the top level, restricts `kb/` to `concepts|tools|people`, and rejects
+anything it cannot map — so a page the LLM invents outside the convention is
+dropped rather than filed. Names within a folder are free-form, though
+`incident-*` / `solution-* `/ `feedback-*` / `architecture-*` prefixes are what
+the session-start context preview looks for.
 
 ## Bootstrapping your own projects
 

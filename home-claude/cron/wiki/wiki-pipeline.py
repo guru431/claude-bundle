@@ -41,7 +41,12 @@ LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 # Full bash path so the alert works in session 0 (Password task), where Git\bin
 # is not on PATH. Absent on POSIX -> Telegram is skipped gracefully.
 TELEGRAM = BUNDLE_ROOT / "cron" / "telegram-send.sh"
-BASH = os.environ.get("BASH_EXE") or r"C:\Program Files\Git\bin\bash.exe"
+sys.path.insert(0, str(BUNDLE_ROOT / "cron" / "hooks"))
+from utils import find_bash  # noqa: E402
+
+# BASH_EXE > PATH > the Git-for-Windows default. The hardcoded Windows path with
+# only an env-var escape hatch meant no alert ever went out on Linux/macOS.
+BASH = find_bash()
 
 # The three always-on wiki phases, in dependency order. (compile-kb is a
 # separate, off-by-default source and is intentionally not part of this chain.)
@@ -67,7 +72,7 @@ def log(msg: str) -> None:
 
 
 def send_telegram(msg: str) -> None:
-    if not (TELEGRAM.exists() and Path(BASH).is_file()):
+    if not (TELEGRAM.exists() and BASH):
         return
     try:
         subprocess.run([BASH, str(TELEGRAM), msg], timeout=30, check=False)

@@ -46,9 +46,36 @@ REJECTED_DIR = LOG_DIR / "rejected"
 # from __file__ made this sweep look next to the pipeline and silently prune
 # nothing on a non-default install.
 PROJECTS_DIR = PROJECTS_BASE
-RETENTION_DAYS = int(os.environ.get("WIKI_LOG_RETENTION_DAYS", "30"))
-REJECTED_RETENTION_DAYS = int(os.environ.get("WIKI_REJECTED_RETENTION_DAYS", "7"))
-HANDOFF_RETENTION_DAYS = int(os.environ.get("WIKI_HANDOFF_RETENTION_DAYS", "7"))
+
+def _window(var: str, default: int) -> int:
+    """Read a retention window in days. Refuses anything that isn't a sane
+    non-negative integer.
+
+    A negative value is the dangerous typo: the cutoff lands in the FUTURE, so
+    every log/jsonl/quarantine/handoff looks old and the sweep deletes the lot.
+    This runs unattended, so a bad `.env` line must abort before the first
+    unlink, not silently mass-delete. The upper bound only catches absurd
+    values (it would disable pruning anyway).
+    """
+    raw = os.environ.get(var)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        days = int(raw)
+    except ValueError:
+        print(f"ERROR: {var}={raw!r} is not an integer — refusing to prune.",
+              file=sys.stderr)
+        sys.exit(2)
+    if days < 0 or days > 36500:
+        print(f"ERROR: {var}={days} is out of range (0..36500) — refusing to prune. "
+              "A negative window would delete every matching file.", file=sys.stderr)
+        sys.exit(2)
+    return days
+
+
+RETENTION_DAYS = _window("WIKI_LOG_RETENTION_DAYS", 30)
+REJECTED_RETENTION_DAYS = _window("WIKI_REJECTED_RETENTION_DAYS", 7)
+HANDOFF_RETENTION_DAYS = _window("WIKI_HANDOFF_RETENTION_DAYS", 7)
 DRY_RUN = any(a in ("--dry-run", "--no-llm") for a in sys.argv[1:])
 
 

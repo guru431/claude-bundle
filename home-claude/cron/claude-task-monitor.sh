@@ -126,8 +126,14 @@ echo "$TASK_STATUS" >> "$LOG_FILE"
 # exactly the failure mode this script exists to prevent.
 ALERTS=""
 TASK_FAIL_COUNT=0
+# Exit code semantics: reporting somebody ELSE's failed task is a successful
+# monitor run (exit 0). The monitor failing to MEASURE, or failing to DELIVER,
+# is its own failure (exit 1) — otherwise "monitor down, nobody noticed" is
+# exactly the state it exists to prevent, and it looks green.
+MONITOR_RC=0
 if [ -z "$TASK_STATUS" ] || printf '%s\n' "$TASK_STATUS" | head -1 | grep -q '^ERROR'; then
     ALERTS="task-monitor: task-status collection FAILED (${TASK_STATUS:-python produced no output}) — the monitor itself may be broken, check cron/logs/task-monitor_${DATE}.log"
+    MONITOR_RC=1
 elif [ "$TASK_STATUS" != "OK" ]; then
     TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | grep -v '^OK$' | grep -v '^[[:space:]]' | grep -c .)
     ALERTS="$TASK_STATUS"
@@ -311,10 +317,15 @@ EOF
         # "Alert sent" used to be logged unconditionally — a failed delivery
         # read as a delivered one, which is the worst outcome for a monitor.
         echo "ALERT DELIVERY FAILED: telegram-send.sh exited $TG_RC — alert NOT delivered" >> "$LOG_FILE"
+        MONITOR_RC=1
+        # The only channel just failed, so leave the evidence somewhere that
+        # does not depend on it — the same emergency file the FATAL path uses.
+        echo "$(date '+%Y-%m-%d %H:%M:%S') ALERT DELIVERY FAILED (rc=$TG_RC), undelivered alert follows:" >> "$HOME/task-monitor-fatal.log"
+        printf '%s\n' "$ALERT_MSG" >> "$HOME/task-monitor-fatal.log"
     fi
 else
     echo "All tasks OK, no alert needed" >> "$LOG_FILE"
 fi
 
 echo "=== End Task Monitor $(date '+%H:%M:%S') ===" >> "$LOG_FILE"
-exit 0
+exit "$MONITOR_RC"

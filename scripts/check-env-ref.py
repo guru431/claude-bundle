@@ -57,6 +57,10 @@ DOC_ONLY = {
     # Read by scripts/install-lite.sh from the shell to override the install
     # target. Consumed before any .env exists.
     "CLAUDE_HOME",
+    # Claude Code's own config-root variable, honored by both installers. It must
+    # be exported in the CLIENT's environment to have any effect, so putting it
+    # in the pipeline's .env would be actively misleading.
+    "CLAUDE_CONFIG_DIR",
     # Accepted alias for OPENCODE_GO_API_KEY. The template documents it in prose
     # next to the canonical name rather than declaring a second line.
     "OPENCODE_GO_KEY",

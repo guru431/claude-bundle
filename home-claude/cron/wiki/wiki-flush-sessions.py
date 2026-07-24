@@ -39,6 +39,9 @@ from utils import (dir_to_project, parse_jsonl_messages, is_subagent_jsonl, llm_
                    BUNDLE_ROOT, CLAUDE_HOME, WIKI_ROOT, DAILY_DIR, PENDING_DIR, LOG_MD, PROJECTS_BASE)
 from untrusted import fence
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from runs import record_run  # noqa: E402
+
 # CLAUDE_HOME, not a local Path.home() copy — these belong to Claude Code, not
 # to the pipeline, and stay under ~/.claude wherever the pipeline is deployed.
 PLANS_DIR = CLAUDE_HOME / "plans"
@@ -61,10 +64,26 @@ SOURCE_MAX_AGE_HOURS = 48
 # shipping transcripts the user may never have meant to send anywhere, so it is
 # opt-in: set WIKI_BACKLOG_MAX=<n> in .env to backfill history. Bad values fall
 # back to the default (see docs/cron-architecture.md "First run").
+#
+# A NEGATIVE value must never reach the `all_candidates[:max_files]` slice:
+# Python reads -1 as "everything but the last file", so a typo would ship the
+# entire historical archive to an external provider on the first night — the
+# exact opposite of the opt-in promise. Out-of-range values fall back to 0
+# (disabled), and the cap bounds an over-eager one.
+BACKLOG_MAX_CAP = 500
 try:
     BACKLOG_MAX = int(os.environ.get("WIKI_BACKLOG_MAX") or 0)
 except ValueError:
     BACKLOG_MAX = 0
+if BACKLOG_MAX < 0:
+    print(f"WARNING: WIKI_BACKLOG_MAX={BACKLOG_MAX} is negative — the backlog "
+          "sweep stays DISABLED (a negative slice would send the whole archive).",
+          file=sys.stderr)
+    BACKLOG_MAX = 0
+elif BACKLOG_MAX > BACKLOG_MAX_CAP:
+    print(f"WARNING: WIKI_BACKLOG_MAX={BACKLOG_MAX} exceeds the safety cap "
+          f"{BACKLOG_MAX_CAP} — using {BACKLOG_MAX_CAP}.", file=sys.stderr)
+    BACKLOG_MAX = BACKLOG_MAX_CAP
 
 
 def _is_fresh(path: Path, max_age_hours: int = SOURCE_MAX_AGE_HOURS) -> bool:
@@ -577,9 +596,29 @@ def main():
     # The project label inside a pending file is free text written by a hook, so
     # it has to pass the same policy gate as every other source — otherwise an
     # excluded project still reaches the LLM through this path.
+    #
+    # A denied draft gets ONE explicit disposition, decided here: dropped,
+    # unread. Leaving it in the shared queue meant the outcome depended on what
+    # ELSE ran that night — kept forever when no allowed project produced a
+    # daily, silently deleted by the cleanup loop when one did. Nothing is lost
+    # by dropping it: the draft is a tail copy of a transcript that stays under
+    # ~/.claude/projects and will never be processed while the policy stands.
+    denied = {p for p in pending if not project_allowed(p)}
+    if denied:
+        dropped = [(f, p) for f, p in pending_files if p in denied]
+        if not is_dry_run():
+            for f, _ in dropped:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            pending_files = [(f, p) for f, p in pending_files if p not in denied]
+        log(f"Pending denied by policy: {len(dropped)} file(s) from "
+            f"{', '.join(sorted(denied))} — "
+            f"{'would be dropped (dry run)' if is_dry_run() else 'dropped unread'}")
+
     for project, texts in pending.items():
-        if not project_allowed(project):
-            log(f"Pending skipped by policy: {project}")
+        if project in denied:
             continue
         all_projects.setdefault(project, []).extend(texts)
 
@@ -601,6 +640,13 @@ def main():
         # heartbeat here the monitor would report the phase as stale.
         log("Nothing to process. Exiting.")
         mark_phase_success("flush")
+        # A terminal record even for the idle night: the ledger contract is one
+        # record per run, and "the task never reported" must stay
+        # distinguishable from "the task reported having nothing to do".
+        # useful_items=None (not 0) — there was nothing to extract, so this is
+        # not the empty-artifact false-green the SLO hunts for.
+        record_run(task="ClaudeWikiFlush", process_rc=0, useful_items=None,
+                   delivery="n/a", note="no new sources")
         return
 
     if is_dry_run():
@@ -664,18 +710,22 @@ def main():
         # failed, so the daily itself stays uncompiled). So clear this date's
         # DATE# pair markers unconditionally on any append — otherwise A's appended
         # delta is skipped forever — and drop DATE from compiled_dailies if present.
-        removed_daily = DATE in state_get("compile_sessions", "compiled_dailies")
-        if removed_daily:
-            state_remove("compile_sessions", "compiled_dailies", [DATE])
+        # Markers carry the fingerprint of the daily the compiler actually read
+        # (`DATE@fp`, `DATE#project@fp`), so an append already invalidates them
+        # on its own. Clearing here is still done for the legacy unhashed form
+        # and to keep the state file small.
+        stale_dailies = [d for d in state_get("compile_sessions", "compiled_dailies")
+                         if d == DATE or d.startswith(f"{DATE}@")]
+        if stale_dailies:
+            state_remove("compile_sessions", "compiled_dailies", stale_dailies)
         stale_pairs = [p for p in state_get("compile_sessions", "compiled_pairs")
                        if p.startswith(f"{DATE}#")]
         if stale_pairs:
             state_remove("compile_sessions", "compiled_pairs", stale_pairs)
-        if removed_daily or stale_pairs:
+        if stale_dailies or stale_pairs:
             log(f"{DATE}.md had prior compile state — cleared "
-                f"{'compiled_dailies and ' if removed_daily else ''}"
-                f"{len(stale_pairs)} pair marker(s) so compile-sessions "
-                f"reprocesses the appended sections.")
+                f"{len(stale_dailies)} daily and {len(stale_pairs)} pair marker(s) "
+                f"so compile-sessions reprocesses the appended sections.")
     else:
         daily_path.write_text("\n".join(daily_lines), encoding="utf-8")
         log(f"Daily log: {daily_path}")
@@ -715,6 +765,17 @@ def main():
         log(f"Source D (history): activity recorded for {len(activity)} projects")
 
     log(f"=== Flush complete: {len(all_projects)} projects ===")
+    # Terminal ledger record (cron/runs.py): useful_items = project sections
+    # actually written to the daily, so a run that reached the LLM and produced
+    # no section is recorded as empty-artifact rather than passing for healthy.
+    record_run(
+        task="ClaudeWikiFlush",
+        process_rc=1 if failed_projects else 0,
+        artifact_path=daily_path if ok_sections else None,
+        useful_items=ok_sections,
+        delivery="n/a",
+        note=f"{len(all_projects)} project(s), {len(failed_projects)} failed",
+    )
     # The heartbeat means "the phase ran through", so a project that failed must
     # not leave a green status behind: the scheduler's exit code is the only
     # signal the monitor sees.

@@ -65,7 +65,7 @@ claude-bundle/
 │       ├── llm-call.py                 CLI wrapper for utils.py::llm_call
 │       ├── telegram-send.sh            Bot API helper (env-driven)
 │       ├── prompts/                    LLM prompts (flush/compile/healthcheck)
-│       ├── wiki/wiki-*.py              6 scripts (flush/compile-sessions/compile-kb/build-index/lint + pipeline orchestrator)
+│       ├── wiki/wiki-*.py              7 scripts (flush/compile-sessions/compile-kb/build-index/lint/conflict-resolve + pipeline orchestrator)
 │       ├── bundle-status.py            on-demand full-profile health report
 │       ├── log-retention.py            prune old cron/logs/*.{log,jsonl}
 │       ├── md2pdf-sync.py              regenerate stale paired PDFs (off by default)

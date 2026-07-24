@@ -25,6 +25,21 @@ from utils import dir_to_project, llm_call, parse_jsonl_messages, project_allowe
 HANDOFF_MAX_CHARS = 60000
 
 
+def _clear_marker(transcript: str, session_id: str) -> None:
+    """Drop the in-flight marker pre-compact.py left behind.
+
+    SessionStart waits on it, so it must go on EVERY exit path — including the
+    ones where no handoff is produced. A marker nobody clears turns into a
+    pointless wait at the start of the next session.
+    """
+    safe = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
+    try:
+        os.unlink(os.path.join(os.path.dirname(transcript), "memory",
+                               f".handoff-{safe}.pending"))
+    except OSError:
+        pass
+
+
 def main() -> int:
     if len(sys.argv) < 3:
         return 2
@@ -84,4 +99,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        rc = main()
+    finally:
+        if len(sys.argv) >= 3:
+            _clear_marker(sys.argv[1], sys.argv[2])
+    sys.exit(rc)

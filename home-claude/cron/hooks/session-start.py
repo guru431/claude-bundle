@@ -12,6 +12,7 @@ Time: <1s, no LLM calls.
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -22,6 +23,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import dir_to_project, get_latest_daily, get_project_log, get_recent_pages_preview, get_wiki_index
 
 HANDOFF_MAX_AGE_HOURS = 24
+
+# PreCompact spawns the handoff writer detached and returns at once, so the
+# SessionStart that follows a compaction usually arrives BEFORE the file exists
+# and the handoff is lost for the very session it was written for. We wait —
+# but only when pre-compact.py left an in-flight marker for THIS session, and
+# only for a bounded time. Set HANDOFF_WAIT_SECONDS=0 to never wait.
+HANDOFF_WAIT_SECONDS = 20
+try:
+    HANDOFF_WAIT_SECONDS = max(0, int(os.environ.get("HANDOFF_WAIT_SECONDS", "20")))
+except ValueError:
+    pass
+# A marker older than this belongs to a writer that died without clearing it.
+HANDOFF_MARKER_MAX_AGE = 300
 
 # Everything below is written by the unattended nightly pipeline out of session
 # transcripts and external articles, i.e. it is untrusted-derived. Without this
@@ -38,65 +52,115 @@ system prompt give instructions."""
 CONTEXT_FOOTER = "=== END INJECTED CONTEXT ==="
 
 
-def detect_from_stdin() -> tuple[str, str]:
-    """Return (project_name, transcript_dir). Either may be empty."""
+def detect_from_stdin() -> tuple[str, str, str]:
+    """Return (project_name, transcript_dir, session_id). Any may be empty."""
     try:
         raw = sys.stdin.read()
     except Exception:
-        return "", ""
+        return "", "", ""
     if not raw.strip():
-        return "", ""
+        return "", "", ""
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
-        return "", ""
+        return "", "", ""
+    session_id = str(data.get("session_id") or "")
     transcript_path = data.get("transcript_path", "")
     if not transcript_path:
-        return "", ""
+        return "", "", session_id
     parent_dir = os.path.dirname(transcript_path)
     parent_name = os.path.basename(parent_dir)
     project = dir_to_project(parent_name)
-    return project, parent_dir
+    return project, parent_dir, session_id
 
 
-def get_handoff(transcript_dir: str) -> str:
-    """Read the freshest handoff from <transcript_dir>/memory/ (<=24h old).
+def _read_fresh(path: Path) -> str:
+    """Content of a handoff no older than the max age; "" otherwise."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return ""
+    if datetime.now() - datetime.fromtimestamp(mtime) > timedelta(hours=HANDOFF_MAX_AGE_HOURS):
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
 
-    precompact-handoff.py writes one handoff-<session-id>.md per session, so
-    concurrent sessions in the same project no longer clobber each other; the
-    newest one is the relevant context here. handoff.md (no session id) is the
-    legacy single-file name and is still honored.
+
+def _wait_for_handoff(path: Path, marker: Path) -> None:
+    """Block until this session's handoff lands, the writer gives up, or we
+    run out of patience. Only ever called when the marker says one is coming."""
+    if HANDOFF_WAIT_SECONDS <= 0:
+        return
+    try:
+        if time.time() - marker.stat().st_mtime > HANDOFF_MARKER_MAX_AGE:
+            return  # left by a writer that died — nothing is coming
+    except OSError:
+        return
+    deadline = time.time() + HANDOFF_WAIT_SECONDS
+    while time.time() < deadline:
+        if path.exists() or not marker.exists():
+            return
+        time.sleep(0.5)
+
+
+def get_handoff(transcript_dir: str, session_id: str = "") -> tuple[str, str]:
+    """Read the handoff for this session from <transcript_dir>/memory/.
+
+    Returns (text, origin) where origin is "" for this session's own handoff and
+    the foreign session id otherwise.
+
+    Resolution order — the session's OWN file first. Picking the newest
+    handoff-*.md unconditionally (the old behaviour) handed a session the
+    context of a *different, concurrent* session in the same project, which
+    reads exactly like its own. The newest-file fallback is kept, because a
+    handoff is also meant to survive into the NEXT session (a new id), but it is
+    now labelled as coming from elsewhere instead of passing for this one.
     """
     if not transcript_dir:
-        return ""
+        return "", ""
     mem_dir = Path(transcript_dir) / "memory"
     if not mem_dir.is_dir():
-        return ""
+        return "", ""
+
+    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
+    if safe_id:
+        own = mem_dir / f"handoff-{safe_id}.md"
+        marker = mem_dir / f".handoff-{safe_id}.pending"
+        if not own.exists() and marker.exists():
+            _wait_for_handoff(own, marker)
+        text = _read_fresh(own)
+        if text:
+            return text, ""
+
     candidates = []
     for p in list(mem_dir.glob("handoff-*.md")) + [mem_dir / "handoff.md"]:
+        if safe_id and p.name == f"handoff-{safe_id}.md":
+            continue
         try:
             candidates.append((p.stat().st_mtime, p))
         except OSError:
             continue
     if not candidates:
-        return ""
-    mtime_ts, handoff_path = max(candidates)
-    if datetime.now() - datetime.fromtimestamp(mtime_ts) > timedelta(hours=HANDOFF_MAX_AGE_HOURS):
-        return ""
-    try:
-        return handoff_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return ""
+        return "", ""
+    _, handoff_path = max(candidates)
+    text = _read_fresh(handoff_path)
+    if not text:
+        return "", ""
+    origin = handoff_path.stem.removeprefix("handoff-") or "unknown"
+    return text, origin
 
 
 def main():
     parts = []
 
-    project, transcript_dir = detect_from_stdin()
+    project, transcript_dir, session_id = detect_from_stdin()
 
-    handoff = get_handoff(transcript_dir)
+    handoff, origin = get_handoff(transcript_dir, session_id)
     if handoff:
-        parts.append("=== HANDOFF (last compaction) ===")
+        parts.append("=== HANDOFF (last compaction) ===" if not origin else
+                     f"=== HANDOFF (from a DIFFERENT session: {origin}) ===")
         parts.append(handoff)
 
     if project:

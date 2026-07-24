@@ -106,6 +106,20 @@ $(df -h 2>/dev/null || powershell.exe -Command 'Get-CimInstance Win32_LogicalDis
 # The LLM writes the EXPLANATION; it never decides whether to page. Paging is
 # driven by this check alone, so a reworded verdict can't silence an alert.
 DISK_THRESHOLD="${HEALTHCHECK_DISK_PCT:-85}"
+# Validate before anything depends on it. `[ "$MAX_DISK_PCT" -ge "$DISK_THRESHOLD" ]`
+# with a non-numeric threshold is a shell ERROR, which evaluates false — the
+# script then logs "below threshold" and, with a working LLM, exits 0 on a full
+# disk. A typo in .env must not be able to disable the one deterministic alert.
+case "$DISK_THRESHOLD" in
+    ''|*[!0-9]*)
+        echo "WARNING: HEALTHCHECK_DISK_PCT='$DISK_THRESHOLD' is not an integer 0..100 — using 85" >> "$LOG_FILE"
+        DISK_THRESHOLD=85 ;;
+    *)
+        if [ "$DISK_THRESHOLD" -gt 100 ]; then
+            echo "WARNING: HEALTHCHECK_DISK_PCT=$DISK_THRESHOLD is above 100 (unreachable) — using 85" >> "$LOG_FILE"
+            DISK_THRESHOLD=85
+        fi ;;
+esac
 MAX_DISK_PCT=0
 MAX_DISK_FS=""
 while read -r pct fs; do
@@ -206,6 +220,7 @@ fi
 # stay under Telegram's 4096-char limit).
 echo "Disk check: max ${MAX_DISK_PCT}% on ${MAX_DISK_FS:-?} (threshold ${DISK_THRESHOLD}%)" >> "$LOG_FILE"
 
+DELIVERY="n/a"
 if [ "$MAX_DISK_PCT" -ge "$DISK_THRESHOLD" ]; then
     ALERT_MSG="healthcheck ($DATE): disk ${MAX_DISK_PCT}% on ${MAX_DISK_FS} (threshold ${DISK_THRESHOLD}%)
 
@@ -214,8 +229,10 @@ $(printf '%s' "$ANALYSIS" | head -c 3000)"
     tg_rc=$?
     if [ $tg_rc -eq 0 ]; then
         echo "Alert sent to Telegram" >> "$LOG_FILE"
+        DELIVERY="ok"
     else
         echo "ALERT DELIVERY FAILED: telegram-send.sh exited $tg_rc — verdict not delivered" >> "$LOG_FILE"
+        DELIVERY="failed"
     fi
 else
     echo "No alert: disk below threshold" >> "$LOG_FILE"
@@ -224,7 +241,18 @@ fi
 echo "" >> "$LOG_FILE"
 echo "=== End ===" >> "$LOG_FILE"
 
+# Terminal ledger record (cron/runs.py): one record per run, so bundle-status
+# can tell "healthcheck ran and delivered" from "healthcheck never reported".
+RC=0
+# An undelivered disk alert is a FAILED healthcheck: the measurement happened
+# and nobody was told, which is indistinguishable from never having checked.
+[ "$LLM_FAILED" -eq 0 ] && [ "$DELIVERY" != "failed" ] || RC=1
+"$PYTHON" "$BUNDLE_ROOT/cron/runs.py" record \
+    --task ClaudeHealthcheck --rc "$RC" --artifact "$LOG_FILE" \
+    --delivery "$DELIVERY" --note "disk ${MAX_DISK_PCT}% / threshold ${DISK_THRESHOLD}%" \
+    >>"$LOG_FILE" 2>&1 || true
+
 # The disk alert has fired (or not) on measured data by this point; only now
-# does the LLM failure decide the exit code, so the scheduler still records the
-# run as failed without that failure having suppressed the alert.
-[ "$LLM_FAILED" -eq 0 ] || exit 1
+# does the LLM/delivery failure decide the exit code, so neither failure was
+# able to suppress the alert itself.
+exit "$RC"

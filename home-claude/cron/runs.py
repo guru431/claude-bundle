@@ -135,9 +135,15 @@ def read_runs(log_path: Path = RUNS_LOG) -> list[dict]:
         if not line:
             continue
         try:
-            out.append(json.loads(line))
+            rec = json.loads(line)
         except json.JSONDecodeError:
             continue
+        # Valid JSON that isn't an object (a bare number, string or list) would
+        # sail past the decoder and blow up on .get() in latest_by_task — the
+        # docstring promise is "corrupt lines are skipped", so shape counts as
+        # corrupt too.
+        if isinstance(rec, dict):
+            out.append(rec)
     return out
 
 

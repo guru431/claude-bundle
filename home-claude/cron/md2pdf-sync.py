@@ -42,7 +42,7 @@ BUNDLE_ROOT = Path(__file__).resolve().parents[1]
 # A Task Scheduler Password task starts in session 0 with no user env, so the
 # bundle .env must be loaded before any os.environ.get() below is evaluated.
 sys.path.insert(0, str(Path(__file__).parent / "hooks"))
-from utils import _load_dotenv  # noqa: E402
+from utils import _load_dotenv, find_bash  # noqa: E402
 
 _load_dotenv()
 
@@ -64,9 +64,10 @@ EXCLUDE_DIRS = {
 LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 LOG_FILE = LOG_DIR / f"md2pdf-sync_{datetime.now():%Y-%m-%d}.log"
 TELEGRAM = BUNDLE_ROOT / "cron" / "telegram-send.sh"
-# Full path to bash so the Telegram alert works in session 0 (Password task),
-# where Git\bin is not on PATH. Override via BASH_EXE if your install differs.
-BASH = os.environ.get("BASH_EXE") or r"C:\Program Files\Git\bin\bash.exe"
+# Absolute bash path so the Telegram alert works in session 0 (Password task),
+# where Git\bin is not on PATH — and on POSIX, where bash is just /bin/bash.
+# Override with BASH_EXE. None = no bash, alerts are skipped.
+BASH = find_bash()
 
 TG_LIMIT = 3800  # leave headroom under Telegram's 4096
 
@@ -135,7 +136,7 @@ def main() -> int:
 
     log(f"=== done: regenerated={len(regenerated)} skipped={skipped} failed={len(failed)} ===")
 
-    if failed and TELEGRAM.exists() and Path(BASH).is_file():
+    if failed and TELEGRAM.exists() and BASH:
         lines = "\n".join(f"- {md.name}: {err}" for md, err in failed)
         msg = f"md2pdf-sync: {len(failed)} PDF(s) not regenerated:\n{lines}"
         if len(msg) > TG_LIMIT:

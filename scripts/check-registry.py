@@ -50,8 +50,14 @@ KNOWN_KEYS = {
     "name", "project", "description", "script", "script_args", "execute",
     "kind", "trigger", "user", "logon_type", "runlevel", "hidden",
     "timeout_hours", "enabled", "platform", "repeat_every", "repeat_for",
-    "startup_delay",
+    "startup_delay", "restart_count", "restart_interval",
 }
+
+# Fields whose TYPE matters. A quoted "false" is truthy in PowerShell, and a
+# string where an int is expected reaches [int] casts that throw at sync time —
+# both used to pass this guard and fail on the machine instead.
+BOOLS = ("enabled", "hidden")
+INTS = ("timeout_hours", "restart_count")
 
 ENUMS = {
     "kind": KINDS,
@@ -62,7 +68,7 @@ ENUMS = {
 
 # ISO-8601 durations, parsed by gen.iso_seconds (and by Task Scheduler's
 # <Repetition>/<Delay> XML on the Windows side).
-DURATIONS = ("repeat_every", "repeat_for", "startup_delay")
+DURATIONS = ("repeat_every", "repeat_for", "startup_delay", "restart_interval")
 
 
 def check_trigger(trig: str) -> str | None:
@@ -114,12 +120,31 @@ def check_task(task: dict) -> list[str]:
         err = check_trigger(str(task["trigger"]))
         if err:
             problems.append(err)
+    for key in BOOLS:
+        val = task.get(key)
+        if val is not None and not isinstance(val, bool):
+            problems.append(f"{key}: must be true/false, got {type(val).__name__} "
+                            f"({val!r}) — a quoted 'false' registers as enabled")
+    for key in INTS:
+        val = task.get(key)
+        if val is None:
+            continue
+        if isinstance(val, bool) or not isinstance(val, int):
+            problems.append(f"{key}: must be an integer, got {type(val).__name__} ({val!r})")
+        elif val < 0:
+            problems.append(f"{key}: must be >= 0, got {val}")
+    if task.get("script_args") is not None and not isinstance(task["script_args"], list):
+        problems.append("script_args: must be a YAML list")
+    # repeat_for without repeat_every is a no-op: the duration of a repetition
+    # that never repeats. It reads like a schedule and schedules nothing.
+    if task.get("repeat_for") and not task.get("repeat_every"):
+        problems.append("repeat_for is set without repeat_every — the repetition never fires")
     if str(task.get("kind", "")).lower() == "exec" and not task.get("execute"):
         problems.append("kind: exec requires an 'execute:' field")
     return problems
 
 
-def check() -> int:
+def check(registry: Path = REGISTRY) -> int:
     try:
         import yaml
     except ImportError:
@@ -127,19 +152,29 @@ def check() -> int:
               "(pip install -r requirements.txt)")
         return 2
 
-    data = yaml.safe_load(REGISTRY.read_text(encoding="utf-8"))
+    data = yaml.safe_load(registry.read_text(encoding="utf-8"))
     tasks = data.get("tasks") or []
 
     problems: list[str] = []
+    seen: dict[str, int] = {}
     for i, task in enumerate(tasks):
         if not isinstance(task, dict):
             problems.append(f"task #{i + 1}: not a YAML mapping")
             continue
         name = task.get("name") or f"#{i + 1} (unnamed)"
+        # Task names are the scheduler's primary key: a duplicate means the
+        # second entry silently overwrites the first at sync time, and the
+        # registry then describes a task that does not exist as written.
+        if task.get("name"):
+            if task["name"] in seen:
+                problems.append(f"{name}: duplicate task name (also task "
+                                f"#{seen[task['name']]}) — the later one wins at sync")
+            else:
+                seen[task["name"]] = i + 1
         problems += [f"{name}: {p}" for p in check_task(task)]
 
     if problems:
-        print("REGISTRY SCHEMA ERRORS — fix home-claude/cron/registry.yaml:")
+        print(f"REGISTRY SCHEMA ERRORS — fix {registry}:")
         for p in problems:
             print("  " + p)
         return 1
@@ -148,4 +183,10 @@ def check() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(check())
+    # Optional path argument, so the same guard can validate a DEPLOYED
+    # registry.yaml (self-test -InstallPath) and not just the source template.
+    target = Path(sys.argv[1]) if len(sys.argv) > 1 else REGISTRY
+    if not target.is_file():
+        print(f"registry not found: {target}")
+        sys.exit(1)
+    sys.exit(check(target))

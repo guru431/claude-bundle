@@ -191,11 +191,23 @@ That is why the installer takes **two** roots, not one:
 ```
 
 - **`-ClaudeHome`** (default `~/.claude`) — `CLAUDE.md`, `settings.json`,
-  `skills/`, `commands/`. Moving this only makes sense for a sandbox
-  install: config placed anywhere else is never read.
+  `skills/`, `commands/`, `hooks/`. Claude Code honors `CLAUDE_CONFIG_DIR`
+  for its config root, but only when that variable is exported in the
+  environment of the CLI/IDE that reads it — pointing the installer
+  somewhere else without exporting it to the client is a sandbox install,
+  and the config is never read.
 - **`-PipelineRoot`** (default: same as `-ClaudeHome`) — `cron/`, `wiki/`,
   `bin/`, `.env`, `bundle.local.yaml`. These resolve paths relative to
   their own location, so they genuinely run from anywhere.
+
+When the two roots differ, the hook paths in
+`settings.example-with-hooks.json` (written for the one-root layout) no
+longer match the deployment: `PreToolUse`/`PostToolUse` hooks live under
+`<ClaudeHome>\hooks\`, while `SessionStart`/`SessionEnd`/`PreCompact` live
+under `<PipelineRoot>\cron\hooks\`. The installer prints the correct pair
+for your layout at the end of a split-root run. `claude-switch.ps1` is
+installed next to `.env` (i.e. into `PipelineRoot` when split), because
+that is the only place it looks for your keys.
 
 `-InstallPath` still works and sets both at once (the old one-root
 behaviour). It used to be the *only* option, which meant a custom path put
@@ -216,8 +228,19 @@ It removes only what the manifest lists — your `.env`, `bundle.local.yaml`,
 wiki notes, logs and pipeline state are never touched — and finds the
 pipeline root from the manifest, so you don't have to remember it. A file
 changed since install is reported and kept unless you pass `-Force`.
-Scheduled tasks are **not** unregistered (that needs elevation): remove
-them with `schtasks /delete /tn <name> /f` first.
+Scheduled tasks are **not** unregistered by the uninstaller (that needs
+elevation). Remove them the same way they were created — through the
+registry, never with a hand-typed `schtasks /delete`, which drifts from
+`registry.yaml` and leaves it describing tasks that no longer exist:
+
+```powershell
+# elevated
+powershell -File "<PipelineRoot>\cron\admin\sync-tasks.ps1" -Unregister
+```
+
+It deletes only tasks carrying the `managed-by-registry` marker, so a
+same-named task somebody else created is left alone. Add `-DryRun` to see
+the list first.
 
 ### 8. Copy the wiki and cron components
 
@@ -502,7 +525,9 @@ replaced.
 
 ```bash
 scripts/install-lite.sh          # copies config into ~/.claude, stamps the version
-# or: CLAUDE_HOME=/custom/path scripts/install-lite.sh
+# or: CLAUDE_CONFIG_DIR=/custom/path scripts/install-lite.sh
+#     (the variable the installer AND Claude Code both read — export it from
+#      your shell profile, or the client will keep reading ~/.claude)
 ```
 
 **Tier 2 (full)** — the wiki + cron scripts run as-is; generate scheduler

@@ -132,17 +132,39 @@ if ($py) {
     # is always the bundle source) AND for the DEPLOYED bundle.local.yaml when one
     # exists — a policy key that is not a YAML list silently disables the privacy
     # policy in utils.py, so a wrong type there must FAIL rather than pass quietly.
+    # Mirrors the runtime validation in cron/hooks/utils.py: EVERY field, not
+    # just three of the lists. A malformed field there denies every project, so
+    # anything this check waves through is a policy that silently stops working.
     $mcode = @'
 import sys, yaml
+KNOWN = {'project_map', 'known_projects', 'skip_dirs', 'skip_projects',
+         'allow_projects', 'skip_jsonl_projects', 'collect_plans'}
 d = yaml.safe_load(open(sys.argv[1], encoding='utf-8'))
 if d is None:
     sys.exit(0)
 if not isinstance(d, dict):
     print('not a YAML mapping'); sys.exit(3)
-for k in ('allow_projects', 'skip_projects', 'skip_dirs'):
+for k in ('allow_projects', 'skip_projects', 'skip_dirs', 'known_projects',
+          'skip_jsonl_projects'):
     v = d.get(k)
-    if v is not None and not isinstance(v, list):
-        print('%s must be a YAML list, got %s' % (k, type(v).__name__)); sys.exit(4)
+    if v is None:
+        continue
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        print('%s must be a YAML list of strings, got %s' % (k, type(v).__name__))
+        sys.exit(4)
+pm = d.get('project_map')
+if pm is not None:
+    if not isinstance(pm, dict):
+        print('project_map must be a mapping, got %s' % type(pm).__name__); sys.exit(4)
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in pm.items()):
+        print('project_map must map strings to strings (quote values like 1.0)'); sys.exit(4)
+for k in ('collect_plans',):
+    v = d.get(k)
+    if v is not None and not isinstance(v, bool):
+        print('%s must be true/false, got %s' % (k, type(v).__name__)); sys.exit(4)
+unknown = sorted(set(d) - KNOWN)
+if unknown:
+    print('unknown key(s): %s' % ', '.join(unknown)); sys.exit(5)
 sys.exit(0)
 '@
     $manifests = @{ 'bundle.local.example.yaml (template)' = (Join-Path $root 'config/bundle.local.example.yaml') }
@@ -158,6 +180,7 @@ sys.exit(0)
         $ErrorActionPreference = $prevEAP
         if ($mrc -eq 0) { Ok "$label — valid schema" }
         elseif ($mout -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped manifest parse: $label" }
+        elseif ($mrc -eq 5) { Warn "${label} — $mout (ignored at runtime; check for a typo)" }
         else { Bad "$label invalid: $mout" }
     }
 }
@@ -169,7 +192,11 @@ if ($py) {
         'md2pdf-on-edit.py'               = '{"tool_input":{"file_path":"nonexistent.md"}}'
     }
     foreach ($h in $hooks.Keys) {
-        $hp = Join-Path $home_claude "hooks/$h"
+        # $configRoot, not $home_claude: lifecycle hooks are wired from
+        # settings.json and therefore live with the config (ClaudeHome), which
+        # -PipelineRoot can move away from the pipeline tree. Looking under the
+        # pipeline root reported PASS/FAIL for a path settings.json never names.
+        $hp = Join-Path $configRoot "hooks/$h"
         if (-not (Test-Path $hp)) { Bad "hook missing: $h"; continue }
         $hooks[$h] | & $py $hp | Out-Null
         if ($LASTEXITCODE -eq 0) { Ok "hook smoke: $h (exit 0)" }
@@ -206,6 +233,7 @@ if (Test-Path $st) {
         $rc = $LASTEXITCODE
         if ($out -match 'placeholder') { Ok "sync-tasks -DryRun: placeholder guard fired (template not yet bootstrapped)" }
         elseif ($rc -eq 0) { Ok "sync-tasks -DryRun completed (exit 0)" }
+        elseif ($rc -eq 3) { Warn "sync-tasks -DryRun: some tasks would be SKIPPED (partial sync):`n$out" }
         else { Bad "sync-tasks -DryRun exited $rc unexpectedly:`n$out" }
     } catch { Bad "sync-tasks -DryRun threw: $($_.Exception.Message)" }
 } else { Bad "sync-tasks.ps1 not found" }
@@ -258,17 +286,24 @@ if ($py -and -not $deployed) {
     }
 }
 
-# ── 11. Registry schema guard (source tree only) ─────────────────────────────
-# Validates every task's required fields / kind / trigger grammar, so a typo
-# that gen-scheduler.py would silently skip fails here instead
+# ── 11. Registry schema guard ────────────────────────────────────────────────
+# Validates every task's required fields / kind / trigger grammar / types, so a
+# typo that gen-scheduler.py would silently skip fails here instead
 # (scripts/check-registry.py). Exit 2 = PyYAML missing → WARN, matching the
 # registry.yaml parse step above.
-if ($py -and -not $deployed) {
+#
+# Runs against the DEPLOYED registry too when -InstallPath is given: the guard
+# script lives in the bundle checkout, but the file that actually drives the
+# scheduler is the deployed one — checking only the pristine template said
+# nothing about the registry a user had edited.
+if ($py) {
     $cr = Join-Path $root 'scripts/check-registry.py'
-    if (Test-Path $cr) {
+    $crTarget = if ($deployed) { Join-Path $home_claude 'cron/registry.yaml' } else { $null }
+    if ((Test-Path $cr) -and (-not $deployed -or (Test-Path $crTarget))) {
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $out = (& $py $cr 2>&1 | Out-String).Trim()
+        if ($crTarget) { $out = (& $py $cr $crTarget 2>&1 | Out-String).Trim() }
+        else           { $out = (& $py $cr 2>&1 | Out-String).Trim() }
         $rc = $LASTEXITCODE
         $ErrorActionPreference = $prevEAP
         if ($rc -eq 0) { Ok "registry.yaml schema valid" }

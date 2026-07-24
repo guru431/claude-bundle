@@ -138,7 +138,9 @@ Generic (in the bundle):
 - The hooks
 
 Yours-specific (you fill in):
-- The list of your projects (`PROJECT_MAP` + `KNOWN_PROJECTS` in `utils.py`)
+- The list of your projects (`project_map:` + `known_projects:` in
+  `~/.claude/bundle.local.yaml` — NOT in `utils.py`, which ships as an empty
+  template and is overwritten by every reinstall)
 - The vault contents
 - The LLM provider keys (see `config/llm-providers.example.env`)
 - Whether the wiki is a separate git repo or nested in this bundle

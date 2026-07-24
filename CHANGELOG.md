@@ -3,6 +3,182 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.7.0] - 2026-07-25 — the whole open findings backlog, closed
+
+34 findings filed on 2026-07-21 (10 P1, 19 P2, 5 P3). Every one was verified
+against the source and fixed; none were rejected. The theme is the same
+throughout: things that were *declared* — a promise in a comment, a claim in the
+docs, a guard that exists — but not actually *enforced*.
+
+### Fixed — leaks and unattended data loss (P1)
+
+- **`claude-switch.ps1` left an unignored copy of the old API key next to the
+  project.** `Save-Settings` backs the previous file up to
+  `settings.local.json.bak`, but only the main path was checked against git.
+  Switching a key-based backend to `anthropic` cleared the main file and left
+  the old key in an untracked, unignored backup that `git add .` would stage.
+  Both paths are now git-safety-checked, before anything is written, whenever
+  either the new or the existing config carries a key.
+- **The backend switcher silently granted promptless execution.** With no
+  `permissions` block present it wrote one allowing `Bash(*)` / `PowerShell(*)`
+  / WebFetch / file writes. Choosing an LLM backend has nothing to do with what
+  Claude Code may run unattended, so the seeding is now opt-in behind
+  `-SeedPermissions`; existing permissions were never touched and still aren't.
+- **Both public-push guards could publish a secret from history.**
+  `github-push.sh` scanned only the working tree on a first push, so a key added
+  and later deleted shipped invisibly — it now scans the full reachable history
+  through the same per-commit path, and strips CRLF from `.sanitize-patterns`
+  (a Windows-saved denylist matched nothing). `.githooks/pre-push` excluded
+  objects present on ANY remote, so a commit already on a private `origin`
+  counted as published when pushing it to a PUBLIC remote for the first time; it
+  now excludes only what the TARGET remote has (from the hook's own stdin), and
+  a missing scan lib fails closed instead of exiting 0.
+- **The nightly sweep pushed already-committed secrets unscanned.**
+  `guard_secrets` only ever saw the staged diff, so a clean tree with an
+  unpushed commit went straight to `git push`. Every push is now preceded by a
+  scan of the outgoing commit range (the whole branch on a first push), fail
+  closed if the scanner is unavailable.
+- **A negative retention window deleted everything.** `WIKI_LOG_RETENTION_DAYS=-1`
+  put the cutoff in the future, so every log, jsonl, quarantine file and handoff
+  looked old. All three windows are now validated as sane non-negative integers
+  and the sweep aborts before the first unlink.
+- **A negative `WIKI_BACKLOG_MAX` shipped the whole archive.** `-1` is a valid
+  Python slice (`[:-1]` = everything but one file), so a typo would have sent
+  almost the entire historical transcript backlog to an external provider on the
+  first night. Negative now means disabled, and a safety cap bounds the rest.
+- **A flush/compile overlap could lose a day's delta for good.** Compile read a
+  daily, flush appended to it and cleared the markers, and the already-running
+  compile then marked the daily compiled — including a section it never saw.
+  Both markers now carry a fingerprint of the daily as it was read, so an append
+  stops matching and the next run recompiles (`apply_changes` dedups).
+- **The installer replaced your files without a backup.** The guard covered
+  `CLAUDE.md` and `settings.json`; the recursive copies silently overwrote any
+  same-named skill, command, hook, cron script or wiki page. Both installers now
+  copy every file they are about to replace into one timestamped backup
+  directory and report the count. `~/.codex/AGENTS.md` is backed up before the
+  optional mirror overwrites it.
+- **The uninstaller trusted the manifest's paths.** `written[].path` was joined
+  onto a root with no containment check, so an edited manifest could aim
+  `-Confirm` at any file; and the prune walked BOTH roots whole, removing every
+  empty directory and all-`.pyc` `__pycache__` it met — including ones the
+  installer never wrote. Paths must now be relative and stay inside their root,
+  ClaudeHome is taken from where the manifest actually is, and the prune only
+  considers directories a removal emptied.
+- **"local-only" never checked that the endpoint was local.** `LOCAL_LLM_BASE_URL`
+  accepted any URL while the provider stayed flagged `offbox: False`. A
+  local-only provider pointed at a remote host is now REFUSED before the request;
+  `LOCAL_LLM_ALLOWED_HOSTS` allows a trusted LAN box as an explicit decision.
+
+### Fixed — silent skips, false greens and drift (P2)
+
+- **`compile-kb` finalized partially-rejected articles**, contradicting the
+  contract in `apply_changes` — the rejected entity never came back. It is no
+  longer marked processed when siblings applied and something was rejected (the
+  applied siblings re-apply idempotently).
+- **A valid `[]` from `compile-kb` counted as a permanent failure**, so the
+  article was re-sent to the LLM every night. An explicit empty array is now a
+  successful no-op.
+- **A policy-denied pending draft was kept forever or deleted unread depending on
+  what else ran that night.** It now has one disposition, decided up front.
+- **A state rebuild from `log.md` dropped the `@size` suffix**, producing a
+  legacy key that matches at any size — a growing session file would never be
+  re-read again.
+- **The handoff could arrive from a different session.** The reader threw away
+  the input `session_id` and took the newest `handoff-*.md` in the project. It
+  now prefers this session's own file, waits (bounded, only while pre-compact's
+  in-flight marker says one is coming) for the detached writer that the
+  post-compact SessionStart used to race, and labels a fallback from another
+  session instead of passing it off as this one's.
+- **Split `-ClaudeHome` / `-PipelineRoot` installs were internally inconsistent.**
+  Lifecycle `hooks/` now install to ClaudeHome (where `settings.json` points),
+  `claude-switch.ps1` installs next to the `.env` it reads, the self-test checks
+  hooks at the config root, and the installer prints the hook paths for the
+  actual layout.
+- **The durable `claude-switch.ps1` copy wrote to the wrong project.** Any
+  `PSScriptRoot` whose leaf is `.claude` was treated as project-local — including
+  the global `%USERPROFILE%\.claude` the installer copies it to. The global
+  config root is now excluded explicitly.
+- **Full preflight allowed an install with no usable Python.** Missing, too old
+  and unreported-version interpreters are all hard stops now, and the check runs
+  against `PYTHON_EXE` when set — the interpreter the tasks will actually use.
+- **`bootstrap-registry.ps1` still used the WMI call that hangs.** The same
+  `Get-CimInstance Win32_LogicalDisk` that was removed from the installer and the
+  syncer after a reproduced hang; it now uses `System.IO.DriveInfo` like they do.
+- **A partial task sync reported success.** Skipped tasks (invalid trigger,
+  mapped drive, foreign same-named task, and now a missing script/executable)
+  left the exit code at 0 and the installer printed "registered". The syncer
+  exits 3 on a partial sync and the installer says PARTIAL. `check-registry.py`
+  additionally validates duplicate names, bool/int types, non-negative integers,
+  `script_args` being a list, and `repeat_for` without `repeat_every` — and it
+  can now be pointed at a deployed registry, which the self-test does.
+- **The Semantic Artifact SLO covered one task out of five.** `record_run` is now
+  called on every terminal branch of flush, compile-sessions (including its
+  clean no-op, which returned early), compile-kb, memory-update and healthcheck.
+- **A monitor that could not measure or deliver still exited 0.** Reporting
+  somebody else's failed task is a successful run; failing to collect, or having
+  Telegram reject the message, is the monitor's own failure and now exits
+  non-zero (with the undelivered alert written to the emergency log).
+- **An invalid `HEALTHCHECK_DISK_PCT` disabled the deterministic disk alert** —
+  a non-numeric threshold makes the comparison an error, which reads as false.
+  It is validated as an integer 0..100 and falls back to 85.
+- **Manifest fail-closed applied to some fields only.** A wrong-typed
+  `project_map` was ignored and a wrong-typed boolean fell back to its default,
+  both without denying anything. Every field now fails closed uniformly, unknown
+  keys are reported as probable typos, and `self-test.ps1` validates the same
+  schema (template and deployed manifest alike).
+- **Memory extraction starved the same projects every night.** JSONLs were read
+  in filesystem order while the cap assumed chronological, and the global 40K cap
+  dropped whole project sections in alphabetical order. Files are now ordered by
+  mtime and the budget is split evenly, so every project keeps its newest
+  messages instead of some being dropped outright.
+- **POSIX scheduling silently lost registry semantics.** `timeout_hours` is
+  emitted as `RuntimeMaxSec`, an aligned "Daily HH:MM every PT4H" becomes the
+  explicit list of aligned times launchd supports (and says so when it cannot),
+  `startup_delay` is honored, and `find_bash()` resolves bash platform-aware —
+  the hardcoded Git-for-Windows path meant no Telegram alert ever fired on
+  Linux/macOS.
+- **A failed `git commit` was reported as success.** A rejecting pre-commit hook
+  or a missing identity left the work staged, the branch matching the remote,
+  and the sweep exiting 0. The repo is now counted as failed and not pushed.
+- **The official uninstall step was the one thing the project forbids.** It told
+  users to run `schtasks /delete` by hand, which drifts from `registry.yaml`.
+  `sync-tasks.ps1 -Unregister` removes exactly the tasks carrying the
+  `managed-by-registry` marker.
+- **The shipped rules files taught a lifecycle the project no longer follows.**
+  `home-claude/CLAUDE.md` and `codex/AGENTS.md` still said to close a finding by
+  editing its status in place; both now document `FINDINGS.md` holding `open`
+  only, done entries deleted, rejected ones moved append-first to
+  `FINDINGS-archive.md` — and the same for `IDEAS.md`.
+
+### Fixed — docs and small stuff (P3)
+
+- `bundle-status.py` crashed on valid-but-wrongly-shaped JSON, checked only two
+  hardcoded provider keys, called a missing `.env` bad even when the environment
+  supplied the keys, and demanded the Windows VBS launcher on POSIX.
+- README/wiki-method described features that did not exist or no longer applied:
+  the wiki script count, a missing-frontmatter lint check (now implemented, since
+  the `sources:` provenance is what the method rests on), project mapping pointed
+  at `utils.py` instead of `bundle.local.yaml`, and `wiki/index.md` claiming no
+  naming conventions are enforced when `normalize_wiki_path` enforces the path
+  shape strictly.
+- `claude-warm-window.sh` warned about a billing change that was put on hold; it
+  now links the current policy instead of freezing a superseded one.
+- The POSIX custom-path example set `CLAUDE_HOME` while the installer reads
+  `CLAUDE_CONFIG_DIR`, and the Windows docs claimed Claude Code "only ever" reads
+  `~/.claude`. Both installers honor `CLAUDE_CONFIG_DIR`; the real constraint —
+  it must be exported for the client too — is what is documented now.
+- The `/code-review-ext` command listed "theoretically disclaimers" as a
+  false-positive pattern, which let a confirmable finding be dropped over its
+  wording; the skill's evidence-based algorithm is the only rule now.
+
+### Added
+
+- `tests/test_guards.py` — 18 offline tests for the fail-closed guards above
+  (retention windows, backlog cap, local-endpoint verification, manifest
+  validation, state-key migration).
+- Two more `test_push_repo.sh` scenarios: a secret in an already-committed
+  unpushed commit, and a rejecting pre-commit hook.
+
 ## [0.6.1] - 2026-07-18 — CI green again
 
 ### Fixed

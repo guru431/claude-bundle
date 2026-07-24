@@ -13,7 +13,8 @@ do NOT solve it inline, but do NOT lose it either:
    doesn't exist — create it (lazy creation) with this header:
    ```
    # Findings — <project>
-   Side observations collected during work. Review monthly. Stale >90 days → alert.
+   Side observations, `open` only. Review monthly. Stale >90 days → alert.
+   Newest first. Done entries are deleted; rejected ones move to FINDINGS-archive.md.
    ```
 2. Add an entry **at the top** of the file (newest first) in this format:
    ```
@@ -28,8 +29,34 @@ do NOT solve it inline, but do NOT lose it either:
    - **P3** — nice-to-have (small improvement, note for later)
 3. Continue with the current task.
 
-**Closing a finding:** change status to `done` / `wontfix`, add
-`**Resolved:** YYYY-MM-DD — what was done`.
+**Lifecycle — `FINDINGS.md` holds `open` entries and nothing else.** What
+happens on closing depends on the outcome:
+
+- **Done** → the entry is simply **deleted**. It is not archived: `git log`
+  and the code are the record, and re-telling it in prose turns the archive
+  into a dump.
+- **Rejected** (`wontfix`, `deferred`, or a `done` that dropped part of the
+  work) → the entry **moves** to `FINDINGS-archive.md` next to `FINDINGS.md`.
+  The archive has exactly one purpose: stop the same rejected thing being
+  filed again — which automated review does every single week.
+
+Move in this **order**, never the reverse: first **append** the entry to the
+top of `FINDINGS-archive.md` (creating it with `# Findings archive — <project>`
+if absent), adding
+
+```
+**Status:** wontfix | deferred
+**Resolved:** YYYY-MM-DD — why we are not doing it
+```
+
+then **delete** it from `FINDINGS.md`. A crash between the two steps then
+leaves a visible duplicate instead of a silent loss. Nothing is ever deleted
+from the archive.
+
+**`IDEAS.md` / `IDEAS-archive.md` — same lifecycle.** Ideas and feature
+requests (not bugs) live in `IDEAS.md`, `proposed` only. A shipped idea is
+deleted; a rejected one (`wontfix`, `deferred`, `partial`, or "already
+implemented") moves to `IDEAS-archive.md`, append-first.
 
 **Not the same as incidents:** incidents are root-caused failures that go
 into project incident logs. Findings are deferred observations for review.

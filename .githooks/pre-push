@@ -22,35 +22,62 @@ progress_threshold=2000
 # one source of truth for the regex lives in home-claude/cron/lib/secret-scan.sh.
 lib="$repo_root/home-claude/cron/lib/secret-scan.sh"
 if [ ! -f "$lib" ]; then
-  echo "WARNING: $lib not found — skipping generic token scan." >&2
-  exit 0
+  # Fail CLOSED. Exiting 0 here turned "the guard is missing" into "the guard
+  # passed" — on a public remote that is the one direction you cannot be wrong
+  # in. Deleting the lib must not be a way to publish unscanned objects.
+  echo "BLOCKED: $lib not found — the secret scan cannot run." >&2
+  echo "Restore it, or push with --no-verify if you have checked by hand." >&2
+  exit 1
 fi
 # shellcheck source=/dev/null
 . "$lib"
 
 # 1) Collect the refs being pushed. stdin: <local ref> <local sha> <remote ref> <remote sha>
+# The TARGET remote is $1 (name, or a URL for an ad-hoc push).
+target_remote="${1:-}"
 shas=""
-while read -r _local_ref local_sha _remote_ref _remote_sha; do
+excludes=""
+while read -r _local_ref local_sha _remote_ref remote_sha; do
   # An all-zeros local sha is a branch DELETION — it publishes no objects.
   case "$local_sha" in
     *[!0]*) shas="$shas $local_sha" ;;
     *) continue ;;
   esac
+  # What the TARGET already has on this ref, straight from git. All-zeros means
+  # the ref is new there — nothing to exclude.
+  case "$remote_sha" in
+    *[!0]*) excludes="$excludes $remote_sha" ;;
+  esac
 done
 [ -n "$shas" ] || exit 0
+
+# Exclude only what the TARGET remote has. `--not --remotes` (the old form)
+# excluded objects present on ANY remote — so a commit already pushed to a
+# private origin was treated as published when pushing it to a PUBLIC remote for
+# the first time, and its blobs were never scanned. An unnamed remote (a bare
+# URL) matches no ref pattern, which just means everything gets scanned.
+case "$target_remote" in
+  ''|*[!A-Za-z0-9._/-]*) ;;                                   # URL or empty → no ref exclusion
+  *) excludes="$excludes --remotes=$target_remote" ;;
+esac
 
 tmpdir=$(mktemp -d 2>/dev/null || echo "$repo_root/.pre-push.tmp")
 mkdir -p "$tmpdir"
 objects="$tmpdir/objects"
 blobs="$tmpdir/blobs"
 
-# 2) New objects only: everything reachable from what we push, minus everything
-# any remote already has. A brand-new repo has no remote refs, so this is the
+# 2) New objects only: everything reachable from what we push, minus what the
+# TARGET remote already has. A brand-new target has nothing, so this is the
 # whole history — correct, and what a first push actually publishes.
 # `awk NF>1` keeps only objects that carry a path (blobs and trees); commits
-# and tags print bare. shellcheck disable=SC2086 — $shas must word-split.
-# shellcheck disable=SC2086
-git rev-list --objects $shas --not --remotes 2>/dev/null | awk 'NF>1' > "$objects" || true
+# and tags print bare. shellcheck disable=SC2086 — both vars must word-split.
+if [ -n "$excludes" ]; then
+  # shellcheck disable=SC2086
+  git rev-list --objects $shas --not $excludes 2>/dev/null | awk 'NF>1' > "$objects" || true
+else
+  # shellcheck disable=SC2086
+  git rev-list --objects $shas 2>/dev/null | awk 'NF>1' > "$objects" || true
+fi
 
 # One batch-check pass instead of `git cat-file -t` per object (that is a
 # process spawn each, and a first push has thousands). Drops trees and blobs

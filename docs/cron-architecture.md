@@ -215,6 +215,15 @@ ordering only ever **defers** material one cycle — it never loses it. The
 one real cost is that a "processed tonight" status can mislead on a night
 things bunch up.
 
+What makes the "never loses it" part true is that compile's markers carry
+a **fingerprint of the daily log as it was read** (`DATE@fp`,
+`DATE#project@fp`). Without it the overlap really could lose a section: a
+compile that read the daily, then a flush that appended a delta and cleared
+the markers, then that same compile writing its marker — and the appended
+text would be recorded as compiled by a process that never saw it. With the
+fingerprint, an append simply stops matching any marker, so the next run
+recompiles and `apply_changes` dedups the overlap.
+
 If you want a hard ordering guarantee (and an accurate per-night status),
 run the shipped orchestrator `cron/wiki/wiki-pipeline.py` as a **single**
 task instead — it runs flush → compile → index in sequence in one process:
@@ -267,9 +276,15 @@ python ~/.claude/cron/memory-update.py           --dry-run
 ```
 
 Both print the effective policy line first. A manifest that exists but
-can't be honored (invalid YAML, PyYAML missing, a field of the wrong
-type) denies every project rather than falling back to the permissive
-default — a policy you can't read is not a policy you can ignore.
+can't be honored denies every project rather than falling back to the
+permissive default — a policy you can't read is not a policy you can
+ignore. That covers **every** field, uniformly: invalid YAML, a missing
+PyYAML, a root that isn't a mapping, a string where a list belongs, a
+`project_map` that isn't a string→string mapping, and a non-boolean
+`collect_plans`. An unrecognized key is reported as a probable typo (it is
+ignored, so a misspelled `skip_project:` would otherwise silently allow
+what you meant to exclude). `scripts/self-test.ps1` validates the same
+schema against both the template and your deployed manifest.
 
 ### What the policy is NOT
 

@@ -81,8 +81,15 @@ fi
 # instead (the old behaviour) saw only the current state of each file, so a key
 # added and later deleted was published invisibly by the very command whose job
 # is to stop that.
+#
+# --format=%B keeps the commit MESSAGE (a secret pasted into a commit message
+# ships just as publicly as one in a file) but drops the `commit` / `Author:` /
+# `Date:` header lines. Commit metadata is not published content: the author
+# identity is identical across the whole already-public history, yet it was
+# rescanned on every push and matched `.sanitize-patterns` — where a username
+# belongs so it can be found IN FILES — blocking the push on a false positive.
 SCAN_RANGE="${RANGE:-$BRANCH}"
-diff_content=$(git log -p --unified=0 "$SCAN_RANGE" -- . ':(exclude).githooks/' 2>/dev/null || true)
+diff_content=$(git log -p --format=%B --unified=0 "$SCAN_RANGE" -- . ':(exclude).githooks/' 2>/dev/null || true)
 added=$(git log --name-only --diff-filter=AR --pretty=format: "$SCAN_RANGE" -- . | sort -u || true)
 
 fail=0

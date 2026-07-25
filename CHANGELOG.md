@@ -79,6 +79,13 @@ everything while printing `ALL`, a block that exits 0.
   being generated" opened by telling users to check that `.pending/` fills up —
   which only happens if they opted into the lifecycle hooks that step 8
   describes as optional. An empty `.pending/` is normal; flush reads the JSONLs.
+- **`github-push.sh` blocked every push on its own commit metadata.** The
+  privacy scan read `git log -p`, so the `Author:` line was checked against
+  `.sanitize-patterns` — where a username belongs precisely so it can be found
+  in FILES. The identity is identical across the whole already-public history,
+  so the guard fired on every single publish. It now scans with `--format=%B`:
+  the commit message stays under check (a secret pasted into one ships just as
+  publicly), the `commit` / `Author:` / `Date:` headers no longer do.
 
 ### Fixed — from the weekly auto-review (3 real of 46)
 

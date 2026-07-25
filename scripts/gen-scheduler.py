@@ -111,13 +111,26 @@ def systemd_quote(arg: str) -> str:
 def systemd_oncalendar(task: dict) -> tuple[str, str] | None:
     """Return (kind, value) where kind is 'OnCalendar' or 'OnBootSec', or None."""
     trig = str(task.get("trigger", ""))
-    rep_h = iso_hours(task.get("repeat_every", ""))
+    rep_raw = str(task.get("repeat_every", "") or "")
+    rep_h = iso_hours(rep_raw)
+    # A repetition this generator cannot express must not be dropped in silence:
+    # the OnCalendar step syntax below only takes whole hours, so PT30M (which
+    # check-registry.py accepts, validating via iso_seconds) used to produce a
+    # plain once-a-day timer — the same registry line running 48x less often on
+    # Linux than on Windows, with nothing printed. Return None; emit_systemd
+    # turns that into a `skip` line naming the reason.
+    if rep_raw and rep_h is None:
+        return None
     m = TRIGGER_DAILY.fullmatch(trig)
     if m:
         h, mi = int(m.group(1)), m.group(2)
         if rep_h:  # every rep_h hours starting at h (systemd step syntax)
             return ("OnCalendar", f"*-*-* {h:02d}/{rep_h}:{mi}:00")
         return ("OnCalendar", f"*-*-* {h:02d}:{mi}:00")
+    # Only the Daily branch can carry the step syntax; a Weekly/Monthly trigger
+    # with repeat_every would otherwise lose it just as quietly.
+    if rep_h and not TRIGGER_DAILY.fullmatch(trig):
+        return None
     m = TRIGGER_WEEKLY.fullmatch(trig)
     if m:
         dow = DOW.get(m.group(1).lower())
@@ -139,6 +152,11 @@ def emit_systemd(task: dict, install_path: str, out: Path) -> str | None:
         return f"skip {name}: kind={task.get('kind')} has no POSIX equivalent"
     sched = systemd_oncalendar(task)
     if sched is None:
+        rep = str(task.get("repeat_every", "") or "")
+        if rep:
+            return (f"skip {name}: repeat_every={rep} with trigger "
+                    f"'{task.get('trigger')}' has no systemd equivalent "
+                    f"(OnCalendar steps take whole hours on a Daily trigger)")
         return f"skip {name}: trigger '{task.get('trigger')}' unsupported for systemd"
     desc = str(task.get("description", "")).replace("\n", " ")
     exec_line = " ".join(systemd_quote(a) for a in argv)

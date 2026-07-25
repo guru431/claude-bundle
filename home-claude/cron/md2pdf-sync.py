@@ -51,8 +51,17 @@ _load_dotenv()
 # user profile, not a projects workspace.
 PROJECTS_ROOT = Path(os.environ.get("PROJECTS_ROOT") or BUNDLE_ROOT.parent)
 
-# MD->PDF converter — same location the md2pdf-on-edit hook expects.
-MD2PDF = Path.home() / ".claude" / "bin" / "md2pdf.py"
+# MD->PDF converter. It ships in bin/, which travels with cron/ into
+# -PipelineRoot — so resolve it from BUNDLE_ROOT like every other module here,
+# not from Path.home(). With a split install (-PipelineRoot ≠ -ClaudeHome) the
+# hardcoded ~/.claude path made this task die with "md2pdf not found" while the
+# file sat exactly where the installer put it. ~/.claude stays as a fallback for
+# installs that placed the converter there by hand.
+MD2PDF = BUNDLE_ROOT / "bin" / "md2pdf.py"
+if not MD2PDF.is_file():
+    _legacy = Path.home() / ".claude" / "bin" / "md2pdf.py"
+    if _legacy.is_file():
+        MD2PDF = _legacy
 PYTHON = os.environ.get("CLAUDE_HOOK_PYTHON") or os.environ.get("PYTHON_EXE") or sys.executable
 THRESHOLD = 5 * 60  # sec: md must be newer than pdf by more than 5 minutes
 

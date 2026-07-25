@@ -491,13 +491,20 @@ def main():
                                                   project=project,
                                                   blind_update=bodies_withheld)
                 total_changes += len(applied)
-                if not applied:
+                if not applied and rejected:
                     # The LLM produced changes but normalize_wiki_path rejected
                     # EVERY path (bare filenames, <3 path parts, ...) → this
                     # section's content was dropped. Mirror wiki-compile-kb and
                     # make LOUD noise instead of the old innocuous "→ 0 changes"
                     # log line, which hid the loss. Save the dropped payload for
                     # inspection and flag the run as a hard failure (exit 1).
+                    #
+                    # `and rejected` matters: a real rejection ALWAYS fills
+                    # `rejected`, while an idempotent blind_update whose content
+                    # the page already has applies nothing and rejects nothing.
+                    # Without the guard that harmless no-op quarantined itself,
+                    # exited 1 and paged the monitor — while the branch below
+                    # simultaneously logged it as "already present".
                     quarantine_raw(f"{daily_path.stem}#{project}", "all-paths-rejected", str(changes))
                     hard_failure = True
                     print(f"  ERROR compile-sessions [{project}] daily {daily_path.stem}: "

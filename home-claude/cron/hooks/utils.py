@@ -189,6 +189,33 @@ def _manifest_bool(key: str, default: bool) -> bool:
 COLLECT_PLANS: bool = _manifest_bool("collect_plans", False)
 
 
+def manifest_broken() -> bool:
+    """True when bundle.local.yaml EXISTS but could not be honored.
+
+    project_allowed() then denies every project, so the pipeline reads no
+    sources at all. That state used to be invisible: the only trace was an
+    ERROR on stderr, which the Task Scheduler launcher does not redirect, while
+    bundle-status kept printing `policy: allow_projects=ALL` and flush reported
+    a green "Nothing to process". Every consumer of the policy must be able to
+    ask, so they can say DENIED instead of ALL.
+    """
+    return _MANIFEST_BROKEN
+
+
+def policy_summary() -> str:
+    """The effective privacy policy as one human-readable line.
+
+    Single source for the identical line flush / memory-update / bundle-status
+    each printed by hand — including, now, the broken-manifest case.
+    """
+    if _MANIFEST_BROKEN:
+        return ("DENIED — bundle.local.yaml exists but could not be read; "
+                "every project is skipped until it parses")
+    return (f"allow_projects={sorted(ALLOW_PROJECTS) or 'ALL'}; "
+            f"skip_projects={sorted(SKIP_JSONL_PROJECTS) or 'none'}; "
+            f"skip_dirs={sorted(SKIP_DIRS) or 'none'}")
+
+
 def project_allowed(project: str) -> bool:
     """Single privacy gate every source collector calls before reading a project.
 
@@ -1002,8 +1029,13 @@ def _log_provider_once() -> None:
         extra = ""
         if LLM_PROVIDER == "deepseek":
             # Print the fallback policy, not just the primary: "why did my
-            # local-only prompt reach a cloud gateway" is answered here.
-            extra = " (fallback=opencode)" if OFFBOX_FALLBACK else " (fallback=off, WIKI_OFFBOX_FALLBACK=0)"
+            # local-only prompt reach a cloud gateway" is answered here — so the
+            # names come from DEFAULT_CHAIN itself. Hardcoded, the line kept
+            # saying "fallback=opencode" after DeepInfra joined the chain, i.e.
+            # the one line whose job is diagnosing where a request went was the
+            # line that lied about it.
+            rest = " → ".join(DEFAULT_CHAIN[1:])
+            extra = f" (fallback={rest})" if OFFBOX_FALLBACK else " (fallback=off, WIKI_OFFBOX_FALLBACK=0)"
         elif not PROVIDERS[LLM_PROVIDER].get("offbox", True):
             extra = (" (local-only, endpoint verified)" if _is_local_endpoint(base)
                      else " (local-only, but the endpoint is NOT local — every call "

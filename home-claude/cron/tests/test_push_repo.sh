@@ -110,4 +110,16 @@ reset_counters; push_repo "$R7" "r7" "Auto-commit: test"
 [ "$pushed" = "0" ] || fail "T7: pushed despite a failed commit (pushed=$pushed)"
 [ -n "$(git -C "$R7" status --porcelain)" ] || fail "T7: tree should still be dirty"
 
-echo "PASS: push_repo (7 scenarios)"
+# === Test 8: a secret in the WORKING TREE fails the repo (staged-diff guard) ===
+# Same event class as T6, one step earlier. It used to count as `skipped`, so a
+# blocked secret left the sweep exiting 0 — green in the monitor, with Telegram
+# (optional by design) as the only signal.
+R8="$TMP/r8"; mkrepo "$R8"
+printf 'token = "ghp_%s"\n' "0123456789abcdefghij0123456789" > "$R8/leak.py"
+reset_counters; push_repo "$R8" "r8" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T8: staged secret not counted as failed (failed=$failed)"
+[ "$pushed" = "0" ] || fail "T8: pushed despite a staged secret (pushed=$pushed)"
+git -C "$R8" log --oneline | grep -q oops && fail "T8: leaking change was committed"
+[ "$(git -C "$R8" rev-list --count HEAD)" = "1" ] || fail "T8: an extra commit was created"
+
+echo "PASS: push_repo (8 scenarios)"

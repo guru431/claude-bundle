@@ -3,6 +3,97 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.7.1] - 2026-07-25 — false greens, dead guards, and a third drift check
+
+57 open findings closed: 11 hand-filed and 46 from the weekly auto-review, of
+which 3 were real. The recurring shape this time is a guard that reports the
+wrong colour — a run that fails while logging success, a policy that denies
+everything while printing `ALL`, a block that exits 0.
+
+### Fixed — a healthy run that reads as broken, and vice versa
+
+- **A broken `bundle.local.yaml` blanked the pipeline and every indicator
+  stayed green.** An unreadable manifest correctly makes `project_allowed()`
+  deny everything, but nothing surfaced it: `bundle-status.py` printed
+  `manifest: present` / `policy: allow_projects=ALL`, flush found no sources,
+  logged `Nothing to process`, stamped the phase successful and recorded a
+  `green` verdict. The only signal was an `ERROR` on stderr, which the Task
+  Scheduler launcher does not redirect. `utils.py` now exports
+  `manifest_broken()` and `policy_summary()`; status prints `[!!] present but
+  UNREADABLE — every project is denied`, flush and memory-update print
+  `Policy: DENIED — ...`, and flush exits non-zero instead of claiming success.
+- **compile-sessions quarantined a no-op and failed the run.** An idempotent
+  `blind_update` whose content the page already has applies nothing and rejects
+  nothing — which tripped the `if not applied:` branch into
+  `quarantine_raw(..., "all-paths-rejected")`, `exit 1` and a monitor alert,
+  while the branch below simultaneously logged it as `0 applied (already
+  present)`. The condition is now `if not applied and rejected:`, which is what
+  the branch always described: a real path rejection always fills `rejected`.
+- **A secret blocked from the nightly auto-commit left no visible trace.**
+  `guard_secrets` counted the hit as `skipped`, so `failed` stayed 0 and the
+  sweep exited 0 — green in the monitor, with Telegram (optional by design) as
+  the only signal. It now counts as `failed` like its outgoing-commit sibling,
+  and no longer runs `git reset HEAD`, which also unstaged whatever the user
+  had staged by hand — against the rule stated two guards above it. Covered by
+  a new scenario in `cron/tests/test_push_repo.sh` (8 total).
+
+### Fixed — declared but not enforced
+
+- **The cross-project leak guard was dead code on a stock install.**
+  `_retarget_subproject_headers` promotes a foreign `## Project: foo` heading so
+  compile-sessions files those facts under the right project — but only when the
+  slug was in `KNOWN_PROJECTS`, which ships empty. Every foreign heading was
+  therefore demoted to `###` and attributed to the session's project, the exact
+  leak the function documents fixing. An explicit `Project:` prefix now also
+  qualifies; bare chatter (`## Incidents`) still demotes, so no new project
+  folders are minted.
+- **`gen-scheduler.py` dropped a sub-hour `repeat_every` in silence.**
+  `check-registry.py` validates it through `iso_seconds` (accepting `PT30M`),
+  while the systemd branch reads `iso_hours` and got `None` — emitting a plain
+  daily timer, i.e. the same registry line running 48x less often on Linux than
+  on Windows, with nothing printed. Unexpressible repetitions now return `None`
+  and land in the `skip …` output with the reason.
+- **`WIKI_LLM_PROVIDER=deepseek` contradicted its own documentation.** Three
+  places stated "any other registry key means this provider only, no fallback",
+  but the code cannot tell unset from an explicit `deepseek`, and `INSTALL.md`
+  step 9 told users to write exactly that. The behaviour is deliberate and
+  unchanged; the docs now say so plainly — `deepseek` names the *chain*, and
+  `WIKI_OFFBOX_FALLBACK=0` is the switch that pins it to one provider.
+- **`check-env-ref.py` gained a third direction: code → template.** It compared
+  template ↔ docs only, so "the variable exists in the code and nowhere else"
+  was an invisible class. Four were found and documented:
+  `HEALTHCHECK_DISK_PCT` (the pipeline's only deterministic alert threshold),
+  `MEMORY_CROSS_NOTES` (enables a *second* nightly LLM call carrying user
+  messages — now also stated in the data matrix), `HANDOFF_WAIT_SECONDS` and
+  `WAIT_FOR_PATTERN`. Invocation-time and test-only knobs live in a `CODE_ONLY`
+  allowlist with a reason each, mirroring `DOC_ONLY`.
+- **`[llm] provider=` printed a stale fallback chain.** The startup diagnostic
+  line hardcoded `(fallback=opencode)` after DeepInfra joined `DEFAULT_CHAIN`;
+  it is now built from the chain itself.
+- **`md2pdf-sync.py` ignored a split install.** It resolved the converter from
+  `Path.home()/.claude/bin` while every sibling module honours `BUNDLE_ROOT`, so
+  with `-PipelineRoot` ≠ `-ClaudeHome` the task died with `md2pdf not found`
+  while the file sat where the installer put it. Now `BUNDLE_ROOT/bin` with the
+  old path as a fallback.
+- **INSTALL troubleshooting sent people down a false trail.** "Wiki pages aren't
+  being generated" opened by telling users to check that `.pending/` fills up —
+  which only happens if they opted into the lifecycle hooks that step 8
+  describes as optional. An empty `.pending/` is normal; flush reads the JSONLs.
+
+### Fixed — from the weekly auto-review (3 real of 46)
+
+- `find_backlog_jsonls` stat()ed every JSONL in every project before slicing to
+  `max_files`, including when `max_files` is 0 (the shipped default) and the
+  result is discarded. Early return.
+- `kind=exec` with no `script:` produced a literal empty `""` argument, which
+  some executables parse as a real positional parameter.
+- `wiki-lint.py` rescanned the whole vault twice; `vault_targets()` is cached.
+
+The other 43 were verified line by line against the source and rejected — the
+recurring class was PowerShell 5.1 semantics (property access on `$null` is not
+an error; `?.` does not exist) and misread control flow. They are recorded in
+`FINDINGS-archive.md` so next week's run does not re-file them.
+
 ## [0.7.0] - 2026-07-25 — the whole open findings backlog, closed
 
 34 findings filed on 2026-07-21 (10 P1, 19 P2, 5 P3). Every one was verified

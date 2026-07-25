@@ -89,8 +89,16 @@ $deleted
 
 # Secret guard: scan the staged diff for token-shaped strings before committing
 # (this script auto-commits unattended, so a leaked key would otherwise be
-# pushed to a remote). On a hit: unstage everything, skip the repo, and alert.
-# Returns non-zero so the caller can skip the commit/push for this repo.
+# pushed to a remote). On a hit: leave the index alone, skip the repo, alert.
+# Returns non-zero → the caller counts the repo FAILED (not skipped) so the
+# sweep exits non-zero and the task monitor sees it. Telegram is optional by
+# design, so a block that only alerted there left no trace at all when it was
+# unconfigured — a blocked secret is exactly what must not be silent.
+#
+# It deliberately does NOT `git reset HEAD`: that also unstaged whatever the
+# user had staged by hand, against the rule stated on guard_staged_sensitive
+# above ("never silently unstage — that would hide the user's own intent").
+# Nothing gets committed either way, so the index can stay as it is.
 guard_secrets() {
     local label="$1"
     local hits
@@ -98,8 +106,7 @@ guard_secrets() {
     # Otherwise the unattended auto-commit would reach a remote with no secret
     # check at all — the exact case this guard exists for.
     if ! command -v secret_scan_diff >/dev/null 2>&1; then
-        echo "[$label] SECRET-SCAN unavailable (lib not loaded) — skipping repo (fail closed)" >> "$LOG_FILE"
-        git reset -q HEAD >> "$LOG_FILE" 2>&1
+        echo "[$label] SECRET-SCAN unavailable (lib not loaded) — repo FAILED, nothing committed (fail closed)" >> "$LOG_FILE"
         # -f, not -x: on SMB/mapped drives the exec bit is lost and the gate
         # would silently never fire.
         if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
@@ -113,9 +120,8 @@ guard_secrets() {
     # propagation through the pipe.
     hits=$(git diff --cached --unified=0 2>/dev/null | secret_scan_diff)
     [ -z "$hits" ] && return 0
-    echo "[$label] SECRET-shaped token blocked from auto-commit:" >> "$LOG_FILE"
+    echo "[$label] SECRET-shaped token blocked from auto-commit (repo FAILED, index left as it was):" >> "$LOG_FILE"
     printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
-    git reset -q HEAD >> "$LOG_FILE" 2>&1
     if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
         bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret in staged changes for [$label] — skipped (not committed, not pushed). Check by hand." >> "$LOG_FILE" 2>&1
     fi
@@ -194,7 +200,12 @@ push_repo() {
             git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
             guard_protected_deletions "$label"
             if ! guard_secrets "$label"; then
-                skipped=$((skipped + 1)); return
+                # FAILED, not skipped: same event class as
+                # guard_outgoing_secrets, so the sweep exits non-zero and the
+                # monitor reports it instead of a green night.
+                failed=$((failed + 1))
+                failed_repos="${failed_repos:+$failed_repos, }$label"
+                return
             fi
             if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
                 echo "[$label] nothing to commit after .env exclusion" >> "$LOG_FILE"

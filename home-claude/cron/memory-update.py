@@ -24,11 +24,9 @@ if sys.platform == "win32":
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
-    ALLOW_PROJECTS,
     CLAUDE_HOME,
     PROJECTS_BASE,
     SKIP_DIRS,
-    SKIP_JSONL_PROJECTS,
     dir_to_project,
     extract_first_json_object,
     find_bash,
@@ -36,6 +34,7 @@ from utils import (  # noqa: E402
     is_subagent_jsonl,
     llm_call,
     parse_jsonl_messages,
+    policy_summary,
     project_allowed,
 )
 
@@ -383,9 +382,7 @@ def run_incident_extract() -> None:
 
 def main() -> int:
     log(f"=== Memory Update {DATE} ===")
-    log(f"Policy: allow_projects={sorted(ALLOW_PROJECTS) or 'ALL'}; "
-        f"skip_projects={sorted(SKIP_JSONL_PROJECTS) or 'none'}; "
-        f"skip_dirs={sorted(SKIP_DIRS) or 'none'}")
+    log(f"Policy: {policy_summary()}")
     if not PROJECTS_DIR.is_dir():
         log(f"No projects dir at {PROJECTS_DIR} — nothing to process.")
         return 0

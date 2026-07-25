@@ -395,8 +395,12 @@ function Build-Action([hashtable]$task, [string]$launcher) {
     }
     if ($kind -eq 'exec') {
         if (-not $task.execute) { throw "kind=exec requires 'execute:' field in task $($task.name)" }
-        $execArgs = if ($script -match '^/' -or $script -match '\s/c\s') { $script } else { '"' + ($script -replace '"', '""') + '"' }
-        return @{ execute=$task.execute; arguments=($execArgs + $rest); work_dir=$null }
+        # For kind=exec `script:` holds the ARGUMENTS, and they are optional —
+        # a daemon may take none. Quoting an absent value produced a literal
+        # empty '""' argument, which some executables parse as a real (empty)
+        # positional parameter rather than ignoring it.
+        $execArgs = if (-not $script) { '' } elseif ($script -match '^/' -or $script -match '\s/c\s') { $script } else { '"' + ($script -replace '"', '""') + '"' }
+        return @{ execute=$task.execute; arguments=(($execArgs + $rest).TrimStart()); work_dir=$null }
     }
     if ($kind -eq 'vbs') {
         return @{ execute='wscript.exe'; arguments=('"' + $script + '"' + $rest); work_dir=$null }

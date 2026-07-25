@@ -88,11 +88,21 @@ chain returns `None` (and the calling script logs an error) rather than
 silently chew through your Claude subscription. If a wiki compile fails
 because DeepSeek is down, that's a Telegram alert, not a $5 surprise.
 
-The chain order lives in `utils.py::DEFAULT_CHAIN` and applies only to the
-default provider. Setting `WIKI_LLM_PROVIDER` to any other registry key
-means "this provider only, no fallback" — an explicit choice must not
-silently route elsewhere. Two gateways sit behind the primary rather than
-one: with a single fallback, both being down at once leaves the pipeline
+The chain order lives in `utils.py::DEFAULT_CHAIN`. Precisely which values
+select it:
+
+- `WIKI_LLM_PROVIDER` **unset, empty, or `deepseek`** — the whole chain.
+  `deepseek` is the chain's *name*, not a way to pin DeepSeek alone: the two
+  spellings are indistinguishable to the code, and `INSTALL.md` step 9 has
+  always suggested writing it out.
+- **any other registry key** (`opencode`, `deepinfra`, `local`, `claude`,
+  `mock`) — that provider only, no fallback. An explicit choice of a
+  non-default provider must not silently route elsewhere.
+
+So to run DeepSeek and *nothing else*, the switch is
+`WIKI_OFFBOX_FALLBACK=0`, which suppresses every off-box step of the chain —
+not a `WIKI_LLM_PROVIDER` value. Two gateways sit behind the primary rather
+than one: with a single fallback, both being down at once leaves the pipeline
 dark for a whole night.
 
 This public default (DeepSeek direct primary, OpenCode Go fallback) is

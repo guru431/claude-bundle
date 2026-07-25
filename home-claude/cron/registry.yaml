@@ -132,7 +132,7 @@ tasks:
 
   - name: ClaudeMd2PdfSync
     project: main
-    description: Nightly catch-up — regenerate any PDF whose paired .md is newer. Disabled by default — enable after installing ~/.claude/bin/md2pdf.py.
+    description: Nightly catch-up — regenerate any PDF whose paired .md is newer. Disabled by default — enable after installing md2pdf.py into the pipeline root's bin/.
     script: <bundle-install-path>\cron\md2pdf-sync.py
     kind: python
     trigger: Daily 06:30

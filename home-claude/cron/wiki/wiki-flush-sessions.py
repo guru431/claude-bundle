@@ -34,8 +34,9 @@ for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (dir_to_project, parse_jsonl_messages, is_subagent_jsonl, llm_call,
                    normalize_project_name, KNOWN_PROJECTS, mark_phase_success,
-                   state_get, state_add, state_remove, is_dry_run, SKIP_DIRS, SKIP_JSONL_PROJECTS,
-                   project_allowed, slug_collisions, ALLOW_PROJECTS, COLLECT_PLANS,
+                   state_get, state_add, state_remove, is_dry_run, SKIP_DIRS,
+                   project_allowed, slug_collisions, COLLECT_PLANS,
+                   manifest_broken, policy_summary,
                    BUNDLE_ROOT, CLAUDE_HOME, WIKI_ROOT, DAILY_DIR, PENDING_DIR, LOG_MD, PROJECTS_BASE)
 from untrusted import fence
 
@@ -187,6 +188,13 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20,
     by_project: dict[str, list[Path]] = {}
     all_candidates = []
     exclude = exclude or set()
+
+    # WIKI_BACKLOG_MAX=0 (the shipped default) disables the sweep, and the slice
+    # below would return nothing anyway — but only after stat()ing every JSONL
+    # in every project directory. On a large archive that is the bulk of the
+    # phase's I/O, spent to build a list that is then thrown away.
+    if max_files <= 0:
+        return by_project
 
     if not PROJECTS_BASE.exists():
         return by_project
@@ -459,16 +467,22 @@ def _retarget_subproject_headers(extracted: str, session_project: str) -> str:
     as project sections) trapped those foreign facts INSIDE the `## {P}` H2, and
     compile-sessions then attributed them to P — a cross-project leak.
 
-    Now: if a heading normalizes to a KNOWN project that differs from the
-    session, keep it as a real `## <project>` H2 so compile-sessions routes the
-    facts to the right namespace. Otherwise (same project / unknown project /
-    LLM chatter like `## Incidents`) demote it to `###`, as before (the facts
-    stay anchored under the session). normalize_project_name doesn't know the
-    English `Project:` prefix, so the label is cleaned here before matching.
+    Now: if a heading names a project other than the session's, keep it as a
+    real `## <project>` H2 so compile-sessions routes the facts to the right
+    namespace. A heading counts as naming a project when it normalizes to a
+    configured KNOWN project, OR when it carries an explicit `Project:` prefix
+    — that prefix IS the contamination case, and gating on KNOWN_PROJECTS alone
+    made the whole protection dead code on a stock install, where the list ships
+    empty. Otherwise (same project / bare LLM chatter like `## Incidents`)
+    demote it to `###`, as before (the facts stay anchored under the session).
+    The prefix is what separates "another project" from "another topic": without
+    it, every chatter heading would mint a new project folder.
     """
     def repl(m: re.Match) -> str:
         label = m.group(2)
         # Strip a Project: prefix and unescape `\_` from the LLM markdown engine.
+        stripped = label.strip("[] ")  # `[[Project: finance]]` → `Project: finance`
+        named_project = bool(re.match(r"(?i)^project\s*:\s*\S", stripped))
         cleaned = re.sub(r"(?i)^project\s*:\s*", "", label).replace(r"\_", "_")
         cleaned = cleaned.strip("[] ")  # `[[Finance]]` → `Finance`
         norm = normalize_project_name(cleaned)
@@ -481,7 +495,7 @@ def _retarget_subproject_headers(extracted: str, session_project: str) -> str:
         explicit = norm != DEFAULT_PROJECT or low == DEFAULT_PROJECT \
             or low.startswith(DEFAULT_PROJECT + " ") or low.startswith(DEFAULT_PROJECT + "-") \
             or low.startswith(DEFAULT_PROJECT + "(") or low.startswith(DEFAULT_PROJECT + "—")
-        if explicit and norm in KNOWN_PROJECTS and norm != session_project:
+        if explicit and norm != session_project and (norm in KNOWN_PROJECTS or named_project):
             return f"## {norm}"
         return f"### {label}"
 
@@ -503,10 +517,17 @@ def main():
     log(f"=== Wiki Flush Sessions {DATE} ===")
     # Show the effective privacy policy up front (also visible in --dry-run) so
     # it's obvious which projects can reach the LLM and how much history is swept.
-    log(f"Policy: allow_projects={sorted(ALLOW_PROJECTS) or 'ALL'}; "
-        f"skip_projects={sorted(SKIP_JSONL_PROJECTS) or 'none'}; "
-        f"skip_dirs={sorted(SKIP_DIRS) or 'none'}; backlog_max={BACKLOG_MAX}; "
+    log(f"Policy: {policy_summary()}; backlog_max={BACKLOG_MAX}; "
         f"collect_plans={'yes' if COLLECT_PLANS else 'no (unattributed — opt-in)'}")
+    # An unreadable manifest denies every project, so the run below would find
+    # no sources, log a cheerful "Nothing to process", stamp the phase
+    # successful and read GREEN — a config error dressed as a healthy night.
+    # Fail here instead: this is the first phase, so the alert names the cause.
+    if manifest_broken():
+        log("FATAL: bundle.local.yaml is present but unreadable — refusing to "
+            "run with every project denied. Fix the manifest (or remove it) "
+            "and re-run.")
+        sys.exit(1)
     # A slug claimed by two cwds makes the policy ambiguous: it can only name the
     # slug, so allowing one directory quietly allows the other as well.
     for slug, dirs in sorted(slug_collisions().items()):

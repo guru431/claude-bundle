@@ -23,7 +23,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
-    ALLOW_PROJECTS, SKIP_DIRS, SKIP_JSONL_PROJECTS, PROJECT_MAP,
+    PROJECT_MAP, manifest_broken, policy_summary,
     BUNDLE_ROOT, WIKI_ROOT, PENDING_DIR, STATE_PATH, LLM_PROVIDER,
     DEFAULT_CHAIN, PROVIDERS, _env_first,
 )
@@ -82,11 +82,18 @@ def main() -> int:
     (ok if tg else na)(f"Telegram alerts: {'configured' if tg else 'not configured (failures log only)'}")
 
     manifest = BUNDLE_ROOT / "bundle.local.yaml"
-    (ok if manifest.is_file() else na)(
-        f"manifest (bundle.local.yaml): {'present' if manifest.is_file() else 'absent (using template defaults)'}")
-    print(f"  policy: allow_projects={sorted(ALLOW_PROJECTS) or 'ALL'}; "
-          f"skip_projects={sorted(SKIP_JSONL_PROJECTS) or 'none'}; "
-          f"skip_dirs={sorted(SKIP_DIRS) or 'none'}")
+    # "present" alone was a lie whenever the file could not be parsed: the
+    # policy line then printed allow_projects=ALL while project_allowed() was
+    # denying everything, so the one page whose job is "is the pipeline really
+    # wired?" answered the opposite of the truth.
+    if manifest_broken():
+        bad("manifest (bundle.local.yaml): present but UNREADABLE — every "
+            "project is denied (see the ERROR above; missing PyYAML, bad YAML "
+            "or a mistyped field)")
+    else:
+        (ok if manifest.is_file() else na)(
+            f"manifest (bundle.local.yaml): {'present' if manifest.is_file() else 'absent (using template defaults)'}")
+    print(f"  policy: {policy_summary()}")
     print(f"  project_map entries: {len(PROJECT_MAP)}")
 
     # ── launcher (Windows Task Scheduler) ────────────────────────────────────

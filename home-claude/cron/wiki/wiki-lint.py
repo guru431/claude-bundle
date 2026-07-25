@@ -20,6 +20,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
@@ -89,12 +90,18 @@ def link_target(link: str) -> str:
     return link.removesuffix(".md")
 
 
+@lru_cache(maxsize=1)
 def vault_targets() -> tuple[set[str], dict[str, int]]:
     """Everything a wikilink may point at.
 
     Returns (full paths relative to WIKI_ROOT without .md, stem → how many
     pages carry that stem). index/CLAUDE/log pages are link targets even
     though find_all_pages skips them as lint subjects.
+
+    Cached: two checks call it, and the lint run writes no pages, so the second
+    full rglob of the vault only repeated the first one's I/O. Callers treat the
+    result as read-only (a shared cached set/dict would otherwise be mutable
+    state between checks).
     """
     paths: set[str] = set()
     stems: dict[str, int] = {}

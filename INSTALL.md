@@ -292,8 +292,11 @@ Fill in:
 - `DEEPSEEK_KEY=...` (or `OPENCODE_GO_API_KEY=...`)
 - `TELEGRAM_BOT_TOKEN=...` (if you want alerts)
 - `TELEGRAM_CHAT_ID=...`
-- `WIKI_LLM_PROVIDER=deepseek` (default — pick `opencode` or `claude`
-  if you prefer)
+- `WIKI_LLM_PROVIDER=` — leave empty (or write `deepseek`, the same thing)
+  for the default chain **DeepSeek → OpenCode Go → DeepInfra**. Naming any
+  other provider (`opencode`, `local`, `claude`, ...) pins that one with no
+  fallback. To use DeepSeek alone, set `WIKI_OFFBOX_FALLBACK=0` — the
+  provider name cannot express it. See `docs/llm-routing.md`.
 - `PROJECTS_ROOT=...` — **required** by `git-push-all.sh` and
   `md2pdf-sync.py` when the bundle is deployed at the documented default
   `~/.claude` (they refuse to run without it). Point it at the folder
@@ -495,8 +498,11 @@ it's non-zero:
 
 ### Wiki pages aren't being generated
 The pipeline only writes pages from sessions it knows about. Check:
-- `~/.claude/wiki/daily/.pending/` should accumulate files after each
-  Claude Code session ends (via `session-end.py` hook)
+- **Only if you wired the lifecycle hooks in step 8** (they are opt-in and
+  absent from the default `settings.json`): `~/.claude/wiki/daily/.pending/`
+  should accumulate files as sessions end, via `session-end.py`. Without
+  those hooks an empty `.pending/` is normal and not the fault — flush reads
+  the JSONL transcripts under `~/.claude/projects/*` directly
 - `wiki-flush-sessions.py` and `wiki-compile-sessions.py` run on
   schedule (02:30 / 04:00 by default)
 - Their LLM calls need a working key — check

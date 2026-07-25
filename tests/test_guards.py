@@ -139,6 +139,22 @@ def test_broken_manifest_denies_every_project(bundle_tree: Path, monkeypatch, bo
     assert utils.project_allowed("anything") is False
 
 
+def test_broken_manifest_is_visible_not_just_enforced(bundle_tree: Path, monkeypatch):
+    """Denying everything silently is the failure this pair of helpers closes.
+
+    The status page and the flush log both printed `allow_projects=ALL` while
+    project_allowed() was refusing every project, so an unreadable policy read
+    as a healthy night with nothing to do.
+    """
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text("skip_projects: notalist\n",
+                                                   encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.manifest_broken() is True
+    assert "DENIED" in utils.policy_summary()
+    assert "ALL" not in utils.policy_summary()
+
+
 def test_valid_manifest_allows(bundle_tree: Path, monkeypatch):
     pytest.importorskip("yaml")
     (bundle_tree / "bundle.local.yaml").write_text(
@@ -146,6 +162,8 @@ def test_valid_manifest_allows(bundle_tree: Path, monkeypatch):
     utils = _import_utils(monkeypatch, bundle_tree)
     assert utils.project_allowed("alpha") is True
     assert utils.project_allowed("beta") is False
+    assert utils.manifest_broken() is False
+    assert "allow_projects=['alpha']" in utils.policy_summary()
 
 
 # ── state migration: the @size suffix is part of the key ────────────────────

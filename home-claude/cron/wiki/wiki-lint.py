@@ -3,12 +3,14 @@
 
 No LLM — pure Python markdown parsing. Fast (seconds), free.
 On errors, optionally sends a Telegram alert (opt-in via
-ENABLE_TELEGRAM_ALERTS below).
+ENABLE_TELEGRAM_ALERTS below), plus a second alert when a check class grows
+past the previous run's count (see BASELINE_FILE).
 
 Schedule: Sunday at 02:00.
 """
 
 import difflib
+import json
 import os
 import subprocess
 import re
@@ -38,6 +40,20 @@ DATE = datetime.now().strftime("%Y-%m-%d")
 
 # Set to True to send Telegram alerts on lint errors.
 ENABLE_TELEGRAM_ALERTS = False
+
+# Per-class counts from the previous run. WARNs are never zero on a real vault —
+# compiled kb pages carry link rot that nobody is going to clean — so an absolute
+# threshold is either always firing or switched off, and a genuine regression
+# (a compiler that starts emitting broken pages) hides inside the standing noise.
+# Comparing per class against the last run separates "the usual background" from
+# "this got worse this week". Lives next to the script; it is metadata, not content.
+BASELINE_FILE = Path(__file__).resolve().parent / ".wiki-lint-baseline.json"
+
+# Alert only when a class grows by at least this many findings, or when a new
+# non-empty class appears. Absolute, not a percentage: against a base of
+# thousands a percentage is noise, while dozens of newly broken links in a week
+# is a real signal.
+BASELINE_DELTA_MIN = 20
 
 # Written by wiki-build-index.py, and they link nearly every page. Counting them
 # as inbound links would make the orphan check come up clean after every build.
@@ -496,6 +512,47 @@ def check_project_collapse() -> list[str]:
     return []
 
 
+def load_baseline() -> dict[str, int]:
+    """Last run's per-class counts. Empty on the first run or a broken file."""
+    if not BASELINE_FILE.exists():
+        return {}
+    try:
+        data = json.loads(BASELINE_FILE.read_text(encoding="utf-8"))
+        counts = data.get("counts", {})
+        return {k: int(v) for k, v in counts.items()}
+    except (json.JSONDecodeError, ValueError, OSError, AttributeError):
+        return {}
+
+
+def save_baseline(counts: dict[str, int]):
+    """Overwrite the baseline with this run's counts."""
+    try:
+        BASELINE_FILE.write_text(
+            json.dumps({"date": DATE, "counts": counts}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def baseline_regressions(counts: dict[str, int], baseline: dict[str, int]) -> list[str]:
+    """Classes that grew past the threshold since the previous run.
+
+    A class absent from the baseline counts as a regression right away —
+    otherwise a whole new class of defects appears in complete silence.
+    """
+    lines = []
+    for cls, now in sorted(counts.items()):
+        prev = baseline.get(cls, 0)
+        delta = now - prev
+        if cls not in baseline:
+            if now >= BASELINE_DELTA_MIN:
+                lines.append(f"{cls}: new class, {now}")
+        elif delta >= BASELINE_DELTA_MIN:
+            lines.append(f"{cls}: {prev} → {now} (+{delta})")
+    return lines
+
+
 def send_telegram_alert(message: str):
     """Send an alert to Telegram on errors."""
     if not ENABLE_TELEGRAM_ALERTS:
@@ -545,12 +602,14 @@ def main():
         ("H1 spam", check_h1_spam, pages),
     ]
 
+    class_counts: dict[str, int] = {}
     for name, func, arg in checks:
         if arg is not None:
             issues = func(arg)
         else:
             issues = func()
         log(f"  {name}: {len(issues)} issues")
+        class_counts[name] = len(issues)
         all_issues.extend(issues)
 
     stats = {
@@ -572,6 +631,22 @@ def main():
             f"wiki-lint {DATE}: {stats['errors']} errors, "
             f"{stats['warnings']} warnings ({stats['pages']} pages)"
         )
+
+    # Second signal, orthogonal to the error count above: growth per check class
+    # against the previous run. This is what catches a regression buried in a
+    # standing pile of WARNs, which the absolute count never will.
+    baseline = load_baseline()
+    if baseline:
+        regressions = baseline_regressions(class_counts, baseline)
+        if regressions:
+            body = "\n".join(regressions)
+            log(f"Regressions past baseline:\n{body}")
+            send_telegram_alert(f"wiki-lint {DATE}: findings grew past baseline\n{body}")
+        else:
+            log("No regressions past baseline")
+    else:
+        log("No baseline yet — first run, recording counts")
+    save_baseline(class_counts)
 
     log(f"=== Lint complete ===")
 

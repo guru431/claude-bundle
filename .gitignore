@@ -43,6 +43,8 @@ __pycache__/
 .processed.json.lock
 home-claude/wiki/log.md
 home-claude/cron/logs/
+home-claude/cron/state/
+home-claude/cron/wiki/.wiki-lint-baseline.json
 
 # Agent-side backlog files (private to maintainer, never published)
 FINDINGS.md

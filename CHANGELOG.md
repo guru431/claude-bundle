@@ -3,6 +3,79 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.8.0] - 2026-07-25 — backport of a week of meta-repo fixes
+
+Everything here comes from the meta-repo this bundle is extracted from, where
+each item was found on a live install and fixed there first. Nothing in this
+release originates from bundle-side review.
+
+### Fixed — the provider account is shared, the schedule is not a lock
+
+- **Overlapping nightly jobs rate-limited each other.** Every scheduled task
+  here talks to the same provider account, so two runs overlapping means the
+  second one collects HTTP 429s and fails. Spacing the triggers apart does not
+  fix it — durations drift, and a compile that usually takes 20 minutes
+  occasionally takes 90 and rolls into the next task's window (in the meta-repo
+  this is what killed a monthly review). `llm_call()` now serializes through a
+  cross-process queue at `cron/state/.llm.lock`. Fail-open by construction: a
+  call that cannot get a slot within `WIKI_LLM_LOCK_WAIT` (900s) proceeds
+  anyway, a lock older than `WIKI_LLM_LOCK_STALE` (1800s) is treated as
+  abandoned, and a waiter that timed out never deletes the holder's lock. The
+  `mock` provider bypasses the queue entirely.
+
+### Fixed — the model's word taken for data
+
+- **Pages were dated from the model's imagination.** The LLM picks the date in
+  `<slug>-<date>.md`, and it lands in the future often enough to matter (57 such
+  pages in one meta-repo sample). `_enforce_source_date()` now derives that
+  suffix in code from the source daily's own date, clamped to today, and reuses
+  an existing page under the same slug instead of minting a duplicate under a
+  new date. Paths with no date suffix are untouched.
+- **An appended fragment turned pages into "two versions of themselves".** The
+  `blind_update` path appended the model's whole-page answer verbatim: its `# H1`
+  became a second title, its `## Current state` a second section competing with
+  the page's own, and — because `write_page` sanitizes the body afterwards — the
+  raw-content containment check never matched what actually landed on disk, so
+  every retry appended another copy. The fragment is now stripped of its own H1,
+  demoted one level to nest under `## Update (…)`, has "current state" headings
+  rewritten to a dated snapshot, and is sanitized *before* the idempotency check.
+  Fenced code is left alone throughout.
+- **A retried daily duplicated its `_log.md` lines.** `append_per_project_log()`
+  now dedups within today's block only — the same page legitimately reappears on
+  a later day.
+
+### Fixed — guards and retention
+
+- **`runs.jsonl` was pruned by `log-retention.py`.** The cumulative run registry
+  lives in `cron/logs/` and matches the `*.jsonl` glob, but its mtime tracks the
+  last write, not the age of its records: if the instrumented tasks went quiet
+  for a month, the sweep deleted the whole audit trail exactly when it was needed
+  to explain the silence. `KEEP_FOREVER` exempts it.
+- **`telegram-send.sh` could log the bot token.** Keeping the token out of `argv`
+  (via `-K -`) is only half the job — `2>&1` folds curl's own diagnostics, which
+  quote the URL, into the body that gets printed to a cron log. The token is now
+  masked with a bash substitution (not `sed`, which would treat `/ & \` inside a
+  token as syntax and leave it intact).
+- **The secret scanner had no way to allow a line that must look like a secret.**
+  A detector's own test fixture, or documentation showing a blocked line, would
+  block every later commit touching that file *and* the unattended nightly sweep.
+  `SECRET_SCAN_ALLOW='secret-scan:allow'` exempts a single line — on the line
+  itself, so it shows in the diff and is findable via `git log -S`, unlike
+  `--no-verify`, which waves through a whole push silently.
+
+### Added
+
+- **`wiki-lint.py`: per-class regression alert.** WARNs are never zero on a real
+  vault, so the absolute count is either always firing or switched off, and a
+  genuine regression hides inside the standing noise. Counts per check class are
+  now compared against the previous run (`.wiki-lint-baseline.json`, gitignored)
+  and an alert fires only on growth of at least `BASELINE_DELTA_MIN` (20), or on
+  a new non-empty class.
+- **`claude-healthcheck.sh`: untrusted-data marker.** `METRICS` is command and
+  log output from remote hosts, fed straight into an analyzing model. A log line
+  phrased as an instruction is indirect prompt injection; the block is now fenced
+  the way session text already is.
+
 ## [0.7.1] - 2026-07-25 — false greens, dead guards, and a third drift check
 
 57 open findings closed: 11 hand-filed and 46 from the weekly auto-review, of

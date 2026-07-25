@@ -72,6 +72,12 @@ CURL_CFG
 )
 HTTP_CODE=$(printf '%s' "$RESPONSE" | tail -n1)
 BODY=$(printf '%s' "$RESPONSE" | sed '$d')
+# Mask the bot token before anything is printed. Keeping it out of argv is only
+# half the job: 2>&1 above folds curl's own diagnostics into $RESPONSE, and those
+# quote the URL — token included — straight into a cron log that is not treated
+# as a secret store. Bash substitution, not sed: the token is substituted as a
+# literal, whereas sed would treat / & \ inside it as syntax and leave it intact.
+BODY="${BODY//"$TELEGRAM_BOT_TOKEN"/***TOKEN***}"
 
 if [ "$HTTP_CODE" != "200" ] || printf '%s' "$BODY" | grep -q '"ok":false'; then
     echo "telegram-send: Bot API error (HTTP ${HTTP_CODE:-?}): $BODY" >&2

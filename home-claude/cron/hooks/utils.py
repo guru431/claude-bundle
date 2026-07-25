@@ -5,6 +5,7 @@ parsing, simple YAML frontmatter handling and a multi-provider LLM dispatcher.
 Customize PROJECT_MAP / KNOWN_PROJECTS for your own setup.
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -1418,6 +1419,17 @@ def append_per_project_log(project: str, entries: list[str]) -> None:
     hdr_match = re.search(rf'^{re.escape(header)}$', existing, re.M)
     if hdr_match:
         insert_at = hdr_match.end()
+        # Dedup within today's block. A daily that gets retried (the flush ran
+        # twice, or a compile was re-run by hand) otherwise appends the exact
+        # same lines again, and the feed session-start injects as "recent
+        # project context" fills up with duplicates. Only today's block is
+        # checked: the same page legitimately appears on different days.
+        next_hdr = re.search(r"\n## ", existing[insert_at:])
+        block = existing[insert_at:insert_at + next_hdr.start()] if next_hdr else existing[insert_at:]
+        have = {ln.strip() for ln in block.split("\n")}
+        entries = [e for e in entries if f"- {e}" not in have]
+        if not entries:
+            return
         new_block = "\n" + "\n".join(f"- {e}" for e in entries)
         existing = existing[:insert_at] + new_block + existing[insert_at:]
     else:
@@ -1793,8 +1805,75 @@ def parse_llm_json(raw: str) -> list[dict]:
     return []
 
 
+LLM_LOCK = BUNDLE_ROOT / "cron" / "state" / ".llm.lock"
+# How long to wait for the queue before going anyway (fail-open).
+LLM_LOCK_WAIT = int(os.environ.get("WIKI_LLM_LOCK_WAIT", "900"))
+# A lock older than this is considered abandoned (process killed, host rebooted
+# mid-run). Without this a crashed job would wedge every later LLM call.
+LLM_LOCK_STALE = int(os.environ.get("WIKI_LLM_LOCK_STALE", "1800"))
+
+
+@contextlib.contextmanager
+def _llm_queue():
+    """Cross-process queue around a provider call.
+
+    Every scheduled job here talks to the SAME provider account, so two nightly
+    tasks overlapping is self-inflicted rate limiting: the second one collects
+    HTTP 429s and the run it belongs to fails. Spacing the triggers apart does
+    not fix it — run durations drift, and a compile that normally takes 20
+    minutes occasionally takes 90 and rolls into the next task's window. The
+    serialization therefore has to live in the call itself, not the schedule.
+
+    Fail-open by construction: if the lock cannot be taken within
+    LLM_LOCK_WAIT the call proceeds anyway (risking a 429 beats silently
+    skipping a nightly job), and a filesystem error skips the queue entirely.
+    An abandoned lock is stolen after LLM_LOCK_STALE; a lock held by a live
+    process is never removed by the waiter.
+    """
+    acquired = False
+    deadline = time.time() + LLM_LOCK_WAIT
+    try:
+        LLM_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            try:
+                # O_CREAT|O_EXCL is atomic on every filesystem this runs on,
+                # including SMB — unlike a stat-then-write check.
+                fd = os.open(str(LLM_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')}\n".encode())
+                os.close(fd)
+                acquired = True
+                break
+            except FileExistsError:
+                try:
+                    age = time.time() - LLM_LOCK.stat().st_mtime
+                except OSError:
+                    age = 0
+                if age > LLM_LOCK_STALE:
+                    print(f"  llm-lock: abandoned lock ({int(age)}s) — taking it over", file=sys.stderr)
+                    LLM_LOCK.unlink(missing_ok=True)
+                    continue
+                if time.time() >= deadline:
+                    print(f"  llm-lock: no slot after {LLM_LOCK_WAIT}s — proceeding "
+                          "unqueued (429 possible)", file=sys.stderr)
+                    break
+                time.sleep(5)
+    except OSError as e:
+        print(f"  llm-lock: unavailable ({e}) — proceeding unqueued", file=sys.stderr)
+    try:
+        yield
+    finally:
+        # Only the holder releases. A caller that timed out must not delete
+        # someone else's lock, or the queue degrades into no queue at all.
+        if acquired:
+            try:
+                LLM_LOCK.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def llm_call(prompt: str, timeout: int = 600) -> str | None:
-    """Universal LLM call.
+    """Universal LLM call. Calls are serialized through a cross-process queue
+    (`cron/state/.llm.lock`) — see _llm_queue.
 
     Provider chain (NO silent fallback to Claude — it consumes the Max plan):
       - "deepseek" (default): DeepSeek V4-Flash → OpenCode Go → DeepInfra → None.
@@ -1812,7 +1891,13 @@ def llm_call(prompt: str, timeout: int = 600) -> str | None:
     """
     _log_provider_once()
     if LLM_PROVIDER == "mock":
-        return _llm_mock(prompt, timeout)
+        return _llm_mock(prompt, timeout)  # never leaves the box — no queue needed
+    with _llm_queue():
+        return _llm_call_unlocked(prompt, timeout)
+
+
+def _llm_call_unlocked(prompt: str, timeout: int = 600) -> str | None:
+    """Body of llm_call without the queue — the provider chain as-is."""
     if LLM_PROVIDER == "claude":
         return _llm_claude(prompt, timeout)
     if LLM_PROVIDER in PROVIDERS and LLM_PROVIDER != "deepseek":

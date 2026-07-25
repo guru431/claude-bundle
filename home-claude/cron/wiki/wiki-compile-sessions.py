@@ -32,6 +32,7 @@ from utils import (  # noqa: E402
     parse_llm_json,
     quarantine_raw,
     read_page,
+    sanitize_page_body,
     state_add,
     state_get,
     is_dry_run,
@@ -346,6 +347,114 @@ def coalesce_changes(changes: list[dict]) -> list[dict]:
     return out
 
 
+def _strip_leading_h1(md: str) -> str:
+    """Drop the leading H1 of an appended fragment.
+
+    The model returns a WHOLE PAGE, title included. Appended as-is it becomes a
+    second H1 on an existing page, and the page turns into "two versions of
+    itself" — with no way to tell which title describes the current state. The
+    page already has a title; the duplicate carries no information.
+    """
+    lines = md.split("\n")
+    for i, ln in enumerate(lines):
+        if not ln.strip():
+            continue
+        if ln.startswith("# "):
+            del lines[i]
+            while i < len(lines) and not lines[i].strip():
+                del lines[i]
+        break  # first non-blank line isn't an H1 — nothing to strip
+    return "\n".join(lines)
+
+
+def _demote_headings(md: str) -> str:
+    """Push the fragment's headings one level down — it nests under `## Update (…)`.
+
+    Otherwise the update's sections sit at the same level as the page's own, so
+    the page ends up with two sections of the same name and, again, no way to
+    tell which one is current. Demoting makes the update a subsection, which is
+    what it actually is: an addition made on a given date.
+
+    Fenced code is left alone: `# comment` inside ``` is code, not a heading.
+    """
+    out: list[str] = []
+    in_fence = False
+    for line in md.split("\n"):
+        s = line.lstrip()
+        if s.startswith("```") or s.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        # Up to H5: markdown won't render deeper anyway, and '#######' is junk.
+        if not in_fence and re.match(r"^#{1,5} ", line):
+            line = "#" + line
+        out.append(line)
+    return "\n".join(out)
+
+
+# Headings that declare their content to be the current state. In an APPENDED
+# fragment such a heading lies: it is a snapshot taken on the daily log's date,
+# not the page's present state.
+_CURRENT_HEADING_RE = re.compile(
+    r"^(#{1,6})\s+(current\s+state|current\s+status|current\s+version"
+    r"|current\s+stats?|latest\s+state|overview|status)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _date_current_headings(md: str, date_str: str) -> str:
+    """Rename "current state" headings in a fragment into a dated snapshot.
+
+    A page has exactly one canonical current block — the one already there (or
+    the one written by a full rewrite, where the model did see the body).
+    Everything the nightly run appends is history, so it gets stamped with a
+    date and the page never accumulates competing "current" states.
+    """
+    out: list[str] = []
+    in_fence = False
+    for line in md.split("\n"):
+        s = line.lstrip()
+        if s.startswith("```") or s.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        m = _CURRENT_HEADING_RE.match(line) if not in_fence else None
+        if m:
+            line = f"{m.group(1)} State as of {date_str} (snapshot)"
+        out.append(line)
+    return "\n".join(out)
+
+
+_DATE_SUFFIX_RE = re.compile(r"^(.*)-(\d{4}-\d{2}-\d{2})\.md$")
+
+
+def _enforce_source_date(rel_path: str, source_date: str) -> str:
+    """Force the date suffix in a filename to the TRUSTED daily-log date.
+
+    The model invents the date in `<slug>-<date>.md` — it comes out of the
+    model's head, not out of the data, and lands in the future often enough to
+    matter (57 such pages in one meta-repo sample). The only trustworthy date
+    here is that of the source daily (always <= today). If a page under the same
+    slug already exists with ANY date, reuse it instead of minting a duplicate
+    under a new one. Paths with no date suffix (solution-*, architecture-*) are
+    left untouched.
+    """
+    parts = rel_path.split("/")
+    if len(parts) != 3:
+        return rel_path
+    m = _DATE_SUFFIX_RE.match(parts[2])
+    if not m:
+        return rel_path
+    slug = m.group(1)
+    folder = WIKI_ROOT / parts[0] / parts[1]
+    if folder.is_dir():
+        pat = re.compile(r"^" + re.escape(slug) + r"-\d{4}-\d{2}-\d{2}\.md$")
+        for existing in sorted(folder.glob("*.md")):
+            if pat.match(existing.name):
+                return f"{parts[0]}/{parts[1]}/{existing.name}"
+    return f"{parts[0]}/{parts[1]}/{slug}-{source_date}.md"
+
+
 def apply_changes(changes: list[dict], source_daily: str, project: str,
                   blind_update: bool = False) -> tuple[list[str], list[str]]:
     """Apply changes: preserve frontmatter, record source, update _log.md.
@@ -363,6 +472,11 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
     applied = []
     rejected: list[str] = []
     log_entries: list[str] = []
+    # Trusted date = the daily log's own date (source_daily is "YYYY-MM-DD.md"),
+    # never a date from the model. Clamped to today in case of clock skew.
+    source_date = Path(source_daily).stem
+    if source_date > DATE:
+        source_date = DATE
     for change in coalesce_changes(changes):
         if not isinstance(change, dict):
             rejected.append(f"non-dict entry: {str(change)[:80]}")
@@ -383,6 +497,11 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
             rejected.append(f"out-of-scope path: {rel_path}")
             continue
 
+        # The date in the filename is derived IN CODE from the trusted
+        # source_date, not taken from whatever the model wrote. The slug lookup
+        # inside also collapses would-be duplicates onto the existing page.
+        rel_path = _enforce_source_date(rel_path, source_date)
+
         full_path = WIKI_ROOT / rel_path
 
         if content.lstrip().startswith("---\n"):
@@ -393,9 +512,23 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
         existing_fm, existing_body = read_page(full_path)
         action_label = "updated" if full_path.exists() else "created"
         if blind_update and full_path.exists():
-            if content.strip() in existing_body:
+            # The body is preserved (the model never saw it), but the fragment
+            # is normalized first: no H1 of its own, one level down so it nests
+            # under `## Update (…)`, and no heading claiming to be the current
+            # state. Without this the page accumulates "two versions of itself".
+            fragment = _demote_headings(_strip_leading_h1(content.strip()))
+            fragment = _date_current_headings(fragment, DATE)
+            # Sanitize BEFORE the containment check: write_page runs the body
+            # through sanitize_page_body anyway, and if the fragment changes
+            # after the comparison, what lands on disk is text the check will
+            # not find next time — so the next run appends a copy.
+            fragment = sanitize_page_body(fragment, label=full_path.name).strip()
+            # Idempotency is checked against the FRAGMENT, not the raw content:
+            # the page holds the transformed text, so comparing against the
+            # original would never match and every retry would append a copy.
+            if fragment in existing_body:
                 continue  # nothing new — keeps a retried daily idempotent
-            content = existing_body.rstrip() + f"\n\n## Update ({DATE})\n\n" + content.strip() + "\n"
+            content = existing_body.rstrip() + f"\n\n## Update ({DATE})\n\n" + fragment + "\n"
             action_label = "appended"
 
         new_fm = add_source_to_frontmatter(

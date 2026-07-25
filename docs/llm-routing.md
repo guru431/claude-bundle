@@ -83,6 +83,21 @@ entry — it needs no key, endpoint or model. It returns the verbatim contents o
 the file named by `WIKI_LLM_MOCK_RESPONSE`, letting `tests/test_pipeline.py`
 drive the whole flush→compile→index→lint flow offline (see that test).
 
+### One account, one queue
+
+Every provider call except `mock` goes through a cross-process lock at
+`cron/state/.llm.lock`. All the scheduled tasks share a single provider account,
+so two runs overlapping is self-inflicted rate limiting: the second one collects
+HTTP 429s and the run it belongs to fails. Spacing the triggers apart in
+`registry.yaml` does not solve it — run durations drift, and a compile that
+usually takes 20 minutes occasionally takes 90 and rolls into the next task's
+window. So the serialization lives in the call, not the schedule.
+
+It is fail-open on purpose: no slot within `WIKI_LLM_LOCK_WAIT` (900s) and the
+call proceeds anyway — a 429 beats a silently skipped nightly job — while a lock
+older than `WIKI_LLM_LOCK_STALE` (1800s) is treated as abandoned by a killed
+process. A waiter that timed out never removes the holder's lock.
+
 The default is `deepseek`. **Claude is never the silent fallback** — the
 chain returns `None` (and the calling script logs an error) rather than
 silently chew through your Claude subscription. If a wiki compile fails

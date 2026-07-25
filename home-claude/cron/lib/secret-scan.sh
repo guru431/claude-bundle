@@ -8,6 +8,7 @@
 #
 # Exposes:
 #   SECRET_SCAN_PATTERN   — the bare ERE alternation (very low false-positive)
+#   SECRET_SCAN_ALLOW     — inline marker that exempts a single line
 #   secret_scan_diff      — scan the ADDED lines of a unified diff for
 #                           token-shaped strings. Reads diff text from stdin if
 #                           given, otherwise falls back to `git diff --cached`.
@@ -27,6 +28,17 @@
 # is already covered above — but a truncated or reformatted export keeps the id.
 SECRET_SCAN_PATTERN='-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{16,}|ccr-[A-Za-z0-9]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|"private_key_id"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"|[0-9]{8,10}:[A-Za-z0-9_-]{35}'
 
+# Inline exemption for lines that MUST look like a secret — the test fixtures of
+# the detectors themselves, and documentation showing what a blocked line looks
+# like. Without an escape hatch such a line blocks every future commit touching
+# that file AND the unattended nightly sweep (cron/git-push-all.sh sources this
+# same library), which then fails every night with no one at the keyboard. The
+# marker has to sit ON the offending line, so it shows up in the diff and is
+# findable with `git log -S` — deliberate and auditable, unlike `--no-verify`,
+# which waves through an entire commit or push silently.
+# NEVER put this on a line carrying a real credential.
+SECRET_SCAN_ALLOW='secret-scan:allow'
+
 secret_scan_diff() {
     # Take diff text from stdin when piped, else read the staged diff.
     if [ -t 0 ]; then
@@ -37,7 +49,7 @@ secret_scan_diff() {
     # Added lines only: a commit that REMOVES a leaked token must not be blocked,
     # or the leak could never be remediated. '+++' is a file header, not content.
     _ssd_hits=$(printf '%s\n' "$_ssd_diff" | grep -E '^\+' | grep -vE '^\+\+\+' \
-        | grep -nE -e "$SECRET_SCAN_PATTERN" || true)
+        | grep -nE -e "$SECRET_SCAN_PATTERN" | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
     if [ -n "$_ssd_hits" ]; then
         printf '%s\n' "$_ssd_hits"
         return 1
@@ -48,7 +60,7 @@ secret_scan_diff() {
 secret_scan_text() {
     # Raw content on stdin — no '^+' filtering, every line is "added" here.
     # -I: binary input yields no matches, so a blob can be piped in as-is.
-    _sst_hits=$(grep -nIE -e "$SECRET_SCAN_PATTERN" || true)
+    _sst_hits=$(grep -nIE -e "$SECRET_SCAN_PATTERN" | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
     if [ -n "$_sst_hits" ]; then
         printf '%s\n' "$_sst_hits"
         return 1

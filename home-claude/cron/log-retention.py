@@ -2,7 +2,9 @@
 """Prune old cron logs so the bundle doesn't teach unbounded log growth.
 
 Deletes *.log and *.jsonl files under cron/logs/ older than the retention window. The
-window defaults to 30 days; override with WIKI_LOG_RETENTION_DAYS.
+window defaults to 30 days; override with WIKI_LOG_RETENTION_DAYS. Cumulative journals
+listed in KEEP_FOREVER (runs.jsonl) are exempt — their mtime tracks the last write, not
+the age of the records inside.
 
 Quarantined raw payloads (cron/logs/rejected/*.txt) get their own, shorter window:
 they echo private session text and raw LLM output, so they are kept only long
@@ -76,6 +78,13 @@ def _window(var: str, default: int) -> int:
 RETENTION_DAYS = _window("WIKI_LOG_RETENTION_DAYS", 30)
 REJECTED_RETENTION_DAYS = _window("WIKI_REJECTED_RETENTION_DAYS", 7)
 HANDOFF_RETENTION_DAYS = _window("WIKI_HANDOFF_RETENTION_DAYS", 7)
+# Cumulative append-only journals. They sit in logs/ next to the per-day files and
+# match the *.jsonl glob, but their mtime is the time of the LAST write, not the age
+# of the contents. runs.jsonl is the terminal run registry (cron/runs.py) behind
+# bundle-status' artifact health: if the instrumented tasks go quiet for a month, an
+# mtime sweep would delete the whole audit trail exactly when it is needed to explain
+# the silence. Never pruned by age.
+KEEP_FOREVER = {"runs.jsonl"}
 DRY_RUN = any(a in ("--dry-run", "--no-llm") for a in sys.argv[1:])
 
 
@@ -85,6 +94,9 @@ def prune(files, cutoff: float) -> tuple[int, int, int]:
     kept = 0
     freed = 0
     for f in files:
+        if f.name in KEEP_FOREVER:
+            kept += 1
+            continue
         try:
             st = f.stat()
         except OSError:

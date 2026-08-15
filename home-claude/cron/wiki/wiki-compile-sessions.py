@@ -35,6 +35,7 @@ from utils import (  # noqa: E402
     sanitize_page_body,
     state_add,
     state_get,
+    strip_leading_frontmatter,
     is_dry_run,
     mark_phase_success,
     write_page,
@@ -504,10 +505,7 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
 
         full_path = WIKI_ROOT / rel_path
 
-        if content.lstrip().startswith("---\n"):
-            m = re.match(r"^\s*---\n.*?\n---\n", content, re.DOTALL)
-            if m:
-                content = content[m.end():]
+        content = strip_leading_frontmatter(content)
 
         existing_fm, existing_body = read_page(full_path)
         action_label = "updated" if full_path.exists() else "created"

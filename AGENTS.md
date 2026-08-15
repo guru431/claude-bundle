@@ -7,15 +7,21 @@ agent) working **on this repo**.
 
 A portable Claude Code starter pack: sanitized `~/.claude/` config,
 optional Karpathy-style wiki + cron pipeline, `claude-switch.ps1`
-backend switcher, `codex/AGENTS.md` mirror. Public on GitHub
-(release pending), MIT.
+backend switcher, `codex/AGENTS.md` mirror. Written for public
+release under MIT; maintained meanwhile on a private Forgejo + Gitea
+pair, with the GitHub publication still pending.
 
 ## Where the real rules live
 
 - **Project rules (full):** [`CLAUDE.md`](CLAUDE.md) in this root —
   read this first
-- **Universal rules:** `~/.codex/AGENTS.md` (mirror of
-  `~/.claude/CLAUDE.md`)
+- **Universal rules — what the bundle ships:**
+  [`codex/AGENTS.md`](codex/AGENTS.md), the mirror of
+  [`home-claude/CLAUDE.md`](home-claude/CLAUDE.md) (CI keeps the two in
+  sync via `scripts/check-agents-sync.py`)
+- **Universal rules — on your own machine:** whatever the bundle
+  installed at `~/.codex/AGENTS.md` / `~/.claude/CLAUDE.md`. Editing
+  those does NOT change the repo; the sources above do.
 - **Docs:** [`docs/`](docs/) — `wiki-method.md`, `cron-architecture.md`,
   `llm-routing.md`
 
@@ -46,7 +52,9 @@ false positive with `git commit --no-verify`.
   defaults only. Users declare their real project map in the deployed
   `~/.claude/bundle.local.yaml` (`project_map:` / `known_projects:`), which
   a reinstall never overwrites; never ship these constants populated, and
-  never point users at them.
+  never point users at them. The committed template for that file is
+  `config/bundle.local.example.yaml` — a new manifest key must be added
+  there too.
 - Wiki vault under `home-claude/wiki/` must ship **empty** (only
   `index.md`, `README.md`, and `.gitkeep` files).
 - The `config/llm-providers.example.env` template is committed but
@@ -62,6 +70,7 @@ false positive with `git commit --no-verify`.
 | Sanitization checklist | [`CLAUDE.md`](CLAUDE.md) § Sanitization |
 | Automated secret-guard (pre-commit) | [`.githooks/pre-commit`](.githooks/pre-commit) — activate: `git config core.hooksPath .githooks` |
 | What changes when adding X also requires touching Y | [`CLAUDE.md`](CLAUDE.md) § Cross-link table |
+| Install / verify / bootstrap scripts | [`scripts/`](scripts/) — `install.ps1`, `install-lite.sh`, `self-test.ps1`, `bootstrap-registry.ps1` (fills the `registry.yaml` placeholders) |
 | Wiki pipeline details | [`docs/wiki-method.md`](docs/wiki-method.md) |
 | Cron / Task Scheduler details | [`docs/cron-architecture.md`](docs/cron-architecture.md) |
 | LLM routing (switcher vs cron) | [`docs/llm-routing.md`](docs/llm-routing.md) |

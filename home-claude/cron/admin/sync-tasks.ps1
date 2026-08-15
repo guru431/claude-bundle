@@ -234,6 +234,18 @@ function Parse-RegistryYaml([string]$path) {
 # All triggers go through a single XML path Register-ScheduledTask -Xml. This
 # avoids parameter-set resolution issues that have hit the native
 # -Action/-Trigger combination on some PowerShell 5.1 versions.
+
+# StartBoundary for a calendar trigger (Daily/Weekly/Monthly). If today's HH:MM
+# has already passed, start tomorrow: with StartWhenAvailable=true a boundary in
+# the past reads as a missed run, so registering at 14:00 could fire a "Daily
+# 02:30" nightly job immediately after the sync. Only the time-of-day is
+# compared for idempotency, so moving the date changes nothing else.
+function Get-CalendarStart([int]$h, [int]$m) {
+    $t = (Get-Date).Date.AddHours($h).AddMinutes($m)
+    if ($t -le (Get-Date)) { $t = $t.AddDays(1) }
+    return $t.ToString('s')
+}
+
 function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [string]$repeatFor) {
     # Optional <Repetition>: repeat within the trigger period (e.g. PT4H = every
     # 4 hours). Honored for every calendar trigger (Daily/Weekly/Monthly); the
@@ -258,7 +270,7 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
     }
     if ($spec -match '^Daily\s+(\d{1,2}):(\d{2})$') {
         $h = [int]$Matches[1]; $m = [int]$Matches[2]
-        $start = (Get-Date).Date.AddHours($h).AddMinutes($m).ToString('s')
+        $start = Get-CalendarStart $h $m
         return @"
 <CalendarTrigger>
       <StartBoundary>$start</StartBoundary>
@@ -285,7 +297,7 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
         if (-not $dow) {
             throw "Unknown day-of-week '$dowRaw' in trigger '$spec' (expected Mon/Tue/Wed/Thu/Fri/Sat/Sun or full names)"
         }
-        $start = (Get-Date).Date.AddHours($h).AddMinutes($m).ToString('s')
+        $start = Get-CalendarStart $h $m
         return @"
 <CalendarTrigger>
       <StartBoundary>$start</StartBoundary>
@@ -299,7 +311,7 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
     }
     if ($spec -match '^Monthly\s+day=(\d{1,2})\s+(\d{1,2}):(\d{2})$') {
         $d = [int]$Matches[1]; $h = [int]$Matches[2]; $m = [int]$Matches[3]
-        $start = (Get-Date).Date.AddHours($h).AddMinutes($m).ToString('s')
+        $start = Get-CalendarStart $h $m
         return @"
 <CalendarTrigger>
       <StartBoundary>$start</StartBoundary>
@@ -380,6 +392,14 @@ function Quote-Arg([string]$a) {
     return $a
 }
 
+# Always-quoted variant for the launcher/script path components below. They used
+# to be spliced in as '"' + $path + '"', so a path containing a double quote
+# produced an unbalanced command line — exactly what Quote-Arg exists to prevent,
+# applied to script_args but not to the paths. Always quoting (rather than
+# delegating to Quote-Arg) keeps the emitted Arguments byte-identical for
+# ordinary paths, so no task is re-registered just for a quoting change.
+function Quote-Path([string]$p) { return '"' + ($p -replace '"', '""') + '"' }
+
 # ── action builder ───────────────────────────────────────────────────────────
 # kind=bash|python|cmd  → wscript.exe + local _run-hidden.vbs (hidden window)
 # kind=vbs              → wscript.exe <script.vbs>
@@ -403,13 +423,13 @@ function Build-Action([hashtable]$task, [string]$launcher) {
         return @{ execute=$task.execute; arguments=(($execArgs + $rest).TrimStart()); work_dir=$null }
     }
     if ($kind -eq 'vbs') {
-        return @{ execute='wscript.exe'; arguments=('"' + $script + '"' + $rest); work_dir=$null }
+        return @{ execute='wscript.exe'; arguments=((Quote-Path $script) + $rest); work_dir=$null }
     }
     if ($kind -eq 'python_local') {
         $pythonExe = if ($env:PYTHON_EXE) { $env:PYTHON_EXE } else { 'python.exe' }
-        return @{ execute=$pythonExe; arguments=('"' + $script + '"' + $rest); work_dir=$null }
+        return @{ execute=$pythonExe; arguments=((Quote-Path $script) + $rest); work_dir=$null }
     }
-    return @{ execute='wscript.exe'; arguments=('"' + $launcher + '" ' + $kind + ' "' + $script + '"' + $rest); work_dir=$null }
+    return @{ execute='wscript.exe'; arguments=((Quote-Path $launcher) + ' ' + $kind + ' ' + (Quote-Path $script) + $rest); work_dir=$null }
 }
 
 # ── compare current vs wanted ────────────────────────────────────────────────

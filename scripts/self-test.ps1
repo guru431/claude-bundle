@@ -53,6 +53,24 @@ function Ok($msg)   { Write-Host "[PASS] $msg" -ForegroundColor Green;  $script:
 function Bad($msg)  { Write-Host "[FAIL] $msg" -ForegroundColor Red;    $script:fail++ }
 function Warn($msg) { Write-Host "[WARN] $msg" -ForegroundColor Yellow; $script:warn++ }
 
+# ── run a child process/script with $ErrorActionPreference relaxed ───────────
+# Under 'Stop', PS 5.1 turns a native process's stderr captured via 2>&1 into a
+# terminating NativeCommandError. Every step below exists to REPORT a failing
+# child as [FAIL] — without this it would instead kill the whole self-test with
+# an unreadable error, precisely when something is broken. Returns the combined
+# output; the child's exit code lands in $script:lastRc.
+$script:lastRc = 0
+function Invoke-Checked([scriptblock]$sb, [switch]$AllStreams) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if ($AllStreams) { $out = (& $sb *>&1 | Out-String).Trim() }
+        else             { $out = (& $sb 2>&1 | Out-String).Trim() }
+        $script:lastRc = $LASTEXITCODE
+        return $out
+    } finally { $ErrorActionPreference = $prev }
+}
+
 # ── locate a Python interpreter ──────────────────────────────────────────────
 function Find-Python {
     $cands = @()
@@ -105,8 +123,8 @@ foreach ($rel in @('settings.json', 'settings.example-with-hooks.json')) {
 
 # ── 2. Python compileall ─────────────────────────────────────────────────────
 if ($py) {
-    $out = & $py -m compileall -q (Join-Path $home_claude 'cron') (Join-Path $home_claude 'hooks') 2>&1
-    if ($LASTEXITCODE -eq 0) { Ok "Python compileall (home-claude/)" }
+    $out = Invoke-Checked { & $py -m compileall -q (Join-Path $home_claude 'cron') (Join-Path $home_claude 'hooks') }
+    if ($script:lastRc -eq 0) { Ok "Python compileall (home-claude/)" }
     else { Bad "Python compileall failed:`n$out" }
 } else { Warn "Python not found — skipped compileall, hooks, YAML" }
 
@@ -115,15 +133,10 @@ if ($py) {
     $reg = Join-Path $home_claude 'cron/registry.yaml'
     $code = "import sys,yaml; d=yaml.safe_load(open(sys.argv[1],encoding='utf-8')); print(len(d.get('tasks',[])))"
     # A missing PyYAML makes python print a ModuleNotFoundError traceback to
-    # stderr. Under $ErrorActionPreference='Stop', piping that via 2>&1 raises a
-    # terminating NativeCommandError in PS 5.1 and would kill the whole self-test
-    # before the WARN branch. Relax the preference just for this native call and
-    # decide on the exit code instead.
-    $prevEAP = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $out = (& $py -c $code $reg 2>&1 | Out-String).Trim()
-    $rc = $LASTEXITCODE
-    $ErrorActionPreference = $prevEAP
+    # stderr — Invoke-Checked keeps that from aborting the run (see its comment),
+    # so the WARN branch below is reachable.
+    $out = Invoke-Checked { & $py -c $code $reg }
+    $rc = $script:lastRc
     if ($rc -eq 0) { Ok "registry.yaml parses ($out tasks)" }
     elseif ($out -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped registry.yaml parse" }
     else { Bad "registry.yaml parse error: $out" }
@@ -173,11 +186,8 @@ sys.exit(0)
     foreach ($label in $manifests.Keys) {
         $mani = $manifests[$label]
         if (-not (Test-Path $mani)) { continue }
-        $prevEAP = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        $mout = (& $py -c $mcode $mani 2>&1 | Out-String).Trim()
-        $mrc = $LASTEXITCODE
-        $ErrorActionPreference = $prevEAP
+        $mout = Invoke-Checked { & $py -c $mcode $mani }
+        $mrc = $script:lastRc
         if ($mrc -eq 0) { Ok "$label — valid schema" }
         elseif ($mout -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped manifest parse: $label" }
         elseif ($mrc -eq 5) { Warn "${label} — $mout (ignored at runtime; check for a typo)" }
@@ -229,8 +239,9 @@ if ($deployed) {
 $st = Join-Path $home_claude 'cron/admin/sync-tasks.ps1'
 if (Test-Path $st) {
     try {
-        $out = & $st -DryRun *>&1   # *>&1 captures Write-Host (info stream) too
-        $rc = $LASTEXITCODE
+        # -AllStreams: *>&1 captures Write-Host (info stream) too
+        $out = Invoke-Checked { & $st -DryRun } -AllStreams
+        $rc = $script:lastRc
         if ($out -match 'placeholder') { Ok "sync-tasks -DryRun: placeholder guard fired (template not yet bootstrapped)" }
         elseif ($rc -eq 0) { Ok "sync-tasks -DryRun completed (exit 0)" }
         elseif ($rc -eq 3) { Warn "sync-tasks -DryRun: some tasks would be SKIPPED (partial sync):`n$out" }
@@ -280,8 +291,8 @@ if ($home_claude -match '[\\/]\.claude$' -and -not $env:PROJECTS_ROOT) {
 if ($py -and -not $deployed) {
     $dc = Join-Path $root 'scripts/check-doc-counts.py'
     if (Test-Path $dc) {
-        $out = & $py $dc 2>&1
-        if ($LASTEXITCODE -eq 0) { Ok "doc counts match registry" }
+        $out = Invoke-Checked { & $py $dc }
+        if ($script:lastRc -eq 0) { Ok "doc counts match registry" }
         else { Bad "doc/registry task-count drift:`n$out" }
     }
 }
@@ -300,12 +311,9 @@ if ($py) {
     $cr = Join-Path $root 'scripts/check-registry.py'
     $crTarget = if ($deployed) { Join-Path $home_claude 'cron/registry.yaml' } else { $null }
     if ((Test-Path $cr) -and (-not $deployed -or (Test-Path $crTarget))) {
-        $prevEAP = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        if ($crTarget) { $out = (& $py $cr $crTarget 2>&1 | Out-String).Trim() }
-        else           { $out = (& $py $cr 2>&1 | Out-String).Trim() }
-        $rc = $LASTEXITCODE
-        $ErrorActionPreference = $prevEAP
+        if ($crTarget) { $out = Invoke-Checked { & $py $cr $crTarget } }
+        else           { $out = Invoke-Checked { & $py $cr } }
+        $rc = $script:lastRc
         if ($rc -eq 0) { Ok "registry.yaml schema valid" }
         elseif ($rc -eq 2) { Warn "PyYAML not installed — skipped registry schema check" }
         else { Bad "registry.yaml schema errors:`n$out" }
@@ -320,8 +328,8 @@ if ($py) {
 if ($py -and -not $deployed) {
     $ce = Join-Path $root 'scripts/check-env-ref.py'
     if (Test-Path $ce) {
-        $out = & $py $ce 2>&1
-        if ($LASTEXITCODE -eq 0) { Ok "env template matches the docs" }
+        $out = Invoke-Checked { & $py $ce }
+        if ($script:lastRc -eq 0) { Ok "env template matches the docs" }
         else { Bad "env/doc reference drift:`n$out" }
     }
 }

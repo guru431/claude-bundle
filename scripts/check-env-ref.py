@@ -88,6 +88,11 @@ CODE_ONLY = {
     # Set BY the pipeline for its own children, never read from .env.
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
+    # Read by home-claude/hooks/md2pdf-on-edit.py to locate bin/md2pdf.py on a
+    # split install. A lifecycle hook runs in the Claude Code client session and
+    # never loads the pipeline .env, so declaring it there would do nothing;
+    # documented in home-claude/hooks/README.md instead.
+    "CLAUDE_MD2PDF",
 }
 
 # Provided by the OS / the shell, not by the bundle.

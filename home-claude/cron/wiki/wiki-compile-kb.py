@@ -32,6 +32,7 @@ from utils import (  # noqa: E402
     read_page,
     state_add,
     state_get,
+    strip_leading_frontmatter,
     is_dry_run,
     mark_phase_success,
     write_page,
@@ -96,7 +97,11 @@ def read_existing_pages() -> dict[str, str]:
         if not d.exists():
             continue
         for f in d.glob("*.md"):
-            pages[f.stem] = f.read_text(encoding="utf-8")
+            # errors="replace" (as in wiki-compile-sessions.py): one page with a
+            # stray non-UTF-8 byte would otherwise raise before the first article
+            # is touched, so the whole nightly compile dies and nothing is marked
+            # processed.
+            pages[f.stem] = f.read_text(encoding="utf-8", errors="replace")
     return pages
 
 
@@ -105,10 +110,12 @@ def compile_article(article_path: Path, existing_pages: dict[str, str]) -> list[
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
     try:
         article_text = article_path.read_text(encoding="utf-8")
-    except OSError:
-        # File vanished between find_new_files() and here (the KB Update writer
-        # at 03:00 may still be mutating kb_news/) — treat as a compile failure
-        # so it isn't marked processed and a later run retries if it reappears.
+    except (OSError, UnicodeDecodeError):
+        # OSError: the file vanished between find_new_files() and here (the KB
+        # Update writer at 03:00 may still be mutating kb_news/).
+        # UnicodeDecodeError: a source saved in the system ANSI code page — a
+        # real case on Windows. Uncaught it killed the whole run; here it is one
+        # failed article. Either way: not marked processed, retried next run.
         return None
 
     existing_list = ", ".join(sorted(existing_pages.keys())[:100])
@@ -195,12 +202,7 @@ def apply_changes(changes: list[dict], existing_pages: dict[str, str],
 
         full_path = WIKI_ROOT / rel_path
 
-        # CRLF-tolerant: an LLM answer carrying \r\n would otherwise skip the
-        # strip and leave its frontmatter duplicated inside the page body.
-        if re.match(r"\s*---\r?\n", content):
-            m = re.match(r"^\s*---\r?\n.*?\n---\r?\n", content, re.DOTALL)
-            if m:
-                content = content[m.end():]
+        content = strip_leading_frontmatter(content)
 
         existing_fm, existing_body = read_page(full_path)
 

@@ -1169,6 +1169,19 @@ def read_page(path: Path) -> tuple[dict, str]:
     return parse_frontmatter(text)
 
 
+def strip_leading_frontmatter(content: str) -> str:
+    """Drop a frontmatter block the LLM put at the top of a page body.
+
+    CRLF-tolerant: an answer carrying \\r\\n skipped an LF-only strip and left
+    its YAML duplicated inside the page body. Both compilers call this so the
+    two phases can't drift apart again — they had, and only one was fixed.
+    """
+    if not re.match(r"\s*---\r?\n", content):
+        return content
+    m = re.match(r"^\s*---\r?\n.*?\n---\r?\n", content, re.DOTALL)
+    return content[m.end():] if m else content
+
+
 _LITERAL_NL = chr(92) + "n"  # '\' + 'n', built from chr() so the escaping level survives copies
 
 

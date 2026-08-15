@@ -11,9 +11,9 @@ follow MD edits without the user having to remember." Failure to regenerate
 is reported back to the model via systemMessage (visible in the UI) so the
 issue is not silently swallowed.
 
-Requires: ~/.claude/bin/md2pdf.py (a small wrapper around any MD->PDF
-converter — pandoc, weasyprint, mdpdf, etc.). If you don't use the
-md+pdf pairing pattern, you can simply delete this hook from settings.json.
+Requires bin/md2pdf.py (a small wrapper around any MD->PDF converter —
+pandoc, weasyprint, mdpdf, etc.). If you don't use the md+pdf pairing
+pattern, you can simply delete this hook from settings.json.
 """
 from __future__ import annotations
 
@@ -26,7 +26,30 @@ from pathlib import Path
 # Python interpreter. Override via $CLAUDE_HOOK_PYTHON if you need a specific
 # install; otherwise reuse the interpreter the hook itself was launched with.
 PYTHON = os.environ.get("CLAUDE_HOOK_PYTHON") or sys.executable
-MD2PDF = Path.home() / ".claude" / "bin" / "md2pdf.py"
+
+
+def _find_md2pdf() -> Path:
+    """Locate the converter the same way cron/md2pdf-sync.py does.
+
+    bin/ ships with the bundle, so resolve it relative to this file first — a
+    hardcoded ~/.claude path made the nightly sync and this hook disagree on a
+    split install (-PipelineRoot ≠ -ClaudeHome). $CLAUDE_MD2PDF wins over both:
+    with a split install bin/ travels with the pipeline while hooks/ stays in
+    the config root, so neither path below can find it and the var is the only
+    way to point the hook at the converter the cron job uses.
+    """
+    override = os.environ.get("CLAUDE_MD2PDF")
+    cands = [Path(override)] if override else []
+    cands.append(Path(__file__).resolve().parents[1] / "bin" / "md2pdf.py")
+    legacy = Path.home() / ".claude" / "bin" / "md2pdf.py"
+    cands.append(legacy)
+    for c in cands:
+        if c.is_file():
+            return c
+    return cands[0]  # nothing found — report the most specific path we tried
+
+
+MD2PDF = _find_md2pdf()
 
 
 def emit(msg: str | None = None, suppress: bool = True) -> None:

@@ -275,11 +275,16 @@ NL=$'\n'
 # cron/logs/ → 100 MB
 LOGS_MB=$(du -sm "$BUNDLE_ROOT/cron/logs" 2>/dev/null | awk '{print $1}')
 [ -n "$LOGS_MB" ] && [ "$LOGS_MB" -gt 100 ] && SIZE_WARNINGS+="cron/logs/ = ${LOGS_MB} MB (>100 MB)${NL}"
-# wiki/ → 200 MB
-WIKI_MB=$(du -sm "$BUNDLE_ROOT/wiki" --exclude=".git" 2>/dev/null | awk '{print $1}')
+# wiki/ → 200 MB, counted without wiki/.git (which has its own threshold below).
+# As a difference rather than `du --exclude`: that flag is a GNU extension, so
+# on BSD/macOS du the call fails, WIKI_MB comes back empty and the size check
+# silently stops running.
+WIKIGIT_MB=$(du -sm "$BUNDLE_ROOT/wiki/.git" 2>/dev/null | awk '{print $1}')
+WIKI_TOTAL_MB=$(du -sm "$BUNDLE_ROOT/wiki" 2>/dev/null | awk '{print $1}')
+WIKI_MB=""
+[ -n "$WIKI_TOTAL_MB" ] && WIKI_MB=$(( WIKI_TOTAL_MB - ${WIKIGIT_MB:-0} ))
 [ -n "$WIKI_MB" ] && [ "$WIKI_MB" -gt 200 ] && SIZE_WARNINGS+="wiki/ = ${WIKI_MB} MB (>200 MB)${NL}"
 # wiki/.git → 100 MB (binary bloat warning)
-WIKIGIT_MB=$(du -sm "$BUNDLE_ROOT/wiki/.git" 2>/dev/null | awk '{print $1}')
 [ -n "$WIKIGIT_MB" ] && [ "$WIKIGIT_MB" -gt 100 ] && SIZE_WARNINGS+="wiki/.git = ${WIKIGIT_MB} MB (>100 MB — binary bloat?)${NL}"
 
 echo "Size check: logs=${LOGS_MB:-?}MB wiki=${WIKI_MB:-?}MB wiki.git=${WIKIGIT_MB:-?}MB" >> "$LOG_FILE"
@@ -300,14 +305,11 @@ if [ -n "$ALERTS" ]; then
     fi
     echo "Sending alert ($TASK_FAIL_COUNT failed tasks)..." >> "$LOG_FILE"
 
-    ALERT_MSG=$(cat <<EOF
-$HEADER
-
-$ALERTS
-
-Check logs: cron/logs/
-EOF
-)
+    # printf, not an unquoted heredoc: ALERTS carries task names and Descriptions
+    # straight from Task Scheduler, and an unquoted <<EOF marker expands
+    # variable references, backticks and command substitutions in its body — a
+    # task whose name contains one would have had it executed right here.
+    ALERT_MSG=$(printf '%s\n\n%s\n\nCheck logs: cron/logs/\n' "$HEADER" "$ALERTS")
 
     bash "$CRON_DIR/telegram-send.sh" "$ALERT_MSG" >>"$LOG_FILE" 2>&1
     TG_RC=$?

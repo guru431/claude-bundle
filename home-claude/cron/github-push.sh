@@ -100,7 +100,9 @@ if [ -n "$added" ]; then
     | grep -iE '(^|/)(\.env(\.[A-Za-z0-9]+)?$|.*\.pem$|.*\.key$|.*\.p12$|.*\.pfx$|id_rsa|id_ed25519|id_dsa|vault\.env|\.sanitize-patterns$)' \
     | grep -ivE '\.example(\.|$)|\.pub$' || true)   # .pub = public key, safe (unanchored id_rsa was catching id_rsa.pub)
   if [ -n "$bad" ]; then
-    echo "BLOCKED: sensitive files in the publication:"; printf '  %s\n' $bad; fail=1
+    # "$bad" quoted: an unquoted expansion word-splits a path containing spaces
+    # into several bogus "files", so the block list misreports what was found.
+    echo "BLOCKED: sensitive files in the publication:"; printf '%s\n' "$bad" | sed 's/^/  /'; fail=1
   fi
 fi
 
@@ -142,7 +144,7 @@ if [ -f "$deny" ] && [ -n "$added" ]; then
     case "$glob" in ''|\#*) continue ;; esac
     bad=$(printf '%s\n' "$added" | grep -E "$glob" || true)
     if [ -n "$bad" ]; then
-      echo "BLOCKED: path from .github-push-deny ('$glob') in the publication:"; printf '  %s\n' $bad; fail=1
+      echo "BLOCKED: path from .github-push-deny ('$glob') in the publication:"; printf '%s\n' "$bad" | sed 's/^/  /'; fail=1
     fi
   done < "$deny"
 fi

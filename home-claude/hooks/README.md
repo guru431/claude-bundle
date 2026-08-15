@@ -35,10 +35,11 @@ it's harmless either way.
 ## md2pdf-on-edit.py
 
 **PostToolUse / Write|Edit|MultiEdit.** When you edit `foo.md` and a sibling
-`foo.pdf` exists, regenerates the PDF automatically by calling
-`~/.claude/bin/md2pdf.py`.
+`foo.pdf` exists, regenerates the PDF automatically by calling `bin/md2pdf.py`
+— resolved next to the hook's own tree first, then `~/.claude/bin/md2pdf.py`
+(same order as the nightly `cron/md2pdf-sync.py`, so both use one converter).
 
-Requires you to provide your own `~/.claude/bin/md2pdf.py` — a small wrapper
+Requires you to provide your own `bin/md2pdf.py` — a small wrapper
 around any MD→PDF converter (pandoc, weasyprint, mdpdf, ...). Without it the
 hook skips the file and says so via `systemMessage`
 (`md2pdf-on-edit: skipped — converter missing at ...`) — it does nothing to
@@ -67,5 +68,9 @@ tier supports). Replace the placeholders before pasting:
   run `bin/md2pdf.py` — it does not affect how the hook itself is launched.
   If unset, the hook falls back to `sys.executable` (whatever `<python-exe>`
   resolved to). Set it only when the converter needs a *different* Python.
+- `CLAUDE_MD2PDF` points at the converter explicitly. Needed only for a split
+  install (`install.ps1 -PipelineRoot`), where `bin/` travels with the
+  pipeline while `hooks/` stays in the config root — neither default location
+  then holds the converter the cron job uses.
 - Both hooks read JSON from stdin per the Claude Code hook protocol and emit
   JSON to stdout. They never raise on malformed input — they pass through.

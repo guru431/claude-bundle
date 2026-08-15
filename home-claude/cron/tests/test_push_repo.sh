@@ -4,6 +4,12 @@
 # deletion guard) and push behaviour (including already-committed-but-unpushed
 # commits, which the old copy-pasted blocks skipped).
 # Run: bash cron/tests/test_push_repo.sh
+#
+# File-scope SC2034: this harness drives a SOURCED script, so several of the
+# globals it sets (DRY_RUN, the counters) are read there and never here. The
+# resets after each scenario have no reader at all by design — leaving a flag
+# set would silently neuter every test appended below.
+# shellcheck disable=SC2034
 set -u
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/git-push-all.sh"

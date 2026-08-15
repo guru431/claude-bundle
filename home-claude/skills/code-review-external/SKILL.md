@@ -14,7 +14,7 @@ large projects, and has a **diff mode** for reviewing only changed files.
 This skill is a **template**. Adapt the script path and the model alias to
 your setup before using it. Recommended provider rotation:
 
-- A strong reasoning model not in this session (e.g. `glm-5.2`, `claude-sonnet-4-x`,
+- A strong reasoning model not in this session (e.g. `glm-5.3`, `claude-sonnet-4-x`,
   `gpt-5.5`, `kimi-k2.7-code`) via a provider you already have billed
 - Avoid using the same model family for both "author" and "reviewer" — you
   want a different bias profile

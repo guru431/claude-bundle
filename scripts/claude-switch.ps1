@@ -25,7 +25,7 @@
 #   .\claude-switch.ps1 opencode             # OpenCode Go direct (picker: minimax-m3 / qwen3.7-max)
 #   .\claude-switch.ps1 opencode qwen3.7-max # OpenCode Go direct, specific model
 #   .\claude-switch.ps1 ollama qwen3.5:9b    # Ollama + specific model
-#   .\claude-switch.ps1 ccr glm-5.2          # CCR + specific model
+#   .\claude-switch.ps1 ccr glm-5.3          # CCR + specific model
 #   .\claude-switch.ps1 status               # show current mode without changing
 #
 # Optional parameters:
@@ -257,7 +257,7 @@ $STANDARD_PERMISSIONS = [pscustomobject]@{
 $CCR_MODELS = @(
     "deepseek-v4-flash", "deepseek-v4-pro",
     "minimax-m3",
-    "glm-5.2",
+    "glm-5.3",
     "kimi-k2.7-code",
     "mimo-v2.5-pro", "mimo-v2.5",
     "qwen3.7-plus"

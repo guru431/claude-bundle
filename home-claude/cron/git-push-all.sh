@@ -128,6 +128,37 @@ guard_secrets() {
     return 1
 }
 
+# Dry-run twin of guard_secrets: report only, never block. Dry-run deliberately
+# leaves the index untouched (no `git add`), so the staged guard never ran in a
+# preview at all — the preview diverged from the real run in exactly the gate
+# the run exists for, and reported a clean night for a repo the real sweep would
+# refuse. Scan what the real run WOULD stage: tracked changes plus new files,
+# minus the .env pathspec.
+guard_secrets_preview() {
+    local label="$1"
+    if ! command -v secret_scan_diff >/dev/null 2>&1; then
+        echo "[$label] [DRY] secret-scan lib unavailable — the real run WOULD SKIP this repo (fail closed)" >> "$LOG_FILE"
+        return 0
+    fi
+    local hits untracked f fhits
+    hits=$(git diff HEAD --unified=0 -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' 2>/dev/null | secret_scan_diff)
+    untracked=$(git ls-files --others --exclude-standard -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' 2>/dev/null)
+    while IFS= read -r f; do
+        [ -n "$f" ] && [ -f "$f" ] || continue
+        # A new file is entirely "added" — scan its raw contents.
+        fhits=$(secret_scan_text < "$f")
+        [ -n "$fhits" ] && hits="${hits:+$hits
+}$f: $fhits"
+    done <<< "$untracked"
+    if [ -z "$hits" ]; then
+        echo "[$label] [DRY] staged secret-scan: clean" >> "$LOG_FILE"
+        return 0
+    fi
+    echo "[$label] [DRY] staged secret-scan: REPO WOULD BE BLOCKED:" >> "$LOG_FILE"
+    printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
+    return 0
+}
+
 # Outgoing-commit guard: scan everything this push would publish, not just the
 # diff we are about to stage. guard_secrets only ever sees the staged tree, so a
 # repo with a CLEAN working tree and an unpushed commit — committed by hand, by
@@ -155,7 +186,8 @@ guard_outgoing_secrets() {
     [ -z "$hits" ] && return 0
     echo "[$label] SECRET-shaped token in OUTGOING commits ($range) — push blocked:" >> "$LOG_FILE"
     printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
-    if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+    # In dry-run the guard runs for the preview only — there is nothing to alert about.
+    if [ "$DRY_RUN" != "1" ] && [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
         bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret in unpushed commits of [$label] — NOT pushed. Rewrite the history that carries it and rotate the key." >> "$LOG_FILE" 2>&1
     fi
     return 1
@@ -192,6 +224,7 @@ push_repo() {
             # whatever the user had staged.
             echo "[$label] [DRY] would auto-commit (working tree):" >> "$LOG_FILE"
             git status --porcelain >> "$LOG_FILE" 2>&1
+            guard_secrets_preview "$label"
         else
             # Safety: exclude any path matching .env / .env.* / **/.env* via
             # pathspec so a file that appears between status and add can never
@@ -240,7 +273,14 @@ push_repo() {
     fi
     # Something WILL be published — scan it. Covers commits that predate this
     # run and never went through the staged-diff guard above.
-    if [ "$DRY_RUN" != "1" ] && ! guard_outgoing_secrets "$label" "$branch"; then
+    if [ "$DRY_RUN" = "1" ]; then
+        # Report only: the preview must show what would have been blocked.
+        if guard_outgoing_secrets "$label" "$branch"; then
+            echo "[$label] [DRY] outgoing secret-scan: clean" >> "$LOG_FILE"
+        else
+            echo "[$label] [DRY] outgoing secret-scan: PUSH WOULD BE BLOCKED (see above)" >> "$LOG_FILE"
+        fi
+    elif ! guard_outgoing_secrets "$label" "$branch"; then
         failed=$((failed + 1))
         failed_repos="${failed_repos:+$failed_repos, }$label"
         return

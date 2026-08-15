@@ -384,6 +384,122 @@ def _load_gen_scheduler():
     return mod
 
 
+def _load_utils(bundle: Path, name: str):
+    """Import the COPIED cron/hooks/utils.py so BUNDLE_ROOT lands in tmp_path."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        name, bundle / "cron" / "hooks" / "utils.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_llm_queue_never_steals_a_live_lock(bundle: Path):
+    """The queue's whole point is one provider call at a time on one account.
+
+    Taking an abandoned lock over used to be an unconditional unlink, which is a
+    TOCTOU race: two waiters both see age > STALE, the first removes the lock and
+    takes its own, the second removes THAT fresh lock and takes its own — both
+    then call the provider in parallel on one key, the self-inflicted 429 the
+    queue exists to prevent. A live lock must survive a waiter; an abandoned one
+    must be taken over without leaving debris behind.
+    """
+    import os
+    import time
+    u = _load_utils(bundle, "utils_lock")
+    u.LLM_LOCK.parent.mkdir(parents=True, exist_ok=True)
+
+    # 1. Normal round trip: held inside, released after.
+    with u._llm_queue():
+        assert u.LLM_LOCK.exists()
+    assert not u.LLM_LOCK.exists()
+
+    # 2. A LIVE lock is never removed by a waiter that gave up (fail-open: the
+    #    call proceeds unqueued, but the holder keeps the slot).
+    u.LLM_LOCK.write_text("999999 holder\n", encoding="utf-8")
+    u.LLM_LOCK_WAIT = 0
+    with u._llm_queue():
+        pass
+    assert u.LLM_LOCK.exists(), "a waiter deleted a live holder's lock"
+
+    # 3. An abandoned lock IS taken over, and no .stale.* debris is left.
+    old = time.time() - 10_000
+    os.utime(u.LLM_LOCK, (old, old))
+    u.LLM_LOCK_STALE = 1800
+    with u._llm_queue():
+        assert u.LLM_LOCK.exists()
+    assert not u.LLM_LOCK.exists()
+    assert not list(u.LLM_LOCK.parent.glob(f"{u.LLM_LOCK.name}.stale.*"))
+
+
+def test_llm_queue_loses_the_steal_race_gracefully(bundle: Path, monkeypatch):
+    """The interleaving the old unconditional unlink got wrong.
+
+    Waiter sees an abandoned lock; before it acts, the holder releases and a
+    DIFFERENT waiter takes a fresh one. The lock now on disk is that fresh lock,
+    and removing it puts two processes on the provider at once — the exact 429
+    the queue prevents. The steal must therefore be undone once the stolen file
+    turns out to be fresh.
+    """
+    import os
+    import time
+    u = _load_utils(bundle, "utils_race")
+    u.LLM_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    u.LLM_LOCK.write_text("999999 other-waiter\n", encoding="utf-8")
+    old = time.time() - 10_000
+    os.utime(u.LLM_LOCK, (old, old))
+    u.LLM_LOCK_STALE = 1800
+    u.LLM_LOCK_WAIT = 0  # give up quickly instead of looping on a live lock
+
+    real_replace = os.replace
+
+    def racing_replace(src, dst):
+        # Simulate the window: what we are about to steal is already the fresh
+        # lock a competing waiter just took, not the abandoned one we stat'ed.
+        if Path(src) == u.LLM_LOCK and Path(src).exists():
+            os.utime(src, None)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", racing_replace)
+    with u._llm_queue():
+        pass
+
+    assert u.LLM_LOCK.exists(), "the fresh lock of a competing waiter was destroyed"
+    assert u.LLM_LOCK.read_text(encoding="utf-8").startswith("999999"), \
+        "the competing waiter's lock was overwritten"
+    assert not list(u.LLM_LOCK.parent.glob(f"{u.LLM_LOCK.name}.stale.*")), \
+        "the undone steal left debris behind"
+
+
+def test_llm_call_latches_a_403(bundle: Path, monkeypatch):
+    """403 = the model is not available to this account (a region opt-in never
+    accepted) or a WAF rejected us. Neither clears mid-run, so it must latch the
+    provider like 402 does. Falling through to the generic error handler left
+    the circuit breaker open, and every remaining call of the batch paid another
+    round trip to a door already known to be shut."""
+    import requests
+    u = _load_utils(bundle, "utils_403")
+    # Not token-shaped on purpose: the repo's own secret guard scans this diff.
+    monkeypatch.setenv("DEEPSEEK_KEY", "unit-test-placeholder")
+    calls = {"n": 0}
+
+    class Resp:
+        status_code = 403
+        text = "RegionError: requires explicit opt in"
+
+    def fake_post(*a, **kw):
+        calls["n"] += 1
+        return Resp()
+
+    # _llm_openai_compat does `import requests` at call time, so patching the
+    # module object itself is what reaches it.
+    monkeypatch.setattr(requests, "post", fake_post)
+    assert u._llm_openai_compat("deepseek", "hi") is None
+    assert calls["n"] == 1, "a 403 was retried instead of latched"
+    assert "deepseek" in u._DEPLETED_PROVIDERS
+    assert u._is_depleted("deepseek"), "the circuit breaker did not open on 403"
+
+
 def test_gen_scheduler_escapes_and_passes_script_args(tmp_path: Path):
     """An install path with a space or '&' must not corrupt the emitted units,
     and registry `script_args` must reach the command line: the launchd plist

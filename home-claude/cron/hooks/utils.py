@@ -1862,8 +1862,33 @@ def _llm_queue():
                 except OSError:
                     age = 0
                 if age > LLM_LOCK_STALE:
+                    # Take an abandoned lock over by RENAMING it, not by
+                    # unlinking. An unconditional unlink was a TOCTOU race: two
+                    # waiters both saw age > STALE, the first removed the lock
+                    # and immediately took its own, the second then removed
+                    # THAT fresh lock and took its own — both talked to the
+                    # provider in parallel on one key, which is exactly the
+                    # self-inflicted 429 the queue exists to prevent.
+                    # os.replace is atomic: exactly one waiter wins, the rest
+                    # get ENOENT and keep waiting.
+                    steal = LLM_LOCK.with_name(f"{LLM_LOCK.name}.stale.{os.getpid()}")
+                    try:
+                        os.replace(LLM_LOCK, steal)
+                    except OSError:
+                        time.sleep(1)
+                        continue
+                    # Between the stat and the replace the holder may have
+                    # released the queue and another process taken a fresh
+                    # lock. Stole the wrong one — put it back.
+                    try:
+                        if time.time() - steal.stat().st_mtime <= LLM_LOCK_STALE:
+                            os.replace(steal, LLM_LOCK)
+                            time.sleep(5)
+                            continue
+                    except OSError:
+                        pass
                     print(f"  llm-lock: abandoned lock ({int(age)}s) — taking it over", file=sys.stderr)
-                    LLM_LOCK.unlink(missing_ok=True)
+                    steal.unlink(missing_ok=True)
                     continue
                 if time.time() >= deadline:
                     print(f"  llm-lock: no slot after {LLM_LOCK_WAIT}s — proceeding "
@@ -2002,6 +2027,16 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
                 # don't pay the latency of calling it again for every remaining
                 # project.
                 print(f"  {label} 402 insufficient_balance: {resp.text[:200]}", file=sys.stderr)
+                _DEPLETED_PROVIDERS.add(provider)
+                return None
+            if resp.status_code == 403:
+                # The model is not available to this account (a region opt-in
+                # that was never accepted, a plan that doesn't carry it) or a
+                # WAF rejected the user agent. Neither clears within a run, so
+                # latch it: without this the 403 fell through to the generic
+                # "API error" below and every remaining call of the batch paid
+                # another round trip to a door that is known to be shut.
+                print(f"  {label} 403 forbidden: {resp.text[:200]}", file=sys.stderr)
                 _DEPLETED_PROVIDERS.add(provider)
                 return None
             if resp.status_code in (429, 529):

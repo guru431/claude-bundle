@@ -15,6 +15,15 @@ the pdf is newer than the md, so the file does NOT re-trigger the next night
 (no loop), and a pdf updated by hand after its md does not cause a needless
 regeneration.
 
+One threshold is not enough on its own: an .md edited LESS than THRESHOLD after
+its pdf was generated wedges under the threshold forever — neither mtime moves
+again, so the pdf stays stale for good. Hence the second criterion: the .md
+changed after the last successful sweep (stamped in cron/state/md2pdf-sync.json).
+Such an edit is picked up by the very next run and not repeated afterwards.
+A missing state file seeds the stamp instead of triggering a catch-up, so a
+first run on a large tree does not shell out to the converter for every pair
+that happens to sit under the threshold.
+
 Suggested schedule: Daily 06:30 — shortly before git-push-all (07:00) so the
 fresh PDFs land in the nightly auto-commit. A Password task starts in session 0
 before logon (no interactive Edge), which suits the headless print md2pdf uses.
@@ -27,9 +36,11 @@ disabled in the registry.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -70,6 +81,7 @@ EXCLUDE_DIRS = {
     "dist", "build", ".next", ".obsidian", ".pytest_cache",
 }
 
+STATE_FILE = BUNDLE_ROOT / "cron" / "state" / "md2pdf-sync.json"
 LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 LOG_FILE = LOG_DIR / f"md2pdf-sync_{datetime.now():%Y-%m-%d}.log"
 TELEGRAM = BUNDLE_ROOT / "cron" / "telegram-send.sh"
@@ -86,6 +98,27 @@ def log(msg: str) -> None:
     print(line)
     with LOG_FILE.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
+
+
+def load_last_run() -> float | None:
+    """When the last successful sweep ran. None if there is no usable stamp —
+    the caller then seeds one instead of regenerating the whole tree."""
+    try:
+        return float(json.loads(STATE_FILE.read_text(encoding="utf-8"))["last_run"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def save_last_run(ts: float) -> None:
+    # Atomic (temp + os.replace): a half-written JSON would read back as "no
+    # stamp", and the run after that would silently lose the second criterion.
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
+        tmp.write_text(json.dumps({"last_run": ts}), encoding="utf-8")
+        os.replace(tmp, STATE_FILE)
+    except OSError as e:
+        log(f"WARN: could not write {STATE_FILE}: {e}")
 
 
 def iter_md_files():
@@ -106,7 +139,12 @@ def main() -> int:
             "Set PROJECTS_ROOT in the bundle .env to your projects directory.")
         return 1
 
-    log(f"=== md2pdf-sync started; root={PROJECTS_ROOT} threshold={THRESHOLD}s ===")
+    # Stamp the START of the sweep, not its end: an .md edited while the run is
+    # in progress then still counts as newer next time instead of being missed.
+    started = time.time()
+    last_run = load_last_run()
+    log(f"=== md2pdf-sync started; root={PROJECTS_ROOT} threshold={THRESHOLD}s "
+        f"last_run={'(none — seeding)' if last_run is None else f'{last_run:.0f}'} ===")
     if not MD2PDF.is_file():
         log(f"FATAL: md2pdf not found at {MD2PDF}")
         return 1
@@ -120,13 +158,19 @@ def main() -> int:
         if not pdf.is_file():
             continue
         try:
-            delta = md.stat().st_mtime - pdf.stat().st_mtime
+            md_mtime = md.stat().st_mtime
+            delta = md_mtime - pdf.stat().st_mtime
         except OSError:
             continue  # file vanished/renamed since os.walk enumerated it
-        if delta <= THRESHOLD:
+        # Either criterion is enough — see the module docstring on why the
+        # threshold alone leaves an edit wedged under it stale forever.
+        edited_since_last_run = last_run is not None and md_mtime > last_run
+        if delta <= 0 or (delta <= THRESHOLD and not edited_since_last_run):
             skipped += 1
             continue
-        log(f"STALE (md newer by {int(delta)}s): {md}")
+        reason = (f"md newer by {int(delta)}s" if delta > THRESHOLD
+                  else "md edited since the last sweep")
+        log(f"STALE ({reason}): {md}")
         try:
             r = subprocess.run(
                 [PYTHON, str(MD2PDF), "--pair", str(md)],
@@ -142,6 +186,14 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001 — log any per-file error and continue
             failed.append((md, str(e)))
             log(f"  EXCEPTION: {e}")
+
+    # Advance the stamp only on a clean sweep. A file picked up solely by the
+    # "edited since the last sweep" criterion and then failing to convert would
+    # otherwise fall behind the new stamp and never be retried. Holding the
+    # stamp costs nothing: everything that DID convert now has a pdf newer than
+    # its md, so it is skipped on the next run anyway.
+    if not failed:
+        save_last_run(started)
 
     log(f"=== done: regenerated={len(regenerated)} skipped={skipped} failed={len(failed)} ===")
 

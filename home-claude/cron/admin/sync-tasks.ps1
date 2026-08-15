@@ -258,7 +258,14 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
         $rep = "<Repetition><Interval>$repeatEvery</Interval><Duration>$dur</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>`n      "
     }
     if ($spec -eq 'AtLogOn') {
-        return "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
+        # <Delay> is as valid here as it is on BootTrigger below, and needed for
+        # the same reason: a service starting with the logon races the network
+        # and a desktop that isn't up yet. It used to be dropped entirely — a
+        # task with startup_delay in the registry registered WITHOUT the delay
+        # while the comparison below kept demanding it, so the task showed up
+        # as `updated` on every single sync and re-registered, still undelayed.
+        $d = if ($delay) { "<Delay>$delay</Delay>" } else { "" }
+        return "<LogonTrigger><Enabled>true</Enabled>$d</LogonTrigger>"
     }
     if ($spec -eq 'AtStartup') {
         # Optional <Delay>: makes the boot trigger fire N after boot so network
@@ -570,7 +577,49 @@ if ($Unregister) {
     exit 0
 }
 
-if (-not (Test-Path $launcher)) {
+# ── launcher redistribution ──────────────────────────────────────────────────
+# The canonical _run-hidden.vbs ships with the bundle at <install>\bin\ and is
+# versioned. `launcher:` may point somewhere else entirely — that is the
+# documented workaround for a bundle living on a mapped drive or a share, which
+# Password tasks cannot see from session 0, so the launcher has to be copied to
+# a local C:\ path. Once those two paths differ, nothing kept them in step: a
+# bundle update fixed the shipped launcher while every task kept invoking the
+# stale copy, and a hand-edit of the deployed copy lived on one machine and
+# never made it back into git.
+# Copy byte-for-byte — the .vbs is UTF-8 without BOM with LF endings, and
+# rewriting its contents from PowerShell would change both.
+$masterLauncher = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'bin\_run-hidden.vbs'
+$masterIsLauncher = $false
+if ((Test-Path $masterLauncher) -and (Test-Path $launcher)) {
+    # Same file (the usual in-place install) — nothing to distribute.
+    $masterIsLauncher = ((Resolve-Path -LiteralPath $masterLauncher).Path -eq (Resolve-Path -LiteralPath $launcher).Path)
+}
+if ((Test-Path $masterLauncher) -and -not $masterIsLauncher) {
+    $needCopy = $true
+    if (Test-Path $launcher) {
+        $needCopy = ((Get-FileHash -LiteralPath $masterLauncher -Algorithm SHA256).Hash -ne
+                     (Get-FileHash -LiteralPath $launcher       -Algorithm SHA256).Hash)
+    }
+    if (-not $needCopy) {
+        Write-Host "[launcher ] up to date" -ForegroundColor DarkGray
+    } elseif ($DryRun) {
+        Write-Host "[would update launcher] $launcher <- $masterLauncher" -ForegroundColor Yellow
+    } else {
+        $launcherDir = Split-Path -Parent $launcher
+        if (-not (Test-Path $launcherDir)) {
+            New-Item -ItemType Directory -Force -Path $launcherDir | Out-Null
+        }
+        Copy-Item -LiteralPath $masterLauncher -Destination $launcher -Force
+        Write-Host "[launcher ] updated from $masterLauncher" -ForegroundColor Green
+    }
+} elseif (-not (Test-Path $masterLauncher)) {
+    Write-Host "WARNING: shipped launcher missing at $masterLauncher — redistribution skipped" -ForegroundColor DarkYellow
+}
+
+# A dry run that just reported "[would update launcher]" must not then abort on
+# the very file it said it would install — the preview would show nothing at all
+# on a first sync.
+if (-not (Test-Path $launcher) -and -not ($DryRun -and (Test-Path $masterLauncher))) {
     Write-Host "ERROR: launcher missing at $launcher" -ForegroundColor Red; exit 1
 }
 
@@ -692,17 +741,20 @@ foreach ($task in $reg.tasks) {
             ((ConvertTo-DurationSpan $current.repeatInterval) -ne (ConvertTo-DurationSpan $wantedRepeatEvery)) -or `
             ((ConvertTo-DurationSpan $current.repeatDuration) -ne (ConvertTo-DurationSpan $wantedRepeatFor))
         # Compare trigger TYPE (Daily→Weekly etc. must not report "unchanged").
-        # Monthly registers via XML, but Task Scheduler reads it back as
-        # MSFT_TaskMonthlyTrigger — without this branch Monthly tasks would be
-        # reported as changed and re-registered on every sync.
-        $wantedTriggerType = if ($task.trigger -eq 'AtLogOn') { 'MSFT_TaskLogonTrigger' }
-            elseif ($task.trigger -eq 'AtStartup')      { 'MSFT_TaskBootTrigger' }
-            elseif ($task.trigger -match '^Daily\s')    { 'MSFT_TaskDailyTrigger' }
-            elseif ($task.trigger -match '^Weekly\s')   { 'MSFT_TaskWeeklyTrigger' }
-            elseif ($task.trigger -match '^Monthly')    { 'MSFT_TaskMonthlyTrigger' }
-            else                                        { 'MSFT_TaskTrigger' }
+        # Everything registers via XML but reads back differently: CIM types
+        # Daily/Weekly/AtLogOn/AtStartup with their own classes, while Monthly
+        # comes back as the base MSFT_TaskTrigger on some builds and as
+        # MSFT_TaskMonthlyTrigger on others. Expecting the monthly class alone
+        # re-registered every Monthly task on every sync, so accept a SET.
+        $wantedTriggerTypes = if ($task.trigger -eq 'AtLogOn') { @('MSFT_TaskLogonTrigger') }
+            elseif ($task.trigger -eq 'AtStartup')      { @('MSFT_TaskBootTrigger') }
+            elseif ($task.trigger -match '^Daily\s')    { @('MSFT_TaskDailyTrigger') }
+            elseif ($task.trigger -match '^Weekly\s')   { @('MSFT_TaskWeeklyTrigger') }
+            elseif ($task.trigger -match '^Monthly')    { @('MSFT_TaskMonthlyTrigger', 'MSFT_TaskTrigger') }
+            else                                        { @('MSFT_TaskTrigger') }
+        $wantedTriggerType = $wantedTriggerTypes -join ' | '
         if ($current.triggerType) {
-            $triggertype_needs_change = ("$($current.triggerType)" -ne $wantedTriggerType)
+            $triggertype_needs_change = ($wantedTriggerTypes -notcontains "$($current.triggerType)")
         }
         # Compare day-of-week for Weekly triggers (bitmask: Sun=1..Sat=64).
         if ($task.trigger -match '^Weekly\s+(\w+)\s' -and $null -ne $current.daysOfWeek) {
@@ -720,14 +772,49 @@ foreach ($task in $reg.tasks) {
             if ($currentTime) { $trigger_needs_change = ($currentTime -ne $wantedTime) }
         }
     }
+    # WHY a task counts as changed. Without this list `[updated]` is a verdict
+    # with no reasoning: a task that re-registers on every sync because one
+    # field never matches looks exactly like a task with a real registry edit,
+    # and the permanent drift hides the genuine change. Both the AtLogOn <Delay>
+    # gap and the Monthly trigger-type mismatch above were found this way.
+    $changeReasons = @()
+    if ($current) {
+        $checks = [ordered]@{
+            action      = @($action_needs_change,      $wantedArgs,             $current.args)
+            enabled     = @($enabled_needs_change,     "$($task.enabled)",      "$($current.enabled)")
+            description = @($desc_needs_change,        $description,            $current.description)
+            logonType   = @($logontype_needs_change,   $logonType,              $current.logonType)
+            user        = @($user_needs_change,        "$($task.user)",         "$($current.user)")
+            startWhenAvailable = @($swa_needs_change,  'True',                  "$($current.startWhenAvailable)")
+            runLevel    = @($runlevel_needs_change,    $wantedRunLevel,         "$($current.runLevel)")
+            hidden      = @($hidden_needs_change,      "$($task.hidden)",       "$($current.hidden)")
+            timeout     = @($timeout_needs_change,     $wantedExecLimit,        "$($current.executionTimeLimit)")
+            triggerTime = @($trigger_needs_change,     $task.trigger,           "$($current.startBoundary)")
+            triggerType = @($triggertype_needs_change, $wantedTriggerType,      "$($current.triggerType)")
+            daysOfWeek  = @($dow_needs_change,         $task.trigger,           "$($current.daysOfWeek)")
+            delay       = @($delay_needs_change,       $wantedDelay,            "$($current.bootDelay)")
+            restart     = @($restart_needs_change,     "$wantedRestartCount/$wantedRestartInterval", "$($current.restartCount)/$($current.restartInterval)")
+            repetition  = @($repeat_needs_change,      "$wantedRepeatEvery/$wantedRepeatFor",        "$($current.repeatInterval)/$($current.repeatDuration)")
+        }
+        foreach ($k in $checks.Keys) {
+            if ($checks[$k][0]) { $changeReasons += "$k (want '$($checks[$k][1])' / have '$($checks[$k][2])')" }
+        }
+    }
     $verb = if ($current) {
-        if ($Force -or $action_needs_change -or $enabled_needs_change -or $desc_needs_change -or $logontype_needs_change -or $user_needs_change -or $swa_needs_change -or $runlevel_needs_change -or $hidden_needs_change -or $timeout_needs_change -or $trigger_needs_change -or $triggertype_needs_change -or $dow_needs_change -or $delay_needs_change -or $restart_needs_change -or $repeat_needs_change) { 'updated' } else { 'unchanged' }
+        if ($Force -or $changeReasons.Count -gt 0) { 'updated' } else { 'unchanged' }
     } else { 'created' }
 
     Write-Host ("[{0,-9}] {1}" -f $verb, $task.name) -ForegroundColor (
         @{ created='Green'; updated='Yellow'; unchanged='DarkGray'; skipped='DarkGray'; failed='Red' }[$verb]
     )
     if ($verb -eq 'unchanged') { $summary[$verb]++ ; continue }
+    if ($verb -eq 'updated') {
+        if ($changeReasons.Count -gt 0) {
+            foreach ($r in $changeReasons) { Write-Host ("   changed: " + $r) -ForegroundColor DarkGray }
+        } else {
+            Write-Host "   changed: (-Force)" -ForegroundColor DarkGray
+        }
+    }
 
     if ($DryRun) {
         Write-Host ("   wanted args: " + $wantedArgs) -ForegroundColor DarkGray

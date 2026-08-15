@@ -48,6 +48,12 @@
 #   Daily HH:MM | Weekly <DOW> HH:MM | AtLogOn | AtStartup
 #   Monthly day=N HH:MM  — uses Register-ScheduledTask -Xml internally.
 #
+# ── Optional `startup_delay` field ─────────────────────────────────────────
+#   ISO-8601 duration (e.g. PT1M) applied to AtStartup and AtLogOn triggers.
+#   Both fire while the machine is still settling — network shares not yet
+#   mounted, desktop not yet up — so a task that needs either races them and
+#   dies with a path-not-found. Ignored for calendar triggers.
+#
 # ── Optional repetition fields (repeat_every / repeat_for) ─────────────────
 #   Attach a repetition pattern to a calendar trigger so the task re-fires
 #   throughout the day after its initial start time. Both are ISO-8601

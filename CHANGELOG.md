@@ -3,10 +3,92 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
-## [Unreleased] — findings backlog cleared
+## [0.9.0] - 2026-08-16
 
-Everything below closes an entry from `FINDINGS.md` (weekly external code
-review, 2026-08-15, plus one older docs-drift item). No new features.
+Two batches, no new features. First, a backport of a month of fixes from the
+meta-repo this bundle is extracted from — each one was found on a live install
+and fixed there first. Then the `FINDINGS.md` backlog cleared by the 2026-08-15
+external review, plus one older docs-drift item.
+
+### Fixed — the code meant to unwedge the LLM queue could break it
+
+- **Taking over an abandoned `.llm.lock` was a TOCTOU race.** The stale branch
+  unlinked the lock unconditionally: two waiters both saw `age > STALE`, the
+  first removed the lock and took its own, the second removed *that fresh* lock
+  and took its own — and both called the provider in parallel on one account,
+  which is the self-inflicted 429 the queue exists to prevent. The lock is now
+  taken over by an atomic rename, and a steal that turns out to have grabbed a
+  fresh lock is undone. Covered by two regression tests.
+- **HTTP 403 was not latched.** 402, an exhausted-cap 429 and a network failure
+  all opened the circuit breaker, but a 403 — the model not enabled for this
+  account (a region opt-in nobody accepted), or a WAF — fell through to the
+  generic error path. Every remaining call of the batch then paid another round
+  trip to a door already known to be shut; in the meta-repo that ran for twelve
+  days on a metered fallback before anyone noticed.
+
+### Fixed — Task Scheduler tasks that re-registered on every sync
+
+- **`AtLogOn` ignored `startup_delay`.** The trigger XML never carried
+  `<Delay>`, while the idempotency compare kept demanding it, so such a task
+  showed up as `updated` on every sync and re-registered — still without the
+  delay it asked for. (`startup_delay` is now documented in `registry.yaml` and
+  `docs/cron-architecture.md`; it was supported but undocumented.)
+- **Monthly triggers read back as the base CIM class on some builds.** The
+  compare expected `MSFT_TaskMonthlyTrigger` alone, so every Monthly task was
+  re-registered every sync. It now accepts either class.
+- **`[updated]` never said why.** A task in permanent drift looked exactly like
+  a task with a real registry edit. The syncer now prints one
+  `changed: <field> (want … / have …)` line per differing field — which is how
+  both bugs above were found.
+
+### Added — the shipped launcher reaches the machine
+
+- **`sync-tasks.ps1` now redistributes `bin/_run-hidden.vbs`.** When `launcher:`
+  points somewhere other than the shipped copy — the documented workaround when
+  the bundle lives on a share session 0 cannot see — the two are compared by
+  SHA256 and the shipped one is copied over before anything is registered.
+  Previously a bundle update fixed the launcher while every task kept invoking
+  the stale copy, and a hand-edit of the deployed copy never came back into git.
+- **The launcher sets `PYTHONIOENCODING=utf-8` for the whole process tree.**
+  Python encodes stdout in the console code page, so any task redirecting
+  non-ASCII output into a log produced mojibake — unreadable exactly when
+  someone opened it to debug.
+
+### Fixed — the git-push dry run disagreed with the real run
+
+- **Neither secret guard ran in `GIT_PUSH_ALL_DRY_RUN=1`.** The preview stages
+  nothing, so the staged guard had nothing to look at, and the outgoing guard
+  was skipped outright. The preview therefore reported a clean night for a repo
+  the real sweep refuses — a disagreement in exactly the gate the run exists
+  for. Dry-run now scans what the run *would* stage (tracked changes plus new
+  files, minus the `.env` pathspec) and states both verdicts, still without
+  touching the index or alerting anyone. Two new scenarios in
+  `cron/tests/test_push_repo.sh`.
+
+### Fixed — a stale PDF that could never catch up
+
+- **`md2pdf-sync.py` had one criterion, and it could wedge.** An `.md` edited
+  less than `THRESHOLD` (5 min) after its PDF was generated left a delta that
+  never grew again, so the PDF stayed stale forever. A second criterion — the
+  `.md` changed since the last successful sweep, stamped in
+  `cron/state/md2pdf-sync.json` — catches it on the next run. A missing stamp
+  seeds rather than triggering a full-tree catch-up, and the stamp is held back
+  on a failed conversion so the file is retried.
+
+### Added — the env-reference guard sweeps its own allowlist
+
+- `scripts/check-env-ref.py` now reports a `CODE_ONLY` entry the code no longer
+  mentions. Each entry is a decision about a real variable; once the variable is
+  gone the entry is an unverifiable name, and the list stops reading as a set of
+  decisions.
+
+### Changed — docs
+
+- `docs/llm-routing.md` gains a section on picking the cron model by **quota**
+  rather than latency on a flat-rate multi-model plan: the models draw on one
+  shared budget at wildly different weights, so the fastest model can be the one
+  that exhausts the plan mid-month and silently moves the pipeline onto the
+  metered fallback.
 
 ### Fixed — a nightly job dying on one bad byte
 

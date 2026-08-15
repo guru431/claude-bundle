@@ -65,7 +65,19 @@ The launcher (`bin/_run-hidden.vbs`, shipped in the bundle) calls
 bash/python/cmd with `WScript.Shell.Run(cmd, 0, True)` — window-style 0 =
 hidden, so cron-tasks don't flash console windows. The launcher itself
 should sit on a path Task Scheduler can resolve in session 0 — UNC or
-local `C:\`, never a mapped drive.
+local `C:\`, never a mapped drive. It also sets `PYTHONIOENCODING=utf-8`
+for the whole process tree, so a task that redirects non-ASCII output into
+a log file produces a readable log rather than mojibake.
+
+**The shipped copy is the master.** If `launcher:` in the registry points
+somewhere other than `<install>/bin/_run-hidden.vbs` — the documented
+workaround when the bundle lives on a share or mapped drive that session 0
+cannot see — the syncer compares the two by SHA256 and copies the shipped
+one over the deployed one before registering anything. Without that, a
+bundle update fixed the launcher while every task kept invoking the stale
+copy, and a hand-edit of the deployed copy lived on one machine and never
+came back into git. Edit the copy under `home-claude/bin/` only; anything
+else is overwritten on the next sync.
 
 ## Trigger formats
 
@@ -79,6 +91,15 @@ local `C:\`, never a mapped drive.
 
 `Monthly` is registered through an XML form because PowerShell's native
 CIM trigger doesn't accept it; the syncer handles that transparently.
+Task Scheduler reads a Monthly trigger back either as its own CIM class or
+as the base one depending on the Windows build, so the idempotency compare
+accepts both — expecting only the monthly class re-registered every Monthly
+task on every sync.
+
+`AtStartup` and `AtLogOn` both accept `startup_delay:` (an ISO-8601 duration
+such as `PT1M`). Boot and logon are exactly when the network shares and the
+desktop are still coming up, and a task that needs either will otherwise race
+them.
 
 ## Hidden window guarantee
 

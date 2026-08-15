@@ -144,6 +144,24 @@ def code_env_vars() -> dict[str, set[str]]:
     return out
 
 
+def code_mentions(names: set[str]) -> set[str]:
+    """Which of `names` appear anywhere in the shipped code, in any form.
+
+    Deliberately broader than code_env_vars(): the stale-allowlist sweep asks
+    "has this name left the codebase entirely", and a var the pipeline only
+    deletes (os.environ.pop) or exports for a child is still a live decision.
+    Counting those as reads in direction 3 would be wrong — popping a variable
+    is not a knob the user sets in .env.
+    """
+    found: set[str] = set()
+    for path in sorted(CODE_ROOT.rglob("*")):
+        if path.suffix not in CODE_SUFFIXES or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        found |= {n for n in names - found if re.search(rf"\b{n}\b", text)}
+    return found
+
+
 # An uncommented declaration:  VAR=
 DECL_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=", re.MULTILINE)
 # A commented-out optional override:  # VAR=value  (no trailing prose — that is
@@ -199,6 +217,17 @@ def check() -> int:
         problems.append(f"{var}: read by {where} but absent from "
                         f"{ENV_TEMPLATE.name} (add it, or add it to CODE_ONLY "
                         f"with a reason)")
+
+    # 3b. the allowlist that outlived its variable. Every CODE_ONLY entry is a
+    # decision about a var the code actually reads; once the code stops reading
+    # it the entry is just a name nobody can check, and the list stops reading
+    # as a set of decisions. DOC_ONLY is not swept the same way — those vars are
+    # documented for the user and legitimately need no code reference.
+    still_present = code_mentions(CODE_ONLY)
+    for var in sorted(CODE_ONLY - still_present):
+        problems.append(f"{var}: listed in CODE_ONLY ({Path(__file__).name}) "
+                        f"but no longer mentioned by any code under "
+                        f"{CODE_ROOT.name}/ — stale entry, drop it")
 
     if problems:
         print("ENV/DOC DRIFT:")

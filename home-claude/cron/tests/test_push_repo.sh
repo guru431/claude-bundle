@@ -122,4 +122,35 @@ reset_counters; push_repo "$R8" "r8" "Auto-commit: test"
 git -C "$R8" log --oneline | grep -q oops && fail "T8: leaking change was committed"
 [ "$(git -C "$R8" rev-list --count HEAD)" = "1" ] || fail "T8: an extra commit was created"
 
-echo "PASS: push_repo (8 scenarios)"
+# === Test 9: dry-run REPORTS a secret it would have blocked ===
+# Dry-run leaves the index alone (no `git add`), so the staged guard had nothing
+# to look at and the preview reported a clean night for a repo the real sweep
+# refuses. A preview that disagrees with the run in exactly the gate the run
+# exists for is worse than no preview.
+R9="$TMP/r9"; mkrepo "$R9"
+printf 'token = "ghp_%s"\n' "0123456789abcdefghij0123456789" > "$R9/leak.py"
+: > "$LOG_FILE"
+DRY_RUN=1
+reset_counters; push_repo "$R9" "r9" "Auto-commit: test"
+DRY_RUN=0
+grep -q "REPO WOULD BE BLOCKED" "$LOG_FILE" || fail "T9: dry-run did not report the secret it would block"
+[ "$(git -C "$R9" rev-list --count HEAD)" = "1" ] || fail "T9: dry-run created a commit"
+[ -z "$(git -C "$R9" diff --cached --name-only)" ] || fail "T9: dry-run left files staged"
+
+# === Test 10: a clean dry-run states BOTH verdicts and still pushes nothing ===
+# The outgoing scan needs something outgoing, so this repo carries an unpushed
+# commit as well as a dirty tree — the state that exercises both previews.
+R10="$TMP/r10"; mkrepo "$R10"
+echo committed > "$R10/b.txt"; git -C "$R10" add -A; git -C "$R10" commit -qm second  # not pushed
+echo ok >> "$R10/app.py"
+: > "$LOG_FILE"
+DRY_RUN=1
+reset_counters; push_repo "$R10" "r10" "Auto-commit: test"
+DRY_RUN=0
+grep -q "staged secret-scan: clean" "$LOG_FILE"   || fail "T10: no staged-scan verdict in the preview"
+grep -q "outgoing secret-scan: clean" "$LOG_FILE" || fail "T10: no outgoing-scan verdict in the preview"
+[ "$(git -C "$R10" rev-list --count HEAD)" = "2" ] || fail "T10: dry-run created a commit"
+[ "$(git -C "$R10" rev-parse "origin/$(br "$R10")")" != "$(git -C "$R10" rev-parse HEAD)" ] \
+    || fail "T10: dry-run actually pushed"
+
+echo "PASS: push_repo (10 scenarios)"

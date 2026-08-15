@@ -33,6 +33,13 @@ Next
 
 Set shell = CreateObject("WScript.Shell")
 
+' Python encodes stdout in the console code page, so any task redirecting
+' non-ASCII output to a file ('>> log 2>&1') produced mojibake — the log became
+' unreadable exactly when someone opened it to debug. A PROCESS-scope variable
+' is inherited by every child (bash -> python, cmd -> python), so this one line
+' covers all bash/python/cmd tasks instead of a per-task 'set PYTHONIOENCODING='.
+shell.Environment("PROCESS")("PYTHONIOENCODING") = "utf-8"
+
 ' Resolve the interpreter path — do NOT invoke bash/python by bare name. A
 ' Password-mode task fires in session 0 with only the SYSTEM PATH, and a default
 ' Git-for-Windows install puts just Git\cmd there (git.exe), NOT Git\bin where

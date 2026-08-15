@@ -223,3 +223,35 @@ If you want one bill for many models:
 
 You can mix — e.g. claude-switch on Anthropic for interactive, DeepSeek
 in `.env` for wiki/cron. They're independent.
+
+### On a flat-rate subscription, pick the model by quota — not by latency
+
+A flat-rate multi-model plan bills one budget for the whole account, and the
+models draw on it at wildly different weights — an order of magnitude or two
+between the cheapest and a strong reasoning model is normal. That makes the
+obvious benchmark (which model answers fastest) the wrong criterion for the
+nightly pipeline, and picking on it has a specific failure mode: the budget is
+exhausted mid-month, every later call falls through to the metered fallback,
+and the bill arrives from the provider you thought you had replaced. Nothing in
+the logs says "you chose wrong" — the pipeline keeps working.
+
+Do the arithmetic before switching the model the cron uses:
+
+1. Count the pipeline's calls per month (`cron/logs/provider_attempts_*.jsonl`
+   records one line per attempt).
+2. Ask the provider how many calls of the candidate model the plan covers, or
+   derive it from the published weights.
+3. Divide. If the pipeline needs more than a fraction of the budget, the model
+   is unaffordable regardless of how fast it is.
+
+The pattern that works: cheap high-quota model for the bulk nightly work,
+expensive model reserved for the few places where its quality actually changes
+the output (a weekly code review, an analysis whose result somebody reads). A
+slow model in a nightly window costs nothing but wall clock — which is what the
+window is for.
+
+Two things worth watching while you are there: HTTP 403 is latched for the rest
+of the run (a model not enabled for your account, or a WAF), and so is a 402 or
+an exhausted-cap 429 — see `_DEPLETED_PROVIDERS` in `utils.py`. Without that
+latch every remaining call of the batch pays another round trip to a door that
+is known to be shut.

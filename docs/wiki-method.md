@@ -34,9 +34,20 @@ Page-level rules:
   only genuinely invalid paths are rejected outright — a top level other
   than `kb`/`projects`, a `kb` subsection other than
   `concepts`/`tools`/`people`, a script-managed `index.md` / `_log.md`,
-  or a surviving `..` traversal segment. A few subsections are rewritten
-  rather than rejected (`kb/models/` → `kb/tools/`, `projects/unknown/` →
-  `projects/main/`).
+  the name of a project's own working file (`FINDINGS.md`, `IDEAS.md`,
+  `CLAUDE.md`, `AGENTS.md`, `README.md` and the `-archive` variants — see
+  below), or a surviving `..` traversal segment. A few subsections are
+  rewritten rather than rejected (`kb/models/` → `kb/tools/`,
+  `projects/unknown/` → `projects/main/`).
+- **A page never carries the name of a file that lives in the project's
+  repository.** Left unchecked, a session discussing findings makes the
+  compiler create `projects/<name>/FINDINGS.md`, and that page becomes a
+  second list of findings nobody reviews — the process reads the real file,
+  not the vault. It also breaks links: `[[FINDINGS.md]]` in prose means
+  "that file in my repo", and Obsidian resolves a bare name across the whole
+  vault, so the link lands in whichever project happens to own such a page.
+  Pages *about* the process are fine — it is the name that is reserved, not
+  the topic (`findings-workflow.md` is a perfectly good page).
 - Each page starts with a YAML frontmatter `sources:` list recording which
   source files were processed into it. In practice each entry carries the
   source `path` and a `processed` timestamp — the `hash`/`mtime` fields the

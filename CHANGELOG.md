@@ -3,6 +3,35 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.10.1] - 2026-08-16
+
+### Fixed — the compiler could create a page that shadows a project's own file
+
+A session discussing findings made the compiler create
+`projects/<name>/FINDINGS.md`. The normalizer rejected only `index.md` and
+`_log.md`, so such a page went through — and then did two kinds of damage.
+
+It **split the source of truth**: the review process reads the project's real
+`FINDINGS.md`, not the vault, so a wiki page by that name is a second list
+nobody looks at. In the vault this was found in, one project's own file sat
+empty while the page held seven open findings.
+
+It **broke links**: `[[FINDINGS.md]]` in prose means "that file in my repo",
+and Obsidian resolves a bare name across the entire vault — so a link written
+in one project resolved into whichever project owned such a page. That
+accounted for 81 of the linter's broken-and-ambiguous-link warnings in a single
+run; after the fix, one (a genuinely missing page).
+
+`normalize_wiki_path` now rejects `FINDINGS`, `IDEAS`, `CLAUDE`, `AGENTS`,
+`README` and the `-archive` variants, and `wiki-lint` no longer reports a link
+to such a file as broken. The name is what is reserved, not the topic — a page
+called `findings-workflow.md` is still perfectly welcome.
+
+### Fixed — `page.MD` collected a second extension
+
+The "add `.md` if missing" check was case-sensitive, so an uppercase extension
+from an LLM produced `page.MD.md`. Found by a test written for the fix above.
+
 ## [0.10.0] - 2026-08-16
 
 ### Added — a weekly job that keeps `AGENTS.md` in step with `CLAUDE.md`

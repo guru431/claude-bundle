@@ -19,6 +19,18 @@ external review, plus one older docs-drift item.
   which is the self-inflicted 429 the queue exists to prevent. The lock is now
   taken over by an atomic rename, and a steal that turns out to have grabbed a
   fresh lock is undone. Covered by two regression tests.
+- **A lock left behind by a dead process cost the next job the full stale wait.**
+  Age alone cannot tell "the holder is working" from "the holder was killed": a
+  job stopped by a timeout or a reboot leaves a lock with a fresh mtime, so every
+  later call waited out `WIKI_LLM_LOCK_STALE` (30 minutes by default) before
+  touching it. A waiter logs nothing while it waits, so the delay read as a hung
+  script rather than a queue. The queue now checks whether the PID in the lock
+  file still exists and reclaims it immediately when it does not — measured at
+  four seconds instead of half an hour. The check errs towards "alive"
+  (`PermissionError` and any unexpected error keep the lock), the takeover still
+  goes through the same atomic rename, and the undo-check compares the signal the
+  steal was based on — an age-only comparison would hand a dead owner's
+  fresh-mtime lock straight back in an endless loop.
 - **HTTP 403 was not latched.** 402, an exhausted-cap 429 and a network failure
   all opened the circuit breaker, but a 403 — the model not enabled for this
   account (a region opt-in nobody accepted), or a WAF — fell through to the

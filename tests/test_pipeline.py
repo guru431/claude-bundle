@@ -415,8 +415,9 @@ def test_llm_queue_never_steals_a_live_lock(bundle: Path):
     assert not u.LLM_LOCK.exists()
 
     # 2. A LIVE lock is never removed by a waiter that gave up (fail-open: the
-    #    call proceeds unqueued, but the holder keeps the slot).
-    u.LLM_LOCK.write_text("999999 holder\n", encoding="utf-8")
+    #    call proceeds unqueued, but the holder keeps the slot). The holder PID
+    #    has to be a real live process — the queue now checks it.
+    u.LLM_LOCK.write_text(f"{os.getpid()} holder\n", encoding="utf-8")
     u.LLM_LOCK_WAIT = 0
     with u._llm_queue():
         pass
@@ -445,7 +446,9 @@ def test_llm_queue_loses_the_steal_race_gracefully(bundle: Path, monkeypatch):
     import time
     u = _load_utils(bundle, "utils_race")
     u.LLM_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    u.LLM_LOCK.write_text("999999 other-waiter\n", encoding="utf-8")
+    # A real live PID: the competing waiter must look alive, or the queue is
+    # entitled to reclaim its lock and the race this test models never happens.
+    u.LLM_LOCK.write_text(f"{os.getpid()} other-waiter\n", encoding="utf-8")
     old = time.time() - 10_000
     os.utime(u.LLM_LOCK, (old, old))
     u.LLM_LOCK_STALE = 1800
@@ -465,10 +468,49 @@ def test_llm_queue_loses_the_steal_race_gracefully(bundle: Path, monkeypatch):
         pass
 
     assert u.LLM_LOCK.exists(), "the fresh lock of a competing waiter was destroyed"
-    assert u.LLM_LOCK.read_text(encoding="utf-8").startswith("999999"), \
+    assert u.LLM_LOCK.read_text(encoding="utf-8").startswith(f"{os.getpid()} other-waiter"), \
         "the competing waiter's lock was overwritten"
     assert not list(u.LLM_LOCK.parent.glob(f"{u.LLM_LOCK.name}.stale.*")), \
         "the undone steal left debris behind"
+
+
+def test_llm_queue_reclaims_a_dead_owners_lock_at_once(bundle: Path, monkeypatch):
+    """A lock whose owner died must not cost the next job the full STALE wait.
+
+    Age alone cannot tell "holder is working" from "holder was killed": a job
+    stopped by a timeout or a reboot leaves a lock with a fresh mtime, and every
+    later job then waits out LLM_LOCK_STALE — half an hour of silence that reads
+    as a hung script, since a waiter logs nothing while it waits.
+    """
+    import os
+    u = _load_utils(bundle, "utils_dead_owner")
+    u.LLM_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(u.time, "sleep", lambda _s: None)
+
+    # Fresh by mtime, but the owning process is gone.
+    u.LLM_LOCK.write_text("4242 killed-by-timeout\n", encoding="utf-8")
+    monkeypatch.setattr(u, "_pid_alive", lambda pid: pid != 4242)
+
+    with u._llm_queue():
+        assert u._lock_owner_pid(u.LLM_LOCK) == os.getpid(), "the queue was not entered"
+
+    assert not u.LLM_LOCK.exists()
+    assert not list(u.LLM_LOCK.parent.glob(f"{u.LLM_LOCK.name}.stale.*")), \
+        "the reclaimed lock left debris behind"
+
+
+def test_llm_queue_keeps_waiting_on_an_unreadable_lock(bundle: Path, monkeypatch):
+    """No PID to check → fall back to the age rule, never to "steal it anyway"."""
+    u = _load_utils(bundle, "utils_bad_lock")
+    u.LLM_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(u.time, "sleep", lambda _s: None)
+    u.LLM_LOCK.write_text("garbage\n", encoding="utf-8")
+    u.LLM_LOCK_WAIT = 0
+
+    with u._llm_queue():
+        pass
+
+    assert u.LLM_LOCK.exists(), "an unreadable lock was treated as abandoned"
 
 
 def test_llm_call_latches_a_403(bundle: Path, monkeypatch):

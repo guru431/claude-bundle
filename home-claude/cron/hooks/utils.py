@@ -1826,6 +1826,37 @@ LLM_LOCK_WAIT = int(os.environ.get("WIKI_LLM_LOCK_WAIT", "900"))
 LLM_LOCK_STALE = int(os.environ.get("WIKI_LLM_LOCK_STALE", "1800"))
 
 
+def _pid_alive(pid: int) -> bool:
+    """Whether a process exists. Anything uncertain counts as alive.
+
+    `os.kill(pid, 0)` works on Windows too: for a dead PID OpenProcess reports
+    ERROR_INVALID_PARAMETER (87) → OSError, for a live process owned by someone
+    else ERROR_ACCESS_DENIED → PermissionError. Erring towards "alive" matters:
+    a false "dead" would let a waiter steal a lock that is still held.
+    """
+    if pid <= 0:
+        return True          # garbage in the lock file — not ours to reclaim by PID
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # the process exists, it just is not ours
+    except OSError as e:
+        return getattr(e, "winerror", None) != 87
+    except Exception:
+        return True          # on any surprise fall back to the age-based wait
+
+
+def _lock_owner_pid(path: Path) -> int | None:
+    """PID from the first field of the lock file, or None if unreadable."""
+    try:
+        return int(path.read_text(encoding="utf-8").split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 @contextlib.contextmanager
 def _llm_queue():
     """Cross-process queue around a provider call.
@@ -1840,8 +1871,9 @@ def _llm_queue():
     Fail-open by construction: if the lock cannot be taken within
     LLM_LOCK_WAIT the call proceeds anyway (risking a 429 beats silently
     skipping a nightly job), and a filesystem error skips the queue entirely.
-    An abandoned lock is stolen after LLM_LOCK_STALE; a lock held by a live
-    process is never removed by the waiter.
+    An abandoned lock is stolen after LLM_LOCK_STALE, or immediately once its
+    owner is known to be dead; a lock held by a live process is never removed
+    by the waiter.
     """
     acquired = False
     deadline = time.time() + LLM_LOCK_WAIT
@@ -1861,7 +1893,13 @@ def _llm_queue():
                     age = time.time() - LLM_LOCK.stat().st_mtime
                 except OSError:
                     age = 0
-                if age > LLM_LOCK_STALE:
+                # The holder is gone (killed, timed out, machine rebooted) —
+                # waiting out LLM_LOCK_STALE is pointless, the queue is free
+                # right now. The waiter logs nothing while it waits, so that
+                # half hour of idling reads as a hung script.
+                owner = _lock_owner_pid(LLM_LOCK)
+                owner_dead = owner is not None and not _pid_alive(owner)
+                if age > LLM_LOCK_STALE or owner_dead:
                     # Take an abandoned lock over by RENAMING it, not by
                     # unlinking. An unconditional unlink was a TOCTOU race: two
                     # waiters both saw age > STALE, the first removed the lock
@@ -1880,14 +1918,22 @@ def _llm_queue():
                     # Between the stat and the replace the holder may have
                     # released the queue and another process taken a fresh
                     # lock. Stole the wrong one — put it back.
+                    # Check the same signal the steal was based on: a lock held
+                    # by a dead owner has a fresh mtime, so an age-only check
+                    # would hand it straight back in an endless loop.
                     try:
-                        if time.time() - steal.stat().st_mtime <= LLM_LOCK_STALE:
+                        if owner_dead:
+                            still_stale = _lock_owner_pid(steal) == owner
+                        else:
+                            still_stale = time.time() - steal.stat().st_mtime > LLM_LOCK_STALE
+                        if not still_stale:
                             os.replace(steal, LLM_LOCK)
                             time.sleep(5)
                             continue
                     except OSError:
                         pass
-                    print(f"  llm-lock: abandoned lock ({int(age)}s) — taking it over", file=sys.stderr)
+                    reason = f"owner PID {owner} is gone" if owner_dead else f"age {int(age)}s"
+                    print(f"  llm-lock: abandoned lock ({reason}) — taking it over", file=sys.stderr)
                     steal.unlink(missing_ok=True)
                     continue
                 if time.time() >= deadline:

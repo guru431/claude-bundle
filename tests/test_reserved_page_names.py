@@ -54,6 +54,18 @@ def test_rejection_survives_the_rewrites(u, path):
 
 
 @pytest.mark.parametrize("path", [
+    "kb/tools/Claude.md",
+    "kb/concepts/Agents.md",
+    "kb/tools/README.md",
+])
+def test_kb_may_use_the_same_words_as_topics(u, path):
+    """Under kb/ these are topics, not shadows: `Claude` the tool, `Agents` the
+    concept. The rule only applies under projects/, where a page would sit next
+    to the file it shadows."""
+    assert u.normalize_wiki_path(path) == path
+
+
+@pytest.mark.parametrize("path", [
     "projects/myapp/findings-workflow.md",
     "projects/myapp/solution-findings-triage.md",
     "projects/myapp/incident-foo-2026-01-01.md",

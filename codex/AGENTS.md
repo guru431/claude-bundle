@@ -69,6 +69,18 @@ requests (not bugs) live in `IDEAS.md`, `proposed` only. A shipped idea is
 deleted; a rejected one (`wontfix`, `deferred`, `partial`, or "already
 implemented") moves to `IDEAS-archive.md`, append-first.
 
+Its header is shared across projects the same way, with
+`cron/hooks/utils.py::ideas_header` as the single source in code:
+```
+# Ideas — <project>
+Feature proposals, `proposed` only — bugs go to [FINDINGS.md](FINDINGS.md). Review monthly. Stale >90 days → alert.
+Newest first. Shipped entries are deleted (the trail is in `git log`); rejected ones move to [IDEAS-archive.md](IDEAS-archive.md).
+```
+**Nothing else belongs in either header.** Project-specific notes — how the
+ordering encodes priority, where a sub-project's backlog lives, what was cleared
+out last month — go in the project's `CLAUDE.md`. The file holds entries, not a
+chronicle of itself.
+
 **Not the same as incidents:** incidents are root-caused failures that go
 into project incident logs. Findings are deferred observations for review.
 

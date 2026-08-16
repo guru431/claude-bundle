@@ -277,6 +277,22 @@ def findings_header(project: str) -> str:
     )
 
 
+def ideas_header(project: str) -> str:
+    """The canonical IDEAS.md header — same reasoning as findings_header.
+
+    IDEAS follows the same lifecycle as FINDINGS (see CLAUDE.md § Findings), so
+    the header is built to the same shape; only the subject and the archive it
+    points at differ.
+    """
+    return (
+        f"# Ideas — {project}\n"
+        "Feature proposals, `proposed` only — bugs go to [FINDINGS.md](FINDINGS.md). "
+        "Review monthly. Stale >90 days → alert.\n"
+        "Newest first. Shipped entries are deleted (the trail is in `git log`); "
+        "rejected ones move to [IDEAS-archive.md](IDEAS-archive.md).\n\n"
+    )
+
+
 # ── Processed-state tracking ─────────────────────────────────────────────────
 # Single source of truth for "what the wiki pipeline has already processed".
 # A small JSON file replaces fragile regex-parsing of the human-readable
@@ -1653,13 +1669,17 @@ def normalize_wiki_path(path: str) -> str:
     # Disallow _log.md (managed by append_per_project_log)
     if path.endswith("/_log.md"):
         return ""
-    # Disallow the names of a project's working files. The compiler would see a
-    # session discussing findings and create a page called "FINDINGS.md",
-    # producing a second list nobody reviews — in one vault the project's own
-    # FINDINGS.md sat empty while seven open items lived in the wiki. It also
-    # breaks links: `[[FINDINGS.md]]` is ordinary prose for "that file", and a
-    # page by that name makes it resolve into some unrelated project.
-    if is_reserved_page_name(parts[-1]):
+    # Disallow the names of a project's working files — but only under
+    # projects/, where the page sits next to the file it shadows. The compiler
+    # would see a session discussing findings and create a page called
+    # "FINDINGS.md", producing a second list nobody reviews; in one vault the
+    # project's own FINDINGS.md sat empty while seven open items lived in the
+    # wiki. It also breaks links: `[[FINDINGS.md]]` is ordinary prose for "that
+    # file", and a page by that name makes it resolve into some unrelated
+    # project. Under kb/ the same words are legitimate TOPICS — `kb/tools/
+    # Claude.md` is about the tool, `kb/concepts/Agents.md` about the concept —
+    # so the rule does not apply there.
+    if parts[0] == "projects" and is_reserved_page_name(parts[-1]):
         return ""
     # Reject any traversal segment that survived the rewrites above — a
     # "projects/../CLAUDE.md" must never resolve outside its project folder.

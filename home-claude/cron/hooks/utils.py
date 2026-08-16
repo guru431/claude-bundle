@@ -82,6 +82,7 @@ _MANIFEST, _MANIFEST_BROKEN = _load_manifest()
 _MANIFEST_KNOWN_KEYS = {
     "project_map", "known_projects", "skip_dirs", "skip_projects",
     "allow_projects", "skip_jsonl_projects", "collect_plans",
+    "projects_root",
 }
 for _unknown in sorted(set(_MANIFEST) - _MANIFEST_KNOWN_KEYS):
     print(f"WARNING: bundle.local.yaml has unknown key '{_unknown}' — it is "
@@ -153,6 +154,22 @@ ALLOW_PROJECTS: set[str] = set(_manifest_str_list("allow_projects"))
 SKIP_JSONL_PROJECTS: set[str] = set(_manifest_str_list("skip_jsonl_projects")) | SKIP_PROJECTS
 
 
+def _manifest_path(key: str) -> Path | None:
+    """Read a filesystem path from the manifest (`~` expanded), or None.
+
+    Unlike the policy fields this one cannot deny anything, so a bad value is a
+    loud warning and a None — the consumer then simply has nothing to walk.
+    """
+    value = _MANIFEST.get(key)
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip():
+        return Path(value).expanduser()
+    print(f"ERROR: bundle.local.yaml '{key}' must be a non-empty string path, "
+          f"got {type(value).__name__} — ignored.", file=sys.stderr)
+    return None
+
+
 def _manifest_bool(key: str, default: bool) -> bool:
     """Read a bool from the manifest; a non-bool value is a loud error, not a
     silent truthy cast ('false' as a string would otherwise mean True).
@@ -188,6 +205,13 @@ def _manifest_bool(key: str, default: bool) -> bool:
 # on only if you accept that every plan goes to your provider regardless of which
 # project it was written for.
 COLLECT_PLANS: bool = _manifest_bool("collect_plans", False)
+
+# Where your working copies live (the parent of the per-project git checkouts),
+# e.g. ~/projects. The rest of the pipeline reads ~/.claude/projects/ — session
+# transcripts — and never needs this; it exists for jobs that inspect the repos
+# themselves, like agents-md-sync-check comparing each project's CLAUDE.md with
+# its AGENTS.md. Unset (the shipped default) simply means those jobs no-op.
+PROJECTS_ROOT: Path | None = _manifest_path("projects_root")
 
 
 def manifest_broken() -> bool:
@@ -235,6 +259,22 @@ def project_allowed(project: str) -> bool:
     if ALLOW_PROJECTS and project not in ALLOW_PROJECTS:
         return False
     return True
+
+
+def findings_header(project: str) -> str:
+    """The canonical FINDINGS.md header — one source for every generator.
+
+    Whichever job creates a project's FINDINGS.md first decides how its header
+    reads forever after, so a second generator with its own wording is how a
+    fleet of projects ends up with a fleet of slightly different headers. Kept
+    identical to the header documented in CLAUDE.md § Findings.
+    """
+    return (
+        f"# Findings — {project}\n"
+        "Side observations, `open` only. Review monthly. Stale >90 days → alert.\n"
+        "Newest first. Done entries are deleted (the trail is in `git log`); "
+        "rejected ones move to [FINDINGS-archive.md](FINDINGS-archive.md).\n\n"
+    )
 
 
 # ── Processed-state tracking ─────────────────────────────────────────────────
@@ -1955,9 +1995,15 @@ def _llm_queue():
                 pass
 
 
-def llm_call(prompt: str, timeout: int = 600) -> str | None:
+def llm_call(prompt: str, timeout: int = 600, model: str | None = None) -> str | None:
     """Universal LLM call. Calls are serialized through a cross-process queue
     (`cron/state/.llm.lock`) — see _llm_queue.
+
+    `model` overrides the configured model for THIS call only, on whichever
+    provider in the chain answers. Use it sparingly and only where the cost of a
+    bad answer is high and the calls are few (editing files, say) — a stronger
+    model can weigh many times more against a provider quota than the default
+    one, so it has no place in a nightly job that makes hundreds of calls.
 
     Provider chain (NO silent fallback to Claude — it consumes the Max plan):
       - "deepseek" (default): DeepSeek V4-Flash → OpenCode Go → DeepInfra → None.
@@ -1977,15 +2023,16 @@ def llm_call(prompt: str, timeout: int = 600) -> str | None:
     if LLM_PROVIDER == "mock":
         return _llm_mock(prompt, timeout)  # never leaves the box — no queue needed
     with _llm_queue():
-        return _llm_call_unlocked(prompt, timeout)
+        return _llm_call_unlocked(prompt, timeout, model)
 
 
-def _llm_call_unlocked(prompt: str, timeout: int = 600) -> str | None:
+def _llm_call_unlocked(prompt: str, timeout: int = 600,
+                       model: str | None = None) -> str | None:
     """Body of llm_call without the queue — the provider chain as-is."""
     if LLM_PROVIDER == "claude":
         return _llm_claude(prompt, timeout)
     if LLM_PROVIDER in PROVIDERS and LLM_PROVIDER != "deepseek":
-        return _llm_openai_compat(LLM_PROVIDER, prompt, timeout)
+        return _llm_openai_compat(LLM_PROVIDER, prompt, timeout, model=model)
 
     previous: str | None = None
     for provider in DEFAULT_CHAIN:
@@ -1996,7 +2043,8 @@ def _llm_call_unlocked(prompt: str, timeout: int = 600) -> str | None:
                 return None
             print(f"  {PROVIDERS[previous]['label']} failed, falling back to "
                   f"{PROVIDERS[provider]['label']}", file=sys.stderr)
-        out = _llm_openai_compat(provider, prompt, timeout, fallback_from=previous)
+        out = _llm_openai_compat(provider, prompt, timeout, fallback_from=previous,
+                                 model=model)
         if out is not None:
             return out
         previous = provider
@@ -2006,8 +2054,13 @@ def _llm_call_unlocked(prompt: str, timeout: int = 600) -> str | None:
 
 
 def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
-                       fallback_from: str | None = None) -> str | None:
+                       fallback_from: str | None = None,
+                       model: str | None = None) -> str | None:
     """POST /chat/completions against any OpenAI-compatible provider.
+
+    `model` overrides the provider's configured model for this call (see
+    llm_call). The override is also what gets audited: usage accounting reads
+    that log, and models can differ many-fold in what one call costs.
 
     One adapter for every row in PROVIDERS. These used to be a function per
     provider, which meant the 402/429/529 contract was copy-pasted and drifted
@@ -2023,7 +2076,8 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
 
     cfg = PROVIDERS[provider]
     label = cfg["label"]
-    key, base_url, model = _provider_cfg(provider)
+    key, base_url, configured_model = _provider_cfg(provider)
+    model = model or configured_model
 
     if not key and not cfg.get("key_optional"):
         print(f"  {cfg['key_env'][0]} env var not set", file=sys.stderr)

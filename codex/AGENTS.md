@@ -22,8 +22,11 @@ do NOT solve it inline, but do NOT lose it either:
    ```
    # Findings — <project>
    Side observations, `open` only. Review monthly. Stale >90 days → alert.
-   Newest first. Done entries are deleted; rejected ones move to FINDINGS-archive.md.
+   Newest first. Done entries are deleted (the trail is in `git log`); rejected ones move to [FINDINGS-archive.md](FINDINGS-archive.md).
    ```
+   The header is the same in every project. In code its single source is
+   `cron/hooks/utils.py::findings_header` — generators take the text from
+   there rather than writing their own.
 2. Add an entry **at the top** of the file (newest first) in this format:
    ```
    ## YYYY-MM-DD · Title [P1|P2|P3]

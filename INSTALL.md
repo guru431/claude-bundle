@@ -413,7 +413,7 @@ placeholders you just filled in in step 11.
 ```
 
 This auto-elevates to UAC once for the whole batch, then idempotently
-registers (or updates) all 12 tasks from `registry.yaml`. Output goes
+registers (or updates) all 13 tasks from `registry.yaml`. Output goes
 to `%TEMP%\sync-tasks_<timestamp>.log`.
 
 ### 14. Verify

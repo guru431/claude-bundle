@@ -37,6 +37,15 @@ known_projects: []
 #   - myapp
 #   - infra
 
+# Where your working copies live — the PARENT directory of your per-project git
+# checkouts (not ~/.claude/projects, which holds session transcripts). Only jobs
+# that inspect the repos themselves use it; today that is agents-md-sync-check,
+# which compares each project's CLAUDE.md with its AGENTS.md. Leave unset and
+# those jobs simply no-op. The privacy policy below still applies to every
+# project found here.
+projects_root:
+#   projects_root: ~/projects
+
 # ── Unified privacy policy (applied to EVERY source: JSONL, memory feedback, ──
 # ── plans, incidents/sessions — in BOTH the wiki flush and memory-update) ─────
 

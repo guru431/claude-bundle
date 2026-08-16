@@ -1,6 +1,6 @@
 # Cron architecture (Windows Task Scheduler)
 
-The bundle ships 12 scheduled tasks (four disabled by default) managed
+The bundle ships 13 scheduled tasks (five disabled by default) managed
 declaratively through one YAML file. This document explains the moving parts.
 
 ## The big picture
@@ -126,8 +126,9 @@ changes the second time.
 
 ## What ships in the bundle
 
-12 tasks (four — `ClaudeWikiCompileKB`, `ClaudeMd2PdfSync`,
-`ClaudeWarmWindow` and `ClaudeGitPushAll` — ship `enabled: false`). Edit
+13 tasks (five — `ClaudeWikiCompileKB`, `ClaudeMd2PdfSync`,
+`ClaudeWarmWindow`, `ClaudeGitPushAll` and `ClaudeAgentsMdSyncCheck` — ship
+`enabled: false`). Edit
 `registry.yaml` to disable any others you don't want before running
 `sync.cmd` the first time.
 
@@ -139,6 +140,7 @@ changes the second time.
 | `ClaudeWikiBuildIndex` | Daily 04:05 | rebuild `projects/index.md` + `kb/index.md`, refresh stats in `wiki/index.md` |
 | `ClaudeWikiLint` | Weekly Sun 02:00 | broken-link / orphan / project-collapse check |
 | `ClaudeLogRetention` | Weekly Sun 03:00 | prune `cron/logs/*.{log,jsonl}` older than 30 days |
+| `ClaudeAgentsMdSyncCheck` | Weekly Sun 07:30 | reconcile each project's `AGENTS.md` with its `CLAUDE.md` (off by default; needs `projects_root`) |
 | `ClaudeMd2PdfSync` | Daily 06:30 | regenerate any PDF whose paired `.md` is newer (off by default) |
 | `ClaudeMemoryUpdate` | Daily 02:00 | JSONL → memory MD |
 | `ClaudeGitPushAll` | Daily 07:00 | auto-push your project repos (off by default — opt-in) |

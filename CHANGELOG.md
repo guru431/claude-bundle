@@ -3,6 +3,56 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.10.0] - 2026-08-16
+
+### Added — a weekly job that keeps `AGENTS.md` in step with `CLAUDE.md`
+
+Two files describe the same project to two different agents, and they drift the
+moment you edit one and not the other — invisibly, until an agent acts on a
+renamed command or a path that moved. `ClaudeAgentsMdSyncCheck` (weekly, **off
+by default**) compares each pair and **fixes the drift in `AGENTS.md` itself**,
+writing to `FINDINGS.md` only what it could not resolve.
+
+The interesting part is what it refuses to do:
+
+- **It disbelieves the model where it can check.** "X is missing from
+  AGENTS.md" is a greppable claim, and one live run had 5 of 12 items wrong —
+  an entire file pair reported as drifted when nothing was. Such items are
+  dropped before anything is written, as are items contrasting two values that
+  differ only in quoting.
+- **It only makes unambiguous edits.** An `old` anchor that does not occur
+  exactly once is refused rather than guessed at, and edits are discarded
+  wholesale if the file would shrink by more than a quarter.
+- **It will not carry private data into a public repo.** For a repo with a
+  remote on a public host, a replacement containing a private address or a
+  key-shaped token is refused and handed to a human instead. Unknown counts as
+  public.
+- **It preserves the file's own line endings**, so a two-line fix is a two-line
+  diff rather than a whole-file rewrite.
+
+Enable it by setting the new `projects_root` in `bundle.local.yaml` (the parent
+of your working copies — the rest of the pipeline reads `~/.claude/projects/`,
+which is a different thing) and flipping `enabled: true`. Without it the job
+no-ops. The privacy policy applies as everywhere else: a project it denies never
+reaches the provider.
+
+`AGENTS_SYNC_FIX_MODEL` optionally points the fix step at a stronger model than
+the detection pass — worth it because this step writes files, affordable because
+it fires only on real drift.
+
+### Added — `llm_call(..., model=...)`
+
+Pins the model for a single call instead of the whole pipeline, for the rare job
+where a bad answer costs more than the call does. It is also what gets audited,
+so usage accounting keeps reflecting the model actually used.
+
+### Added — `findings_header()`
+
+One source for the `FINDINGS.md` header. Whichever job creates the file first
+otherwise decides how its header reads forever, which is how a fleet of projects
+ends up with a fleet of near-identical headers (a meta-repo audit found six
+variants across 22 projects).
+
 ## [0.9.0] - 2026-08-16
 
 Two batches, no new features. First, a backport of a month of fixes from the

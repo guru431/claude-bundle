@@ -199,6 +199,19 @@ tasks:
     hidden: true
     timeout_hours: 72
 
+  - name: ClaudeAgentsMdSyncCheck
+    project: main
+    description: Weekly CLAUDE.md ↔ AGENTS.md sync check across your projects — fixes the drift in AGENTS.md itself, files only the leftovers to FINDINGS.md. Disabled by default; enable after setting projects_root in bundle.local.yaml.
+    script: <bundle-install-path>\cron\agents-md-sync-check.py
+    kind: python
+    trigger: Weekly Sunday 07:30
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    timeout_hours: 72
+    enabled: false
+
   - name: ClaudeLogRetention
     project: main
     description: Weekly prune of cron/logs/*.log older than WIKI_LOG_RETENTION_DAYS (default 30).

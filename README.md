@@ -12,7 +12,7 @@ optional Python hooks.)
 
 **Full** (~30–60 minutes): on top of lite, add the Python hooks, a
 Karpathy-style wiki vault, and a registry-driven Windows Task Scheduler
-automation — 12 scheduled tasks (four disabled by default) that flush
+automation — 13 scheduled tasks (five disabled by default) that flush
 Claude Code sessions into the wiki overnight. The installer also offers to
 wire two optional companion tools: an LLM provider switcher
 (`claude-switch.ps1`) and an `AGENTS.md` mirror for Codex CLI. Needs
@@ -57,7 +57,7 @@ claude-bundle/
 │   │   ├── kb/{concepts,tools,people}/ external knowledge
 │   │   └── daily/.pending/             staging area
 │   ├── bin/_run-hidden.vbs             hidden-window launcher for Task Scheduler
-│   └── cron/                           cron foundation + wiki pipeline + 12 tasks
+│   └── cron/                           cron foundation + wiki pipeline + 13 tasks
 │       ├── hooks/utils.py              shared LLM_call, JSONL parsing, wiki utils
 │       ├── hooks/session-{start,end}.py  inject wiki context / dump session
 │       ├── hooks/pre-compact.py        LLM-summarized handoff before compaction
@@ -74,7 +74,7 @@ claude-bundle/
 │       ├── claude-healthcheck.sh       morning self-check
 │       ├── claude-warm-window.sh       ping the Claude 5h window (off by default)
 │       ├── memory-update.py            JSONL → memory MD
-│       ├── registry.yaml               12 tasks declared here
+│       ├── registry.yaml               13 tasks declared here
 │       └── admin/                      idempotent sync + DPAPI cred saver
 │           ├── sync.cmd, sync-tasks.ps1
 │           └── save-cred.cmd, save-cred.ps1
@@ -145,8 +145,8 @@ from your real Claude Code sessions:
   and refreshes the stats table in `wiki/index.md`
 - A lint script catches broken links, orphan pages, missing frontmatter
 
-A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 12
-scheduled jobs (four disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
+A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 13
+scheduled jobs (five disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
 real `Register-ScheduledTask` calls — idempotent, marked, hidden
 windows, Password-mode by default (runs before login → survives
 overnight reboots).
@@ -227,7 +227,7 @@ See [`INSTALL.md`](INSTALL.md) — ~15 steps, includes:
 - Running `cron/admin/save-cred.cmd` to DPAPI-stash your Windows password
 - Filling `registry.yaml` placeholders (`<bundle-install-path>`, `<user>`)
   — automatable via `scripts/bootstrap-registry.ps1`
-- Running `cron/admin/sync.cmd` to register all 12 tasks
+- Running `cron/admin/sync.cmd` to register all 13 tasks
 - Adapting `codex/AGENTS.md` if you also run Codex CLI
 
 Before deploying, run `powershell -File scripts/self-test.ps1` for a quick

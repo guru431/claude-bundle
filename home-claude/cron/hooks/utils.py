@@ -1558,6 +1558,29 @@ def normalize_project_name(raw: str) -> str:
     return _slugify_project(raw) or "main"
 
 
+# Names under which a project keeps working files, not wiki pages. A page named
+# like one of these is always a compiler mistake: it shadows a file that lives in
+# the project's repository and is maintained by its own process.
+RESERVED_PAGE_NAMES = frozenset({
+    "FINDINGS", "FINDINGS-ARCHIVE",
+    "IDEAS", "IDEAS-ARCHIVE",
+    "CLAUDE", "AGENTS", "README",
+})
+
+
+def is_reserved_page_name(name: str) -> bool:
+    """Whether a name (with or without path, with or without .md) is reserved.
+
+    Compared by stem because such a file gets addressed two ways: the compiler
+    emits a path like `projects/x/FINDINGS.md`, while a wikilink in prose reads
+    `[[FINDINGS.md]]` or `[[FINDINGS]]`.
+    """
+    stem = re.split(r"[/\\]", name.strip())[-1]
+    if stem.lower().endswith(".md"):
+        stem = stem[:-3]
+    return stem.upper() in RESERVED_PAGE_NAMES
+
+
 def normalize_wiki_path(path: str) -> str:
     """Normalize a path produced by an LLM — fix common quirks.
 
@@ -1568,7 +1591,8 @@ def normalize_wiki_path(path: str) -> str:
     path = path.lstrip("/")
     path = path.replace("\\", "/")
 
-    if path and not path.endswith(".md"):
+    # Case-insensitive: "page.MD" from an LLM used to get a second suffix.
+    if path and not path.lower().endswith(".md"):
         path += ".md"
 
     parts = path.split("/")
@@ -1628,6 +1652,14 @@ def normalize_wiki_path(path: str) -> str:
         return ""
     # Disallow _log.md (managed by append_per_project_log)
     if path.endswith("/_log.md"):
+        return ""
+    # Disallow the names of a project's working files. The compiler would see a
+    # session discussing findings and create a page called "FINDINGS.md",
+    # producing a second list nobody reviews — in one vault the project's own
+    # FINDINGS.md sat empty while seven open items lived in the wiki. It also
+    # breaks links: `[[FINDINGS.md]]` is ordinary prose for "that file", and a
+    # page by that name makes it resolve into some unrelated project.
+    if is_reserved_page_name(parts[-1]):
         return ""
     # Reject any traversal segment that survived the rewrites above — a
     # "projects/../CLAUDE.md" must never resolve outside its project folder.

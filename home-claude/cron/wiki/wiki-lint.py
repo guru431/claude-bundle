@@ -26,7 +26,8 @@ from functools import lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-from utils import BUNDLE_ROOT, WIKI_ROOT, LOG_MD, find_bash, mark_phase_success  # noqa: E402
+from utils import (BUNDLE_ROOT, WIKI_ROOT, LOG_MD, find_bash,  # noqa: E402
+                   is_reserved_page_name, mark_phase_success)
 
 KBNEWS_DIR = BUNDLE_ROOT / "kb_news"
 TELEGRAM_SCRIPT = BUNDLE_ROOT / "cron" / "telegram-send.sh"
@@ -149,6 +150,12 @@ def check_broken_links(pages: dict[str, list[Path]]) -> list[str]:
             for link in extract_wikilinks(text):
                 target = link_target(link)
                 if target in targets:
+                    continue
+                # [[FINDINGS.md]] and friends name a working file in the
+                # project's repository, not a wiki page — no page by that name
+                # should exist (normalize_wiki_path rejects them), so such a
+                # link is not broken. In one vault this was 81 of the warnings.
+                if is_reserved_page_name(target):
                     continue
                 # A bare stem resolves only when it is unique vault-wide; a
                 # path-qualified link must match a real path (no stem fallback,

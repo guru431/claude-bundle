@@ -212,6 +212,33 @@ tasks:
     timeout_hours: 72
     enabled: false
 
+  - name: ClaudeTestSweep
+    project: main
+    description: Daily fast test run across every project under projects_root; a suite that turns red files a finding in that project's FINDINGS.md and alerts once. Disabled by default; enable after setting projects_root in bundle.local.yaml.
+    script: <bundle-install-path>\cron\test-sweep.py
+    kind: python
+    trigger: Daily 05:15
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    timeout_hours: 2
+    enabled: false
+
+  - name: ClaudeTestSweepFull
+    project: main
+    description: Weekly full test run (adds `integration`) across every project under projects_root. Same reporting as ClaudeTestSweep. Disabled by default; enable after setting projects_root in bundle.local.yaml.
+    script: <bundle-install-path>\cron\test-sweep.py
+    script_args: ["--full"]
+    kind: python
+    trigger: Weekly Saturday 07:00
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    timeout_hours: 6
+    enabled: false
+
   - name: ClaudeLogRetention
     project: main
     description: Weekly prune of cron/logs/*.log older than WIKI_LOG_RETENTION_DAYS (default 30).

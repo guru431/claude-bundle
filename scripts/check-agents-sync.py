@@ -31,6 +31,7 @@ REQUIRED = [
     "Findings",
     "Tool Selection Rules",
     "Coding Discipline",
+    "Test policy",
     "Secrets",
     "Windows Task Scheduler",
 ]
@@ -40,6 +41,7 @@ REQUIRED = [
 COMPARED = [
     "Findings",
     "Coding Discipline",
+    "Test policy",
 ]
 
 # Each file must name its own tool, its own rules file and its own home. Folding

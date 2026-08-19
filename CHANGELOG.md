@@ -3,6 +3,75 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.11.0] - 2026-08-19
+
+### Added — a nightly test sweep, because local projects have no CI
+
+`ClaudeTestSweep` (daily, **off by default**) runs the fast suite of every
+project under `projects_root`; `ClaudeTestSweepFull` (weekly) does the same
+including `integration`. A suite that turns red gets a `[P2]` entry in **that
+project's** `FINDINGS.md` and one Telegram line. No LLM is involved and no test
+output leaves the machine.
+
+What makes it survivable unattended is mostly the parts that are not about
+running pytest:
+
+- **The alert fires on a CHANGE of state**, not on every red run. One unfixed
+  failure otherwise sends a message every night until people stop reading them.
+- **Each suite gets its own process group.** A grandchild that broadcasts
+  `GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)` kills the whole console — the
+  sweep included. A sweep died twice in one day with `0xC000013A` while
+  finishing the suite that happened to run after one pulling in uvicorn. Both
+  suites pass alone; only the adjacency broke them.
+- **Each suite gets its own `--basetemp`**, inside a per-run tree. A shared
+  basetemp left behind by a process with an admin token cannot be wiped by the
+  next run, so pytest fails in the setup of every `tmp_path` test: that turned
+  13 of 16 green suites red in one night, complete with 13 "tests are failing"
+  findings. Such a run is now classified as `env` — reported as a broken
+  environment, and deliberately files no findings at all.
+- **A timeout kills the whole process tree**, and abandoned pytest processes
+  (pytest in the cmdline, dead parent, older than an hour — all three required)
+  are reaped before the run. Four orphans from finished sessions once held a
+  project's files for 11 hours and made a 30-second suite time out at 610.
+
+Enable it the same way as `ClaudeAgentsMdSyncCheck`: set `projects_root` in
+`bundle.local.yaml` and flip `enabled: true`. Without it the task no-ops.
+`TEST_SWEEP_TIMEOUT`, `TEST_SWEEP_TIMEOUT_FULL`, `TEST_SWEEP_SKIP` and
+`TEST_SWEEP_TELEGRAM` are the knobs.
+
+### Added — the task monitor no longer goes blind when WMI is wedged
+
+`ClaudeTaskMonitor` read every status through CIM. A wedged `WmiPrvSE` hangs
+those queries, the monitor times out — and reports **"0 failed tasks"**, hiding
+real failures behind a green line. It now falls back to `schtasks` (RPC, not
+WMI, and it answered in 7 seconds while CIM was down), and only calls itself
+broken when BOTH paths fail. When the fallback is used, the alert says so
+instead of quietly succeeding.
+
+The parsing lives in `cron/schtasks_status.py` rather than inside the shell
+heredoc, because its edge cases have to be testable: `schtasks` prints exit
+codes **signed** (`-1073741510` where CIM says `3221225786`), prints dates in
+the console locale, uses `30.11.1999` to mean "never ran", repeats a row per
+trigger, and produces CSV that shifts columns when a task description contains
+a quote.
+
+### Added — `mask_secrets()` in `utils.py`
+
+Anything that quotes program output can quote a secret with it — a failing test
+prints the environment it was handed. Used by the sweep on every tail it writes
+to a log, a finding or an alert; the same credential shapes the commit-time
+guard in `cron/lib/secret-scan.sh` looks for, plus a generic `name = value`
+rule that keeps the NAME visible.
+
+### Added — a written test policy
+
+`pytest.ini` shipped in 0.10.x without the reasoning behind it. `CLAUDE.md` and
+`codex/AGENTS.md` now carry the rules the sweep assumes: two levels with a fast
+default and a 60-second budget, the one-second threshold marked **by
+measurement** rather than by directory name, no real clock in tests (two suites
+had gone red purely on the calendar), and a "why does this test exist" bar. The
+mirror guard compares the section's wording in both files.
+
 ## [0.10.1] - 2026-08-16
 
 ### Fixed — the compiler could create a page that shadows a project's own file

@@ -293,6 +293,44 @@ def ideas_header(project: str) -> str:
     )
 
 
+# Credential shapes worth masking before text is written to a log, a
+# FINDINGS.md entry or a Telegram alert. Kept in the same spirit as
+# cron/lib/secret-scan.sh (which guards commits): the specific high-confidence
+# formats first, then a generic `name = value` rule that keeps the NAME visible
+# so the reader still learns which credential leaked into the output.
+_SECRET_PATTERNS = [
+    (re.compile(r"-{5}BEGIN[^-]*PRIVATE KEY-{5}.*?-{5}END[^-]*PRIVATE KEY-{5}", re.DOTALL),
+     "[REDACTED-PRIVATE-KEY]"),
+    (re.compile(r"\d{8,10}:[A-Za-z0-9_-]{35}"), "[REDACTED-TELEGRAM-TOKEN]"),
+    (re.compile(r"gh[pos]_[A-Za-z0-9]{20,}"), "[REDACTED-GITHUB-TOKEN]"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED-GITHUB-TOKEN]"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED-AWS-KEY]"),
+    (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED-SLACK-TOKEN]"),
+    (re.compile(r"sk-[A-Za-z0-9_-]{16,}"), "[REDACTED-API-KEY]"),
+    # The optional quote BEFORE the separator matters: program output quotes a
+    # credential both ways — `API_TOKEN=value` in an env dump and
+    # `{'API_TOKEN': 'value'}` in a dict repr from a failing assertion.
+    (re.compile(r"(?i)\b([\w-]*(?:key|token|secret|password|passwd|pwd|credential))"
+                r"(['\"]?\s*[:=]\s*['\"]?)([^\s'\",]{8,})"),
+     lambda m: m.group(1) + m.group(2) + "[REDACTED]"),
+]
+
+
+def mask_secrets(text: str) -> str:
+    """Mask credential-looking strings before they are logged or sent onward.
+
+    Anything that quotes program output can quote a secret with it: a failing
+    test prints the environment it was handed, a review model cites the token it
+    just flagged. Logs stay on disk, FINDINGS.md goes into git and alerts go to
+    a chat — none of them is a place for a live credential.
+    """
+    if not text:
+        return text
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 # ── Processed-state tracking ─────────────────────────────────────────────────
 # Single source of truth for "what the wiki pipeline has already processed".
 # A small JSON file replaces fragile regex-parsing of the human-readable

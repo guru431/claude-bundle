@@ -53,8 +53,13 @@ echo "TRACE: BUNDLE_ROOT=$BUNDLE_ROOT" >> "$LOG_FILE"
 
 # --- Collect task statuses via PowerShell ---
 echo "TRACE: stage=tasks $(date '+%H:%M:%S')" >> "$LOG_FILE"
-TASK_STATUS=$("$PYTHON" - 2>>"$LOG_FILE" <<'PYSCRIPT'
+TASK_STATUS=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$CRON_DIR" 2>>"$LOG_FILE" <<'PYSCRIPT'
 import subprocess, sys, json
+
+# argv[1] is $CRON_DIR — that is where schtasks_status (the fallback collection
+# path) is imported from.
+sys.path.insert(0, sys.argv[1])
+import schtasks_status
 
 ps_cmd = r"""
 Get-ScheduledTask | Where-Object {
@@ -72,20 +77,44 @@ Get-ScheduledTask | Where-Object {
 } | ConvertTo-Json -Compress
 """
 
-r = subprocess.run(
-    ['powershell', '-NoProfile', '-Command', ps_cmd],
-    capture_output=True, timeout=60
-)
-stdout = r.stdout.decode('utf-8', errors='replace').strip()
+def collect_via_cim():
+    r = subprocess.run(
+        ['powershell', '-NoProfile', '-Command', ps_cmd],
+        capture_output=True, timeout=60
+    )
+    stdout = r.stdout.decode('utf-8', errors='replace').strip()
+    if not stdout:
+        raise ValueError(f"empty stdout, rc={r.returncode}, "
+                         f"stderr={r.stderr.decode('utf-8', errors='replace')[:300]}")
+    tasks = json.loads(stdout)
+    return [tasks] if isinstance(tasks, dict) else tasks
 
-if not stdout:
-    sys.stderr.write(f"PowerShell empty stdout, rc={r.returncode}, stderr={r.stderr.decode('utf-8', errors='replace')[:500]}\n")
-    print('ERROR: PowerShell returned empty')
+
+# CIM first, schtasks second. A wedged WmiPrvSE hangs every CIM query, and the
+# monitor then reports "0 failed tasks" — a green line covering real failures.
+# schtasks goes over RPC and answers in seconds while WMI is down.
+tasks, errors = None, []
+for collect in (collect_via_cim, schtasks_status.collect):
+    try:
+        tasks = collect()
+        break
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError,
+            json.JSONDecodeError, ValueError) as exc:
+        errors.append(f"{collect.__name__}: {type(exc).__name__}: {exc}")
+        sys.stderr.write(errors[-1] + '\n')
+
+if tasks is None:
+    # BOTH paths failed — that is a genuinely broken monitor.
+    print('ERROR: could not collect task statuses via CIM or schtasks')
     sys.exit(1)
 
-tasks = json.loads(stdout)
-if isinstance(tasks, dict):
-    tasks = [tasks]
+# Falling back silently would mean WMI is down and nobody knows — precisely the
+# invisibility this fallback was added to remove. The note rides along in the
+# same alert as the failures.
+NOTES = []
+if collect is schtasks_status.collect:
+    NOTES.append('WMI/CIM unavailable — statuses collected via the schtasks '
+                 'fallback. Usually a wedged WmiPrvSE: kill the process.')
 
 # Result 0 = success, 267009 = still running, 267011 = not yet run, 267014 = terminated by user
 OK_CODES = {0, 267009, 267011, 267014}
@@ -113,7 +142,9 @@ if failures:
         lines.append(f"{f['Name']}: exit {f['LastResult']} (last run: {f['LastRun']}) [{tag}]")
     if any('[ORPHAN]' in ln for ln in lines):
         lines.append('  ORPHAN → add to cron/registry.yaml, disable it, or add to EXCLUDE_TASKS with a reason')
-    print('\n'.join(lines))
+    print('\n'.join(NOTES + lines))
+elif NOTES:
+    print('\n'.join(NOTES))
 else:
     print('OK')
 PYSCRIPT
@@ -135,7 +166,10 @@ if [ -z "$TASK_STATUS" ] || printf '%s\n' "$TASK_STATUS" | head -1 | grep -q '^E
     ALERTS="task-monitor: task-status collection FAILED (${TASK_STATUS:-python produced no output}) — the monitor itself may be broken, check cron/logs/task-monitor_${DATE}.log"
     MONITOR_RC=1
 elif [ "$TASK_STATUS" != "OK" ]; then
-    TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | grep -v '^OK$' | grep -v '^[[:space:]]' | grep -c .)
+    # Count only real failure lines (`<name>: exit <code> ...`). The block can
+    # also carry the ORPHAN hint and the "collected via the schtasks fallback"
+    # note, and counting those would inflate the header's failed-task count.
+    TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | grep -c ': exit ')
     ALERTS="$TASK_STATUS"
 fi
 

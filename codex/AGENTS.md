@@ -141,6 +141,43 @@ into project incident logs. Findings are deferred observations for review.
 - Strong criteria let you loop independently. Weak criteria
   ("make it work") require clarification first
 
+## Test policy (all projects)
+
+An audit across 20 projects found 5 with no tests at all, 8 with no pytest
+config, one full run that did not finish in 17 minutes, and a suite that had
+been red for two days without anyone noticing. Each rule below exists to
+prevent one of those; `pytest.ini` in this repo is the reference implementation.
+
+1. **Two levels, fast by default.** Bare `pytest` = the fast suite, **60s
+   budget**. Anything that reaches the network, a share, a real database, a
+   model, hardware or an LLM is marked `integration`; anything run by hand is
+   `manual`. Both are excluded through
+   `addopts = -m "not integration and not manual"`. A config is mandatory in
+   every project that has tests.
+2. **The one-second threshold.** A test over a second in the fast suite is
+   either fixed or marked `integration`. Mark **by measurement**
+   (`--durations`), never by directory name: in one project the tests under
+   `tests/unit/` polled real hardware, and one of them took 53 seconds.
+3. **No real clock.** `datetime.now()`, `date.today()`, ISO week numbers and
+   time zones only through injection or a fake. A test that depends on the
+   calendar is green some days and red others — one suite quietly went red on
+   even ISO weeks, another exactly 60 days after its fixture was written.
+4. **Cron runs them, not a person.** With no CI, `ClaudeTestSweep` (daily, off
+   by default) runs the fast suite across every project under `projects_root`;
+   red earns a Telegram alert and an entry in that project's `FINDINGS.md`.
+   `ClaudeTestSweepFull` does the same weekly, including `integration`.
+5. **"Why does this test exist."** Write one for: (a) a reproduced bug or
+   incident, (b) a contract between modules or services, (c) an irreversible
+   operation — deletion, deploy, migration, writing to an archive. Do not write
+   one for trivial wrappers, combinatorial variations of the same thing, or
+   markup details. Weed out the duplicates when refactoring.
+6. **A project with no tests gets a minimum, not a suite.** A smoke test on the
+   entry point (`--help` / `--dry-run` does not crash) plus a test for its most
+   dangerous operation. Mandatory for code that touches infrastructure or
+   production.
+
+Do not put `--cov` in `addopts`: coverage is measured on demand, not on every run.
+
 ## Error Recovery — MAXIMUM 2 attempts
 
 - If a shell command fails, try ONE alternative approach

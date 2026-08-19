@@ -1,6 +1,6 @@
 # Cron architecture (Windows Task Scheduler)
 
-The bundle ships 13 scheduled tasks (five disabled by default) managed
+The bundle ships 15 scheduled tasks (seven disabled by default) managed
 declaratively through one YAML file. This document explains the moving parts.
 
 ## The big picture
@@ -126,8 +126,9 @@ changes the second time.
 
 ## What ships in the bundle
 
-13 tasks (five — `ClaudeWikiCompileKB`, `ClaudeMd2PdfSync`,
-`ClaudeWarmWindow`, `ClaudeGitPushAll` and `ClaudeAgentsMdSyncCheck` — ship
+15 tasks (seven — `ClaudeWikiCompileKB`, `ClaudeMd2PdfSync`,
+`ClaudeWarmWindow`, `ClaudeGitPushAll`, `ClaudeAgentsMdSyncCheck`,
+`ClaudeTestSweep` and `ClaudeTestSweepFull` — ship
 `enabled: false`). Edit
 `registry.yaml` to disable any others you don't want before running
 `sync.cmd` the first time.
@@ -146,6 +147,8 @@ changes the second time.
 | `ClaudeGitPushAll` | Daily 07:00 | auto-push your project repos (off by default — opt-in) |
 | `ClaudeHealthcheck` | Daily 09:00 | morning self-check |
 | `ClaudeTaskMonitor` | Daily 09:30 | alert on failed Task Scheduler jobs |
+| `ClaudeTestSweep` | Daily 05:15 | run every project's fast test suite; file a finding when one turns red (off by default; needs `projects_root`) |
+| `ClaudeTestSweepFull` | Weekly Sat 07:00 | the same sweep including `integration` tests (off by default; needs `projects_root`) |
 | `ClaudeWarmWindow` | Daily 01:00 /4h | ping the Claude 5h window (off by default — read the billing note in the script; set `CLAUDE_BIN` in `.env` if the `claude` CLI isn't on PATH in session 0) |
 
 The pipeline writes to Telegram only on failure (no spam on success).
@@ -169,6 +172,7 @@ publishes nothing.
 | `ClaudeTaskMonitor` / alerts | failure summary → Telegram Bot API | no | no | on |
 | `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
 | `ClaudeMd2PdfSync` | nothing (local render) | no | no | off |
+| `ClaudeTestSweep` / `ClaudeTestSweepFull` | a summary of which suites broke → Telegram Bot API. No LLM is involved and no test output goes to a provider; tails are masked for credentials before they are logged or sent | no | writes a finding into each affected project's `FINDINGS.md` | off (needs `projects_root`) |
 
 ### What `ClaudeHealthcheck` actually sends
 

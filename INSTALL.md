@@ -106,6 +106,17 @@ In a Claude chat:
 /plugin install context7
 ```
 
+Then check that no local MCP process was started for a server that has a hosted
+endpoint — a plugin update can half-apply and silently leave you running one:
+
+```bash
+python scripts/mcp-probe.py --check-wrappers
+```
+
+If it reports anything, see [`docs/mcp-servers.md`](docs/mcp-servers.md) — it covers
+the fix and the general rule for declaring MCP servers (short version: HTTP url when
+one is offered, otherwise a direct interpreter path, never `npx -y` / `uv run`).
+
 ### 4. (Optional) Wire the hooks
 
 The default `settings.json` does NOT enable the two example hooks

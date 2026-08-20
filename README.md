@@ -94,6 +94,7 @@ claude-bundle/
 │   ├── check-registry.py             CI guard: registry fields / kind / trigger grammar
 │   ├── check-env-ref.py              CI guard: .env template matches the docs
 │   ├── check-agents-sync.py          CI guard: CLAUDE.md ↔ codex/AGENTS.md mirror
+│   ├── mcp-probe.py                  verify MCP servers by handshake; --check-wrappers audits declarations
 │   ├── enable-guard.sh / .ps1        activate the pre-commit + pre-push secret-guard
 │   └── bootstrap-registry.ps1         fill registry.yaml placeholders + path policy
 │
@@ -110,6 +111,7 @@ claude-bundle/
 └── docs/
     ├── wiki-method.md                 how the Karpathy wiki pipeline works
     ├── cron-architecture.md           Task Scheduler + registry.yaml policies
+    ├── mcp-servers.md                 declaring MCP servers: HTTP / direct path, never npx -y
     └── llm-routing.md                 claude-switch vs utils.py::llm_call
 ```
 
@@ -225,6 +227,13 @@ Then in a Claude Code chat:
 ```
 
 Reload the window. Done.
+
+> **Worth checking once.** Current `context7` ships an HTTP config and needs no local
+> Node process. But a plugin update can leave `installPath` pinned to an older
+> npx-based copy, and nothing tells you — you just pay a local server per session
+> (on Windows up to six processes, plus a few seconds of registry round-trip while a
+> new window opens). Run `python scripts/mcp-probe.py --check-wrappers` after installing;
+> if it flags anything, see [`docs/mcp-servers.md`](docs/mcp-servers.md).
 
 ### If you want the full tier too
 

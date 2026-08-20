@@ -118,6 +118,45 @@ into project incident logs. Findings are deferred observations for review.
 - Prefer Exa MCP over the built-in WebSearch / WebFetch
 - The free tier is metered — check Exa's current limits before relying on it
 
+### Declaring MCP servers — never wrap them in `npx -y` or `uv run`
+
+Use a **direct path to the interpreter**, or an **HTTP url** when the project
+publishes a hosted endpoint. A resolver wrapper costs you three times over:
+
+- **It stays alive.** `npx` does not replace itself with the server — it parents it
+  and keeps sitting there. Measured on a real setup: an idle `npx` wrapper held
+  **95 MB** of commit, roughly twice the server it had launched.
+- **It re-resolves on every session start.** Measured: `npx -y <server> --version`
+  took **6.4 s**, of which 4.0 s was a round-trip to the npm registry. Multiply by
+  servers × open sessions — that is the pause you feel when a new editor window
+  opens, and it makes your tooling depend on the network being up.
+- **On Windows each wrapper drags a shell and a console host with it**, so one
+  server can cost six processes instead of one.
+
+```jsonc
+// bad — extra process, re-resolve, network access on every start
+{ "command": "npx", "args": ["-y", "some-mcp-server"] }
+
+// good — hosted endpoint, zero local processes
+{ "type": "http", "url": "https://mcp.example.com/mcp" }
+
+// good — local server, direct interpreter path
+{ "command": "/path/to/.venv/bin/python", "args": ["/path/to/server.py"] }
+```
+
+Two traps when a local stdio server misbehaves:
+
+- **stdout belongs to the protocol.** Any stray line there breaks JSON-RPC — banners
+  and diagnostics must go to stderr. `dotenv` v17, for example, prints
+  `injected env … from .env` to *stdout*; silence it with `DOTENV_CONFIG_QUIET=true`.
+- **`bin` is not always the working entry point.** A package can ship a broken CLI
+  while its `main` module starts fine. Check what actually runs before blaming your
+  config — and remember `npx` always launches `bin`.
+
+Verify with a handshake, not with "the process started": `scripts/mcp-probe.py` in this
+bundle runs each declared server, performs `initialize` + `tools/list`, and reports
+stray stdout separately.
+
 ## Coding Discipline (Karpathy rules)
 
 ### 1. Think Before Coding

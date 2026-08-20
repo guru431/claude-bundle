@@ -3,6 +3,53 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.12.0] - 2026-08-20
+
+### Added — `scripts/mcp-probe.py` and a rule for how MCP servers get declared
+
+An MCP server declared through `npx -y` or `uv run` costs far more than it
+looks. The wrapper never hands off — it parents the real server and stays
+resident: measured, an idle `npx` wrapper held **95 MB** of commit, roughly
+twice the server it had launched. It re-resolves the package on *every* session
+start, measured at **6.4 s** per server with 4.0 s of that a round-trip to the
+npm registry. On Windows each wrapper drags a shell and a console host along, so
+one server can cost six processes. With several editor windows open, that is
+exactly the pause you feel when a new one starts — and it makes local tooling
+depend on the registry being reachable.
+
+`docs/mcp-servers.md` states the rule (HTTP url when the project offers a hosted
+endpoint, otherwise a direct path to the interpreter) and covers two traps that
+make a working server look broken: stray output on stdout, where MCP speaks
+JSON-RPC — `dotenv` v17 prints a banner there and that alone kills a session —
+and packages whose `bin` is broken while `main` starts fine, which `npx` can
+never reach because it always launches `bin`.
+
+`scripts/mcp-probe.py` verifies by handshake rather than by "the process
+started": it launches each declared stdio server exactly as configured, runs
+`initialize` + `tools/list`, and reports stray stdout separately.
+`--check-wrappers` launches nothing at all — it audits declarations, including
+plugin-provided ones, and looks for wrapper processes already running. Exit code
+is 1 on any finding, so it can gate a script.
+
+### Changed — the plugin step now says what to check afterwards
+
+A plugin can ship an HTTP config and still leave you running a local server.
+Seen with `context7`: an update fetched the HTTP version and recorded its commit,
+but `installPath` stayed pinned to the older npx-based copy in the plugin cache,
+with nothing to indicate it. README and INSTALL now point at the check, and
+`docs/mcp-servers.md` documents the fallback — declare the server yourself and
+disable the plugin, remembering that tool names depend on the declaration style,
+so `permissions.allow` needs updating in the same pass.
+
+### Added — "log before you touch anything that can block" (docs/cron-architecture.md)
+
+Companion to the existing pathing policy, drawn from a task that ran twelve
+hours without writing a single log line. A `mkdir -p` on an unreachable network
+share was its first statement; the ssh timeout, the integrity check, the atomic
+rename and the failure alert all sat below it and never ran. Protection placed
+after the point of failure protects nothing, and a `timeout_hours` far above the
+real runtime buys silence rather than safety.
+
 ## [0.11.0] - 2026-08-19
 
 ### Added — a nightly test sweep, because local projects have no CI

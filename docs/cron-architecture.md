@@ -48,6 +48,41 @@ The bundle ships an example `registry.yaml` with placeholders
 (`<bundle-install-path>`). When you adapt it, use UNC or `C:\` —
 not mapped drives.
 
+## Log before you touch anything that can block
+
+The pathing policy above is one way a task fails silently. Here is the
+other, and it bites even when every path is correct.
+
+Write a start marker to the log — on a **local** disk — **before** the
+first operation that can block. A network share, an SSH call, a remote
+API: any of them can hang with no timeout, and if your first log line
+comes after them, a hung task is indistinguishable from one that never
+ran. You check the log directory, find no file for today, and conclude
+the trigger didn't fire.
+
+A real example from the setup this bundle came from. A nightly backup
+started at 01:30 and was still `Running` twelve hours later, with no log
+file at all. The script was written carefully: a `timeout` on the ssh
+call, output streamed to a `.part` file, an integrity check, an atomic
+rename, a Telegram alert on failure. Every bit of that sat *below* a
+`mkdir -p` on a network path, which happened to be the first statement.
+The share was unreachable, `mkdir` blocked indefinitely, and none of the
+protection ever ran — no backup, no alert, no log, for a full day. The
+failure was invisible precisely because it looked like nothing had
+happened.
+
+Two rules follow:
+
+- **Order beats coverage.** Protection placed after the point of failure
+  protects nothing. Open the log first, define your failure handler
+  second, and only then reach for the network — with each network call
+  wrapped in a `timeout` that fails loudly.
+- **`timeout_hours` should match reality, not fear.** That task was
+  registered with `timeout_hours: 72` while a healthy run took three
+  minutes, so it would not have self-terminated for three days. A
+  generous ceiling doesn't buy safety — it buys silence. Set it to a
+  small multiple of the real runtime.
+
 ## Script kinds
 
 `kind:` in the registry:

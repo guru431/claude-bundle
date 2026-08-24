@@ -20,8 +20,8 @@ pair, with the GitHub publication still pending.
   [`home-claude/CLAUDE.md`](home-claude/CLAUDE.md) (CI keeps the two in
   sync via `scripts/check-agents-sync.py`)
 - **Universal rules — on your own machine:** whatever the bundle
-  installed at `~/.codex/AGENTS.md` / `~/.claude/CLAUDE.md`. Editing
-  those does NOT change the repo; the sources above do.
+  installed at `~/.claude/CLAUDE.md`. Editing that does NOT change
+  the repo; the sources above do.
 - **Docs:** [`docs/`](docs/) — `wiki-method.md`, `cron-architecture.md`,
   `llm-routing.md`
 
@@ -36,7 +36,8 @@ This check is **already automated** by [`.githooks/pre-commit`](.githooks/pre-co
 key/token-format scan). Don't re-implement it by hand — just activate it
 once per clone with [`scripts/enable-guard.sh`](scripts/enable-guard.sh)
 (or `scripts/enable-guard.ps1`); the bare equivalent is
-`git config core.hooksPath .githooks`. Bypass a confirmed
+`git config core.hooksPath .githooks`. The hook expects `.sanitize-patterns`
+to contain regexes only — no comments or blank lines. Bypass a confirmed
 false positive with `git commit --no-verify`.
 
 ## Project-specific gotchas

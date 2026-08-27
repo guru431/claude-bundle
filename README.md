@@ -48,6 +48,7 @@ claude-bundle/
 │   │   └── README.md
 │   ├── skills/                         user-level skill templates
 │   │   ├── code-review-external/SKILL.md
+│   │   ├── code-selfcheck/             SKILL.md + catalog.example.json
 │   │   ├── personal-voice/SKILL.md
 │   │   └── README.md
 │   ├── commands/code-review-ext.md     user-level slash command
@@ -124,7 +125,7 @@ claude-bundle/
 | `CLAUDE.md` | Karpathy coding discipline (Think/Simplicity/Surgical/Goal-driven), tool-selection rules (Glob/Grep/Read/Edit over Bash), Windows file-encoding rules (BOM for `.ps1`, no BOM for `.sh`), Findings pattern, Superpowers workflow, Codex coexistence note |
 | `settings.json` | Permissions allow-list, `enabledPlugins` for `superpowers` and `context7`, `language: ru` (change to your preference) |
 | `hooks/*.py` | Optional: block dangerous `iptables-save`, regenerate `.pdf` when paired `.md` is edited |
-| `skills/*/SKILL.md` | Optional: `code-review-external` template (second-opinion review), `personal-voice` template (write text in your voice by register) |
+| `skills/*/SKILL.md` | Optional: `code-review-external` template (second-opinion review), `code-selfcheck` template (check your diff against your own anti-pattern catalog), `personal-voice` template (write text in your voice by register) |
 | `commands/code-review-ext.md` | Optional: `/code-review-ext` slash wrapper |
 
 After install: `/plugin install superpowers context7` gives you a large

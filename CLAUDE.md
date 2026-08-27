@@ -51,7 +51,7 @@ preserve that discipline.
 │   ├── settings.json                   permissions + plugins
 │   ├── settings.example-with-hooks.json
 │   ├── hooks/                          2 sanitized PreToolUse/PostToolUse hooks
-│   ├── skills/                         2 skill templates (placeholders)
+│   ├── skills/                         3 skill templates (placeholders)
 │   ├── commands/                       1 slash-command wrapper
 │   ├── wiki/                           empty Karpathy vault skeleton
 │   ├── bin/_run-hidden.vbs             hidden-window Task Scheduler launcher

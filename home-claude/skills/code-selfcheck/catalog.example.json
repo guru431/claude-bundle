@@ -1,0 +1,44 @@
+{
+  "_comment": "Template. Copy to catalog.json (same directory) and replace with patterns mined from your own code reviews. Three generic entries below show the schema; see SKILL.md for the field table.",
+  "patterns": [
+    {
+      "id": "AP-001",
+      "title": "Duplicated source of truth: the same constant or data drifting across files",
+      "platforms": ["python", "powershell", "bash", "js-ts", "config"],
+      "severity": "P2",
+      "freq": {"findings": 0, "projects": 0, "models": 0, "fixed": false},
+      "symptom": "One value (a path, a threshold, a model name, a line-length limit) is hardcoded separately in several files or duplicated between a .sh / .ps1 / .cmd trio; editing one place leaves the others on the old value, so results stop being reproducible.",
+      "detect": "grep the same magic number / path / regex across modules; duplicated copies of a function instead of a shared import; parallel configs (setup.cfg vs pyproject.toml, two CI workflows) pinning different versions.",
+      "avoid": "Single source of truth: one config or module that everything reads or imports; if a value must exist in two ecosystems, generate one from the other and assert equality in a test.",
+      "status": "verified",
+      "counterexample": "NOT a finding when the two values are independent by design and a comment says so, or when one copy is a vendored snapshot pinned deliberately.",
+      "links": []
+    },
+    {
+      "id": "AP-002",
+      "title": "Long payload passed as a command-line argument instead of stdin",
+      "platforms": ["python", "powershell", "bash"],
+      "severity": "P2",
+      "freq": {"findings": 0, "projects": 0, "models": 0, "fixed": false},
+      "symptom": "A prompt, file list or JSON blob is interpolated into the command line; past a platform limit (~8k chars on Windows CreateProcess, ~128k-2M on Linux ARG_MAX) the call fails with an opaque OS error, and only for large inputs — so it passes every small test.",
+      "detect": "subprocess/Start-Process/backtick invocations whose argument is built from a variable of unbounded length (file contents, joined list, LLM prompt).",
+      "avoid": "Write the payload to the child's stdin (or to a temp file and pass its path). Cap and validate anything that still has to go in argv.",
+      "status": "verified",
+      "counterexample": "NOT a finding when the argument is provably short (a flag, an id, a single bounded token).",
+      "links": []
+    },
+    {
+      "id": "AP-003",
+      "title": "One failing iteration aborts the whole loop",
+      "platforms": ["python", "powershell", "bash", "js-ts"],
+      "severity": "P2",
+      "freq": {"findings": 0, "projects": 0, "models": 0, "fixed": false},
+      "symptom": "A batch job iterating over projects, files or API calls dies on the first bad item; the remaining work is silently skipped and the run reports a single traceback instead of 40 successes and 1 failure.",
+      "detect": "for/foreach body doing I/O (network, subprocess, file, DB) with no try/except (or try/catch) inside the loop; error handling wrapped around the loop instead of within it.",
+      "avoid": "Wrap the loop body: record the failure per item, continue, and report a summary of failures at the end with a non-zero exit code if any occurred.",
+      "status": "verified",
+      "counterexample": "NOT a finding when the items are genuinely dependent (each step consumes the previous one's output) and continuing would produce corrupt results.",
+      "links": []
+    }
+  ]
+}

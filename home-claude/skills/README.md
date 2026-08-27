@@ -1,7 +1,14 @@
 # User-level skills
 
-Two example skills, both **templates** — they need you to fill in paths /
+Three example skills, all **templates** — they need you to fill in paths /
 provide companion files before they do anything useful.
+
+A note that applies to all three: **a skill's data belongs next to the skill**,
+not inside whichever project produced it. Point a `SKILL.md` at
+`<some-project>/data.json` and the skill goes silently inert on every machine
+where that project is not cloned — you get the degrade path forever and no error
+saying why. `code-selfcheck` ships its catalog beside `SKILL.md` for exactly
+that reason.
 
 ## code-review-external
 
@@ -18,6 +25,24 @@ What you provide:
 
 When to use: explicit user request, or proactive suggestion before commit
 of significant production changes.
+
+## code-selfcheck
+
+Pattern: after writing non-trivial code, check the diff against a catalog of
+recurring mistakes mined from your own past code reviews — before handing the
+change to the user.
+
+What you provide:
+- `catalog.json` next to the skill (schema and three generic entries are in
+  `catalog.example.json`), built from clustered findings of your own reviews.
+  Keep only clusters with real evidence behind them — frequency alone proves
+  popularity, not truth.
+- Optionally a build script that regenerates that JSON and writes it **into the
+  skill directory**, so the data travels with the skill.
+
+When to use: proactively after non-trivial edits; on explicit request. Not for
+typos and renames. With no catalog present it degrades to a generic
+encodings / paths / argv-length / loop-isolation checklist.
 
 ## personal-voice
 

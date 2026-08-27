@@ -3,6 +3,29 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.13.0] - 2026-08-26
+
+### Added — `code-selfcheck` skill template, with its data beside the skill
+
+Third skill template: after writing non-trivial code, check the diff against a
+catalog of recurring mistakes mined from your own past reviews, before handing
+the change over. `home-claude/skills/code-selfcheck/` ships `SKILL.md` plus
+`catalog.example.json` — the schema (`id`, `platforms`, `severity`, `detect`,
+`avoid`, `counterexample`, `status`, …) and three generic entries. No mined data
+is shipped; the section "Building your own catalog" describes the loop that
+produces one, including the evidence gate that keeps a cluster only when it was
+actually fixed once or reported by two different models. Frequency alone proves
+popularity, not truth.
+
+The reason it ships that way is the mistake it is built around: **a skill's data
+belongs next to the skill.** The source setup had this catalog living inside the
+project that generated it, and the `SKILL.md` pointing at an absolute path there.
+On a second machine, where that project is not cloned, the skill went inert —
+every invocation fell through to the degrade checklist, with no error saying why,
+because "file not found" is a valid degrade condition. `skills/README.md` now
+states the rule for all three templates, and the skill reads `catalog.json`
+relative to its own directory.
+
 ## [0.12.0] - 2026-08-20
 
 ### Added — `scripts/mcp-probe.py` and a rule for how MCP servers get declared

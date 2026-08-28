@@ -9,7 +9,8 @@
 #   6. sync-tasks -DryRun — runs without a parser crash (placeholder guard OK)
 #   7. Placeholders       — report unsubstituted <bundle-install-path>/<user>
 #   8. Preflight (WARN)   — Tier-2 Python deps (requests/PyYAML), Python ≥3.10,
-#                           and PROJECTS_ROOT when deployed under ~/.claude
+#                           md2pdf prerequisites (parser + browser), and
+#                           PROJECTS_ROOT when deployed under ~/.claude
 #   9. Doc counts         — scheduled-task count in docs matches registry.yaml
 #  10. Secret-guard (WARN)— pre-commit hook active (bundle source tree only)
 #
@@ -123,9 +124,19 @@ foreach ($rel in @('settings.json', 'settings.example-with-hooks.json')) {
 
 # ── 2. Python compileall ─────────────────────────────────────────────────────
 if ($py) {
-    $out = Invoke-Checked { & $py -m compileall -q (Join-Path $home_claude 'cron') (Join-Path $home_claude 'hooks') }
-    if ($script:lastRc -eq 0) { Ok "Python compileall (home-claude/)" }
-    else { Bad "Python compileall failed:`n$out" }
+    # Only the trees that exist: a lite deployment has no cron/ or bin/, and
+    # compileall fails on a missing directory (a FAIL for a correct install).
+    $targets = @('cron', 'hooks', 'bin') |
+        ForEach-Object { Join-Path $home_claude $_ } |
+        Where-Object { Test-Path $_ }
+    if (-not $targets) {
+        # Bare `compileall -q` with no path compiles all of sys.path — never run it.
+        Warn "no cron/, hooks/ or bin/ under $home_claude — skipped compileall"
+    } else {
+        $out = Invoke-Checked { & $py -m compileall -q @targets }
+        if ($script:lastRc -eq 0) { Ok "Python compileall (home-claude/)" }
+        else { Bad "Python compileall failed:`n$out" }
+    }
 } else { Warn "Python not found — skipped compileall, hooks, YAML" }
 
 # ── 3. YAML parse (best-effort) ──────────────────────────────────────────────
@@ -151,7 +162,8 @@ if ($py) {
     $mcode = @'
 import sys, yaml
 KNOWN = {'project_map', 'known_projects', 'skip_dirs', 'skip_projects',
-         'allow_projects', 'skip_jsonl_projects', 'collect_plans'}
+         'allow_projects', 'skip_jsonl_projects', 'collect_plans',
+         'projects_root'}
 d = yaml.safe_load(open(sys.argv[1], encoding='utf-8'))
 if d is None:
     sys.exit(0)
@@ -277,6 +289,42 @@ if ($py) {
         else { Warn "Python module '$mod' not importable — run: pip install -r requirements.txt (Tier-2 LLM calls / YAML parsing need it)" }
     }
 }
+# ── 8b. md2pdf prerequisites (WARN) ──────────────────────────────────────────
+# bin/md2pdf.py ships, but its two runtime prerequisites (a Markdown parser and
+# a Chromium-family browser) do not. Without them the md2pdf-on-edit hook turns
+# into a silent no-op and ClaudeMd2PdfSync exits 1 every night — the failure the
+# whole check exists to make visible. WARN, not FAIL: both consumers are opt-in.
+if ($py) {
+    $conv = Join-Path $home_claude 'bin/md2pdf.py'
+    if (-not (Test-Path $conv)) {
+        # bin/ is a full-tier path; a lite deployment legitimately has none.
+        Warn "bin/md2pdf.py not found at $conv — the md2pdf-on-edit hook and ClaudeMd2PdfSync would no-op"
+    } else {
+        $pcode = @'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('md2pdf_probe', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+parser = importlib.util.find_spec('markdown_it') or importlib.util.find_spec('markdown')
+print('parser=%s' % ('1' if parser else '0'))
+try:
+    print('browser=%s' % mod.find_browser())
+except Exception:
+    print('browser=')
+'@
+        $out = Invoke-Checked { & $py -c $pcode $conv }
+        if ($script:lastRc -ne 0) { Warn "bin/md2pdf.py probe failed:`n$out" }
+        else {
+            # \s*$, not $: the probe's lines end in CRLF and a bare $ anchors
+            # before the \n, so the \r kept `^parser=1$` from ever matching.
+            if ($out -match '(?m)^parser=1\s*$') { Ok "md2pdf: Markdown parser importable" }
+            else { Warn "md2pdf: no Markdown parser — run: pip install -r requirements.txt (markdown-it-py)" }
+            if ($out -match '(?m)^browser=(\S.*?)\s*$') { Ok "md2pdf: browser found ($($Matches[1]))" }
+            else { Warn "md2pdf: no Edge/Chrome/Chromium found — install one or set MD2PDF_BROWSER" }
+        }
+    }
+}
+
 # PROJECTS_ROOT is required by git-push-all / md2pdf-sync when the bundle is
 # deployed at the documented default ~/.claude. Gate on the tree under test
 # ($home_claude), not $root — $root is the source checkout and never matches.

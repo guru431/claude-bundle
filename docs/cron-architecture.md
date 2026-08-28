@@ -177,7 +177,7 @@ changes the second time.
 | `ClaudeWikiLint` | Weekly Sun 02:00 | broken-link / orphan / project-collapse check |
 | `ClaudeLogRetention` | Weekly Sun 03:00 | prune `cron/logs/*.{log,jsonl}` older than 30 days |
 | `ClaudeAgentsMdSyncCheck` | Weekly Sun 07:30 | reconcile each project's `AGENTS.md` with its `CLAUDE.md` (off by default; needs `projects_root`) |
-| `ClaudeMd2PdfSync` | Daily 06:30 | regenerate any PDF whose paired `.md` is newer (off by default) |
+| `ClaudeMd2PdfSync` | Daily 06:30 | regenerate any PDF whose paired `.md` is newer (off by default; needs `PROJECTS_ROOT`, markdown-it-py and a Chromium-family browser for `bin/md2pdf.py`) |
 | `ClaudeMemoryUpdate` | Daily 02:00 | JSONL → memory MD |
 | `ClaudeGitPushAll` | Daily 07:00 | auto-push your project repos (off by default — opt-in) |
 | `ClaudeHealthcheck` | Daily 09:00 | morning self-check |

@@ -3,6 +3,40 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.14.0] - 2026-08-29
+
+### Added — the md2pdf converter itself, instead of a hole where it should be
+
+The bundle shipped both consumers of `bin/md2pdf.py` — the `md2pdf-on-edit`
+PostToolUse hook and the `ClaudeMd2PdfSync` task — but not the converter, and
+`home-claude/bin/` held only `_run-hidden.vbs`. Neither profile installed one.
+Because the hook degrades gracefully (`skipped — converter missing`), the
+feature became a silent no-op on a complete full-tier install and nothing said
+so. `home-claude/bin/md2pdf.py` now ships: md → HTML (markdown-it-py, falling
+back to python-markdown) → headless Edge/Chrome `--print-to-pdf`. A4, Times New
+Roman 11pt, bordered tables, page-break rules that keep headings off the foot of
+a page and repeat a table header across a split.
+
+Its two prerequisites are *not* things a copy can provide, so they are surfaced
+rather than assumed. `markdown-it-py` joins `requirements.txt`; the browser is
+auto-detected (Windows/macOS install paths, then PATH) with `MD2PDF_BROWSER` as
+the override, now a commented entry in the `.env` template. `scripts/self-test.ps1`
+gained a WARN check for both, plus one for the converter's absence — the same
+class of failure as before, but visible. Documented in `hooks/README.md`,
+`INSTALL.md` (steps 4 and 8), `docs/cron-architecture.md` and the registry
+description.
+
+### Fixed
+
+- **`compileall` skipped `home-claude/bin/`** in CI and `self-test.ps1` — the
+  directory held no `.py` file until now. Both compile it; the self-test picks
+  only the trees that exist, since a lite deployment has neither `cron/` nor
+  `bin/` and `compileall` fails on a missing path.
+- **`self-test.ps1` rejected `projects_root`** as an unknown `bundle.local.yaml`
+  key. `cron/hooks/utils.py` has honored it since 0.11.0 (it is what
+  `ClaudeTestSweep` and `ClaudeAgentsMdSyncCheck` read); only the self-test's
+  copy of the key set was stale, so a correct manifest drew a WARN.
+
 ## [0.13.0] - 2026-08-26
 
 ### Added — `code-selfcheck` skill template, with its data beside the skill

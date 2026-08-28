@@ -11,7 +11,7 @@ the entries you need into your `settings.json`.
 > | Entry in the example | Runs | Needs |
 > |---|---|---|
 > | `PreToolUse` → `block-iptables-save-to-rules.py` | Tier 1 | a real Python interpreter |
-> | `PostToolUse` → `md2pdf-on-edit.py` | Tier 1 | a real Python interpreter + your own `bin/md2pdf.py` |
+> | `PostToolUse` → `md2pdf-on-edit.py` | Tier 1 | a real Python interpreter + `bin/md2pdf.py` (ships full-tier) + markdown-it-py + Edge/Chrome |
 > | `SessionStart` / `SessionEnd` / `PreCompact` → `cron/hooks/*.py` | **Tier 2 only** | the full-tier `~/.claude/cron/` install |
 >
 > **Lite** (config only, no Python): take **none** of them — both hooks here
@@ -39,9 +39,16 @@ it's harmless either way.
 — resolved next to the hook's own tree first, then `~/.claude/bin/md2pdf.py`
 (same order as the nightly `cron/md2pdf-sync.py`, so both use one converter).
 
-Requires you to provide your own `bin/md2pdf.py` — a small wrapper
-around any MD→PDF converter (pandoc, weasyprint, mdpdf, ...). Without it the
-hook skips the file and says so via `systemMessage`
+The converter ships with the bundle (`home-claude/bin/md2pdf.py`, copied by the
+full-tier install), but its two prerequisites do not:
+
+- a Markdown parser — `pip install -r requirements.txt` (markdown-it-py);
+- a Chromium-family browser for headless printing (Edge, Chrome, Chromium).
+  Point `MD2PDF_BROWSER` at the executable if it isn't auto-detected.
+
+`scripts/self-test.ps1` warns when either is missing. If the converter file
+itself isn't there (a lite install, or a split install — see `CLAUDE_MD2PDF`
+below), the hook skips the file and says so via `systemMessage`
 (`md2pdf-on-edit: skipped — converter missing at ...`) — it does nothing to
 the PDF, but it doesn't fail silently either.
 

@@ -125,12 +125,16 @@ SRC="<abs-path-to-bundle>"
 DST="$USERPROFILE/.claude"
 cp -r "$SRC/home-claude/wiki" "$DST/"
 cp -r "$SRC/home-claude/cron" "$DST/"
-cp -r "$SRC/home-claude/bin"  "$DST/"   # hidden-window launcher — REQUIRED
+cp -r "$SRC/home-claude/bin"  "$DST/"   # launcher + md2pdf — REQUIRED
 ```
 
 Do not skip `bin/`: every Password-mode `bash`/`python` task runs through
-`bin/_run-hidden.vbs`, and the syncer aborts if it's missing. (On a POSIX
-target you can omit `bin/` — `gen-scheduler.py` runs bash/python directly.)
+`bin/_run-hidden.vbs`, and the syncer aborts if it's missing. It also holds
+`bin/md2pdf.py`, the converter the `md2pdf-on-edit` hook and `ClaudeMd2PdfSync`
+both call (it needs `markdown-it-py` and an Edge/Chrome/Chromium to print
+through; `self-test.ps1` warns when either is absent). (On a POSIX target you
+can omit `bin/` — `gen-scheduler.py` runs bash/python directly — but then the
+md2pdf feature goes with it.)
 
 ### 6. Create `.env` and ask for keys
 

@@ -4,8 +4,13 @@
 #              missing install — it surfaces only at runtime as a misleading
 #              "DeepSeek error: ..." → "all providers failed").
 #   PyYAML   — parses cron/registry.yaml (the syncer, self-test, and CI).
+#   markdown-it-py — the Markdown parser bin/md2pdf.py renders with (used by the
+#              md2pdf-on-edit hook and the ClaudeMd2PdfSync task, both opt-in).
+#              Only needed if you use the md+pdf pairing feature; the converter
+#              also needs a Chromium-family browser for headless printing.
 #
 # Install:  pip install -r requirements.txt
 # Tier 1 (config only) needs none of this.
 requests
 PyYAML
+markdown-it-py

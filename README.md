@@ -57,7 +57,9 @@ claude-bundle/
 │   │   ├── projects/<your-slugs>/      atomic pages (incident/solution/...)
 │   │   ├── kb/{concepts,tools,people}/ external knowledge
 │   │   └── daily/.pending/             staging area
-│   ├── bin/_run-hidden.vbs             hidden-window launcher for Task Scheduler
+│   ├── bin/                            helper executables (full tier)
+│   │   ├── _run-hidden.vbs             hidden-window launcher for Task Scheduler
+│   │   └── md2pdf.py                   MD→PDF via headless Edge/Chrome
 │   └── cron/                           cron foundation + wiki pipeline + 15 tasks
 │       ├── hooks/utils.py              shared LLM_call, JSONL parsing, wiki utils
 │       ├── hooks/session-{start,end}.py  inject wiki context / dump session

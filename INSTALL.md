@@ -123,6 +123,13 @@ The default `settings.json` does NOT enable the two example hooks
 (`block-iptables-save-to-rules.py`, `md2pdf-on-edit.py`). To enable them,
 merge them in from `home-claude/settings.example-with-hooks.json`.
 
+`md2pdf-on-edit.py` calls `bin/md2pdf.py`, which the full tier installs
+(step 8) — a lite install has no `bin/`, so the hook only ever reports
+`converter missing`. The converter itself needs `markdown-it-py`
+(`pip install -r requirements.txt`) and a Chromium-family browser
+(Edge / Chrome / Chromium) it prints through headlessly;
+`scripts/self-test.ps1` warns if either is absent.
+
 **Take only the `PreToolUse` and `PostToolUse` entries here.** That file is
 a full-tier reference: its `SessionStart`, `SessionEnd`, and `PreCompact`
 entries point into `~/.claude/cron/`, which doesn't exist until Tier 2
@@ -263,11 +270,12 @@ Copy-Item -Recurse "$src\bin"  $dst -Force
 
 This puts `~/.claude/wiki/` (empty vault skeleton), `~/.claude/cron/`
 (the foundation, hooks, compilers, task scripts, registry, admin
-scripts), and `~/.claude/bin/_run-hidden.vbs` — the hidden-window
-launcher every Password-mode `bash`/`python` task runs through. **Don't
-skip `bin/`:** the syncer aborts if the launcher is missing, and the
-default `registry.yaml` points every task at it. (`install.ps1` copies it
-for you; this manual step must too.)
+scripts), and `~/.claude/bin/` — `_run-hidden.vbs`, the hidden-window
+launcher every Password-mode `bash`/`python` task runs through, plus
+`md2pdf.py`, the MD→PDF converter the `md2pdf-on-edit` hook and the
+`ClaudeMd2PdfSync` task share. **Don't skip `bin/`:** the syncer aborts
+if the launcher is missing, and the default `registry.yaml` points every
+task at it. (`install.ps1` copies it for you; this manual step must too.)
 
 **(Optional) Wire the session-capture hooks.** The wiki pipeline can be
 fed two ways: it self-collects from `~/.claude/projects/*` JSONLs (works

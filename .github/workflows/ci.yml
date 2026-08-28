@@ -24,7 +24,7 @@ jobs:
         run: python -m pip install --quiet -r requirements.txt
 
       - name: Python compileall
-        run: python -m compileall -q home-claude/cron home-claude/hooks
+        run: python -m compileall -q home-claude/cron home-claude/hooks home-claude/bin
 
       - name: JSON validity
         run: |

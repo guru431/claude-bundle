@@ -5,11 +5,22 @@ Walks ~/.claude/projects/, picks user messages from JSONL files modified in
 the last N hours, then asks the configured LLM (via utils.llm_call) what's
 worth appending to ~/.claude/memory/USER.md and to cross-project-notes.md.
 
-After the main phase it runs incident-extract.py (Phase 2) as a separate
-process. The extractor is optional: skip if not present.
+After the main phase it runs `cron/incident-extract.py`, if you have written
+one — a documented EXTENSION POINT, not a shipped component. The bundle
+deliberately contains no such file (nothing about incident extraction is
+generic enough to ship), so out of the box this phase is a single log line
+saying it was skipped. Drop your own script at that path to use it: it is run
+as a separate process with its output appended to this task's log, and its exit
+code is logged but does not affect this task's.
 
 Schedule: daily at 02:00.
 """
+
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=your user messages of allowed projects + a slice of ~/.claude/memory -> LLM provider (a SECOND call with MEMORY_CROSS_NOTES=1) money=tokens writes=~/.claude/memory/*.md
 import json
 import os
 import re
@@ -212,19 +223,44 @@ def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) ->
     # retry, those projects simply never reached memory. Each project now keeps
     # its NEWEST messages within its share, cut on message boundaries (never
     # mid-sentence), so nothing is dropped outright.
-    n = len(proj_messages)
     per_project_overhead = 12  # "### <name>\n" + the "\n\n" between sections
-    share = max(500, cap // n - per_project_overhead)
+    # A share below MIN_SHARE is not worth sending — a 60-character slice of a
+    # project's day carries nothing the model can use. Past that point the thing
+    # to cut is the NUMBER of projects, not the share: keeping the floor while
+    # dividing by n made the sum exceed the very cap this function exists to
+    # enforce (n above ~78 projects), and it did so silently, because the log
+    # line printed the result size without comparing it to the budget.
+    MIN_SHARE = 500
+    projects = sorted(proj_messages)
+    max_projects = max(1, cap // (MIN_SHARE + per_project_overhead))
+    deferred: list[str] = []
+    if len(projects) > max_projects:
+        # Which ones to keep: the projects with the most material this cycle —
+        # that is where the day actually happened. The rest are picked up on a
+        # later, lighter night rather than shrunk into uselessness now.
+        keep = set(sorted(projects, key=lambda p: len(proj_messages[p]),
+                          reverse=True)[:max_projects])
+        deferred = [p for p in projects if p not in keep]
+        projects = [p for p in projects if p in keep]
+    n = len(projects)
+    share = max(MIN_SHARE, cap // n - per_project_overhead)
     out = []
-    for proj in sorted(proj_messages):
+    for proj in projects:
         body = proj_messages[proj]
         if len(body) > share:
             body = cap_newest_messages(body.split(MSG_SEP), proj, cap=share)
         out.append(f"### {proj}\n{body}")
     summary = "\n\n".join(out)
-    log(f"build_summary: {len(text)} chars over the {cap} cap — every one of the "
-        f"{n} project(s) capped to ~{share} chars (newest kept), "
-        f"result {len(summary)} chars")
+    log(f"build_summary: {len(text)} chars over the {cap} cap — {n} project(s) "
+        f"capped to ~{share} chars each (newest kept), result {len(summary)} chars")
+    if deferred:
+        log(f"build_summary: {len(deferred)} project(s) deferred to a later run "
+            f"(the cap allows {n} at the {MIN_SHARE}-char minimum): "
+            f"{', '.join(deferred)}")
+    if len(summary) > cap:
+        log(f"WARNING: build_summary still {len(summary)} chars against a {cap} cap "
+            f"— one project's minimum share does not fit; raise PROMPT_TOTAL_CAP "
+            f"or lower MIN_SHARE")
     return summary
 
 
@@ -365,10 +401,16 @@ JSON only, no markdown wrapper."""
 
 
 def run_incident_extract() -> None:
-    """Phase 2: run incident-extract.py as a separate process, if present."""
+    """Optional user extension: run cron/incident-extract.py if you wrote one.
+
+    The bundle does not ship the file — see the module docstring. The "not
+    present" line below is the normal, expected outcome on a stock install, not
+    a missing component.
+    """
     extract = Path(__file__).resolve().parent / "incident-extract.py"
     if not extract.exists():
-        log("incident-extract.py not present — skipping Phase 2")
+        log("cron/incident-extract.py not present — optional Phase 2 skipped "
+            "(drop your own script there to enable it)")
         return
     log("=== Incident Extract Phase ===")
     with open(LOG_FILE, "a", encoding="utf-8") as f:

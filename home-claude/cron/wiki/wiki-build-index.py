@@ -10,6 +10,12 @@
 Schedule: after the compile cycle (daily at 04:05).
 """
 
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=nothing money=no writes=wiki indexes only
+
 import re
 import sys
 from collections import defaultdict
@@ -20,12 +26,20 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-from utils import WIKI_ROOT, parse_frontmatter, mark_phase_success, is_dry_run  # noqa: E402
+from utils import (WIKI_ROOT, WIKI_NON_PAGES, parse_frontmatter,  # noqa: E402
+                   mark_phase_success, is_dry_run)
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from runs import record_run  # noqa: E402
 
 PROJECTS_DIR = WIKI_ROOT / "projects"
 KB_DIR = WIKI_ROOT / "kb"
 
-SKIP_FILES = {"index.md", "CLAUDE.md", "log.md", "_log.md", "BOOTSTRAP_RUN.md"}
+# From utils, shared with bundle-status.py's page counter. The two used to keep
+# separate lists (this one excluded CLAUDE.md/log.md/BOOTSTRAP_RUN.md, the other
+# did not), so `wiki/index.md` § Stats and `[wiki] projects/ pages` reported
+# different totals for the same vault and nothing said which was right.
+SKIP_FILES = WIKI_NON_PAGES
 
 
 def categorize_project_page(filename: str) -> str:
@@ -84,6 +98,13 @@ def build_projects_index() -> tuple[int, int]:
 
     projects_count = 0
     pages_count = 0
+    # build_kb_index() checks each of its directories; this one did not, so a
+    # vault without wiki/projects/ (a split install where wiki/ was not copied,
+    # or a hand-deleted folder) crashed the whole task with FileNotFoundError
+    # instead of reporting that there was nothing to index.
+    if not PROJECTS_DIR.is_dir():
+        print(f"No {PROJECTS_DIR} — nothing to index under projects/.")
+        return 0, 0
     for proj_dir in sorted(PROJECTS_DIR.iterdir()):
         if not proj_dir.is_dir():
             continue
@@ -191,6 +212,11 @@ def build_kb_index() -> dict[str, int]:
     lines.append("Back: [[index|Main index]]")
     lines.append("")
 
+    # Same guard as build_projects_index: an absent wiki/kb/ must read as
+    # "nothing to index", not as a crashed nightly task.
+    if not KB_DIR.is_dir():
+        print(f"No {KB_DIR} — nothing to index under kb/.")
+        return counts
     (KB_DIR / "index.md").write_text("\n".join(lines), encoding="utf-8")
     return counts
 
@@ -235,6 +261,15 @@ def main():
     print(f"kb/people/: {kb_counts.get('people', 0)}")
     print("Indexes rebuilt.")
     mark_phase_success("build")
+    # Terminal ledger record (cron/runs.py). useful_items = pages indexed, so a
+    # rebuild that found an EMPTY vault — the shape of a wrong WIKI root or a
+    # flush that has been failing quietly — is recorded as empty-artifact
+    # rather than as a healthy nightly rebuild.
+    record_run(task="ClaudeWikiBuildIndex", process_rc=0,
+               artifact_path=PROJECTS_DIR / "index.md",
+               useful_items=pages_count + sum(kb_counts.values()),
+               delivery="n/a",
+               note=f"{projects_count} project(s), {pages_count} project page(s)")
 
 
 if __name__ == "__main__":

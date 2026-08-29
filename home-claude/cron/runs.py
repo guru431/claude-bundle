@@ -6,9 +6,19 @@ health (exit code, log freshness). A task can finish rc=0 and still produce no
 useful artifact, or fail to deliver it — "false green". That is the failure mode
 an unattended nightly pipeline hides best.
 
-Contract: every LLM task writes ONE terminal record to `cron/logs/runs.jsonl`
-via record_run() at the END of its run. Readers (bundle-status) show artifact
-health SEPARATELY from process health.
+Contract: every scheduled task writes ONE terminal record to
+`cron/logs/runs-<year>.jsonl` via record_run() at the END of its run — on
+every terminal branch, the idle "nothing to do" one included. Readers
+(bundle-status) show artifact health SEPARATELY from process health, and treat
+a verdict older than the task's own schedule as stale rather than as green.
+
+The contract began as "every LLM task", but "ran and produced nothing useful"
+is exactly as invisible for the deterministic ones: a test sweep that finds no
+suite, a retention pass that prunes nothing because it is pointed at the wrong
+tree, and an index rebuild over an empty vault all exit 0.
+
+The ledger is sliced by year (see runs_log_for) so it stays the one long-lived
+journal that does not grow without bound.
 
 Instrumenting a task
 --------------------
@@ -41,7 +51,38 @@ from pathlib import Path
 
 # cron/<file>.py → bundle root
 BUNDLE_ROOT = Path(__file__).resolve().parents[1]
-RUNS_LOG = BUNDLE_ROOT / "cron" / "logs" / "runs.jsonl"
+RUNS_DIR = BUNDLE_ROOT / "cron" / "logs"
+# The pre-rotation file. Still read (an existing deployment's whole history
+# lives in it) but never written to again.
+LEGACY_RUNS_LOG = RUNS_DIR / "runs.jsonl"
+# Kept as the module's advertised path for callers that pass an explicit
+# log_path — tests and the selftest do.
+RUNS_LOG = LEGACY_RUNS_LOG
+
+
+def runs_log_for(year: int | None = None) -> Path:
+    """The ledger slice a record written now belongs in.
+
+    Sliced by YEAR because this is the one artifact of the bundle that nothing
+    else bounds: log-retention deliberately exempts it (its mtime is the time
+    of the last write, not the age of its contents — an mtime sweep would
+    delete the whole audit trail exactly when a month of silence made it
+    necessary), and at ~15 tasks × one record a night that is thousands of
+    lines a year, re-read in full on every `bundle-status`. A bundle that
+    teaches "don't create unbounded logs" should not ship one.
+
+    Slicing rather than folding old records into aggregates: a year's slice is
+    small (a couple of MB), the full per-run detail survives for as long as the
+    files are kept, and the hot path — "what did each task do last?" — only has
+    to open the newest slice.
+    """
+    return RUNS_DIR / f"runs-{year or datetime.now().year}.jsonl"
+
+
+def runs_logs() -> list[Path]:
+    """Every ledger slice that exists, oldest first, legacy file included."""
+    slices = sorted(RUNS_DIR.glob("runs-[0-9][0-9][0-9][0-9].jsonl"))
+    return ([LEGACY_RUNS_LOG] if LEGACY_RUNS_LOG.exists() else []) + slices
 
 # delivery values that do NOT count as a delivery failure.
 _DELIVERY_OK = {"ok", "sent", "delivered", "n/a", "none", "skipped", ""}
@@ -86,8 +127,11 @@ def record_run(task: str, *, process_rc: int, run_id: str | None = None,
                input_hash: str | None = None, artifact_path=None,
                useful_items: int | None = None, delivery: str | None = None,
                message_id=None, provider_attempts=None, note: str = "",
-               log_path: Path = RUNS_LOG) -> dict:
-    """Append ONE terminal run record to runs.jsonl. Returns the written dict."""
+               log_path: Path | None = None) -> dict:
+    """Append ONE terminal run record to the current year's ledger slice.
+
+    `log_path` overrides the destination (tests and the selftest use it).
+    """
     artifact_bytes = artifact_hash = None
     rel_artifact = None
     if artifact_path is not None:
@@ -100,6 +144,8 @@ def record_run(task: str, *, process_rc: int, run_id: str | None = None,
 
     verdict = compute_verdict(process_rc, artifact_bytes, useful_items, delivery)
     now = datetime.now()
+    if log_path is None:
+        log_path = runs_log_for(now.year)
     rec = {
         "ts": now.isoformat(timespec="seconds"),
         "date": now.strftime("%Y-%m-%d"),
@@ -125,8 +171,7 @@ def record_run(task: str, *, process_rc: int, run_id: str | None = None,
     return rec
 
 
-def read_runs(log_path: Path = RUNS_LOG) -> list[dict]:
-    """Read every record. Corrupt lines are skipped — the ledger is long-lived."""
+def _read_one(log_path: Path) -> list[dict]:
     if not log_path.exists():
         return []
     out = []
@@ -147,6 +192,35 @@ def read_runs(log_path: Path = RUNS_LOG) -> list[dict]:
     return out
 
 
+def read_runs(log_path: Path | None = None) -> list[dict]:
+    """Read every record across every ledger slice, oldest slice first.
+
+    Corrupt lines are skipped — the ledger is long-lived. Pass `log_path` to
+    read exactly one file instead.
+    """
+    if log_path is not None:
+        return _read_one(log_path)
+    out: list[dict] = []
+    for path in runs_logs():
+        out.extend(_read_one(path))
+    return out
+
+
+def read_latest_runs(log_path: Path | None = None) -> list[dict]:
+    """Records from the two newest slices only — enough for latest_by_task.
+
+    "What did each task do last?" is the hot question (every `bundle-status`
+    asks it) and it does not need a decade of history. Two slices, not one, so
+    the answer does not go blank for every task in the first days of January.
+    """
+    if log_path is not None:
+        return _read_one(log_path)
+    out: list[dict] = []
+    for path in runs_logs()[-2:]:
+        out.extend(_read_one(path))
+    return out
+
+
 def latest_by_task(runs: list[dict]) -> dict[str, dict]:
     """task → its most recent (by ts) record."""
     latest: dict[str, dict] = {}
@@ -159,11 +233,75 @@ def latest_by_task(runs: list[dict]) -> dict[str, dict]:
     return latest
 
 
-def last_known_good(task: str, log_path: Path = RUNS_LOG) -> dict | None:
+def last_known_good(task: str, log_path: Path | None = None) -> dict | None:
     """The task's last green record (for a "show last-known-good" fallback)."""
     good = [r for r in read_runs(log_path)
             if r.get("task") == task and r.get("verdict") == "green"]
     return max(good, key=lambda r: r.get("ts", "")) if good else None
+
+
+# ---------- staleness: a verdict is only as good as it is recent ----------
+# `green (last 2026-05-01)` read in August is a task that has been silent for
+# four months, and "green" is the last thing that should read as. The ledger
+# records the last RUN, not the current state, so every reader has to ask how
+# old the answer is — which means the windows belong here, not in each reader.
+
+# Roughly double the trigger interval: one missed run must not cry wolf.
+_FRESHNESS_BY_TRIGGER = {"daily": 2.0, "weekly": 10.0, "monthly": 40.0}
+
+
+def freshness_windows(registry: Path | None = None) -> dict[str, float]:
+    """task → days its last verdict stays meaningful, derived from the registry.
+
+    Derived, so a rescheduled task needs no second edit here. Tasks with no
+    time-based trigger (AtLogOn / AtStartup) have no meaningful window and get
+    none; a disabled task gets none either — it is SUPPOSED to be silent.
+
+    Without PyYAML there is no registry to read: returns {} and every caller
+    simply shows verdicts without a staleness judgement rather than failing.
+    """
+    reg = registry or (BUNDLE_ROOT / "cron" / "registry.yaml")
+    if not reg.is_file():
+        return {}
+    try:
+        import yaml
+        tasks = yaml.safe_load(reg.read_text(encoding="utf-8"))["tasks"]
+    except Exception:
+        return {}
+    out: dict[str, float] = {}
+    for t in tasks:
+        if not isinstance(t, dict) or t.get("enabled") is False or not t.get("name"):
+            continue
+        kind = str(t.get("trigger", "")).strip().split(" ", 1)[0].lower()
+        if kind in _FRESHNESS_BY_TRIGGER:
+            out[t["name"]] = _FRESHNESS_BY_TRIGGER[kind]
+    return out
+
+
+def age_days(ts: str, now: datetime | None = None) -> float | None:
+    """Days since an ISO timestamp, or None when it cannot be read."""
+    try:
+        return ((now or datetime.now()) - datetime.fromisoformat(ts)).total_seconds() / 86400
+    except (TypeError, ValueError):
+        return None
+
+
+def stale_tasks(log_path: Path | None = None,
+                registry: Path | None = None) -> list[tuple[str, float, float]]:
+    """[(task, age_days, window_days)] for verdicts that are too old to trust."""
+    windows = freshness_windows(registry)
+    if not windows:
+        return []
+    latest = latest_by_task(read_latest_runs(log_path))
+    out = []
+    for task, window in sorted(windows.items()):
+        rec = latest.get(task)
+        if rec is None:
+            continue  # never instrumented — not the same claim as "went quiet"
+        age = age_days(rec.get("ts", ""))
+        if age is not None and age > window:
+            out.append((task, age, window))
+    return out
 
 
 # ---------- CLI (for shell tasks and the self-test) ----------
@@ -235,12 +373,20 @@ def main() -> None:
     r.add_argument("--note", default=None)
 
     sub.add_parser("selftest", help="check verdict classification")
+    sub.add_parser("stale", help="list tasks whose last verdict is too old")
 
     args = ap.parse_args()
     if args.cmd == "record":
         _cli_record(args)
     elif args.cmd == "selftest":
         sys.exit(_selftest())
+    elif args.cmd == "stale":
+        # Exit 1 when anything is stale, so a shell monitor can branch on the
+        # code instead of parsing the text.
+        rows = stale_tasks()
+        for task, age, window in rows:
+            print(f"{task}: last verdict {age:.0f}d old (expected within {window:.0f}d)")
+        sys.exit(1 if rows else 0)
     else:
         ap.print_help()
 

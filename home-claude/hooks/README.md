@@ -4,9 +4,18 @@ Two optional hooks. They are **not** wired in `settings.json` by default —
 if you want them, see `home-claude/settings.example-with-hooks.json` and merge
 the entries you need into your `settings.json`.
 
-> **That example file is a FULL-tier reference — do not paste its `hooks`
-> block wholesale.** JSON can't carry comments, so the tier split is spelled
-> out here instead:
+> **The example file differs from `settings.json` in exactly ONE block:
+> `hooks`.** Its `permissions` are byte-identical to the default, on purpose.
+> It used to also widen the allow-list — `Bash(cmd.exe:*)`,
+> `Bash(powershell.exe:*)`, `Bash(python:*)`, `Bash(curl:*)`, `WebFetch`, and
+> `Bash(git:*)` instead of read-only git — so anyone who copied the file for
+> the hooks (which is what this README suggests) silently acquired the right to
+> run an arbitrary command through a shell wrapper without being asked. An
+> allow-list with `cmd.exe:*` in it has stopped being a list. Widen your own
+> permissions deliberately, in your own `settings.json`, one entry at a time.
+>
+> **Do not paste its `hooks` block wholesale either.** JSON can't carry
+> comments, so the tier split is spelled out here instead:
 >
 > | Entry in the example | Runs | Needs |
 > |---|---|---|

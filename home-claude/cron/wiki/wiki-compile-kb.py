@@ -8,6 +8,12 @@ pages.
 Schedule: daily at 03:30 (after KB Update at 03:00).
 """
 
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=your KB source text -> LLM provider money=tokens writes=wiki/kb/
+
 import json
 import os
 import re

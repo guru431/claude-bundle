@@ -24,9 +24,16 @@ ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_MD = ROOT / "home-claude" / "CLAUDE.md"
 AGENTS_MD = ROOT / "codex" / "AGENTS.md"
 
-# Universal H2 sections that must be present (by substring) in BOTH files.
+# Universal headings that must be present (by substring) in BOTH files.
 # Substrings tolerate the intentional heading differences, e.g.
 # "(Windows + VS Code + Git Bash)" vs "(Windows + Git Bash)".
+#
+# CLAUDE.md § "What lives where" calls six blocks universal: file-ops, encoding,
+# error recovery, findings, secrets and Task Scheduler. Two of them were absent
+# from this list and therefore unchecked in either direction — "Error Recovery"
+# and "File Encoding" are H3 under `## Working methodology` in CLAUDE.md but
+# standalone H2 in AGENTS.md, and sections() only ever split on `## `. They are
+# in now, because sections() indexes H2 AND H3.
 REQUIRED = [
     "Findings",
     "Tool Selection Rules",
@@ -34,14 +41,25 @@ REQUIRED = [
     "Test policy",
     "Secrets",
     "Windows Task Scheduler",
+    "Error Recovery",
+    "File Encoding",
 ]
 
-# Sections whose bodies are compared, not just counted. A section is left out of
-# this list only when the two files legitimately say different things in it.
+# Sections whose bodies are compared, not just counted. A section left out of
+# this list is verified to EXIST in both files and nothing more — which is a
+# far weaker claim than the success message used to suggest, so the message now
+# says which sections got which treatment.
+#
+# A section belongs out of this list only when the two files legitimately say
+# different things in it: "Tool Selection Rules" and "Windows Task Scheduler"
+# each describe their own tool's paths and commands, and "Secrets" points at a
+# different home directory in each.
 COMPARED = [
     "Findings",
     "Coding Discipline",
     "Test policy",
+    "Error Recovery",
+    "File Encoding",
 ]
 
 # Each file must name its own tool, its own rules file and its own home. Folding
@@ -50,19 +68,34 @@ _SYNONYMS = [
     (r"\bclaude code\b|\bcodex cli\b|\bcodex\b|\bclaude\b", "<tool>"),
     (r"CLAUDE\.md|AGENTS\.md", "<rules-file>"),
     (r"~/\.claude|~/\.codex", "<home>"),
+    # Each file names its own way of running a command: CLAUDE.md says "Bash"
+    # (the tool), AGENTS.md says "shell". Same rule, different vocabulary.
+    (r"\b(?:bash|shell) command\b", "<shell> command"),
 ]
 
 
 def sections(path: Path) -> dict[str, str]:
-    """Split a rules file into {h2 heading: body}."""
+    """Split a rules file into {heading: body}, indexing H2 AND H3.
+
+    H3 too, because the two files do not agree on nesting: what CLAUDE.md keeps
+    as an H3 under `## Working methodology` ("Error Recovery", "File Encoding")
+    is a standalone H2 in AGENTS.md. Splitting on `## ` alone made those
+    sections invisible to this guard — they could not even be listed as
+    REQUIRED, so the two universal blocks most likely to be edited casually
+    were the two nothing compared.
+
+    An H3's body ends at the next heading of EITHER level, so a parent H2's
+    body is the text before its first H3. That is what we want: the comparison
+    is per named block, and a block's own text is what has to match.
+    """
     out: dict[str, str] = {}
     heading = None
     body: list[str] = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("## "):
+        if line.startswith("## ") or line.startswith("### "):
             if heading is not None:
                 out[heading] = "\n".join(body)
-            heading = line[3:].strip()
+            heading = line.split(" ", 1)[1].strip()
             body = []
         elif heading is not None:
             body.append(line)
@@ -118,8 +151,13 @@ def check() -> int:
         for p in problems:
             print("  " + p)
         return 1
-    print(f"agents-sync: {len(REQUIRED)} universal sections present in both files, "
-          f"{len(COMPARED)} compared by content")
+    # Spell out what was actually verified. "N universal sections present in
+    # both files" read as a guarantee that they agreed, while presence was the
+    # only thing checked for most of them.
+    presence_only = [r for r in REQUIRED if r not in COMPARED]
+    print(f"agents-sync: {len(COMPARED)} section(s) compared by content "
+          f"({', '.join(COMPARED)}); {len(presence_only)} checked for presence "
+          f"only ({', '.join(presence_only)})")
     return 0
 
 

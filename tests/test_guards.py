@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -167,6 +168,203 @@ def test_valid_manifest_allows(bundle_tree: Path, monkeypatch):
 
 
 # ── state migration: the @size suffix is part of the key ────────────────────
+
+# ── secret shapes: three detectors, one table, one fixture set ──────────────
+# The three consumers each kept their own list and had drifted: mask_secrets
+# knew nothing about JWTs, `ccr-…` keys or a GCP private_key_id, and the
+# public-repo gate knew about none of those plus AKIA and Telegram tokens. The
+# failure that follows is concrete: a failing test prints a JWT, the tail is
+# "masked" (miss), the token lands in a project's FINDINGS.md and in Telegram,
+# and the nightly push guard then blocks that repo every night.
+#
+# One example per format. Every one must be caught by ALL THREE consumers, or
+# the copies have drifted again.
+
+def _shapes():
+    sys.path.insert(0, str(CRON / "lib"))
+    sys.modules.pop("secret_shapes", None)
+    return importlib.import_module("secret_shapes")
+
+
+SECRET_FIXTURES = {
+    # The only fixture that is a literal rather than a concatenation, so it is
+    # the only one the guards would flag in this very file. That is what the
+    # inline marker is for (cron/lib/secret-scan.sh): a detector's own test
+    # data must look exactly like the thing it detects.
+    "pem": "-----BEGIN RSA PRIVATE KEY-----",  # secret-scan:allow
+    "github-pat": "ghp_" + "a" * 30,
+    "github-fine-grained": "github_pat_" + "b" * 30,
+    "aws": "AKIA" + "C" * 16,
+    "slack": "xoxb-" + "1" * 20,
+    "openai": "sk-" + "d" * 32,
+    "google": "AIza" + "e" * 32,
+    "ccr": "ccr-" + "f" * 20,
+    "jwt": "eyJ" + "a" * 20 + "." + "b" * 20 + "." + "c" * 20,
+    "gcp-key-id": '"private_key_id": "' + "0" * 40 + '"',
+    "telegram": "1234567890:" + "A" * 35,
+}
+
+
+@pytest.mark.parametrize("name,sample", sorted(SECRET_FIXTURES.items()))
+def test_every_secret_shape_is_caught_by_the_commit_guard(name: str, sample: str):
+    shapes = _shapes()
+    assert shapes.scan_regex().search(sample), f"{name} would be committable"
+
+
+@pytest.mark.parametrize("name,sample", sorted(SECRET_FIXTURES.items()))
+def test_every_secret_shape_is_masked(name: str, sample: str):
+    shapes = _shapes()
+    masked = shapes.mask(f"the value is {sample} ok")
+    assert sample not in masked, f"{name} survived masking into a log/alert"
+
+
+@pytest.mark.parametrize("name,sample", sorted(SECRET_FIXTURES.items()))
+def test_every_secret_shape_is_refused_for_a_public_repo(name: str, sample: str):
+    shapes = _shapes()
+    assert shapes.leak_regex().search(sample), \
+        f"{name} could be written into a public repo's AGENTS.md"
+
+
+def test_shell_scan_pattern_is_the_generated_one():
+    """cron/lib/secret-scan.sh carries a LITERAL copy — this is what checks it.
+
+    The shell hook must work with no Python on PATH, so the alternation cannot
+    be generated at run time. It can be verified, and that is the difference
+    between a copy and a fork.
+    """
+    shapes = _shapes()
+    text = (CRON / "lib" / "secret-scan.sh").read_text(encoding="utf-8")
+    m = re.search(r"(?m)^SECRET_SCAN_PATTERN='(.*)'$", text)
+    assert m, "SECRET_SCAN_PATTERN not found in cron/lib/secret-scan.sh"
+    assert m.group(1) == shapes.shell_ere(), (
+        "the shell copy has drifted — regenerate it with "
+        "`python home-claude/cron/lib/secret_shapes.py`")
+
+
+def test_private_addresses_are_leak_only():
+    """A LAN address is not a credential.
+
+    It must never block a commit (documentation legitimately discusses RFC1918
+    ranges) and must never be masked out of a log (that is debugging
+    information) — but it has no business in a public repo's AGENTS.md.
+    """
+    shapes = _shapes()
+    # 10.x rather than a 192.168.x address that looks like somebody's home LAN:
+    # this is a PUBLIC repo, and its own `.sanitize-patterns` denylist rightly
+    # refuses the latter. Same RFC1918 class, so the assertion is unchanged.
+    sample = "the box at 10.0.0.1 answers"
+    assert shapes.leak_regex().search(sample)
+    assert not shapes.scan_regex().search(sample)
+    assert shapes.mask(sample) == sample
+
+
+# ── .env parsing: env wins over the file, in BOTH implementations ───────────
+
+def _bash():
+    import shutil
+    return (shutil.which("bash")
+            or next((p for p in (r"C:\Program Files\Git\bin\bash.exe",)
+                     if Path(p).is_file()), None))
+
+
+@pytest.mark.skipif(_bash() is None, reason="bash not available")
+def test_shell_dotenv_does_not_override_the_environment(tmp_path: Path):
+    """`export "$key=$val"` was unconditional in all five shell copies.
+
+    So .env beat the real environment — the opposite of the Python loader and
+    of what the comment above it claimed. With no attacker involved: a
+    PYTHON_EXE exported for the task was silently replaced by a stale value
+    from the file, and a `PATH=` line changed which curl and python ran.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("ALREADY_SET=from-dotenv\nONLY_IN_FILE=from-dotenv\n",
+                        encoding="utf-8")
+    script = tmp_path / "probe.sh"
+    lib = (CRON / "lib" / "dotenv.sh").as_posix()
+    script.write_text(
+        f". '{lib}'\n"
+        f"dotenv_load '{env_file.as_posix()}'\n"
+        'printf "%s|%s\\n" "$ALREADY_SET" "$ONLY_IN_FILE"\n',
+        encoding="utf-8", newline="\n")
+    env = dict(os.environ, ALREADY_SET="from-environment")
+    out = subprocess.run([_bash(), str(script)], capture_output=True, text=True,
+                         env=env, timeout=60).stdout.strip()
+    assert out == "from-environment|from-dotenv"
+
+
+def test_python_dotenv_does_not_override_the_environment(bundle_tree: Path, monkeypatch):
+    (bundle_tree / ".env").write_text("ALREADY_SET=from-dotenv\nONLY_IN_FILE=from-dotenv\n",
+                                      encoding="utf-8")
+    monkeypatch.setenv("ALREADY_SET", "from-environment")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    utils._load_dotenv()
+    assert os.environ["ALREADY_SET"] == "from-environment"
+    assert os.environ["ONLY_IN_FILE"] == "from-dotenv"
+
+
+# ── markdown: a heading inside fenced code is not a heading ─────────────────
+
+def test_fenced_headings_are_not_treated_as_markup(bundle_tree: Path, monkeypatch):
+    """Six functions honored this rule and two did not.
+
+    `_LLM_H2_RE.sub` in the flush demoted a `## …` line inside a ``` block —
+    editing the user's own markdown example into the daily log — and
+    parse_daily_by_project started a new project section on it, cutting the
+    code block in half across two projects.
+    """
+    utils = _import_utils(monkeypatch, bundle_tree)
+    text = "## real\nbody\n```\n## not a heading\n```\n## also real\n"
+    flagged = [line for line, in_code in utils.iter_md_lines(text) if in_code]
+    assert "## not a heading" in flagged
+    out = utils.sub_outside_fences(r"(?m)^## (.+)$", r"### \1", text)
+    assert "## not a heading" in out
+    assert "### real" in out and "### also real" in out
+
+
+# ── retry ceiling: a deterministic failure must not replay forever ──────────
+
+def test_attempt_counter_bumps_and_resets(bundle_tree: Path, monkeypatch):
+    """Without a ceiling, a source rejected the same way every night replays
+
+    identically: same call, same rejection, same exit 1, same 03:00 alert — and
+    no run brings the next one closer to succeeding.
+    """
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.attempt_count("compile_sessions", "k") == 0
+    assert utils.attempt_bump("compile_sessions", "k") == 1
+    assert utils.attempt_bump("compile_sessions", "k") == 2
+    assert utils.attempt_count("compile_sessions", "k") == 2
+    utils.attempt_reset("compile_sessions", "k")
+    assert utils.attempt_count("compile_sessions", "k") == 0
+
+
+def test_bundle_finding_is_filed_once(bundle_tree: Path, monkeypatch):
+    """The alternative to an unbounded retry loop must not be an unbounded
+    pile of identical findings."""
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.append_bundle_finding("gave up on X", "ctx", "what", "how") is True
+    assert utils.append_bundle_finding("gave up on X", "ctx", "what", "how") is False
+    body = (bundle_tree / "FINDINGS.md").read_text(encoding="utf-8")
+    assert body.count("gave up on X") == 1
+    assert body.startswith("# Findings")
+
+
+# ── the off-box gate applies to the FIRST call, not just the fallback ───────
+
+def test_allow_offbox_zero_refuses_the_primary_provider(bundle_tree: Path,
+                                                        monkeypatch, capsys):
+    """WIKI_OFFBOX_FALLBACK=0 never did this, though its comment claimed it.
+
+    That flag only stops the chain STEPPING to the next provider; the first
+    one — DeepSeek on the shipped default — was called either way.
+    """
+    monkeypatch.delenv("WIKI_LLM_PROVIDER", raising=False)  # CI runs with mock
+    monkeypatch.setenv("WIKI_ALLOW_OFFBOX", "0")
+    monkeypatch.setenv("DEEPSEEK_KEY", "irrelevant")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.llm_call("prompt") is None
+    assert "WIKI_ALLOW_OFFBOX=0" in capsys.readouterr().err
+
 
 def test_state_migration_keeps_jsonl_size(bundle_tree: Path, monkeypatch):
     """Dropping @size yields a legacy key that matches at ANY size, so a growing

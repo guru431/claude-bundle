@@ -7,30 +7,24 @@
 # remote checks. The default version of this template only runs a local
 # disk/memory check so it works out of the box.
 
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=host metrics (plus REMOTE_SSH_HOST / WIN_REMOTE_HOST when set) -> LLM provider; the verdict -> Telegram money=tokens writes=nothing
+
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 LOG_DIR="$BUNDLE_ROOT/cron/logs"
 mkdir -p "$LOG_DIR"
 
 # Session 0 has no user env — read REMOTE_SSH_HOST / WIN_REMOTE_HOST /
-# PYTHON_EXE from the bundle .env (same safe parser as telegram-send.sh).
-ENV_FILE="$BUNDLE_ROOT/.env"
-if [ -f "$ENV_FILE" ]; then
-    while IFS= read -r raw || [ -n "$raw" ]; do
-        line="${raw%$'\r'}"
-        case "$line" in
-            ''|\#*) continue ;;
-            export\ *) line="${line#export }" ;;
-        esac
-        key="${line%%=*}"
-        case "$key" in
-            *[!A-Za-z0-9_]*|'') continue ;;
-        esac
-        val="${line#*=}"
-        val="${val%\"}"; val="${val#\"}"
-        val="${val%\'}"; val="${val#\'}"
-        export "$key=$val"
-    done < "$ENV_FILE"
+# PYTHON_EXE from the bundle .env with the shared safe parser
+# (cron/lib/dotenv.sh; env > dotenv).
+if [ -f "$(dirname "$0")/lib/dotenv.sh" ]; then
+    # shellcheck source=lib/dotenv.sh
+    . "$(dirname "$0")/lib/dotenv.sh"
+    dotenv_load "$BUNDLE_ROOT/.env"
 fi
 
 DATE=$(date +%Y-%m-%d)

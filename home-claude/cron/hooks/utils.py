@@ -82,7 +82,7 @@ _MANIFEST, _MANIFEST_BROKEN = _load_manifest()
 _MANIFEST_KNOWN_KEYS = {
     "project_map", "known_projects", "skip_dirs", "skip_projects",
     "allow_projects", "skip_jsonl_projects", "collect_plans",
-    "projects_root",
+    "projects_root", "dry_run_until",
 }
 for _unknown in sorted(set(_MANIFEST) - _MANIFEST_KNOWN_KEYS):
     print(f"WARNING: bundle.local.yaml has unknown key '{_unknown}' — it is "
@@ -211,7 +211,14 @@ COLLECT_PLANS: bool = _manifest_bool("collect_plans", False)
 # transcripts — and never needs this; it exists for jobs that inspect the repos
 # themselves, like agents-md-sync-check comparing each project's CLAUDE.md with
 # its AGENTS.md. Unset (the shipped default) simply means those jobs no-op.
-PROJECTS_ROOT: Path | None = _manifest_path("projects_root")
+#
+# The manifest key is the CANON. `.env::PROJECTS_ROOT` (which the shell tasks
+# git-push-all.sh / claude-task-monitor.sh and md2pdf-sync.py read) is honored
+# as a deprecated alias, resolved further down once _load_dotenv() has run —
+# see PROJECTS_ROOT / PROJECTS_ROOT_SOURCE below. The two names for one value
+# used to split the consumers arbitrarily: filling in one file left half the
+# jobs working and produced no diagnostic at all.
+_MANIFEST_PROJECTS_ROOT: Path | None = _manifest_path("projects_root")
 
 
 def manifest_broken() -> bool:
@@ -261,6 +268,44 @@ def project_allowed(project: str) -> bool:
     return True
 
 
+# Files inside a wiki folder that are NOT knowledge pages: script-managed
+# indexes and journals, plus the per-project rules file and the bootstrap
+# record. One definition, because the index builder and bundle-status each had
+# their own and printed different page counts for the same vault with no way to
+# tell which number was real.
+WIKI_NON_PAGES = frozenset({
+    "index.md", "CLAUDE.md", "log.md", "_log.md", "BOOTSTRAP_RUN.md",
+})
+
+
+def count_wiki_pages(folder: Path) -> int:
+    """Real wiki pages under a folder, recursively (WIKI_NON_PAGES excluded)."""
+    if not folder.is_dir():
+        return 0
+    return sum(1 for p in folder.rglob("*.md") if p.name not in WIKI_NON_PAGES)
+
+
+def working_copy_allowed(dir_name: str) -> bool:
+    """The privacy gate for a job that walks `projects_root`, not ~/.claude/projects.
+
+    project_allowed() speaks the language of RESOLVED SLUGS — what
+    dir_to_project() produces out of a transcript directory. A job like
+    agents-md-sync-check walks the git checkouts instead, whose directory names
+    are a different namespace. With an empty project_map (the shipped default)
+    the two coincide and nothing was wrong; with a non-empty one they do not,
+    and `skip_projects: [finance]` then failed to exclude the working copy
+    sitting in a directory called `myapp` — while the docs promise ONE policy
+    honored by EVERY source.
+
+    Fails closed: the directory is allowed only when its own name AND every
+    slug that maps onto it are allowed.
+    """
+    keys = {dir_name}
+    keys |= {slug for enc, slug in PROJECT_MAP.items()
+             if enc.rsplit("-", 1)[-1] == dir_name or slug == dir_name}
+    return all(project_allowed(k) for k in keys)
+
+
 def findings_header(project: str) -> str:
     """The canonical FINDINGS.md header — one source for every generator.
 
@@ -293,42 +338,26 @@ def ideas_header(project: str) -> str:
     )
 
 
-# Credential shapes worth masking before text is written to a log, a
-# FINDINGS.md entry or a Telegram alert. Kept in the same spirit as
-# cron/lib/secret-scan.sh (which guards commits): the specific high-confidence
-# formats first, then a generic `name = value` rule that keeps the NAME visible
-# so the reader still learns which credential leaked into the output.
-_SECRET_PATTERNS = [
-    (re.compile(r"-{5}BEGIN[^-]*PRIVATE KEY-{5}.*?-{5}END[^-]*PRIVATE KEY-{5}", re.DOTALL),
-     "[REDACTED-PRIVATE-KEY]"),
-    (re.compile(r"\d{8,10}:[A-Za-z0-9_-]{35}"), "[REDACTED-TELEGRAM-TOKEN]"),
-    (re.compile(r"gh[pos]_[A-Za-z0-9]{20,}"), "[REDACTED-GITHUB-TOKEN]"),
-    (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED-GITHUB-TOKEN]"),
-    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED-AWS-KEY]"),
-    (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED-SLACK-TOKEN]"),
-    (re.compile(r"sk-[A-Za-z0-9_-]{16,}"), "[REDACTED-API-KEY]"),
-    # The optional quote BEFORE the separator matters: program output quotes a
-    # credential both ways — `API_TOKEN=value` in an env dump and
-    # `{'API_TOKEN': 'value'}` in a dict repr from a failing assertion.
-    (re.compile(r"(?i)\b([\w-]*(?:key|token|secret|password|passwd|pwd|credential))"
-                r"(['\"]?\s*[:=]\s*['\"]?)([^\s'\",]{8,})"),
-     lambda m: m.group(1) + m.group(2) + "[REDACTED]"),
-]
+# Credential shapes come from cron/lib/secrets.py — the ONE table shared with
+# cron/lib/secret-scan.sh (commit/push guard) and agents-md-sync-check's
+# public-repo gate. This module used to keep its own list, and it had already
+# fallen behind on JWTs, `ccr-…` keys and GCP `private_key_id`: a failing test
+# that printed a JWT got "masked", the token reached FINDINGS.md and Telegram
+# intact, and the nightly push guard then blocked the repo every night.
+# NB the module is `secret_shapes`, not `secrets`: cron/lib goes on sys.path,
+# and a file named secrets.py there would shadow the stdlib module of that name
+# for every library in the process (urllib3 imports it).
+sys.path.insert(0, str(BUNDLE_ROOT / "cron" / "lib"))
+from secret_shapes import mask as _mask_secrets  # noqa: E402
 
 
 def mask_secrets(text: str) -> str:
     """Mask credential-looking strings before they are logged or sent onward.
 
-    Anything that quotes program output can quote a secret with it: a failing
-    test prints the environment it was handed, a review model cites the token it
-    just flagged. Logs stay on disk, FINDINGS.md goes into git and alerts go to
-    a chat — none of them is a place for a live credential.
+    Thin re-export of cron/lib/secrets.py::mask so callers keep importing it
+    from utils (where every other shared helper lives).
     """
-    if not text:
-        return text
-    for pattern, replacement in _SECRET_PATTERNS:
-        text = pattern.sub(replacement, text)
-    return text
+    return _mask_secrets(text)
 
 
 # ── Processed-state tracking ─────────────────────────────────────────────────
@@ -528,6 +557,112 @@ def state_remove(section: str, key: str, items) -> None:
     finally:
         if lock is not None:
             lock.unlink(missing_ok=True)
+
+
+# ── Bounded retries for sources that will never succeed ──────────────────────
+# The pipeline's "don't finalize a source we failed on" rule is right and it is
+# what keeps content from being lost — but it had no ceiling. A daily whose
+# model output is rejected the same way every night (a path normalize_wiki_path
+# refuses, a payload that always trips a provider filter) produces: same call,
+# same rejection, `exit 1`, monitor alert — every night, with no run ever
+# getting closer to the exit. Nothing about the state changes, so nothing about
+# the outcome can.
+#
+# After this many attempts a source is QUARANTINED instead: its payload is
+# written to cron/logs/rejected/, ONE finding is filed, the marker is set and
+# the retries stop. Raise it if you would rather keep retrying; 0 disables the
+# ceiling and restores the old unbounded behaviour.
+try:
+    RETRY_LIMIT = max(0, int(os.environ.get("WIKI_RETRY_LIMIT", "3")))
+except ValueError:
+    RETRY_LIMIT = 3
+
+
+def attempt_count(section: str, key: str) -> int:
+    """How many times this source has failed in a way a retry cannot fix."""
+    attempts = load_state(persist=False).get(section, {}).get("attempts", {})
+    value = attempts.get(key) if isinstance(attempts, dict) else None
+    return value if isinstance(value, int) else 0
+
+
+def attempt_bump(section: str, key: str) -> int:
+    """Record one more unrecoverable failure for `key`; return the new count.
+
+    Returns the count read without the lock when the state lock cannot be
+    taken — same trade as state_add: a skipped write costs one retry, a write
+    without the lock costs somebody else's update.
+    """
+    lock = _acquire_state_lock()
+    if lock is None:
+        return attempt_count(section, key) + 1
+    try:
+        state = load_state()
+        attempts = state.setdefault(section, {}).setdefault("attempts", {})
+        if not isinstance(attempts, dict):
+            attempts = state[section]["attempts"] = {}
+        current = attempts.get(key)
+        attempts[key] = (current if isinstance(current, int) else 0) + 1
+        save_state(state)
+        return attempts[key]
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def attempt_reset(section: str, key: str) -> None:
+    """Forget a source's failure count (it succeeded, or it was quarantined)."""
+    if attempt_count(section, key) == 0:
+        return
+    lock = _acquire_state_lock()
+    if lock is None:
+        return
+    try:
+        state = load_state()
+        attempts = state.get(section, {}).get("attempts")
+        if isinstance(attempts, dict):
+            attempts.pop(key, None)
+            save_state(state)
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def quarantined_count(section: str) -> int:
+    """How many of this phase's sources have hit the ceiling and stopped retrying."""
+    attempts = load_state(persist=False).get(section, {}).get("attempts", {})
+    if not isinstance(attempts, dict) or not RETRY_LIMIT:
+        return 0
+    return sum(1 for v in attempts.values() if isinstance(v, int) and v >= RETRY_LIMIT)
+
+
+def append_bundle_finding(title: str, context: str, what: str,
+                          proposal: str, priority: str = "P2") -> bool:
+    """File ONE finding in the BUNDLE's own FINDINGS.md. True if it was written.
+
+    Used by the pipeline to report a source it has given up on. Deduped on the
+    title, because the alternative to an unbounded retry loop must not be an
+    unbounded pile of identical findings.
+    """
+    path = BUNDLE_ROOT / "FINDINGS.md"
+    entry = (f"## {today_str()} · {title} [{priority}]\n"
+             f"**Context:** {context}\n"
+             f"**What:** {what}\n"
+             f"**Proposal:** {proposal}\n"
+             f"**Status:** open\n\n")
+    try:
+        existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+        if f"· {title} [" in existing:
+            return False
+        m = re.search(r"(?m)^## ", existing)
+        if existing.lstrip().startswith("# Findings") and m:
+            head, body = existing[:m.start()].rstrip("\n") + "\n\n", existing[m.start():]
+        elif existing.lstrip().startswith("# Findings"):
+            head, body = existing.rstrip("\n") + "\n\n", ""
+        else:
+            head, body = findings_header(BUNDLE_ROOT.name), existing
+        path.write_text(head + entry + body, encoding="utf-8")
+        return True
+    except OSError as exc:
+        print(f"WARNING: could not file a finding in {path}: {exc}", file=sys.stderr)
+        return False
 
 
 def _migrated_state_from_log() -> dict | None:
@@ -774,17 +909,66 @@ def get_wiki_index() -> str:
     return ""
 
 
-def get_latest_daily() -> str:
-    """Read today's daily log, falling back to yesterday."""
+def get_latest_daily(project: str = "") -> str:
+    """Read today's daily log, falling back to yesterday.
+
+    With `project`, return only that project's `## <project>` section. The daily
+    is an LLM digest of EVERY project's day and is easily tens of KB on an
+    active machine; the part that bears on the session at hand is the one
+    section. Falls back to the whole file when the section isn't there (a daily
+    written before the project existed, or an unusual heading).
+    """
+    text = ""
     daily_path = get_daily_path()
     if daily_path.exists():
-        return daily_path.read_text(encoding="utf-8")
-    from datetime import timedelta
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
-    yest_path = get_daily_path(yesterday)
-    if yest_path.exists():
-        return yest_path.read_text(encoding="utf-8")
-    return ""
+        text = daily_path.read_text(encoding="utf-8")
+    else:
+        from datetime import timedelta
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        yest_path = get_daily_path(yesterday)
+        if yest_path.exists():
+            text = yest_path.read_text(encoding="utf-8")
+    if not text or not project:
+        return text
+    section = _daily_section(text, project)
+    return section or text
+
+
+def _daily_section(text: str, project: str) -> str:
+    """The `## <project>` section of a daily log (heading included), or "".
+
+    Fence-aware for the same reason parse_daily_by_project is: a `## …` line
+    inside a code block is part of an example, not a section boundary.
+    """
+    out: list[str] = []
+    inside = False
+    want = project.strip().lower()
+    for line, in_code in iter_md_lines(text):
+        if not in_code and line.startswith("## "):
+            inside = line[3:].strip().lower() == want
+            if inside:
+                out.append(line)
+            continue
+        if inside:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
+def truncate_head(text: str, max_chars: int, hint: str = "") -> str:
+    """Keep the first `max_chars` characters, cut on a line boundary, say so.
+
+    Silent truncation is the failure mode worth avoiding: a reader who does not
+    know the text was cut treats "the rest isn't there" as "the rest doesn't
+    exist". `hint` names where the full text lives.
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    nl = cut.rfind("\n")
+    if nl > max_chars // 2:
+        cut = cut[:nl]
+    tail = f" — full text in {hint}" if hint else ""
+    return cut.rstrip() + f"\n\n… truncated ({len(text)} chars total){tail}"
 
 
 def get_project_log(project: str, max_lines: int = 120) -> str:
@@ -877,8 +1061,14 @@ def _load_dotenv() -> None:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        # Only accept alphanumeric/underscore keys, matching the bash .env
-        # parser in telegram-send.sh (rejects e.g. 'PATH=/evil'-style lines).
+        # Plain identifiers only, matching the bash parser in cron/lib/dotenv.sh.
+        # This is a SHAPE check, not a safety one: it drops a line with no '='
+        # (whose whole text would otherwise become the key) and names like
+        # `KEY[0]`. It does NOT reject `PATH=` — those characters are perfectly
+        # legal. What makes a `PATH=/evil` line inert is the `key not in
+        # os.environ` guard below, and that guard is the whole precedence rule:
+        # **env > dotenv**, a variable already in the environment is never
+        # overwritten from the file.
         if not key or any(not (c.isalnum() or c == "_") for c in key):
             continue
         if key not in os.environ:
@@ -886,6 +1076,34 @@ def _load_dotenv() -> None:
 
 
 _load_dotenv()
+
+
+def _resolve_projects_root() -> tuple[Path | None, str]:
+    """Where the working copies live → (path, human-readable source).
+
+    ONE value with two historical spellings: `projects_root` in
+    bundle.local.yaml (read by agents-md-sync-check and test-sweep) and
+    `PROJECTS_ROOT` in .env (read by git-push-all.sh, md2pdf-sync.py and the
+    task monitor's findings watch). Nothing said they were the same thing, so
+    filling in one file gave you half a working pipeline and no error — the
+    other half just logged "not set" and no-opped.
+
+    The manifest wins; .env is a deprecated alias that warns once. Resolved
+    AFTER _load_dotenv() so a value that only exists in the file is still seen
+    in session 0, where Task Scheduler hands the task no user environment.
+    """
+    if _MANIFEST_PROJECTS_ROOT is not None:
+        return _MANIFEST_PROJECTS_ROOT, "bundle.local.yaml::projects_root"
+    raw = (os.environ.get("PROJECTS_ROOT") or "").strip()
+    if not raw:
+        return None, "not set"
+    print("WARNING: PROJECTS_ROOT comes from .env — that name is DEPRECATED. "
+          "Move it to `projects_root:` in bundle.local.yaml, which is the one "
+          "place every job reads.", file=sys.stderr)
+    return Path(raw).expanduser(), ".env::PROJECTS_ROOT (deprecated alias)"
+
+
+PROJECTS_ROOT, PROJECTS_ROOT_SOURCE = _resolve_projects_root()
 
 # ── LLM provider registry — SINGLE SOURCE OF TRUTH ───────────────────────────
 # Every provider's env-var names, endpoint and default model live here, in one
@@ -967,13 +1185,28 @@ PROVIDERS: dict[str, dict] = {
 # an explicit choice must not silently route elsewhere.
 DEFAULT_CHAIN = ["deepseek", "opencode", "deepinfra"]
 
-# Off-box fallback. Set WIKI_OFFBOX_FALLBACK=0 to forbid llm_call from ever
-# reaching a provider outside this machine. Without it, a local run whose
-# server hiccups silently ships the prompt to a cloud gateway — the transcript
-# leaves the box precisely because the local pipeline failed, which is the
-# opposite of what someone running local-only asked for.
-OFFBOX_FALLBACK = os.environ.get("WIKI_OFFBOX_FALLBACK", "1").strip().lower() \
-    not in ("0", "false", "no")
+def _env_off(name: str, default: str = "1") -> bool:
+    """True when an env flag is switched off (0 / false / no)."""
+    return os.environ.get(name, default).strip().lower() in ("0", "false", "no")
+
+
+# Two DIFFERENT switches. They were conflated for a long time, and the comment
+# here described the stronger one while the code implemented the weaker.
+#
+# WIKI_OFFBOX_FALLBACK=0 — narrow: within the DEFAULT chain, do not step from a
+# failed provider to the next one. It says nothing about the FIRST provider (on
+# the shipped default that first step is DeepSeek, off-box, and it happens
+# either way) and nothing about an explicitly chosen provider, which never
+# falls back at all. docs/llm-routing.md has always described it correctly.
+OFFBOX_FALLBACK = not _env_off("WIKI_OFFBOX_FALLBACK")
+
+# WIKI_ALLOW_OFFBOX=0 — the real thing people believed they were buying above:
+# a gate applied to EVERY call, refusing any provider whose registry row says
+# `offbox: True`, first step included. With it, "fully local" is one variable
+# rather than "set WIKI_LLM_PROVIDER=local and trust that the chain never
+# fires". Enforced in _llm_openai_compat, on the same path and with the same
+# shape of message as the local-only endpoint check next to it.
+ALLOW_OFFBOX = not _env_off("WIKI_ALLOW_OFFBOX")
 
 
 def _env_first(names: list[str], default: str = "") -> str:
@@ -1135,6 +1368,11 @@ def _log_provider_once() -> None:
             extra = (" (local-only, endpoint verified)" if _is_local_endpoint(base)
                      else " (local-only, but the endpoint is NOT local — every call "
                           "will be REFUSED)")
+        # The global gate outranks everything above, so say so on the same line:
+        # otherwise a run under WIKI_ALLOW_OFFBOX=0 reads as "provider=deepseek"
+        # and every refusal further down looks like an unrelated failure.
+        if not ALLOW_OFFBOX:
+            extra += " [WIKI_ALLOW_OFFBOX=0 — off-box providers REFUSED]"
         print(f"  [llm] provider={LLM_PROVIDER} model={model} base={base}{extra}", file=sys.stderr)
     elif LLM_PROVIDER == "claude":
         print("  [llm] provider=claude model=sonnet", file=sys.stderr)
@@ -1142,15 +1380,54 @@ def _log_provider_once() -> None:
         print("  [llm] provider=mock (offline fixture responses)", file=sys.stderr)
 
 
+def _dry_run_until() -> date | None:
+    """`dry_run_until:` from bundle.local.yaml, or None.
+
+    A bad value is a loud warning and None: unlike the privacy fields this one
+    cannot leak anything by being ignored — it only fails to hold the pipeline
+    back — so it must not deny every project the way a broken policy does.
+    """
+    raw = _MANIFEST.get("dry_run_until")
+    if raw is None:
+        return None
+    try:
+        return raw if isinstance(raw, date) else date.fromisoformat(str(raw).strip())
+    except (TypeError, ValueError):
+        print(f"ERROR: bundle.local.yaml 'dry_run_until' must be a YYYY-MM-DD "
+              f"date, got {raw!r} — ignored, the pipeline runs normally.",
+              file=sys.stderr)
+        return None
+
+
+DRY_RUN_UNTIL: date | None = _dry_run_until()
+
+
 def is_dry_run(argv: list[str] | None = None) -> bool:
-    """True when --dry-run / --no-llm is passed.
+    """True when --dry-run / --no-llm is passed, or during the dry-run window.
 
     Lets the wiki scripts collect and report their input sources without making
     any LLM call, hitting the network, or mutating the wiki / state — handy for
     verifying source collection cheaply.
+
+    `dry_run_until: YYYY-MM-DD` in bundle.local.yaml applies the same brake to
+    EVERY phase until that date. WIKI_BACKLOG_MAX=0 already keeps a first run
+    from shipping your archive, but it does nothing about the first NIGHT:
+    everything from the last 48 hours reaches the provider before anyone has
+    read a `--dry-run` preview. The preview machinery already existed; what was
+    missing was a way to turn it on globally without editing every trigger. The
+    installer sets it to today + 7, and the window expires by itself — which is
+    the point, because a flag you have to remember to remove is a flag that
+    stays on for a year.
     """
     args = sys.argv[1:] if argv is None else argv
-    return any(a in ("--dry-run", "--no-llm") for a in args)
+    if any(a in ("--dry-run", "--no-llm") for a in args):
+        return True
+    if DRY_RUN_UNTIL is not None and date.today() < DRY_RUN_UNTIL:
+        print(f"  [dry-run] bundle.local.yaml says dry_run_until={DRY_RUN_UNTIL} "
+              f"— previewing only, nothing is sent or written. Delete the key "
+              f"to start early; it expires on its own.", file=sys.stderr)
+        return True
+    return False
 
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
@@ -1279,6 +1556,43 @@ def strip_leading_frontmatter(content: str) -> str:
 _LITERAL_NL = chr(92) + "n"  # '\' + 'n', built from chr() so the escaping level survives copies
 
 
+# ── Walking markdown: "a heading inside code is not a heading" ────────────────
+# That rule was written out as a near-identical `in_fence = not in_fence` loop
+# in six places, and the seventh and eighth handlers were written WITHOUT it —
+# `_LLM_H2_RE.sub` in wiki-flush-sessions demoted a `## …` line inside a ```
+# block (markdown examples in a transcript are ordinary), and
+# parse_daily_by_project started a new "project section" on the same line,
+# cutting somebody's code block in half. Two functions below turn the rule from
+# a habit into an API, which is the only way such rules survive.
+_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+
+
+def iter_md_lines(text: str):
+    """Yield (line, in_code) for every line of a markdown document.
+
+    `in_code` is True inside a fenced block AND on the fence markers
+    themselves — a caller that transforms markdown must leave both alone.
+    Unclosed fences swallow the rest of the document, which is the safe way to
+    be wrong: text that might be code is treated as code.
+    """
+    in_fence = False
+    for line in text.split("\n"):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            yield line, True
+            continue
+        yield line, in_fence
+
+
+def sub_outside_fences(pattern, repl, text: str) -> str:
+    """re.sub over the prose lines only, leaving fenced code untouched.
+
+    Applied per line, so `pattern` must be a line-level expression (`^…$`).
+    """
+    return "\n".join(line if in_code else re.sub(pattern, repl, line)
+                     for line, in_code in iter_md_lines(text))
+
+
 def _unescape_blob(body: str) -> str:
     """Unfold chunks that arrived as one line carrying literal \\n.
 
@@ -1296,18 +1610,12 @@ def _unescape_blob(body: str) -> str:
     spans removed, replacement on the original; fenced blocks are skipped whole.
     """
     out: list[str] = []
-    in_fence = False
     crlf = chr(92) + "r" + _LITERAL_NL
-    for line in body.split("\n"):
-        s = line.lstrip()
-        if s.startswith("```") or s.startswith("~~~"):
-            in_fence = not in_fence
-            out.append(line)
-            continue
+    for line, in_code in iter_md_lines(body):
         # >=2 literals outside code in ONE line means folded markdown, not
         # prose: a mention of `\n` in text occurs one at a time.
         probe = re.sub(r"`[^`]*`", " ", line)
-        if not in_fence and probe.count(_LITERAL_NL) >= 2:
+        if not in_code and probe.count(_LITERAL_NL) >= 2:
             line = line.replace(crlf, "\n").replace(_LITERAL_NL, "\n")
         out.append(line)
     return "\n".join(out)
@@ -1332,15 +1640,9 @@ _PLACEHOLDER_LINE_RE = re.compile(
 def _drop_placeholder_lines(body: str) -> tuple[str, int]:
     """Drop placeholder lines outside fenced code. Returns (body, how many)."""
     out: list[str] = []
-    in_fence = False
     dropped = 0
-    for line in body.split("\n"):
-        s = line.lstrip()
-        if s.startswith("```") or s.startswith("~~~"):
-            in_fence = not in_fence
-            out.append(line)
-            continue
-        if not in_fence and _PLACEHOLDER_LINE_RE.match(line):
+    for line, in_code in iter_md_lines(body):
+        if not in_code and _PLACEHOLDER_LINE_RE.match(line):
             dropped += 1
             continue
         out.append(line)
@@ -1354,16 +1656,10 @@ def _dedup_h1(body: str) -> tuple[str, int]:
     the current state. A page gets exactly one title.
     """
     out: list[str] = []
-    in_fence = False
     first: str | None = None
     fixed = 0
-    for line in body.split("\n"):
-        s = line.lstrip()
-        if s.startswith("```") or s.startswith("~~~"):
-            in_fence = not in_fence
-            out.append(line)
-            continue
-        if not in_fence and re.match(r"^# \S", line):
+    for line, in_code in iter_md_lines(body):
+        if not in_code and re.match(r"^# \S", line):
             title = line[2:].strip()
             if first is None:
                 first = title
@@ -1381,12 +1677,8 @@ def _dedup_h1(body: str) -> tuple[str, int]:
 def _split_sections(body: str) -> list[tuple[str | None, list[str]]]:
     """Split the body on H2/H3 (outside fenced code). First chunk is the preamble."""
     sections: list[tuple[str | None, list[str]]] = [(None, [])]
-    in_fence = False
-    for line in body.split("\n"):
-        s = line.lstrip()
-        if s.startswith("```") or s.startswith("~~~"):
-            in_fence = not in_fence
-        elif not in_fence and re.match(r"^#{2,3} \S", line):
+    for line, in_code in iter_md_lines(body):
+        if not in_code and re.match(r"^#{2,3} \S", line):
             sections.append((line, []))
             continue
         sections[-1][1].append(line)
@@ -1584,7 +1876,10 @@ def _slugify_project(raw: str) -> str:
         # separator (space, em-dash, paren, colon, backtick). A plain hyphen is
         # NOT a separator — it is common inside project names (e.g. claude-bundle).
         s2 = re.sub(r"^project\b[:\s]*", "", s, flags=re.IGNORECASE)
-        cand = re.split(r"[\s(—`:]", s2, 1)[0].strip()
+        # maxsplit by KEYWORD: passing it positionally is deprecated since
+        # Python 3.13 and the bundle supports 3.10+, so a fork running `-W error`
+        # in its CI would fail on this line.
+        cand = re.split(r"[\s(—`:]", s2, maxsplit=1)[0].strip()
         if not cand:
             # The prefix was empty / a bare label (e.g. the
             # "Project — extracted facts (claude-bundle)" form) — fall back to
@@ -2105,9 +2400,17 @@ def llm_call(prompt: str, timeout: int = 600, model: str | None = None) -> str |
 
     Two off-box gateways behind the primary, not one: a single fallback leaves
     the pipeline dark for a whole night whenever both the primary and its one
-    backup are down at the same time, which has happened. Every step here is
-    suppressed when WIKI_OFFBOX_FALLBACK=0, so a local-only run can never ship a
-    transcript off the machine just because the primary provider failed.
+    backup are down at the same time, which has happened.
+
+    Two switches govern what may leave the machine, and they are not the same:
+
+      WIKI_OFFBOX_FALLBACK=0  stops the chain STEPPING from a failed provider to
+                              the next one. The first provider still runs, and
+                              on the shipped default that first provider is
+                              DeepSeek — off-box. It is not a DLP switch.
+      WIKI_ALLOW_OFFBOX=0     refuses EVERY provider whose registry row says
+                              `offbox: True`, first call included. That is the
+                              switch for "nothing leaves this machine".
     """
     _log_provider_once()
     if LLM_PROVIDER == "mock":
@@ -2162,8 +2465,6 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
     reasoning_content is a separate field and is intentionally ignored, and a
     <think> block that leaks into content is stripped.
     """
-    import requests
-
     cfg = PROVIDERS[provider]
     label = cfg["label"]
     key, base_url, configured_model = _provider_cfg(provider)
@@ -2174,6 +2475,17 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
         return None
     if not model:
         print(f"  {cfg['model_env']} env var not set (no default for {label})", file=sys.stderr)
+        return None
+
+    # The global off-box gate (WIKI_ALLOW_OFFBOX=0). Checked BEFORE the key and
+    # the endpoint, and before any provider in the chain gets a turn: unlike
+    # WIKI_OFFBOX_FALLBACK it applies to the first call too, so "nothing leaves
+    # this machine" holds regardless of which provider was selected.
+    if not ALLOW_OFFBOX and cfg.get("offbox", True):
+        print(f"  {label} REFUSED: WIKI_ALLOW_OFFBOX=0 forbids any provider that "
+              f"leaves this machine — nothing was sent. Use WIKI_LLM_PROVIDER=local "
+              f"with a server of your own, or unset WIKI_ALLOW_OFFBOX.",
+              file=sys.stderr)
         return None
 
     # A provider declared local-only must actually be local. Refusing here is
@@ -2188,6 +2500,11 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
 
     if _is_depleted(provider):
         return None
+
+    # Imported only once every refusal above has been cleared. Those branches
+    # promise that nothing was sent, and a refusal that first needs `requests`
+    # installed is a weaker promise than the one the messages make.
+    import requests
 
     headers = {"Content-Type": "application/json"}
     if key:

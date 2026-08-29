@@ -19,14 +19,20 @@
 #                           reads whole blobs out of the object store.
 
 # High-confidence secret/token formats: PEM private keys, GitHub PATs/tokens,
-# AWS access keys, Slack tokens, OpenAI-style keys, CCR keys, JWTs, GCP service
-# account keys, and Telegram bot tokens. Kept identical in meaning to
-# .githooks/pre-commit.
+# AWS access keys, Slack tokens, OpenAI-style keys, Google API keys, CCR keys,
+# JWTs, GCP service account keys, and Telegram bot tokens.
 #
 # The GCP entry matches the `"private_key_id": "<40 hex>"` field rather than the
 # key body: a service-account JSON is normally committed whole, and its PEM body
 # is already covered above — but a truncated or reformatted export keeps the id.
-SECRET_SCAN_PATTERN='-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{16,}|ccr-[A-Za-z0-9]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|"private_key_id"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"|[0-9]{8,10}:[A-Za-z0-9_-]{35}'
+#
+# DERIVED, not authored here. The table of credential shapes lives in
+# cron/lib/secrets.py (which also feeds mask_secrets and the public-repo gate);
+# `python cron/lib/secrets.py` prints exactly the line below, and
+# tests/test_guards.py fails if the two ever differ. The literal is kept because
+# a POSIX shell hook must work with no Python on PATH — but it is a COPY, and
+# the copy is checked. Regenerate it, never hand-edit it.
+SECRET_SCAN_PATTERN='-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{16,}|ccr-[A-Za-z0-9]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|"private_key_id"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"|[0-9]{8,10}:[A-Za-z0-9_-]{35}'
 
 # Inline exemption for lines that MUST look like a secret — the test fixtures of
 # the detectors themselves, and documentation showing what a blocked line looks

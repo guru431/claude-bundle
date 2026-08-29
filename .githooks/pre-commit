@@ -26,6 +26,13 @@ fi
 
 # Collect staged diff once (exclude the hook itself to avoid self-matching)
 diff_content=$(git diff --cached --unified=0 -- . ':(exclude).githooks/' 2>/dev/null || git diff --cached --unified=0)
+# ADDED lines only, for the same reason secret_scan_diff filters them: a commit
+# that REMOVES a leaked string must not be blocked, or the leak could never be
+# remediated. Step 3 below used to grep the whole diff, '-' lines included — so
+# the one commit that cleans a hostname out of the tree matched its own
+# denylist and was refused, leaving `--no-verify` (which also disables step 2)
+# as the only way through. '+++' is a file header, not content.
+added_content=$(printf '%s\n' "$diff_content" | grep -E '^\+' | grep -vE '^\+\+\+' || true)
 
 # 2) High-confidence secret/token formats (generic, very low false-positive)
 # Shared with the nightly cron/git-push-all.sh sweep — one source of truth for
@@ -52,7 +59,7 @@ if [ -f "$sp" ]; then
   # leave a trailing \r on every regex and silently disable the whole denylist.
   grep -vE '^[[:space:]]*$' "$sp" 2>/dev/null | tr -d '\r' > "$pat" || true
   if [ -s "$pat" ]; then
-    hits=$(printf '%s\n' "$diff_content" | grep -inEf "$pat" || true)
+    hits=$(printf '%s\n' "$added_content" | grep -inEf "$pat" || true)
     if [ -n "$hits" ]; then
       echo "BLOCKED: personal data (matched .sanitize-patterns) in staged changes:"
       printf '%s\n' "$hits" | sed 's/^/  /'

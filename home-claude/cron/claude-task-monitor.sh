@@ -10,6 +10,12 @@
 # silently with exit 127. Heredoc <<'PYSCRIPT' bypasses bash interpolation,
 # so Python receives a clean source string.
 
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=a failure summary -> Telegram Bot API money=no writes=nothing
+
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -z "$BUNDLE_ROOT" ] || [ ! -d "$BUNDLE_ROOT/cron" ]; then
     EMERGENCY="$HOME/task-monitor-fatal.log"
@@ -21,24 +27,11 @@ CRON_DIR="$BUNDLE_ROOT/cron"
 LOG_DIR="$CRON_DIR/logs"
 
 # Session 0 has no user env — read the bundle .env (PYTHON_EXE, PROJECTS_ROOT)
-# with the same safe parser as telegram-send.sh.
-ENV_FILE="$BUNDLE_ROOT/.env"
-if [ -f "$ENV_FILE" ]; then
-    while IFS= read -r raw || [ -n "$raw" ]; do
-        line="${raw%$'\r'}"
-        case "$line" in
-            ''|\#*) continue ;;
-            export\ *) line="${line#export }" ;;
-        esac
-        key="${line%%=*}"
-        case "$key" in
-            *[!A-Za-z0-9_]*|'') continue ;;
-        esac
-        val="${line#*=}"
-        val="${val%\"}"; val="${val#\"}"
-        val="${val%\'}"; val="${val#\'}"
-        export "$key=$val"
-    done < "$ENV_FILE"
+# with the shared safe parser (cron/lib/dotenv.sh; env > dotenv).
+if [ -f "$CRON_DIR/lib/dotenv.sh" ]; then
+    # shellcheck source=lib/dotenv.sh
+    . "$CRON_DIR/lib/dotenv.sh"
+    dotenv_load "$BUNDLE_ROOT/.env"
 fi
 
 PYTHON="${PYTHON_EXE:-python}"
@@ -302,6 +295,23 @@ if [ -n "$FINDINGS_ALERT" ]; then
 }$FINDINGS_ALERT"
 fi
 
+# --- Stale artifact verdicts (Semantic Artifact SLO, cron/runs.py) ---
+# Task Scheduler's Last Result answers "did the process exit 0", and this
+# monitor already reads that. It cannot answer "has the task reported AT ALL
+# lately": a task that stops firing has no failing run to notice, so its last
+# ledger verdict just sits there reading `green` for months. `runs.py stale`
+# compares each task's newest record against a window derived from its own
+# registry trigger and exits 1 when something has gone quiet.
+echo "TRACE: stage=stale $(date '+%H:%M:%S')" >> "$LOG_FILE"
+STALE_OUT=$("$PYTHON" "$CRON_DIR/runs.py" stale 2>>"$LOG_FILE")
+if [ -n "$STALE_OUT" ]; then
+    echo "Stale verdicts:" >> "$LOG_FILE"
+    printf '%s\n' "$STALE_OUT" >> "$LOG_FILE"
+    ALERTS="${ALERTS:+$ALERTS
+}StaleVerdict: task(s) have not reported a run in a while
+$STALE_OUT"
+fi
+
 # --- Size watch for logs/wiki (warn on growth, not auto-cleanup) ---
 echo "TRACE: stage=sizes $(date '+%H:%M:%S')" >> "$LOG_FILE"
 SIZE_WARNINGS=""
@@ -364,4 +374,13 @@ else
 fi
 
 echo "=== End Task Monitor $(date '+%H:%M:%S') ===" >> "$LOG_FILE"
+
+# Terminal ledger record (cron/runs.py). delivery carries whether the alert
+# actually reached Telegram — for a monitor, an undelivered alert is the only
+# failure that matters, and it is exactly the one that looks like success.
+"$PYTHON" "$CRON_DIR/runs.py" record \
+    --task ClaudeTaskMonitor --rc "$MONITOR_RC" --artifact "$LOG_FILE" \
+    --delivery "$([ "$MONITOR_RC" -eq 0 ] && echo ok || echo failed)" \
+    >>"$LOG_FILE" 2>&1 || true
+
 exit "$MONITOR_RC"

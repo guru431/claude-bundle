@@ -224,12 +224,17 @@ def test_open_finding_is_detected_for_dedup(sync, tmp_path):
 
 
 def test_pair_without_claude_md_is_skipped(sync, tmp_path):
-    """No CLAUDE.md means there is nothing to be the source of truth."""
-    drifted, fixed = sync.check_pair(
+    """No CLAUDE.md means there is nothing to be the source of truth.
+
+    The third value is `examined`: a skipped pair was NOT verified, and main()
+    counts on that distinction to tell "checked everything, all in sync" from
+    "could not check anything".
+    """
+    drifted, fixed, examined = sync.check_pair(
         "myproject", tmp_path / "CLAUDE.md", tmp_path / "AGENTS.md",
         tmp_path / "FINDINGS.md", tmp_path / "run.log")
 
-    assert (drifted, fixed) == (False, 0)
+    assert (drifted, fixed, examined) == (False, 0, False)
     assert not (tmp_path / "FINDINGS.md").exists()
 
 
@@ -242,6 +247,24 @@ def test_missing_agents_md_is_filed_once(sync, tmp_path):
     second = sync.check_pair("myproject", tmp_path / "CLAUDE.md", tmp_path / "AGENTS.md",
                              findings, tmp_path / "run.log")
 
-    assert first == (True, 0)
-    assert second == (False, 0), "the same missing file was filed twice"
+    assert first == (True, 0, True)
+    assert second == (False, 0, True), "the same missing file was filed twice"
     assert findings.read_text(encoding="utf-8").count("sync drift") == 1
+
+
+def test_a_run_that_examined_nothing_exits_nonzero(sync, tmp_path, monkeypatch):
+    """Every project failing to reach the provider is not a clean sweep.
+
+    main() used to return None on this path, so a night where nothing was
+    verified reported success — for the one task in the bundle that edits files
+    in other people's repositories.
+    """
+    project = tmp_path / "myproject"
+    project.mkdir()
+    (project / "CLAUDE.md").write_text("# Project\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("# Project\n", encoding="utf-8")
+    monkeypatch.setattr(sync, "PROJECTS_ROOT", tmp_path)
+    monkeypatch.setattr(sync, "llm_call", lambda *a, **k: None)
+    monkeypatch.setattr(sync, "record_run", lambda **kw: kw)
+
+    assert sync.main() == 1

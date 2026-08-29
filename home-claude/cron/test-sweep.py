@@ -12,7 +12,13 @@ Modes:
 
 The alert fires on a CHANGE of state (green → red/error/timeout), not on every
 red run: otherwise one unfixed failure sends a Telegram message every day and
-people stop reading them. The FINDINGS.md entry is filed on the same event.
+people stop reading them. The FINDINGS.md entry is filed on the same event, at
+most one open entry per suite.
+
+The reverse transition is reported too. Red → green sends its own line and
+DELETES the entry this sweep filed: FINDINGS.md holds open entries and nothing
+else (CLAUDE.md § Findings), and nobody goes back by hand to close a machine's
+finding after fixing the tests.
 
 No LLM is involved and nothing leaves the machine except the Telegram summary,
 so the bundle's privacy policy has nothing to gate here — but test output can
@@ -26,6 +32,12 @@ State: cron/state/test-sweep.json (last status per suite)
 Exit:  1 if anything is red or the run environment was broken — the task
        monitor sees the non-zero code.
 """
+
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=a masked summary of which suites broke -> Telegram Bot API money=no writes=FINDINGS.md of each affected project
 from __future__ import annotations
 
 import argparse
@@ -51,6 +63,9 @@ sys.path.insert(0, str(CRON_DIR / "hooks"))
 from utils import (PROJECTS_ROOT, find_bash, findings_header,  # noqa: E402
                    mask_secrets)
 
+sys.path.insert(0, str(CRON_DIR))
+from runs import record_run  # noqa: E402
+
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
@@ -73,7 +88,13 @@ SKIP_PROJECTS: set[str] = {
 # without tests is a policy question, not a breakage, and alerting on it daily
 # would train everyone to ignore the alert.
 EXIT_STATUS = {0: "ok", 1: "failed", 2: "interrupted", 3: "error", 4: "usage", 5: "no-tests"}
+# "no-pytest" joins "no-tests" outside ALERTING for the same reason: the sweep's
+# own interpreter choice (the project's venv) not having pytest installed is a
+# fact about the environment, not about the project's tests.
 ALERTING = {"failed", "error", "interrupted", "usage", "timeout"}
+# Statuses that mean "the suite is healthy or simply absent" — used for the
+# green marker and for closing a finding that this sweep filed earlier.
+RECOVERED = {"ok", "no-tests", "no-pytest"}
 
 
 def log(msg: str) -> None:
@@ -138,6 +159,29 @@ def interpreter_for(d: Path) -> str:
     return sys.executable
 
 
+def has_pytest(interpreter: str) -> bool:
+    """Is pytest importable by the interpreter this suite will run under?
+
+    A project venv without pytest makes `python -m pytest` exit 1 — which
+    EXIT_STATUS reads as "failed", so the sweep filed a `[P2] Tests are
+    failing` in somebody's FINDINGS.md and sent a Telegram alert about a suite
+    it never ran. That is precisely the class of false finding is_env_failure
+    and ensure_basetemp exist to prevent; this branch was simply not covered.
+
+    Our own interpreter is answered in-process — no spawn, and no chance of
+    getting a different answer than the import that follows.
+    """
+    if interpreter == sys.executable:
+        import importlib.util
+        return importlib.util.find_spec("pytest") is not None
+    try:
+        return subprocess.run([interpreter, "-c", "import pytest"],
+                              capture_output=True, timeout=60,
+                              check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
 # Temp root for THIS run. A fresh tree per run rather than shared
 # `%TEMP%/sweep-<key>` dirs: pytest makes its basetemp private (inheritance
 # disabled, only SYSTEM/Administrators/OWNER RIGHTS left in the DACL), so a
@@ -176,17 +220,55 @@ def basetemp_for(key: str) -> Path:
     return RUN_ROOT / safe
 
 
+_SWEEP_DIR_RE = re.compile(r"^sweep-run-(\d+)$")
+
+
+def _owner_alive(name: str) -> bool:
+    """Does a live process own this `sweep-run-<pid>` directory?
+
+    ClaudeTestSweep (daily 05:15, timeout 2h) and ClaudeTestSweepFull (weekly
+    Sat 07:00) are two DIFFERENT tasks, so MultipleInstancesPolicy=IgnoreNew —
+    which is per task name — does not keep them apart. On a Saturday their
+    windows overlap, and a sweep that finished first used to delete every
+    `%TEMP%/sweep-*` directory including the `--basetemp` the other sweep was
+    actively writing into. is_env_failure does not classify that as an
+    environment problem either, because the directory did not fail to be
+    cleaned up — it vanished from under a running pytest.
+
+    An unparsable name (a leftover from an older layout) counts as dead: it
+    belongs to no live run and is safe to reclaim.
+    """
+    m = _SWEEP_DIR_RE.match(name)
+    if not m:
+        return False
+    pid = int(m.group(1))
+    if pid == os.getpid():
+        return True
+    try:
+        import psutil
+    except ImportError:
+        # Without psutil we cannot tell a live owner from a dead one. Assume
+        # live: leaving a stale directory behind costs disk, deleting a live
+        # one costs somebody else's whole run.
+        return True
+    return psutil.pid_exists(pid)
+
+
 def cleanup_temp_roots(keep: Path | None = None) -> list[str]:
-    """Remove this run's tree and leftovers from previous ones.
+    """Remove this run's tree and leftovers from runs that are no longer alive.
 
     Without it `%TEMP%` accumulates one directory per suite per run — after
     three runs there were 19, some of them not removable as a normal user.
-    Anything foreign or stuck is skipped silently; it is not worth failing over.
+    Anything owned by a live process, foreign or stuck is skipped silently.
     """
     removed = []
     root = Path(tempfile.gettempdir())
-    for path in list(root.glob("sweep-run-*")) + list(root.glob("sweep-*")):
+    # One glob, not `sweep-run-*` plus the superset `sweep-*`: the second
+    # pattern contained the first, so every directory was visited twice.
+    for path in sorted(root.glob("sweep-*")):
         if not path.is_dir() or (keep and path == keep):
+            continue
+        if path != RUN_ROOT and _owner_alive(path.name):
             continue
         try:
             rmtree_force(path)
@@ -312,8 +394,12 @@ def reap_orphan_pytest() -> list[str]:
 
 
 def run_suite(suite: Path, key: str, full: bool) -> dict:
+    interpreter = interpreter_for(suite)
+    if not has_pytest(interpreter):
+        return {"status": "no-pytest", "seconds": 0.0, "tail": "",
+                "note": f"pytest is not installed for {interpreter} — suite not run"}
     basetemp, temp_note = ensure_basetemp(basetemp_for(key))
-    cmd = [interpreter_for(suite), "-m", "pytest", "-q", "-p", "no:cacheprovider",
+    cmd = [interpreter, "-m", "pytest", "-q", "-p", "no:cacheprovider",
            "--durations=5", "--basetemp", str(basetemp)]
     if full:
         # Overrides the default `-m 'not integration and not manual'` from
@@ -377,12 +463,78 @@ def summary_line(text: str) -> str:
     return ""
 
 
+def finding_marker(suite: str) -> str:
+    """The signature this sweep stamps into every finding it files.
+
+    It is what makes an entry recognisably OURS later — for the duplicate check
+    before filing and for closing the entry once the suite goes green.
+    """
+    return f"auto-cron `ClaudeTestSweep`, `{suite}`,"
+
+
+def _split_entries(text: str) -> tuple[str, list[str]]:
+    """(header, [entry blocks]) for a FINDINGS.md. Each block starts with '## '."""
+    m = re.search(r"(?m)^## ", text)
+    if not m:
+        return text, []
+    return text[:m.start()], [
+        p for p in re.split(r"(?m)^(?=## )", text[m.start():]) if p.strip()
+    ]
+
+
+def has_open_finding(project_dir: Path, suite: str) -> bool:
+    """True when this sweep already has an OPEN entry for this suite.
+
+    Without it every transition between two red statuses (failed → timeout →
+    failed) passed the change filter and appended one more entry about the same
+    broken suite — a flaky test earned a dozen duplicates in somebody else's
+    FINDINGS.md over a month. Mirrors agents-md-sync-check's
+    has_open_drift_finding.
+    """
+    f = project_dir / "FINDINGS.md"
+    if not f.exists():
+        return False
+    try:
+        text = f.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    marker = finding_marker(suite)
+    _, entries = _split_entries(text)
+    return any(marker in e and "**Status:** open" in e for e in entries)
+
+
+def close_finding(project_dir: Path, suite: str) -> bool:
+    """Delete this sweep's open entry for a suite that has gone green again.
+
+    FINDINGS.md holds `open` entries and nothing else (CLAUDE.md § Findings),
+    and a machine-filed entry has to be closed by the same machine: nobody goes
+    back to delete "tests are failing" after fixing the tests, so the file grew
+    a permanent record of problems that no longer exist. Deleting is the
+    documented close for a DONE finding — the trail stays in git log.
+    """
+    f = project_dir / "FINDINGS.md"
+    if not f.exists():
+        return False
+    try:
+        text = f.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    marker = finding_marker(suite)
+    head, entries = _split_entries(text)
+    kept = [e for e in entries if not (marker in e and "**Status:** open" in e)]
+    if len(kept) == len(entries):
+        return False
+    atomic_write_text(f, head.rstrip("\n") + "\n\n" + "".join(
+        e.rstrip("\n") + "\n\n" for e in kept))
+    return True
+
+
 def append_finding(project_dir: Path, project: str, suite: str, res: dict) -> None:
     f = project_dir / "FINDINGS.md"
     detail = summary_line(res["tail"]) or res["status"]
     entry = (
         f"## {DATE} · Tests are failing: {suite} [P2]\n"
-        f"**Context:** auto-cron `ClaudeTestSweep`, `{suite}`, status `{res['status']}`, "
+        f"**Context:** {finding_marker(suite)} status `{res['status']}`, "
         f"{res['seconds']}s\n"
         f"**What:** the run returned: {detail}\n"
         f"**Proposal:** reproduce with `pytest -q` in that directory and fix it, or mark "
@@ -428,13 +580,26 @@ def main(argv=None) -> int:
     ap.add_argument("--project", help="a single project directory name")
     ap.add_argument("--dry-run", action="store_true", help="print the plan and exit")
     args = ap.parse_args(argv)
+    task = "ClaudeTestSweepFull" if args.full else "ClaudeTestSweep"
+
+    def done(rc: int, useful, note: str) -> int:
+        """One terminal ledger record per run (cron/runs.py).
+
+        The contract was written for the LLM tasks, but "ran and did nothing
+        useful" is just as invisible here: a sweep that finds no suite at all
+        exits 0 and looks exactly like a sweep where everything passed.
+        """
+        record_run(task=task, process_rc=rc,
+                   artifact_path=LOG_DIR / f"test-sweep_{DATE}.log",
+                   useful_items=useful, delivery="n/a", note=note)
+        return rc
 
     if PROJECTS_ROOT is None:
         log("projects_root is not set in bundle.local.yaml — nothing to sweep")
-        return 0
+        return done(0, None, "projects_root not set")
     if not PROJECTS_ROOT.is_dir():
         log(f"projects_root does not exist: {PROJECTS_ROOT} — nothing to sweep")
-        return 0
+        return done(0, None, f"projects_root missing: {PROJECTS_ROOT}")
 
     projects = [p for p in sorted(PROJECTS_ROOT.iterdir())
                 if p.is_dir() and not p.name.startswith(".")]
@@ -442,13 +607,13 @@ def main(argv=None) -> int:
         projects = [p for p in projects if p.name == args.project]
         if not projects:
             log(f"project {args.project} not found under {PROJECTS_ROOT}")
-            return 4
+            return done(4, None, f"project {args.project} not found")
 
     if not args.dry_run:
         for entry in reap_orphan_pytest():
             log(f"reaped an abandoned pytest ({entry})")
 
-    state, results, changed = load_state(), {}, []
+    state, results, changed, recovered = load_state(), {}, [], []
     for root in projects:
         name = root.name
         if name in SKIP_PROJECTS:
@@ -465,7 +630,8 @@ def main(argv=None) -> int:
                 continue
             res = run_suite(suite, key, args.full)
             results[key] = res
-            mark = {"ok": "OK ", "no-tests": "OK ", "env": "ENV"}.get(res["status"], "RED")
+            mark = {"ok": "OK ", "no-tests": "OK ", "no-pytest": "OK ",
+                    "env": "ENV"}.get(res["status"], "RED")
             log(f"{mark} {key}: {res['status']} in {res['seconds']}s "
                 f"— {summary_line(res['tail'])}")
             if res.get("note"):
@@ -479,15 +645,34 @@ def main(argv=None) -> int:
                 for line in named or res["tail"].splitlines()[-1:]:
                     log(f"     {line}")
             previous = (state.get(key) or {}).get("status")
+            # Neither a finding nor an alert must take the whole sweep down:
+            # FINDINGS.md can be open, just deleted, or on an unreachable share —
+            # and then the remaining projects would simply never run.
             if res["status"] in ALERTING and previous != res["status"]:
-                changed.append((key, res))
-                # Filing a finding must not take the whole sweep down: FINDINGS.md
-                # can be open, just deleted, or on an unreachable share — and then
-                # the remaining projects would simply never run.
+                # Only ONE open entry per suite. Every transition between two
+                # red statuses (failed → timeout → failed) passes the change
+                # filter, and each used to append another entry about the same
+                # broken suite.
                 try:
-                    append_finding(root, name, key, res)
+                    if has_open_finding(root, key):
+                        log(f"     finding already open for {key} — not filing a duplicate")
+                    else:
+                        append_finding(root, name, key, res)
+                        changed.append((key, res))
                 except OSError as exc:
                     log(f"     finding not written to {name}/FINDINGS.md: {exc}")
+                    changed.append((key, res))
+            elif res["status"] in RECOVERED and previous in ALERTING:
+                # Red → green. Nothing reported this before: Telegram stayed
+                # silent, so nobody learned the fix had worked, and the entry
+                # this sweep filed stayed open forever in a file whose whole
+                # contract is "open entries only".
+                recovered.append((key, res, previous))
+                try:
+                    if close_finding(root, key):
+                        log(f"     recovered — closed the finding in {name}/FINDINGS.md")
+                except OSError as exc:
+                    log(f"     finding not closed in {name}/FINDINGS.md: {exc}")
             state[key] = {"status": res["status"], "seconds": res["seconds"], "date": DATE}
 
     if args.dry_run:
@@ -510,6 +695,14 @@ def main(argv=None) -> int:
         lines += [f"• {k}: {r['status']} — {summary_line(r['tail'])}" for k, r in changed]
         lines.append("Findings filed in the projects' FINDINGS.md.")
         send_telegram("\n".join(lines))
+    if recovered:
+        # A separate message: "it is fixed" is the one piece of news the sweep
+        # used to keep entirely to itself.
+        lines = [f"Tests recovered ({DATE}):"]
+        lines += [f"• {k}: {was} → {r['status']} in {r['seconds']}s"
+                  for k, r, was in recovered]
+        lines.append("Their findings were closed automatically.")
+        send_telegram("\n".join(lines))
     if env:
         # A separate message and no findings: this is a broken run environment,
         # not the projects' tests. It is fixed by clearing permissions on a
@@ -519,7 +712,12 @@ def main(argv=None) -> int:
                       f"The leftover %TEMP%/sweep-* directories belong to a process with "
                       f"an admin token; clear them with "
                       f"takeown /F ... /R /D Y && icacls ... /reset /T. No findings filed.")
-    return 1 if red or env else 0
+    # useful_items = suites actually run: zero means the sweep walked
+    # projects_root and found nothing to test, which is a configuration
+    # problem wearing a green exit code.
+    return done(1 if red or env else 0, len(results),
+                f"{len(results)} suite(s), {len(red)} red, {len(env)} env, "
+                f"{len(recovered)} recovered")
 
 
 if __name__ == "__main__":

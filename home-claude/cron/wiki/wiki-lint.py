@@ -9,6 +9,12 @@ past the previous run's count (see BASELINE_FILE).
 Schedule: Sunday at 02:00.
 """
 
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=nothing by default (a summary -> Telegram with ENABLE_TELEGRAM_ALERTS) money=no writes=nothing
+
 import difflib
 import json
 import os
@@ -28,6 +34,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (BUNDLE_ROOT, WIKI_ROOT, LOG_MD, find_bash,  # noqa: E402
                    is_reserved_page_name, mark_phase_success)
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from runs import record_run  # noqa: E402
 
 KBNEWS_DIR = BUNDLE_ROOT / "kb_news"
 TELEGRAM_SCRIPT = BUNDLE_ROOT / "cron" / "telegram-send.sh"
@@ -656,6 +665,13 @@ def main():
     save_baseline(class_counts)
 
     log(f"=== Lint complete ===")
+
+    # Terminal ledger record (cron/runs.py). useful_items = pages inspected —
+    # a lint that walked an EMPTY vault reports zero rather than passing for a
+    # clean bill of health, which is what "0 errors over 0 pages" reads as.
+    record_run(task="ClaudeWikiLint", process_rc=1 if stats["errors"] else 0,
+               useful_items=stats["pages"], delivery="n/a",
+               note=f"{stats['errors']} error(s), {stats['warnings']} warning(s)")
 
     # Lint errors (index desync) are a hard failure: skip the heartbeat and exit
     # non-zero so the cron monitor sees it. Link resolution and colliding page

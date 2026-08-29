@@ -13,6 +13,10 @@
 #                           PROJECTS_ROOT when deployed under ~/.claude
 #   9. Doc counts         — scheduled-task count in docs matches registry.yaml
 #  10. Secret-guard (WARN)— pre-commit hook active (bundle source tree only)
+#  11. Registry schema    — required fields / kind / trigger grammar
+#  12. Env reference      — .env template agrees with the docs and the code
+#  13. Privacy matrix     — docs table agrees with each task's declared I/O
+#  14. MCP wrappers (WARN)— no `npx -y` / `uv run` resolver wrappers declared
 #
 # Exit code: 0 if all checks pass, 1 if any FAIL. Placeholder/skip = WARN (not a
 # failure) so a freshly-cloned template still self-tests green.
@@ -163,7 +167,7 @@ if ($py) {
 import sys, yaml
 KNOWN = {'project_map', 'known_projects', 'skip_dirs', 'skip_projects',
          'allow_projects', 'skip_jsonl_projects', 'collect_plans',
-         'projects_root'}
+         'projects_root', 'dry_run_until'}
 d = yaml.safe_load(open(sys.argv[1], encoding='utf-8'))
 if d is None:
     sys.exit(0)
@@ -379,6 +383,37 @@ if ($py -and -not $deployed) {
         $out = Invoke-Checked { & $py $ce }
         if ($script:lastRc -eq 0) { Ok "env template matches the docs" }
         else { Bad "env/doc reference drift:`n$out" }
+    }
+}
+
+# ── 13. Privacy matrix guard (source tree only) ──────────────────────────────
+# The "Data, cost & publishing per task" table is the page a user reads to
+# decide whether to enable a task, and it had already drifted on the most
+# invasive one. Each task script declares its I/O in a `# bundle-io:` line and
+# scripts/check-io-matrix.py fails when the doc disagrees.
+if ($py -and -not $deployed) {
+    $ci = Join-Path $root 'scripts/check-io-matrix.py'
+    if (Test-Path $ci) {
+        $out = Invoke-Checked { & $py $ci }
+        if ($script:lastRc -eq 0) { Ok "privacy matrix matches each task's declared I/O" }
+        else { Bad "privacy matrix drift:`n$out" }
+    }
+}
+
+# ── 14. MCP wrapper audit (WARN; source tree or deployment) ──────────────────
+# README devotes a block with measured figures to `npx -y` MCP wrappers (95 MB
+# resident, 6.4 s to resolve, up to six processes per server) and ends with
+# "run mcp-probe --check-wrappers after installing" — leaving the one cheap
+# check in that section to human memory, which is the class of thing this
+# bundle otherwise automates. --check-wrappers launches nothing and makes no
+# network call, so it is safe inside the self-test's offline contract.
+# WARN, never FAIL: which MCP servers you declare is not the bundle's business.
+if ($py) {
+    $mp = Join-Path $root 'scripts/mcp-probe.py'
+    if (Test-Path $mp) {
+        $out = Invoke-Checked { & $py $mp --check-wrappers }
+        if ($script:lastRc -eq 0) { Ok "MCP declarations: no resolver wrappers" }
+        else { Warn "MCP declarations use resolver wrappers (npx -y / uv run):`n$out" }
     }
 }
 

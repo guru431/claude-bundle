@@ -49,16 +49,32 @@ preserve that discipline.
 ├── home-claude/                       what gets copied into ~/.claude/
 │   ├── CLAUDE.md                       global rules ← edit here for tier-1 rule changes
 │   ├── settings.json                   permissions + plugins
-│   ├── settings.example-with-hooks.json
+│   ├── settings.example-with-hooks.json  same permissions, hooks wired in
 │   ├── hooks/                          2 sanitized PreToolUse/PostToolUse hooks
 │   ├── skills/                         3 skill templates (placeholders)
 │   ├── commands/                       1 slash-command wrapper
 │   ├── wiki/                           empty Karpathy vault skeleton
-│   ├── bin/_run-hidden.vbs             hidden-window Task Scheduler launcher
-│   └── cron/                           tier-2: hooks (incl. precompact-handoff),
-│                                       llm-call, telegram, prompts/, wiki/*,
-│                                       task scripts, registry.yaml,
-│                                       admin/{sync,save-cred}
+│   ├── bin/
+│   │   ├── _run-hidden.vbs             hidden-window Task Scheduler launcher
+│   │   └── md2pdf.py                   md → PDF converter (hook + ClaudeMd2PdfSync)
+│   └── cron/                           tier-2 pipeline
+│       ├── hooks/                       session-start/end, pre-compact,
+│       │                                precompact-handoff, untrusted, utils.py
+│       ├── lib/                         sourceable/importable shared code:
+│       │                                secret-scan.sh, secret_shapes.py, dotenv.sh
+│       ├── wiki/                        flush, compile-sessions, compile-kb,
+│       │                                build-index, lint, conflict-resolve, pipeline
+│       ├── prompts/                     the LLM prompts those phases send
+│       ├── tests/                       shell tests for the push guards
+│       ├── admin/                       sync-tasks, save-cred (+ .cmd wrappers)
+│       ├── registry.yaml                the 15 scheduled tasks — source of truth
+│       ├── runs.py                      Semantic Artifact SLO ledger
+│       ├── bundle-status.py             read-only health snapshot
+│       ├── schtasks_status.py           Task Scheduler status parser
+│       ├── memory-update.py, log-retention.py, md2pdf-sync.py,
+│       ├── test-sweep.py, agents-md-sync-check.py, llm-call.py
+│       └── *.sh                         healthcheck, task-monitor, warm-window,
+│                                        git-push-all, github-push, telegram-send
 ├── codex/
 │   ├── AGENTS.md                       universal-rules mirror for Codex CLI
 │   └── AGENTS-per-project.template.md
@@ -66,25 +82,38 @@ preserve that discipline.
 │   ├── claude-switch.ps1               env-driven provider switcher
 │   ├── install.ps1                     guided full/lite installer (Windows)
 │   ├── install-lite.sh                 lite installer (macOS/Linux)
+│   ├── uninstall.ps1                   remove a deployment + its tasks
 │   ├── gen-scheduler.py                systemd/launchd units from registry.yaml
+│   ├── bootstrap-registry.ps1          fill registry.yaml placeholders
 │   ├── self-test.ps1                   offline sanity check (one command)
-│   ├── check-doc-counts.py             CI guard: docs match registry task count
+│   ├── mcp-probe.py                    MCP handshake + `--check-wrappers` audit
 │   ├── enable-guard.{sh,ps1}           activate the pre-commit secret-guard
-│   └── bootstrap-registry.ps1          fill registry.yaml placeholders
+│   └── check-*.py                      CI guards: doc-counts, registry, env-ref,
+│                                       agents-sync, io-matrix
 ├── config/
 │   ├── llm-providers.example.env       env template (committed; no values)
 │   └── bundle.local.example.yaml       machine-local manifest template (project map + privacy policy)
-├── tests/test_pipeline.py              pytest pipeline smoke test (mock provider)
+├── tests/                              pytest suite (offline, mock provider):
+│                                       pipeline, guards, agents-md-sync,
+│                                       test-sweep, schtasks-status, page names
 ├── VERSION, requirements.txt, requirements-dev.txt  semver stamp + runtime + test deps
-├── .githooks/pre-commit                secret-guard hook (git config core.hooksPath .githooks)
-├── .github/workflows/ci.yml            compileall + JSON/YAML + secret-guard + doc-count + mirror-sync + shellcheck + pytest + PS parse/self-test CI
+├── pytest.ini                          the reference impl of the test policy
+├── .githooks/{pre-commit,pre-push}     secret guards (git config core.hooksPath .githooks)
+├── .github/workflows/ci.yml            compileall + JSON/YAML + secret-guard + doc/registry/
+│                                       env/mirror/io-matrix guards + shellcheck + pytest
+│                                       + PS parse/self-test CI
 ├── docs/                               long-form docs referenced from
 │   ├── wiki-method.md                  rules files and INSTALL
 │   ├── cron-architecture.md
-│   └── llm-routing.md
+│   ├── llm-routing.md
+│   └── mcp-servers.md
 ├── AGENTS.md                           per-project pointer for Codex CLI
 └── CLAUDE.md                           ← you are here
 ```
+
+This block is checked by `scripts/check-doc-counts.py` (it compares the
+first-level directory names against the real tree), so it cannot silently
+rot the way it did before — but the leaf entries are still discipline.
 
 ## What lives where — when changing X, also touch Y
 

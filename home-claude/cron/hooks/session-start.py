@@ -2,10 +2,13 @@
 
 Trigger: a new Claude Code session starts.
 Input:   stdin JSON with session_id, transcript_path (may be empty).
-Output (in order of relevance):
-  1. wiki/projects/<current-project>/_log.md — recent updates for this project
-  2. wiki/index.md — global knowledge map
-  3. latest wiki/daily/YYYY-MM-DD.md — yesterday's notes
+Output (in order of relevance, and that order is also the spending order of the
+SESSION_START_MAX_CHARS budget — see below):
+  1. the session's handoff from the last compaction
+  2. recent wiki pages for this project (title + first paragraph)
+  3. wiki/projects/<current-project>/_log.md — recent updates for this project
+  4. wiki/index.md — global knowledge map
+  5. this project's section of the latest wiki/daily/YYYY-MM-DD.md
 Time: <1s, no LLM calls.
 """
 
@@ -20,9 +23,27 @@ if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import dir_to_project, get_latest_daily, get_project_log, get_recent_pages_preview, get_wiki_index
+from utils import (dir_to_project, get_latest_daily, get_project_log,
+                   get_recent_pages_preview, get_wiki_index, truncate_head)
 
 HANDOFF_MAX_AGE_HOURS = 24
+
+# Total budget for everything this hook injects, in characters.
+#
+# This hook runs at EVERY session start, which makes it the most frequently
+# paid component of the bundle — and it was the only one with no size limit at
+# all. get_project_log capped itself at 120 lines and get_recent_pages_preview
+# at 12 pages × ~250 chars, while wiki/index.md and the daily log (an LLM
+# digest of every project's day) were read whole. The cheap sources were
+# rationed and the two expensive ones were not.
+#
+# Blocks are filled in PRIORITY order and the budget is spent as it goes, so
+# what survives a tight budget is what bears most on this session. Set
+# SESSION_START_MAX_CHARS=0 to disable the limit entirely.
+try:
+    MAX_CHARS = max(0, int(os.environ.get("SESSION_START_MAX_CHARS", "8000")))
+except ValueError:
+    MAX_CHARS = 8000
 
 # PreCompact spawns the handoff writer detached and returns at once, so the
 # SessionStart that follows a compaction usually arrives BEFORE the file exists
@@ -152,16 +173,20 @@ def get_handoff(transcript_dir: str, session_id: str = "") -> tuple[str, str]:
     return text, origin
 
 
-def main():
-    parts = []
+def collect_blocks(project: str, transcript_dir: str, session_id: str) -> list[tuple[str, str, str]]:
+    """(title, body, where-the-full-text-lives) in PRIORITY order.
 
-    project, transcript_dir, session_id = detect_from_stdin()
+    Priority is "how specific is this to the session in front of us": the
+    handoff is this very conversation, the wiki previews and log are this
+    project, and the index and daily log are the whole machine.
+    """
+    blocks: list[tuple[str, str, str]] = []
 
     handoff, origin = get_handoff(transcript_dir, session_id)
     if handoff:
-        parts.append("=== HANDOFF (last compaction) ===" if not origin else
-                     f"=== HANDOFF (from a DIFFERENT session: {origin}) ===")
-        parts.append(handoff)
+        title = ("=== HANDOFF (last compaction) ===" if not origin else
+                 f"=== HANDOFF (from a DIFFERENT session: {origin}) ===")
+        blocks.append((title, handoff, "the session's memory/handoff-*.md"))
 
     if project:
         # Preview of recent solution/incident/feedback pages — title + first paragraph.
@@ -169,24 +194,48 @@ def main():
         # obviously relevant entries because they don't know what's inside.
         preview = get_recent_pages_preview(project, days=7, limit=12)
         if preview:
-            parts.append(f"=== RECENT WIKI PAGES ({project}, last 7d) ===")
-            parts.append(preview)
+            blocks.append((f"=== RECENT WIKI PAGES ({project}, last 7d) ===",
+                           preview, f"wiki/projects/{project}/"))
 
         log = get_project_log(project)
         if log:
-            parts.append(f"=== WIKI PROJECT LOG ({project}) ===")
-            parts.append(log)
+            blocks.append((f"=== WIKI PROJECT LOG ({project}) ===",
+                           log, f"wiki/projects/{project}/_log.md"))
 
     index = get_wiki_index()
     if index:
-        parts.append("=== WIKI INDEX ===")
-        parts.append(index)
+        blocks.append(("=== WIKI INDEX ===", index, "wiki/index.md"))
 
-    daily = get_latest_daily()
+    # Only this project's section of the daily digest — the rest of it is other
+    # projects' days and has no bearing on this session.
+    daily = get_latest_daily(project)
     if daily:
-        parts.append("=== LATEST DAILY LOG ===")
-        parts.append(daily)
+        blocks.append(("=== LATEST DAILY LOG ===", daily, "wiki/daily/<date>.md"))
 
+    return blocks
+
+
+def within_budget(blocks: list[tuple[str, str, str]], budget: int) -> list[str]:
+    """Render blocks until the budget runs out, truncating the one that straddles it."""
+    parts: list[str] = []
+    left = budget
+    for title, body, hint in blocks:
+        if budget and left <= len(title):
+            parts.append(f"(… {len(blocks) - len(parts) // 2} lower-priority block(s) "
+                         f"omitted — SESSION_START_MAX_CHARS={budget})")
+            break
+        if budget:
+            body = truncate_head(body, left - len(title), hint)
+            left -= len(title) + len(body)
+        parts.append(title)
+        parts.append(body)
+    return parts
+
+
+def main():
+    project, transcript_dir, session_id = detect_from_stdin()
+    parts = within_budget(collect_blocks(project, transcript_dir, session_id),
+                          MAX_CHARS)
     if parts:
         print("\n\n".join([CONTEXT_HEADER] + parts + [CONTEXT_FOOTER]))
 

@@ -68,6 +68,21 @@ skip_projects: []
 skip_dirs: []
 #   - C--Windows-System32
 
+# ── A safe first week ────────────────────────────────────────────────────────
+
+# dry_run_until: hold EVERY phase in preview mode until this date (YYYY-MM-DD).
+# No LLM call, no network, no writes to the wiki or the state file — the logs
+# show exactly what each source WOULD have sent, per project.
+#
+# WIKI_BACKLOG_MAX=0 already stops a first run shipping your whole transcript
+# archive, but it does nothing about the first NIGHT: everything from the last
+# 48 hours goes to the provider before anyone has read a --dry-run preview.
+# This is that missing brake. The installer sets it to a week out; the window
+# expires by itself, which is the point — a flag you must remember to remove is
+# a flag that stays on for a year. Delete the key to start immediately.
+dry_run_until:
+#   dry_run_until: 2026-09-05
+
 # ── Unattributed sources ─────────────────────────────────────────────────────
 
 # collect_plans: send ~/.claude/plans/*.md to the LLM. OFF by default, and this

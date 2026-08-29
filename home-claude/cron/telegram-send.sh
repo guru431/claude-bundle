@@ -12,26 +12,13 @@
 # user env, so we read .env explicitly when running under cron.
 
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$BUNDLE_ROOT/.env"
-if [ -f "$ENV_FILE" ]; then
-    # Safe parser: extract only well-formed KEY=VALUE lines, no `source` (which
-    # would execute arbitrary bash if .env ever contains $(...) / `...` / `;`).
-    # Strips surrounding quotes from VALUE. Ignores comments and blank lines.
-    while IFS= read -r raw || [ -n "$raw" ]; do
-        line="${raw%$'\r'}"
-        case "$line" in
-            ''|\#*) continue ;;
-            export\ *) line="${line#export }" ;;
-        esac
-        key="${line%%=*}"
-        case "$key" in
-            *[!A-Za-z0-9_]*|'') continue ;;
-        esac
-        val="${line#*=}"
-        val="${val%\"}"; val="${val#\"}"
-        val="${val%\'}"; val="${val#\'}"
-        export "$key=$val"
-    done < "$ENV_FILE"
+# Safe parser (cron/lib/dotenv.sh): well-formed KEY=VALUE lines only, no
+# `source`, and env > dotenv. One shared implementation instead of a copy per
+# script — see the library's header for what the copies had drifted into.
+if [ -f "$(dirname "$0")/lib/dotenv.sh" ]; then
+    # shellcheck source=lib/dotenv.sh
+    . "$(dirname "$0")/lib/dotenv.sh"
+    dotenv_load "$BUNDLE_ROOT/.env"
 fi
 
 if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then

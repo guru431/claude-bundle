@@ -241,7 +241,7 @@ Do not put `--cov` in `addopts`: coverage is measured on demand, not on every ru
 
 ### Error Recovery — MAXIMUM 2 attempts:
 - If a Bash command fails, try ONE alternative approach
-- If it fails again — switch to a dedicated tool (Glob, Read, Grep, ...)
+- If it fails again — switch to a dedicated tool
 - NEVER chain 5+ attempts of the same operation with different syntax
 - If stuck, ask the user instead of brute-forcing
 

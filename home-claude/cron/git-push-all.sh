@@ -7,6 +7,12 @@
 # scan sibling directories under <projects-root>/ for git repos. If your
 # layout is different, set PROJECTS_ROOT env var explicitly.
 
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=your commits -> your git remotes money=no writes=auto-commits and PUSHES every repo under projects_root
+
 # --- Helpers (defined before the main body so the file can be sourced in tests
 #     via GIT_PUSH_ALL_LIB=1 without running a push sweep) ---
 
@@ -306,25 +312,13 @@ LOG_FILE="$LOG_DIR/git-push-all_$(date +%Y-%m-%d).log"
 mkdir -p "$LOG_DIR"
 
 # Task Scheduler in session 0 has no user env, so PROJECTS_ROOT from a shell
-# profile never reaches this script — read it from the bundle .env (same safe
-# parser as telegram-send.sh).
-ENV_FILE="$BUNDLE_ROOT/.env"
-if [ -f "$ENV_FILE" ]; then
-    while IFS= read -r raw || [ -n "$raw" ]; do
-        line="${raw%$'\r'}"
-        case "$line" in
-            ''|\#*) continue ;;
-            export\ *) line="${line#export }" ;;
-        esac
-        key="${line%%=*}"
-        case "$key" in
-            *[!A-Za-z0-9_]*|'') continue ;;
-        esac
-        val="${line#*=}"
-        val="${val%\"}"; val="${val#\"}"
-        val="${val%\'}"; val="${val#\'}"
-        export "$key=$val"
-    done < "$ENV_FILE"
+# profile never reaches this script — read it from the bundle .env with the
+# shared safe parser (cron/lib/dotenv.sh; env > dotenv, so an explicitly
+# exported PROJECTS_ROOT still wins over a stale line in the file).
+if [ -f "$SCRIPT_DIR/lib/dotenv.sh" ]; then
+    # shellcheck source=lib/dotenv.sh
+    . "$SCRIPT_DIR/lib/dotenv.sh"
+    dotenv_load "$BUNDLE_ROOT/.env"
 fi
 
 REPOS_DIR="${PROJECTS_ROOT:-$(dirname "$BUNDLE_ROOT")}"
@@ -338,7 +332,7 @@ case "$BUNDLE_ROOT" in
     */.claude)
         if [ -z "$PROJECTS_ROOT" ]; then
             echo "ERROR: bundle lives in ~/.claude — refusing to scan the user profile." >> "$LOG_FILE"
-            echo "       Set PROJECTS_ROOT in $ENV_FILE to your projects directory." >> "$LOG_FILE"
+            echo "       Set PROJECTS_ROOT in $BUNDLE_ROOT/.env to your projects directory." >> "$LOG_FILE"
             exit 1
         fi
         ;;
@@ -389,6 +383,18 @@ WIKI_DIR="$BUNDLE_ROOT/wiki"
 
 echo "=== Done: pushed=$pushed skipped=$skipped failed=$failed ===" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE"
+
+# Terminal ledger record (cron/runs.py): one record per run, so bundle-status
+# can tell "swept the repos and pushed nothing" from "never ran at all". A
+# sweep that examines zero repos (pushed+skipped+failed = 0) is the wrong-root
+# failure, and it exits 0 without this.
+if [ "$DRY_RUN" != "1" ]; then
+    "${PYTHON_EXE:-python}" "$BUNDLE_ROOT/cron/runs.py" record \
+        --task ClaudeGitPushAll --rc "$([ "$failed" -gt 0 ] && echo 1 || echo 0)" \
+        --artifact "$LOG_FILE" --useful "$((pushed + skipped + failed))" \
+        --delivery n/a --note "pushed=$pushed skipped=$skipped failed=$failed" \
+        >>"$LOG_FILE" 2>&1 || true
+fi
 
 # Failed pushes must be visible: Telegram alert + exit 1 (so the task-monitor
 # catches a non-zero exit instead of every night reporting success).

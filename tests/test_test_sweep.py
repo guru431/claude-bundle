@@ -376,7 +376,64 @@ def test_alert_returns_after_recovery(sweep_env, monkeypatch):
     sweep.main([])
     sweep.main([])
     sweep.main([])
-    assert len(sent) == 2                        # a green run in between resets dedup
+    # Three messages: broke, recovered, broke again. The middle one is the news
+    # the sweep used to keep to itself — a red→green transition told nobody, so
+    # people never learned that the fix had worked.
+    assert len(sent) == 3
+    assert sum("Tests broke" in m for m in sent) == 2
+    assert sum("Tests recovered" in m for m in sent) == 1
+
+
+def test_recovery_closes_the_finding_this_sweep_filed(sweep_env, monkeypatch):
+    """FINDINGS.md holds open entries and nothing else (CLAUDE.md § Findings).
+
+    Nobody deletes a machine's "tests are failing" by hand after fixing the
+    tests, so the file accumulated a permanent record of problems that no
+    longer existed.
+    """
+    project, sent = sweep_env
+    states = iter(["failed", "ok"])
+    monkeypatch.setattr(sweep, "run_suite",
+                        lambda suite, key, full: {"status": next(states), "seconds": 1.0,
+                                                  "tail": ""})
+    sweep.main([])
+    assert (project / "FINDINGS.md").read_text(encoding="utf-8").count(
+        "Tests are failing") == 1
+    sweep.main([])
+    body = (project / "FINDINGS.md").read_text(encoding="utf-8")
+    assert "Tests are failing" not in body
+    assert body.startswith("# Findings"), "the header must survive the close"
+
+
+def test_two_different_red_statuses_file_one_finding(sweep_env, monkeypatch):
+    """failed → timeout → failed is ONE broken suite, not three findings.
+
+    Every transition between two red statuses passes the change filter, so a
+    flaky suite used to earn a new entry each time it changed its mind.
+    """
+    project, sent = sweep_env
+    states = iter(["failed", "timeout", "failed"])
+    monkeypatch.setattr(sweep, "run_suite",
+                        lambda suite, key, full: {"status": next(states), "seconds": 1.0,
+                                                  "tail": ""})
+    for _ in range(3):
+        sweep.main([])
+    assert (project / "FINDINGS.md").read_text(encoding="utf-8").count(
+        "Tests are failing") == 1
+
+
+def test_missing_pytest_is_not_reported_as_failing_tests(tmp_path, monkeypatch):
+    """A venv without pytest exits 1, which EXIT_STATUS reads as "failed".
+
+    The sweep then filed `[P2] Tests are failing` in somebody else's project
+    and alerted about a suite it had never run.
+    """
+    monkeypatch.setattr(sweep, "has_pytest", lambda interp: False)
+    monkeypatch.setattr(sweep.subprocess, "Popen", lambda *a, **k: pytest.fail(
+        "pytest must not be launched when it is not installed"))
+    res = sweep.run_suite(tmp_path, "demo", full=False)
+    assert res["status"] == "no-pytest"
+    assert "no-pytest" not in sweep.ALERTING
 
 
 def test_skipped_project_is_never_run(sweep_env, monkeypatch):

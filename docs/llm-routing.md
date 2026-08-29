@@ -171,9 +171,18 @@ Two separate mechanisms, worth not confusing:
   The default `deepseek` chain falls back to the OpenCode Go gateway when
   DeepSeek fails, which would push a prompt off-box *because* the primary
   broke; this flag forbids that. It is not a DLP switch: it does not
-  restrict where an explicitly chosen provider points. An explicit
-  `local` never falls back to anything in the first place — it is that
-  provider alone, or `None`.
+  restrict where an explicitly chosen provider points, and it does not
+  stop the FIRST provider in the chain (DeepSeek — off-box) from being
+  called. An explicit `local` never falls back to anything in the first
+  place — it is that provider alone, or `None`.
+- **`WIKI_ALLOW_OFFBOX=0` is the DLP switch.** It refuses every provider
+  whose registry row says `offbox: True`, on every call including the
+  first, with the same "nothing was sent" refusal the local-only endpoint
+  check uses. That makes "fully local" one variable instead of
+  `WIKI_LLM_PROVIDER=local` plus a belief about when the chain fires.
+  Pair it with a local server; with none configured the LLM phases no-op
+  rather than quietly reaching out. `bundle-status.py` prints the flag,
+  and so does the `[llm] provider=…` line of every run.
 
 The active policy and the resolved base URL are printed once per run in
 the `[llm] provider=…` line.

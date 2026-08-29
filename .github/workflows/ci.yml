@@ -71,6 +71,9 @@ jobs:
       - name: Env template / docs reference guard
         run: python scripts/check-env-ref.py
 
+      - name: Privacy matrix guard (docs vs each task's declared I/O)
+        run: python scripts/check-io-matrix.py
+
       - name: AGENTS/CLAUDE mirror guard (structural)
         run: python scripts/check-agents-sync.py
 
@@ -100,7 +103,12 @@ jobs:
           # otherwise read as an option. -I skips binary files.
           # Only .githooks/ is excluded (it documents token FORMATS on purpose);
           # .github/ is deliberately scanned — do NOT re-add ':(exclude).github/'.
-          hits=$(git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/' || true)
+          # Honor SECRET_SCAN_ALLOW like the pre-commit and pre-push hooks do.
+          # Without it this step contradicted the escape hatch the library
+          # documents for exactly this case — a detector's own test fixtures,
+          # which must look like the thing they detect.
+          hits=$(git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/' \
+                 | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
           if [ -n "$hits" ]; then
             echo "$hits"
             echo "::error::Possible secret/token format found in tracked files"
@@ -108,18 +116,28 @@ jobs:
           fi
           echo "secret guard: clean"
 
-      - name: ShellCheck (.sh + .githooks)
+      - name: ShellCheck (every shell script in the repo)
         run: |
-          if command -v shellcheck >/dev/null; then
-            # --severity=warning: gate on real issues (errors + warnings), not
-            # style/info notes (SC2016/SC2129 etc.) on these working scripts.
-            # SC1091: don't follow sourced files; scripts are deployed standalone.
-            find home-claude/cron -name '*.sh' -print0 | xargs -0 -r shellcheck --severity=warning -e SC1091
-            shellcheck --severity=warning .githooks/pre-commit
-            echo "shellcheck: done"
-          else
-            echo "shellcheck not available — skipped"
+          # Not "if available … else skip": a missing shellcheck silently turned
+          # this gate off and the step still passed green. It ships on
+          # ubuntu-latest, so its absence is a broken runner, not a valid state.
+          if ! command -v shellcheck >/dev/null; then
+            echo "::error::shellcheck is not installed — this gate must not be skipped"
+            exit 1
           fi
+          # EVERY tracked shell script, not just cron/. The uncovered ones were
+          # .githooks/pre-push (162 lines of `set -eu`, git rev-list and temp
+          # directories — the most fragile shell in the repo), scripts/
+          # install-lite.sh and scripts/enable-guard.sh. The two .githooks files
+          # have no .sh suffix, hence the explicit list next to the find.
+          # --severity=warning: gate on real issues (errors + warnings), not
+          # style/info notes (SC2016/SC2129 etc.) on these working scripts.
+          # SC1091: don't follow sourced files; scripts are deployed standalone.
+          files=$(git ls-files '*.sh'; git ls-files '.githooks/*')
+          echo "$files" | tr ' ' '\n' | sed 's/^/  /'
+          # shellcheck disable=SC2086 — intentional word splitting of the list
+          echo "$files" | xargs -r shellcheck --severity=warning -e SC1091
+          echo "shellcheck: done"
 
       - name: Pipeline smoke test (offline mock LLM provider)
         run: |

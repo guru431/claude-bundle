@@ -198,6 +198,14 @@ listed here (`ClaudeWikiBuildIndex`, `ClaudeWikiLint`, `ClaudeLogRetention`)
 is local-only: it never leaves your machine, spends nothing, and
 publishes nothing.
 
+That sentence used to be a promise nothing checked, and it was already
+wrong: `ClaudeAgentsMdSyncCheck` appeared in no row, so the blanket claim
+covered the single most invasive job in the bundle. Every task script now
+carries a machine-readable `# bundle-io:` line, and
+`scripts/check-io-matrix.py` (CI) fails if a task that sends, spends or
+writes anything is missing from the table below. The code is the source;
+this table reflects it.
+
 | Task | Sends data off-box (to whom) | Spends money | Publishes / pushes | Default state |
 |---|---|---|---|---|
 | Wiki flush + compile (`ClaudeWikiFlush`, `ClaudeWikiCompileSessions`, `ClaudeWikiCompileKB`) | session/source text of allowed projects → your LLM provider (DeepSeek / OpenCode Go). Plans are excluded unless `collect_plans: true` | yes (PAYG tokens) | no | on (KB compile off) |
@@ -207,7 +215,8 @@ publishes nothing.
 | `ClaudeTaskMonitor` / alerts | failure summary → Telegram Bot API | no | no | on |
 | `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
 | `ClaudeMd2PdfSync` | nothing (local render) | no | no | off |
-| `ClaudeTestSweep` / `ClaudeTestSweepFull` | a summary of which suites broke → Telegram Bot API. No LLM is involved and no test output goes to a provider; tails are masked for credentials before they are logged or sent | no | writes a finding into each affected project's `FINDINGS.md` | off (needs `projects_root`) |
+| `ClaudeTestSweep` / `ClaudeTestSweepFull` | a summary of which suites broke → Telegram Bot API. No LLM is involved and no test output goes to a provider; tails are masked for credentials before they are logged or sent | no | writes a finding into each affected project's `FINDINGS.md`, and deletes its own finding again when the suite recovers | off (needs `projects_root`) |
+| `ClaudeAgentsMdSyncCheck` | the **whole** `CLAUDE.md` and `AGENTS.md` of every allowed project → your LLM provider. This is the widest per-project payload in the bundle: not a slice of a transcript but two complete rules files, including whatever hosts, paths and commands they name | yes (PAYG tokens; `AGENTS_SYNC_FIX_MODEL` can point the fix step at a costlier model) | **edits `AGENTS.md` in your working copies** and files a finding in their `FINDINGS.md`. The only task that writes into your repositories | off (needs `projects_root`) |
 
 ### What `ClaudeHealthcheck` actually sends
 
@@ -237,10 +246,14 @@ provider therefore degrades the alert's prose, not the alert.
 Every "sends data off-box" row above is really "sends data to whatever
 `WIKI_LLM_PROVIDER` names". Point it at `local` (any OpenAI-compatible
 server you run — Ollama, llama.cpp, LM Studio, vLLM) and none of them
-leave the box, at no token cost. Set **`WIKI_OFFBOX_FALLBACK=0`** as well:
-the default `deepseek` chain falls back to a cloud gateway on failure,
-which would ship the prompt off-box exactly when your local server broke.
-See `docs/llm-routing.md`.
+leave the box, at no token cost.
+
+Then set **`WIKI_ALLOW_OFFBOX=0`**, which is the switch that actually
+enforces it: every provider declared `offbox: True` is refused on every
+call, so a misconfiguration cannot quietly route around your choice.
+`WIKI_OFFBOX_FALLBACK=0` is a narrower, older flag — it only stops the
+default chain stepping to its next provider, and it never gated the first
+one. See `docs/llm-routing.md` for the difference.
 
 ## Retention of session-derived artifacts
 
@@ -256,6 +269,20 @@ The last two are shorter because they echo private session text. Handoffs
 are unreadable to the pipeline after 24 hours anyway (`session-start.py`
 ignores older ones), so a longer window would only accumulate summaries
 nothing reads.
+
+A window of **0 means "keep everything"** — the documented way to switch
+one class of rotation off. Read literally, a zero-day cutoff lands at
+`now` and would delete every matching file including the log the run is
+writing; nobody types 0 meaning that, and a weekly unattended sweep is the
+worst place for the two readings to differ. A negative value still aborts
+before the first unlink.
+
+The run ledger (`cron/logs/runs-<year>.jsonl`) is exempt from age-based
+pruning: its mtime is the time of the last write, not the age of the
+records inside, so an mtime sweep would delete the audit trail exactly
+when a month of silence made it worth reading. It is bounded a different
+way — `cron/runs.py` slices it per calendar year, and `bundle-status.py`
+reads only the two newest slices.
 
 `wiki/daily/.pending/*.md` is deliberately **not** pruned: those are queued
 session tails awaiting a flush that hasn't succeeded, so deleting them
@@ -276,6 +303,25 @@ just no-ops; whatever one night misses, the next night picks up. A bad
 ordering only ever **defers** material one cycle — it never loses it. The
 one real cost is that a "processed tonight" status can mislead on a night
 things bunch up.
+
+### When a retry cannot help — the ceiling
+
+"Never finalize a source we failed on" is what keeps content from being
+lost, and it is right. It also needs a ceiling. A failure that is
+**deterministic** — the model's answer arrives and is rejected (a path
+`normalize_wiki_path` refuses), or a payload that reliably trips a
+provider's filter — replays identically every night: same call, same
+rejection, same `exit 1`, same morning alert, and no run brings the next
+one closer to succeeding.
+
+After `WIKI_RETRY_LIMIT` such nights (default 3) the source is
+**quarantined** instead: its payload goes to `cron/logs/rejected/`, ONE
+`[P2]` entry is filed in the bundle's own `FINDINGS.md` naming it, the
+marker is set and the retries stop. `bundle-status.py` reports how many
+sources are in that state. A **transient** failure (the provider never
+answered) does not count towards the limit — waiting really does fix that
+one, and capping it would throw away content over a bad week. Set
+`WIKI_RETRY_LIMIT=0` to restore unbounded retries.
 
 What makes the "never loses it" part true is that compile's markers carry
 a **fingerprint of the daily log as it was read** (`DATE@fp`,
@@ -388,6 +434,15 @@ can't ship your whole archive to an LLM before you've seen the
 `--dry-run` preview. Once `allow_projects` says what you mean, set
 `WIKI_BACKLOG_MAX=<n>` in `.env` to backfill history `<n>` transcripts
 per night.
+
+That covers the archive but not the first **night**: everything from the
+last 48 hours would still go out before you had read a preview. Hence
+`dry_run_until: YYYY-MM-DD` in `bundle.local.yaml` — while that date is in
+the future, EVERY phase runs in preview mode (no LLM call, no network, no
+writes), and the logs show exactly what each source would have sent, per
+project. The installer sets it a week out. It expires on its own, which is
+the design: a flag you have to remember to remove is a flag that stays on
+for a year. Delete the key to start immediately.
 
 ## Adapting for your machine
 

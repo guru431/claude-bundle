@@ -3,6 +3,277 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.15.0] - 2026-08-29
+
+Clears `FINDINGS.md` and `IDEAS.md` completely: 26 findings and 12 proposals,
+most of them paired (a finding describing a defect and an idea describing the
+mechanism that would prevent its whole class). Both files are back to their
+headers.
+
+### Added — three shared libraries where there had been copies
+
+Every one of these replaced a rule that was being re-implemented by hand, and
+in each case the copies had already drifted.
+
+- **`cron/lib/secret_shapes.py`** — one table of credential formats, with roles
+  (`scan` blocks a commit, `mask` redacts output, `leak` refuses to write into
+  a public repo). Three detectors kept their own list: `mask_secrets` did not
+  know JWTs, `ccr-…` keys or a GCP `private_key_id`, and the public-repo gate
+  knew none of those plus `AKIA` and Telegram tokens. The concrete failure that
+  followed: a failing test prints a JWT → the tail is "masked" (miss) → the
+  token lands in a project's `FINDINGS.md` **and** in Telegram → the nightly
+  `git-push-all.sh` catches it and marks that repo FAILED every night until
+  someone intervenes. `cron/lib/secret-scan.sh` keeps a literal copy (a POSIX
+  hook must work with no Python), and a test asserts it is byte-identical to
+  what the table generates. One fixture set, one example per format, three
+  assertions — the parity test is the part that stops them diverging again.
+- **`cron/lib/dotenv.sh`** — one `.env` parser for the shell tasks, replacing
+  **five** verbatim copies (telegram-send, task-monitor, git-push-all,
+  healthcheck, warm-window). They had drifted from the Python loader on the
+  thing that matters: `export "$key=$val"` was unconditional, so `.env`
+  overrode the real environment. No attacker needed — a `PYTHON_EXE` exported
+  for a task was silently replaced by a stale value from the file, and a
+  `PATH=` line changed which `curl` and `python` the script went on to run.
+  Now **env > dotenv**, as `utils.py` always claimed.
+- **`utils.iter_md_lines` / `sub_outside_fences`** — "a heading inside fenced
+  code is not a heading", as an API rather than a habit. Six functions honored
+  it with near-identical loops; the seventh and eighth did not. `_LLM_H2_RE`
+  demoted `## …` lines inside ``` blocks, editing the user's own markdown
+  examples into the daily log, and `parse_daily_by_project` started a new
+  project section on such a line, cutting a code block in half across two
+  projects. All eight now go through the iterator.
+
+### Added — bounded retries, so a broken source stops replaying forever
+
+"Never finalize a source we failed on" is right and load-bearing, but it had no
+ceiling. A **deterministic** failure — the model answers and the answer is
+rejected (a path `normalize_wiki_path` refuses), or a payload that reliably
+trips a provider filter — replayed identically every night: same call, same
+rejection, same `exit 1`, same morning alert, no run any closer to succeeding.
+
+After `WIKI_RETRY_LIMIT` nights (default 3) the source is quarantined instead:
+payload to `cron/logs/rejected/`, ONE `[P2]` entry filed in the bundle's own
+`FINDINGS.md` naming it, marker set, retries stop. A **transient** failure (the
+provider never answered) does not count towards the limit — waiting really does
+fix that one. `bundle-status.py` reports how many sources are in that state,
+which also answers the older question "the pending queue keeps growing, but
+behind which source?".
+
+### Added — a real off-box switch, and the honest description of the old one
+
+`WIKI_OFFBOX_FALLBACK=0` was documented in `utils.py` as forbidding any call to
+a provider outside the machine. It never did that: it is checked only from the
+SECOND element of the chain, so on the shipped default the first, off-box call
+to DeepSeek happened anyway — and with `WIKI_LLM_PROVIDER=local` the chain is
+not used at all, making the comment's scenario impossible for a different
+reason. `docs/llm-routing.md` had it right ("it is not a DLP switch"); the code
+that people actually read was the part that lied.
+
+**`WIKI_ALLOW_OFFBOX=0`** is now the switch people believed they had: every
+provider whose registry row says `offbox: True` is refused on every call, first
+one included, with the same "nothing was sent" message as the local-only
+endpoint check. "Fully local" is one variable instead of a provider setting
+plus a belief about when the chain fires. The `[llm] provider=…` line and
+`bundle-status.py` both say when it is on.
+
+### Added — the privacy matrix is now generated-checked, not maintained by hand
+
+`docs/cron-architecture.md` § "Data, cost & publishing per task" is the page a
+user reads to decide whether to enable a task, and it was the only such page
+nothing verified. It had already drifted, on the most invasive task in the
+bundle: `ClaudeAgentsMdSyncCheck` appeared in no row, so the section's blanket
+"everything not listed here is local-only" covered a job that sends every
+project's **entire** `CLAUDE.md` and `AGENTS.md` to a provider, spends tokens,
+and rewrites files inside your working copies.
+
+Every task script now carries a machine-readable `# bundle-io: offbox=… money=…
+writes=…` header, and `scripts/check-io-matrix.py` (CI + self-test) fails when a
+task that sends, spends or writes anything is missing from the table. Same
+pattern as the `DEFAULT_CHAIN` guard: the code is the source, the doc reflects
+it. The missing row is written, and worded as strongly as the task deserves.
+
+### Added — the artifact ledger covers every task, and knows when it is stale
+
+`cron/runs.py`'s contract said "every LLM task writes ONE terminal record", and
+five did. `ClaudeAgentsMdSyncCheck` — the sixth, and the one that edits other
+people's files — wrote none, and its `main()` returned no code at all, so a
+night where every project failed to reach the provider exited 0 and looked
+exactly like a clean sweep. It now records, and exits 1 when it had pairs to
+check and examined none.
+
+The deterministic tasks are instrumented too (`test-sweep`, `log-retention`,
+`wiki-build-index`, `wiki-lint`, `md2pdf-sync`, `git-push-all`, `task-monitor`,
+`warm-window`): "ran and produced nothing useful" is exactly as invisible for
+them — a sweep that finds no suite, a retention pass pointed at the wrong tree,
+an index rebuild over an empty vault all exit 0.
+
+Second gap, in the reading rather than the writing: `bundle-status` printed
+`[ok] task: green (… last 2026-05-01)` in August. The ledger records the last
+RUN, not the current state, so a verdict older than the task's own schedule
+(derived from its registry trigger — Daily 2d, Weekly 10d, Monthly 40d) is now
+marked `STALE`, and `claude-task-monitor.sh` alerts on it. Task Scheduler's
+Last Result can never catch this: a task that stops firing has no failing run.
+
+Finally, the ledger itself is bounded. `runs.jsonl` was deliberately exempt from
+retention (its mtime is the last write, not the age of its contents) and had no
+other limit — thousands of lines a year, re-read whole on every status check,
+in a bundle that teaches "don't create unbounded logs". It is now sliced per
+calendar year, and readers open only the two newest slices.
+
+### Added — a safe first week (`dry_run_until`)
+
+`WIKI_BACKLOG_MAX=0` protects the archive but not the first **night**:
+everything from the last 48 hours reached the provider before anyone had read a
+`--dry-run` preview. `dry_run_until: YYYY-MM-DD` in `bundle.local.yaml` holds
+every phase in preview mode until that date. The installer sets it a week out
+on a fresh manifest (never on a reinstall). It expires by itself, which is the
+design — a flag you must remember to remove is a flag that stays on for a year.
+
+### Added — SessionStart has a context budget
+
+The hook runs at EVERY session start, making it the most frequently paid
+component of the bundle, and it was the only one with no size limit at all:
+`get_project_log` capped itself at 120 lines and the page preview at 12 pages,
+while `wiki/index.md` and the daily log — an LLM digest of every project's day,
+tens of KB on an active machine — were read whole. `SESSION_START_MAX_CHARS`
+(default 8000) is now a total budget spent in priority order (handoff → recent
+pages → project log → index → daily); what is cut says so and names the file
+holding the full text. The daily contributes only the CURRENT project's
+section, which is the part that bears on the session at hand.
+
+### Fixed
+
+- **`ClaudeTestSweep` no longer reports "tests are failing" for a project that
+  simply has no pytest.** `interpreter_for()` picks the project's own venv;
+  `python -m pytest` there exits 1 when pytest is not installed, which
+  `EXIT_STATUS` read as `failed` — so the sweep filed a `[P2]` in somebody
+  else's `FINDINGS.md` and alerted about a suite it had never run. New status
+  `no-pytest`, outside `ALERTING`, alongside the `no-tests` exemption that was
+  already there.
+- **The sweep now reports recoveries and closes its own findings.** Red → green
+  sent nothing, so nobody learned the fix had worked, and the `[P2]` entry it
+  had filed stayed open forever in a file whose entire contract is "open entries
+  only". It now sends its own line and deletes the entry it filed. Transitions
+  between two red statuses (`failed` → `timeout` → `failed`) also each passed
+  the change filter and appended another entry about the same broken suite;
+  there is now at most one open entry per suite.
+- **Two concurrent sweeps no longer delete each other's temp trees.**
+  `cleanup_temp_roots()` removed every `%TEMP%/sweep-*` directory, and
+  `MultipleInstancesPolicy=IgnoreNew` is per task NAME — `ClaudeTestSweep`
+  (daily 05:15, 2h timeout) and `ClaudeTestSweepFull` (weekly Sat 07:00) are two
+  different names whose windows overlap on Saturdays. Whichever finished first
+  wiped the `--basetemp` the other was writing into, and `is_env_failure` does
+  not classify that as an environment problem, because the directory did not
+  fail to be cleaned up — it vanished from under a running pytest. Cleanup now
+  skips directories owned by a live process. (Also: the two globs were
+  `sweep-run-*` plus its own superset `sweep-*`, so every directory was visited
+  twice.)
+- **`WIKI_LOG_RETENTION_DAYS=0` no longer deletes every log.** `_window()`
+  explained at length why a negative window is refused and let `0` through, where
+  the cutoff lands at `now` and everything — including the log written half an
+  hour earlier — is older than it. Nobody types 0 meaning that. It now means
+  "keep everything", which is what it reads as.
+- **`ClaudeLogRetention` writes a log.** The docs said "each script writes its
+  own log" and "the hidden launcher does no redirection"; both were true and
+  together they meant a Password task in session 0 wrote its whole output to
+  nowhere. An `exit 2` from a malformed retention window left no trace at all:
+  rotation stopped for weeks, the task monitor saw `LastTaskResult=2`, and the
+  reason was visible to no one.
+- **`bodies_withheld` is per change, not per project.** Page visibility is
+  recomputed for each part (`existing_pages` grows as parts feed their output
+  back in), so part 3 can cross `MAX_PAGES_WITH_CONTENT` while parts 1–2 saw
+  every body in full. One project-wide flag sent those earlier, honestly
+  rewritten pages down the `blind_update` path, gluing the new text on as
+  `## Update (…)` under the stale body — the "two versions of itself" that
+  `_dedup_h1` exists to prevent.
+- **`build_summary` can no longer exceed the cap it exists to enforce.**
+  `share = max(500, cap // n - overhead)` let the 500-character floor win above
+  ~78 projects, so the sum overshot the budget — silently, because the log line
+  printed the result size without comparing it to the cap. Past that point the
+  thing to cut is the NUMBER of projects, not the share; the deferred ones are
+  named in the log and picked up on a later night.
+- **`.githooks/pre-commit` no longer blocks the commit that REMOVES a leaked
+  string.** `secret_scan_diff` deliberately looks at added lines only — "a
+  commit that removes a leaked token must not be blocked, or the leak could
+  never be remediated" — while step 3 (the `.sanitize-patterns` denylist)
+  grepped the whole diff, `-` lines included. So the one commit that cleans a
+  hostname out of the tree matched its own denylist and was refused, leaving
+  `--no-verify` (which also disables the working guard) as the only way through.
+- **`wiki-build-index.py` survives a missing `wiki/projects/`.** `build_kb_index`
+  checked each of its directories and this one did not, so a vault without that
+  folder (a split install, a hand-deleted directory) crashed the task with
+  `FileNotFoundError` instead of reporting nothing to index.
+- **One page-counting rule.** The index builder excluded
+  `index.md`/`CLAUDE.md`/`log.md`/`_log.md`/`BOOTSTRAP_RUN.md`; `bundle-status`
+  excluded two of those. `wiki/index.md` § Stats and `[wiki] projects/ pages`
+  reported different totals for one vault, with nothing to say which was real.
+- **`ClaudeAgentsMdSyncCheck` applies the privacy policy in the right
+  namespace.** It walks git checkouts, whose directory names are not the
+  resolved slugs the policy is written in. With a non-empty `project_map` the
+  two differ, and `skip_projects: [finance]` failed to exclude a working copy
+  sitting in a directory called `myapp` — while the docs promise ONE policy
+  honored by EVERY source. New `working_copy_allowed()` fails closed.
+- **`re.split(..., 1)`** → `maxsplit=1`. Deprecated since Python 3.13, and the
+  bundle supports 3.10+, so a fork running `-W error` in CI already fails on it.
+- **`settings.example-with-hooks.json` no longer widens `permissions`.** It is
+  offered as "the two example hooks wired in", and the README warns about
+  exactly one block — but it also added `Bash(cmd.exe:*)`,
+  `Bash(powershell.exe:*)`, `Bash(python:*)`, `Bash(curl:*)`, `WebFetch` and
+  `Bash(git:*)` in place of read-only git. Anyone copying it for the hooks
+  silently acquired the right to run any command through a shell wrapper without
+  being asked; an allow-list containing `cmd.exe:*` has stopped being a list.
+  Its `permissions` are now byte-identical to the default, and the README says so.
+- **The AGENTS/CLAUDE mirror guard covers the blocks it claims to.**
+  `sections()` split on `## ` only, so "Error Recovery" and "File Encoding" —
+  H3 under `## Working methodology` in CLAUDE.md, standalone H2 in AGENTS.md —
+  could not even be listed as required, and were checked in neither direction.
+  Of the six required sections only three were compared by content, while the
+  success message ("universal sections present in both files") read as a
+  guarantee that they agreed. H2 and H3 are both indexed now, both blocks are
+  compared, and the message says which sections were compared and which were
+  only checked for presence.
+- **CI shellchecks every shell script.** Coverage was `home-claude/cron/*.sh`
+  plus `.githooks/pre-commit`, leaving out `.githooks/pre-push` (162 lines of
+  `set -eu`, `git rev-list` and temp directories — the most fragile shell in the
+  repo), `scripts/install-lite.sh` and `scripts/enable-guard.sh`. And a missing
+  `shellcheck` printed "skipped" and passed: a silently disabled gate. It is a
+  hard failure now.
+- **The structure block in `CLAUDE.md` matches the tree**, and a guard keeps it
+  that way. Its own table says "New file structure section | Update the layout
+  block in README.md AND in this file", and nothing enforced it, so it
+  accumulated a dozen missing entries while README.md stayed current.
+  `check-doc-counts.py` now compares both layout blocks against the real
+  top-level directories.
+- **`memory-update.py` no longer points at a component that does not exist.**
+  Its docstring announced that it runs `incident-extract.py` as Phase 2; no such
+  file ships, and nothing describes one. It is an extension point — now
+  documented as one, with a log line that says so instead of reading like a
+  missing part.
+- **`pytest.ini` is in English and measures what its policy demands.** It was
+  the only Russian file in an otherwise English public repo, it pointed at
+  `~/.claude/CLAUDE.md` as canon rather than the copy in this repo, and although
+  it exists to illustrate "mark `integration` BY MEASUREMENT, never by directory
+  name" it carried no `--durations`. It does now.
+- **`_load_dotenv`'s comment describes what the code does.** It claimed the key
+  filter "rejects e.g. 'PATH=/evil'-style lines"; `[A-Za-z0-9_]` does not reject
+  `PATH` — every character is legal. What makes such a line inert is the
+  `key not in os.environ` guard, which is the precedence rule itself.
+- **A refused provider call no longer needs `requests` installed.** The
+  local-only and off-box refusals print "nothing was sent", but `import
+  requests` sat above them at function entry, so on a machine without it the
+  refusal path raised instead of refusing. The import moved below the gates.
+
+### Corrected
+
+- The 0.11.0 entry below states that `ClaudeTestSweep` involves no LLM and that
+  **"no test output leaves the machine"**. The first half is true; the second is
+  not. The task sends `summary_line(res['tail'])` to Telegram — masked pytest
+  output, but pytest output. The script's own docstring and
+  `docs/cron-architecture.md` always said so correctly; only the CHANGELOG,
+  which is what people read when deciding whether to enable it, did not.
+  Historical entries are not rewritten, hence this note: read that line as "no
+  test output goes to an LLM provider; a masked summary goes to Telegram".
+
 ## [0.14.0] - 2026-08-29
 
 ### Added — the md2pdf converter itself, instead of a hole where it should be

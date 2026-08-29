@@ -23,6 +23,12 @@
 # the call at API rates instead of into the subscription window. We need OAuth
 # (subscription) → a plain `-p`.
 
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=a one-word ping -> Anthropic money=Claude subscription window writes=nothing
+
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="$BUNDLE_ROOT/cron/logs"
 mkdir -p "$LOG_DIR"
@@ -30,25 +36,12 @@ DATE=$(date +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/warm-window_${DATE}.log"
 
 # Task Scheduler in session 0 has no user env, so CLAUDE_BIN from a shell profile
-# never reaches this script — read it from the bundle .env (same safe parser as
-# telegram-send.sh / git-push-all.sh).
-ENV_FILE="$BUNDLE_ROOT/.env"
-if [ -f "$ENV_FILE" ]; then
-    while IFS= read -r raw || [ -n "$raw" ]; do
-        line="${raw%$'\r'}"
-        case "$line" in
-            ''|\#*) continue ;;
-            export\ *) line="${line#export }" ;;
-        esac
-        key="${line%%=*}"
-        case "$key" in
-            *[!A-Za-z0-9_]*|'') continue ;;
-        esac
-        val="${line#*=}"
-        val="${val%\"}"; val="${val#\"}"
-        val="${val%\'}"; val="${val#\'}"
-        export "$key=$val"
-    done < "$ENV_FILE"
+# never reaches this script — read it from the bundle .env with the shared safe
+# parser (cron/lib/dotenv.sh; env > dotenv).
+if [ -f "$(dirname "$0")/lib/dotenv.sh" ]; then
+    # shellcheck source=lib/dotenv.sh
+    . "$(dirname "$0")/lib/dotenv.sh"
+    dotenv_load "$BUNDLE_ROOT/.env"
 fi
 
 # Locate the claude CLI. Override with CLAUDE_BIN (in the bundle .env or the
@@ -71,7 +64,19 @@ rc=$?
 
 echo "$OUT" >> "$LOG_FILE"
 
+PING_RC=0
 if [ $rc -ne 0 ] || [ -z "$OUT" ] || echo "$OUT" | grep -qi "not logged in"; then
+    PING_RC=1
+fi
+
+# Terminal ledger record (cron/runs.py), written BEFORE the exit so the failing
+# path is recorded too — a ping that never lands is precisely what this task
+# exists to reveal, and it used to leave the ledger silent.
+"${PYTHON_EXE:-python}" "$BUNDLE_ROOT/cron/runs.py" record \
+    --task ClaudeWarmWindow --rc "$PING_RC" --artifact "$LOG_FILE" \
+    --delivery n/a --note "claude -p ping" >>"$LOG_FILE" 2>&1 || true
+
+if [ "$PING_RC" -ne 0 ]; then
     echo "FATAL: warm-up ping failed (rc=$rc)" >> "$LOG_FILE"
     echo "FATAL: warm-up ping failed" >&2   # wire your own alert here
     exit 1

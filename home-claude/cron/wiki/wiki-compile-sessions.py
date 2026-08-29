@@ -7,6 +7,12 @@ LLM to create/update per-project wiki pages.
 Schedule: daily at 04:00 (after flush at 02:30).
 """
 
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=daily-log text of allowed projects -> LLM provider money=tokens writes=wiki/projects/
+
 import hashlib
 import json
 import os
@@ -24,8 +30,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (  # noqa: E402
+    RETRY_LIMIT,
     add_source_to_frontmatter,
+    append_bundle_finding,
     append_per_project_log,
+    attempt_reset,
+    attempt_bump,
+    iter_md_lines,
     llm_call,
     normalize_project_name,
     normalize_wiki_path,
@@ -129,7 +140,13 @@ def find_uncompiled_dailies(compiled: set[str]) -> list[tuple[Path, str, str]]:
 
 
 def parse_daily_by_project(text: str) -> dict[str, str]:
-    """Split a daily log into sections per `## project_name`."""
+    """Split a daily log into sections per `## project_name`.
+
+    Fenced code is not markup: a `## …` line inside a ``` block belongs to
+    somebody's code sample (a transcript is full of them) and starting a new
+    project section there cut that block in half, splitting its two halves
+    across two projects.
+    """
     by_project: dict[str, str] = {}
     current_project = None
     current_lines: list[str] = []
@@ -143,8 +160,8 @@ def parse_daily_by_project(text: str) -> dict[str, str]:
         else:
             by_project[name] = body
 
-    for line in text.split("\n"):
-        if line.startswith("## "):
+    for line, in_code in iter_md_lines(text):
+        if line.startswith("## ") and not in_code:
             if current_project and current_lines:
                 _store(current_project, current_lines)
             current_project = line[3:].strip()
@@ -168,7 +185,8 @@ def get_existing_project_pages(project: str) -> dict[str, str]:
     return pages
 
 
-def compile_project_data(project: str, data: str, existing_pages: dict[str, str]) -> tuple[list[dict], bool, bool]:
+def compile_project_data(project: str, data: str,
+                         existing_pages: dict[str, str]) -> tuple[list[dict], bool, bool]:
     """Call the LLM to compile project data into wiki pages.
 
     A large data section (observed 161351 chars) deterministically makes the
@@ -176,14 +194,28 @@ def compile_project_data(project: str, data: str, existing_pages: dict[str, str]
     boundaries (never mid-line/mid-paragraph) and call the LLM per part,
     concatenating results.
 
-    Returns (changes, complete, bodies_withheld). A failed part no longer zeroes
-    the whole project: successful parts are accumulated and applied (their
-    content is not lost, nor retried forever as part of a big payload), while
-    complete=False leaves the (daily, project) pair unmarked — the retry redoes
-    the whole project, but already-succeeded parts overwrite idempotently and
-    the failed part gets another chance. bodies_withheld is True when the LLM
-    saw only page NAMES for any existing page (page-count or byte cap) — the
-    caller must then append rather than overwrite (blind_update).
+    Returns (changes, complete, transient). A failed part no longer zeroes the whole
+    project: successful parts are accumulated and applied (their content is not
+    lost, nor retried forever as part of a big payload), while complete=False
+    leaves the (daily, project) pair unmarked — the retry redoes the whole
+    project, but already-succeeded parts overwrite idempotently and the failed
+    part gets another chance.
+
+    `complete` is False when any part failed; `transient` says WHY. A part that
+    failed because llm_call returned None is a provider/network problem and
+    retrying is exactly right. A part whose answer arrived and could not be
+    parsed or validated is a prompt/normalizer bug — retrying reproduces it
+    forever, so the caller counts those against RETRY_LIMIT.
+
+    Each change carries `_bodies_withheld`: True when the LLM saw only page
+    NAMES while producing it (page-count or byte cap), so apply_changes must
+    append rather than overwrite. It is PER CHANGE, not per project, because
+    visibility is recomputed for every part: existing_pages grows as parts feed
+    their own output back into it, so part 3 can cross MAX_PAGES_WITH_CONTENT
+    while parts 1-2 saw every body in full. A single project-wide flag sent
+    those earlier, honestly-rewritten pages down the blind_update path, where
+    the new text was glued on as `## Update (…)` under the stale body — the
+    "two versions of itself" that _dedup_h1 exists to prevent.
     """
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
@@ -210,8 +242,6 @@ def compile_project_data(project: str, data: str, existing_pages: dict[str, str]
                     break
         return names, bodies, withheld
 
-    bodies_withheld = False
-
     # Split data into parts on blank-line (block) boundaries.
     if len(data) > MAX_PART_SIZE:
         parts = []
@@ -237,9 +267,9 @@ def compile_project_data(project: str, data: str, existing_pages: dict[str, str]
 
     all_changes: list[dict] = []
     complete = True
+    transient = False   # at least one failure was "the provider did not answer"
     for part_idx, part in enumerate(parts):
         existing_list, existing_content, part_withheld = render_existing()
-        bodies_withheld = bodies_withheld or part_withheld
         part_label = f" (part {part_idx+1}/{len(parts)})" if len(parts) > 1 else ""
         full_prompt = f"""{prompt}
 
@@ -277,6 +307,7 @@ JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
         if not output:
             print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: llm_call returned None — part skipped, project left unmarked", file=sys.stderr)
             complete = False
+            transient = True
             continue
 
         try:
@@ -301,6 +332,10 @@ JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
         # Merge this part's bodies into the state the next part is shown, so a
         # page touched twice is extended rather than rewritten from scratch.
         for chg in result:
+            if isinstance(chg, dict):
+                # Stamp the visibility THIS part was generated under; see the
+                # docstring for why a project-wide flag was wrong.
+                chg["_bodies_withheld"] = part_withheld
             if isinstance(chg, dict) and chg.get("path") and chg.get("content"):
                 # Key by the NORMALIZED stem: normalize_wiki_path can rewrite the
                 # filename (projects/proj-topic.md → projects/proj/topic.md), and
@@ -313,7 +348,7 @@ JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
         if part_idx < len(parts) - 1:
             time.sleep(5)
 
-    return all_changes, complete, bodies_withheld
+    return all_changes, complete, transient
 
 
 def coalesce_changes(changes: list[dict]) -> list[dict]:
@@ -345,6 +380,11 @@ def coalesce_changes(changes: list[dict]) -> list[dict]:
             out.append(merged)
             continue
         prev["content"] = prev.get("content", "").rstrip() + "\n\n" + content.lstrip()
+        # Merging two parts with different page visibility: if EITHER was
+        # produced blind, the combined text is not a trustworthy replacement
+        # for the existing body, so the merged change appends.
+        prev["_bodies_withheld"] = bool(prev.get("_bodies_withheld")) or \
+            bool(change.get("_bodies_withheld"))
     return out
 
 
@@ -379,15 +419,9 @@ def _demote_headings(md: str) -> str:
     Fenced code is left alone: `# comment` inside ``` is code, not a heading.
     """
     out: list[str] = []
-    in_fence = False
-    for line in md.split("\n"):
-        s = line.lstrip()
-        if s.startswith("```") or s.startswith("~~~"):
-            in_fence = not in_fence
-            out.append(line)
-            continue
+    for line, in_code in iter_md_lines(md):
         # Up to H5: markdown won't render deeper anyway, and '#######' is junk.
-        if not in_fence and re.match(r"^#{1,5} ", line):
+        if not in_code and re.match(r"^#{1,5} ", line):
             line = "#" + line
         out.append(line)
     return "\n".join(out)
@@ -412,14 +446,8 @@ def _date_current_headings(md: str, date_str: str) -> str:
     date and the page never accumulates competing "current" states.
     """
     out: list[str] = []
-    in_fence = False
-    for line in md.split("\n"):
-        s = line.lstrip()
-        if s.startswith("```") or s.startswith("~~~"):
-            in_fence = not in_fence
-            out.append(line)
-            continue
-        m = _CURRENT_HEADING_RE.match(line) if not in_fence else None
+    for line, in_code in iter_md_lines(md):
+        m = None if in_code else _CURRENT_HEADING_RE.match(line)
         if m:
             line = f"{m.group(1)} State as of {date_str} (snapshot)"
         out.append(line)
@@ -465,10 +493,12 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
     dropped content never came back. The caller must not finalize the source
     while `rejected` is non-empty.
 
-    blind_update=True means the LLM saw only page names (too many pages for
-    full content) — overwriting an existing page would destroy a body the
-    model never read, so new content is APPENDED instead (skipped if already
-    present, which keeps retries idempotent).
+    A blind update means the LLM saw only page names (too many pages for full
+    content) — overwriting an existing page would destroy a body the model never
+    read, so new content is APPENDED instead (skipped if already present, which
+    keeps retries idempotent). Each change carries its own `_bodies_withheld`
+    stamped by compile_project_data; `blind_update` is only the default for
+    changes that lack one (a hand-assembled list, a test).
     """
     applied = []
     rejected: list[str] = []
@@ -509,7 +539,8 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
 
         existing_fm, existing_body = read_page(full_path)
         action_label = "updated" if full_path.exists() else "created"
-        if blind_update and full_path.exists():
+        blind = bool(change.get("_bodies_withheld", blind_update))
+        if blind and full_path.exists():
             # The body is preserved (the model never saw it), but the fragment
             # is normalized first: no H1 of its own, one level down so it nests
             # under `## Update (…)`, and no heading claiming to be the current
@@ -542,6 +573,58 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
         append_per_project_log(project, log_entries)
 
     return applied, rejected
+
+
+def give_up_after_repeated_failure(marker: str, project: str, daily_path: Path,
+                                   transient: bool, changes: list, rejected: list,
+                                   log) -> bool:
+    """Stop retrying a (daily, project) pair that fails the same way every night.
+
+    Returns True when the pair was QUARANTINED — its payload saved, one finding
+    filed, the marker set so nothing retries it again.
+
+    The rule this bounds is otherwise correct and load-bearing: a pair that
+    failed is left unmarked so its content is recompiled rather than lost. But
+    with no ceiling, a DETERMINISTIC failure — a path `normalize_wiki_path`
+    refuses, an answer that never parses — replays identically forever: same
+    call, same rejection, same `exit 1`, same 03:00 alert, and no run brings the
+    next one any closer to succeeding.
+
+    A transient failure (llm_call returned None: provider down, quota spent)
+    does NOT count. That one really is fixed by waiting, and putting a ceiling
+    on it would throw away content over a bad week.
+    """
+    if transient or not RETRY_LIMIT:
+        return False
+    n = attempt_bump("compile_sessions", marker)
+    if n < RETRY_LIMIT:
+        log(f"  [{project}] deterministic failure {n}/{RETRY_LIMIT} for "
+            f"{daily_path.stem} — retrying next run")
+        return False
+
+    payload = "\n".join(rejected) if rejected else str(changes)
+    quarantine_raw(f"{daily_path.stem}#{project}", "retry-limit-reached", payload)
+    state_add("compile_sessions", "compiled_pairs", [marker])
+    attempt_reset("compile_sessions", marker)
+    log(f"  [{project}] QUARANTINED after {n} deterministic failures on "
+        f"{daily_path.stem} — payload in cron/logs/rejected/, retries stop here")
+    filed = append_bundle_finding(
+        title=f"compile-sessions gave up on {daily_path.stem}#{project}",
+        context="`cron/wiki/wiki-compile-sessions.py` (retry ceiling, WIKI_RETRY_LIMIT)",
+        what=(f"The (daily, project) pair `{daily_path.stem}#{project}` failed "
+              f"{n} times in a row for a reason a retry cannot fix (the model's "
+              f"answer arrived and was rejected — an unusable path, or output "
+              f"that would not parse). Its payload is quarantined in "
+              f"`cron/logs/rejected/`; the pair is now marked compiled so the "
+              f"nightly run stops replaying it."),
+        proposal=("Read the quarantined payload. Usually it is the compile prompt "
+                  "steering the model at a path outside `projects/<project>/`, or "
+                  "`normalize_wiki_path` being stricter than the prompt promises. "
+                  "Fix one of the two and re-run this daily by hand."),
+    )
+    if not filed:
+        log(f"  [{project}] (a finding for this pair is already open)")
+    return True
 
 
 def main():
@@ -613,14 +696,14 @@ def main():
             existing = get_existing_project_pages(project)
             log(f"  [{project}] existing pages: {len(existing)}, data: {len(data)} chars")
 
-            changes, complete, bodies_withheld = compile_project_data(project, data, existing)
+            changes, complete, transient = compile_project_data(project, data, existing)
             # Apply the results of the successful parts even on partial failure —
             # their content is not lost, nor retried forever as part of a big
-            # payload.
+            # payload. Page visibility travels WITH each change (see
+            # compile_project_data), not as one flag for the whole project.
             if changes:
                 applied, rejected = apply_changes(changes, source_daily=daily_path.name,
-                                                  project=project,
-                                                  blind_update=bodies_withheld)
+                                                  project=project)
                 total_changes += len(applied)
                 if not applied and rejected:
                     # The LLM produced changes but normalize_wiki_path rejected
@@ -658,6 +741,7 @@ def main():
                     # above), so a drop is never silently finalized here.
                     state_add("compile_sessions", "compiled_pairs", [marker])
                     compiled_pairs.add(marker)
+                    attempt_reset("compile_sessions", marker)
                     # Nothing applied AND nothing rejected means every change was
                     # a blind_update whose content the page already had. That is
                     # a no-op, not a loss — calling it "content dropped" sent
@@ -667,17 +751,27 @@ def main():
                 else:
                     # A part failed — the pair stays unmarked, the retry redoes
                     # the whole project (succeeded parts overwrite idempotently).
-                    failed += 1
-                    log(f"  [{project}] → partial failure ({len(applied)} applied), pair NOT marked — retry next run")
+                    if not give_up_after_repeated_failure(
+                            marker, project, daily_path, transient,
+                            changes, rejected, log):
+                        failed += 1
+                        log(f"  [{project}] → partial failure ({len(applied)} applied), pair NOT marked — retry next run")
+                    else:
+                        compiled_pairs.add(marker)
             elif complete:
                 # Empty result, but every part ran (LLM extracted nothing) —
                 # mark the pair so an empty daily is not retried forever.
                 state_add("compile_sessions", "compiled_pairs", [marker])
                 compiled_pairs.add(marker)
+                attempt_reset("compile_sessions", marker)
                 log(f"  [{project}] → 0 changes (LLM extracted nothing)")
             else:
-                log(f"  [{project}] → ERROR (all parts failed)")
-                failed += 1
+                if not give_up_after_repeated_failure(
+                        marker, project, daily_path, transient, changes, [], log):
+                    log(f"  [{project}] → ERROR (all parts failed)")
+                    failed += 1
+                else:
+                    compiled_pairs.add(marker)
 
             time.sleep(5)
 

@@ -62,6 +62,10 @@ claude-bundle/
 │   │   └── md2pdf.py                   MD→PDF via headless Edge/Chrome
 │   └── cron/                           cron foundation + wiki pipeline + 15 tasks
 │       ├── hooks/utils.py              shared LLM_call, JSONL parsing, wiki utils
+│       ├── lib/                         sourceable/importable shared code:
+│       │                                secret-scan.sh + secret_shapes.py (one
+│       │                                credential table for all three detectors),
+│       │                                dotenv.sh (one .env parser for the shell tasks)
 │       ├── hooks/session-{start,end}.py  inject wiki context / dump session
 │       ├── hooks/pre-compact.py        LLM-summarized handoff before compaction
 │       ├── hooks/precompact-handoff.py background handoff writer (spawned by pre-compact)
@@ -70,6 +74,10 @@ claude-bundle/
 │       ├── prompts/                    LLM prompts (flush/compile/healthcheck)
 │       ├── wiki/wiki-*.py              7 scripts (flush/compile-sessions/compile-kb/build-index/lint/conflict-resolve + pipeline orchestrator)
 │       ├── bundle-status.py            on-demand full-profile health report
+│       ├── runs.py                      Semantic Artifact SLO ledger (per-year slices)
+│       ├── schtasks_status.py           Task Scheduler status parser
+│       ├── test-sweep.py                run every project's suite (off by default)
+│       ├── agents-md-sync-check.py      reconcile AGENTS.md with CLAUDE.md (off by default)
 │       ├── log-retention.py            prune old cron/logs/*.{log,jsonl}
 │       ├── md2pdf-sync.py              regenerate stale paired PDFs (off by default)
 │       ├── claude-task-monitor.sh      alert on failed Task Scheduler jobs
@@ -97,6 +105,8 @@ claude-bundle/
 │   ├── check-registry.py             CI guard: registry fields / kind / trigger grammar
 │   ├── check-env-ref.py              CI guard: .env template matches the docs
 │   ├── check-agents-sync.py          CI guard: CLAUDE.md ↔ codex/AGENTS.md mirror
+│   ├── check-io-matrix.py            CI guard: the privacy matrix matches each
+│   │                                 task's declared `# bundle-io:` line
 │   ├── mcp-probe.py                  verify MCP servers by handshake; --check-wrappers audits declarations
 │   ├── enable-guard.sh / .ps1        activate the pre-commit + pre-push secret-guard
 │   └── bootstrap-registry.ps1         fill registry.yaml placeholders + path policy
@@ -105,11 +115,14 @@ claude-bundle/
 │   ├── llm-providers.example.env      env template (copy to ~/.claude/.env)
 │   └── bundle.local.example.yaml      machine-local manifest template (project map + privacy policy)
 │
-├── tests/                             pytest pipeline smoke test (mock LLM provider)
+├── tests/                             pytest suite, offline (mock LLM provider):
+│                                      pipeline, fail-closed guards, agents-md-sync,
+│                                      test-sweep, schtasks-status, reserved names
+├── pytest.ini                         the reference implementation of the test policy
 ├── VERSION, requirements.txt, requirements-dev.txt
 │
-├── .githooks/pre-commit               secret-guard hook (activate: git config core.hooksPath .githooks)
-├── .github/workflows/ci.yml           compileall + JSON/YAML validity + secret-guard + doc-count guard + mirror-sync + shellcheck + pytest smoke + PowerShell parse/self-test CI
+├── .githooks/{pre-commit,pre-push}    secret guards (activate: git config core.hooksPath .githooks)
+├── .github/workflows/ci.yml           compileall + JSON/YAML validity + secret-guard + doc-count/registry/env/mirror/io-matrix guards + shellcheck (every shell script) + pytest + PowerShell parse/self-test CI
 │
 └── docs/
     ├── wiki-method.md                 how the Karpathy wiki pipeline works

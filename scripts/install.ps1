@@ -479,7 +479,17 @@ if ($DryRun) {
     Good "bundle.local.yaml already present — left untouched"
 } elseif (Test-Path $manifestTpl) {
     Copy-Item $manifestTpl $manifestDst -Force
+    # Open the dry-run window on a FRESH manifest only (never on a reinstall,
+    # which would silently mute a working pipeline for a week). Until this date
+    # every phase previews instead of calling a provider, so the first night's
+    # transcripts do not leave the machine before anyone has read the logs. It
+    # expires by itself — see docs/cron-architecture.md § First run.
+    $until = (Get-Date).AddDays(7).ToString('yyyy-MM-dd')
+    (Get-Content $manifestDst -Raw -Encoding UTF8) `
+        -replace '(?m)^dry_run_until:\s*$', "dry_run_until: $until" |
+        Set-Content $manifestDst -Encoding UTF8 -NoNewline
     Good "created bundle.local.yaml from template (project map + privacy policy — reinstall-safe)"
+    Info "  dry_run_until: $until — every phase previews only until then; read cron/logs/, then delete the key (it expires on its own)"
 }
 if (Test-Path $manifestDst) { $script:preserved.Add('bundle.local.yaml') }
 

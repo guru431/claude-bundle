@@ -13,6 +13,12 @@ Result: wiki/daily/YYYY-MM-DD.md, grouped by project.
 Schedule: daily at 02:30.
 """
 
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=session/source text of allowed projects -> LLM provider (plans only with collect_plans) money=tokens writes=wiki/daily/
+
 import json
 import os
 import re
@@ -36,7 +42,9 @@ from utils import (dir_to_project, parse_jsonl_messages, is_subagent_jsonl, llm_
                    normalize_project_name, KNOWN_PROJECTS, mark_phase_success,
                    state_get, state_add, state_remove, is_dry_run, SKIP_DIRS,
                    project_allowed, slug_collisions, COLLECT_PLANS,
-                   manifest_broken, policy_summary,
+                   manifest_broken, policy_summary, sub_outside_fences,
+                   RETRY_LIMIT, attempt_bump, attempt_reset,
+                   append_bundle_finding, quarantine_raw,
                    BUNDLE_ROOT, CLAUDE_HOME, WIKI_ROOT, DAILY_DIR, PENDING_DIR, LOG_MD, PROJECTS_BASE)
 from untrusted import fence
 
@@ -499,7 +507,10 @@ def _retarget_subproject_headers(extracted: str, session_project: str) -> str:
             return f"## {norm}"
         return f"### {label}"
 
-    return _LLM_H2_RE.sub(repl, extracted)
+    # Outside fenced code only. A `## …` line inside a ``` block is part of a
+    # markdown example the session was discussing — demoting it there silently
+    # edits the user's own code sample into the daily log.
+    return sub_outside_fences(_LLM_H2_RE, repl, extracted)
 
 
 def main():
@@ -696,6 +707,7 @@ def main():
             daily_lines.append(extracted)
             daily_lines.append("")
             ok_sections += 1
+            attempt_reset("flush", f"project:{project}")
             log(f"  → OK")
         else:
             # Do NOT write a placeholder section to the daily log: its JSONLs
@@ -751,6 +763,42 @@ def main():
         daily_path.write_text("\n".join(daily_lines), encoding="utf-8")
         log(f"Daily log: {daily_path}")
 
+    # A project that fails the SAME way every night never leaves the queue: its
+    # JSONLs stay unprocessed, are re-collected, and fail again. Usually the
+    # cause really is transient (a provider outage) and waiting is right — but
+    # a payload that reliably trips a provider's filter or exceeds what it will
+    # answer produces the identical "llm_call returned None" forever, and the
+    # pending queue only grows. After RETRY_LIMIT nights the project's sources
+    # are finalized anyway, with the reason recorded rather than silently
+    # dropped.
+    gave_up: set[str] = set()
+    for project in sorted(failed_projects):
+        if not RETRY_LIMIT:
+            break
+        n = attempt_bump("flush", f"project:{project}")
+        if n < RETRY_LIMIT:
+            log(f"  [{project}] extraction failed {n}/{RETRY_LIMIT} — retrying next run")
+            continue
+        gave_up.add(project)
+        attempt_reset("flush", f"project:{project}")
+        quarantine_raw(f"flush#{project}", "retry-limit-reached",
+                       "\n\n---\n\n".join(all_projects.get(project, [])))
+        log(f"  [{project}] QUARANTINED after {n} failed nights — sources in "
+            f"cron/logs/rejected/, marked processed so the queue can drain")
+        if not append_bundle_finding(
+                title=f"flush gave up on project {project}",
+                context="`cron/wiki/wiki-flush-sessions.py` (retry ceiling, WIKI_RETRY_LIMIT)",
+                what=(f"Extraction for `{project}` returned nothing on {n} "
+                      f"consecutive runs. Its sources are quarantined in "
+                      f"`cron/logs/rejected/` and now marked processed, so the "
+                      f"pending queue stops growing behind them."),
+                proposal=("Check the quarantined payload against your provider's "
+                          "limits — an oversized or filter-tripping chunk fails "
+                          "identically every night. Re-run the flush by hand once "
+                          "it is addressed.")):
+            log(f"  [{project}] (a finding for this project is already open)")
+    failed_projects -= gave_up
+
     # Pending files are deleted only now that the daily log is safely written,
     # and only for projects whose extraction succeeded — a transient LLM /
     # network failure must not permanently drop a project's session content.
@@ -761,6 +809,7 @@ def main():
             pf.unlink()
         except OSError:
             pass
+
 
     # JSONLs are recorded as processed only for projects that extracted OK, so a
     # failed project's sessions are re-collected (not skipped) on the next run.

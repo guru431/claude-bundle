@@ -21,8 +21,19 @@ Set `projects_root` in bundle.local.yaml to point at your working copies;
 without it the job no-ops. Projects denied by the privacy policy are skipped —
 their CLAUDE.md never reaches the provider.
 
+Writes one terminal record to cron/logs/runs.jsonl (see cron/runs.py), and
+exits 1 when it had projects to check but could not examine a single one —
+"verified nothing" must not be indistinguishable from "everything is in sync"
+for a job that edits files unattended.
+
 Schedule: weekly.
 """
+
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=the FULL CLAUDE.md and AGENTS.md of every allowed project -> LLM provider money=tokens writes=AGENTS.md + FINDINGS.md in your working copies
 import json
 import os
 import re
@@ -44,8 +55,11 @@ from utils import (  # noqa: E402
     manifest_broken,
     parse_llm_json,
     policy_summary,
-    project_allowed,
+    working_copy_allowed,
 )
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from runs import record_run  # noqa: E402
 
 LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 
@@ -149,14 +163,16 @@ Hard rules:
 # What must never be carried from CLAUDE.md into the AGENTS.md of a repo with a
 # public remote: private addresses, internal hosts, key formats. An edit that
 # trips this is not applied — it goes to FINDINGS.md for a human instead.
-PUBLIC_LEAK_RE = re.compile(
-    r"""(?:
-        \b(?:192\.168|10|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b
-      | \b(?:sk-|ghp_|github_pat_|AIza|xoxb-)[A-Za-z0-9_-]{6,}
-      | -----BEGIN[ A-Z]*PRIVATE\ KEY-----
-    )""",
-    re.X | re.I,
-)
+#
+# The shapes come from cron/lib/secret_shapes.py, the same table behind the
+# commit guard and mask_secrets. This gate used to carry its own list and knew
+# nothing about AKIA keys, JWTs, `ccr-…` or Telegram bot tokens — so the one
+# job in the bundle that WRITES to other people's repositories had the weakest
+# of the three detectors.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from secret_shapes import leak_regex  # noqa: E402
+
+PUBLIC_LEAK_RE = leak_regex()
 
 _MISSING_SECTION = "CRITICAL_MISSING_IN_AGENTS"
 _IDENT_RE = re.compile(r"`([^`]+)`")
@@ -397,25 +413,28 @@ automatically (the rest has already been applied to AGENTS.md).
 
 
 def check_pair(project: str, claude_path: Path, agents_path: Path,
-               findings_path: Path, log_path: Path) -> tuple[bool, int]:
+               findings_path: Path, log_path: Path) -> tuple[bool, int, bool]:
     """Check one CLAUDE.md / AGENTS.md pair.
 
-    Returns (was a finding filed, how many items were fixed automatically).
+    Returns (was a finding filed, items fixed automatically, was the pair
+    actually examined). The third value is what separates "checked and found
+    nothing" from "never reached the provider": without it a night where every
+    project returned LLM_FAIL looked exactly like a clean sweep.
     """
     claude_md = read_file(claude_path)
     agents_md = read_file(agents_path)
 
     if claude_md is None:
         log(f"  {project}: SKIP (no CLAUDE.md)", log_path)
-        return False, 0
+        return False, 0, False
     if agents_md is None:
         if has_open_drift_finding(findings_path, project):
             log(f"  {project}: MISSING AGENTS.md — finding already open, skip", log_path)
-            return False, 0
+            return False, 0, True
         log(f"  {project}: MISSING AGENTS.md — CLAUDE.md exists but no counterpart", log_path)
         append_to_findings(findings_path, project,
                            "AGENTS.md is missing while CLAUDE.md exists.")
-        return True, 0
+        return True, 0, True
 
     response = llm_call(
         PROMPT_TEMPLATE.format(project=project, claude_md=claude_md, agents_md=agents_md),
@@ -423,12 +442,12 @@ def check_pair(project: str, claude_path: Path, agents_path: Path,
     )
     if response is None:
         log(f"  {project}: LLM_FAIL (skipping)", log_path)
-        return False, 0
+        return False, 0, False
 
     response = response.strip()
     if response == "OK" or response.startswith(("OK\n", "OK ")):
         log(f"  {project}: OK", log_path)
-        return False, 0
+        return False, 0, True
 
     response, dropped = verify_report(response, agents_md)
     if dropped:
@@ -437,7 +456,7 @@ def check_pair(project: str, claude_path: Path, agents_path: Path,
             log(f"      false positive: {item[:160]}", log_path)
     if not response:
         log(f"  {project}: OK (every item turned out to be a false positive)", log_path)
-        return False, 0
+        return False, 0, True
 
     model_note = f" on {FIX_MODEL}" if FIX_MODEL else ""
     log(f"  {project}: DRIFT detected ({len(response)} chars) — autofix{model_note}", log_path)
@@ -448,14 +467,14 @@ def check_pair(project: str, claude_path: Path, agents_path: Path,
 
     if not failed:
         log(f"  {project}: AUTOFIXED {len(applied)} item(s), no finding filed", log_path)
-        return False, len(applied)
+        return False, len(applied), True
 
     for item in failed:
         log(f"      UNFIXED: {item[:200]}", log_path)
 
     if has_open_drift_finding(findings_path, project):
         log(f"  {project}: leftovers remain, finding already open — skip", log_path)
-        return False, len(applied)
+        return False, len(applied), True
 
     leftover = "### Could not be fixed automatically\n" + "\n".join(
         f"- {item}" for item in failed
@@ -466,35 +485,51 @@ def check_pair(project: str, claude_path: Path, agents_path: Path,
         )
     leftover += "\n\n**Original report:**\n\n" + response
     append_to_findings(findings_path, project, leftover)
-    return True, len(applied)
+    return True, len(applied), True
 
 
-def main():
+def main() -> int:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"agents-md-sync-check_{date.today().isoformat()}.log"
     log("=== AGENTS.md sync check START ===", log_path)
     log(f"privacy policy: {policy_summary()}", log_path)
 
+    def done(rc: int, useful, note: str) -> int:
+        """One terminal ledger record per run, on EVERY exit path.
+
+        The contract in cron/runs.py is "every LLM task writes ONE terminal
+        record"; this, the sixth LLM task, wrote none, so the job that EDITS
+        files in other people's repositories was the one job absent from
+        bundle-status' artifact health.
+        """
+        record_run(task="ClaudeAgentsMdSyncCheck", process_rc=rc,
+                   artifact_path=log_path, useful_items=useful,
+                   delivery="n/a", note=note)
+        return rc
+
     if manifest_broken():
         log("bundle.local.yaml could not be read — every project denied, nothing to do",
             log_path)
-        return
+        return done(0, None, "manifest unreadable — every project denied")
     if PROJECTS_ROOT is None:
         log("projects_root is not set in bundle.local.yaml — nothing to check", log_path)
-        return
+        return done(0, None, "projects_root not set")
     if not PROJECTS_ROOT.is_dir():
         log(f"projects_root does not exist: {PROJECTS_ROOT} — nothing to check", log_path)
-        return
+        return done(0, None, f"projects_root missing: {PROJECTS_ROOT}")
 
-    drift_count = fixed_count = checked = 0
+    drift_count = fixed_count = checked = examined = 0
     for project_dir in sorted(PROJECTS_ROOT.iterdir()):
         if not project_dir.is_dir():
             continue
         project = project_dir.name
-        if not project_allowed(project):
+        # working_copy_allowed, not project_allowed: this walk is over git
+        # checkouts, whose directory names are a different namespace from the
+        # resolved slugs the policy is written in (see utils).
+        if not working_copy_allowed(project):
             log(f"  skip {project} (privacy policy)", log_path)
             continue
-        drifted, fixed = check_pair(
+        drifted, fixed, reached = check_pair(
             project,
             project_dir / "CLAUDE.md",
             project_dir / "AGENTS.md",
@@ -504,10 +539,22 @@ def main():
         drift_count += int(drifted)
         fixed_count += fixed
         checked += 1
+        examined += int(reached)
 
-    log(f"=== DONE: {checked} pair(s) checked, {fixed_count} item(s) auto-fixed, "
-        f"{drift_count} finding(s) filed ===", log_path)
+    log(f"=== DONE: {checked} pair(s) seen, {examined} actually examined, "
+        f"{fixed_count} item(s) auto-fixed, {drift_count} finding(s) filed ===",
+        log_path)
+
+    # A run where every candidate project failed to reach the provider verified
+    # NOTHING, and used to exit 0 all the same: main() returned None, so "did
+    # not check a single pair" and "everything is in sync" were the same signal
+    # to the task monitor.
+    if checked and not examined:
+        log("ERROR: not one pair could be examined (LLM unreachable for all) — "
+            "nothing was verified this run.", log_path)
+        return done(1, 0, f"{checked} pair(s), none examined")
+    return done(0, fixed_count or None, f"{examined}/{checked} pair(s) examined")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

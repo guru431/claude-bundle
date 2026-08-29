@@ -15,7 +15,7 @@ for the pass/fail check). Lines are tagged [ok] / [--] / [!!] for quick scanning
 import json
 import os
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -25,11 +25,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
     PROJECT_MAP, manifest_broken, policy_summary,
     BUNDLE_ROOT, WIKI_ROOT, PENDING_DIR, STATE_PATH, LLM_PROVIDER,
-    DEFAULT_CHAIN, PROVIDERS, _env_first,
+    DEFAULT_CHAIN, PROVIDERS, _env_first, ALLOW_OFFBOX,
+    PROJECTS_ROOT, PROJECTS_ROOT_SOURCE, count_wiki_pages, quarantined_count,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runs import read_runs, latest_by_task  # noqa: E402
+from runs import (read_latest_runs, latest_by_task,  # noqa: E402
+                  freshness_windows, age_days)
 
 
 def ok(msg):   print(f"  [ok] {msg}")
@@ -37,13 +39,14 @@ def na(msg):   print(f"  [--] {msg}")
 def bad(msg):  print(f"  [!!] {msg}")
 
 
-def _count_md(folder: Path) -> int:
-    """Count real wiki pages under folder (recursively), ignoring the
-    script-managed index.md / _log.md."""
-    if not folder.is_dir():
-        return 0
-    return sum(1 for p in folder.rglob("*.md")
-               if p.name not in ("index.md", "_log.md"))
+# Page counting comes from utils.count_wiki_pages — the same rule the index
+# builder applies. The two used to disagree (this one counted CLAUDE.md,
+# log.md and BOOTSTRAP_RUN.md as pages, wiki-build-index.py did not), so
+# `wiki/index.md` § Stats and the line below reported different totals for one
+# vault with nothing to say which was the real number.
+_count_md = count_wiki_pages
+
+
 
 
 def main() -> int:
@@ -93,8 +96,25 @@ def main() -> int:
     else:
         (ok if manifest.is_file() else na)(
             f"manifest (bundle.local.yaml): {'present' if manifest.is_file() else 'absent (using template defaults)'}")
+    if not ALLOW_OFFBOX:
+        ok("WIKI_ALLOW_OFFBOX=0 — every off-box provider is refused; only a "
+           "local server can answer")
     print(f"  policy: {policy_summary()}")
     print(f"  project_map entries: {len(PROJECT_MAP)}")
+
+    # One value, two historical spellings (bundle.local.yaml::projects_root and
+    # .env::PROJECTS_ROOT). Filling in only one used to leave half the jobs
+    # working with no diagnostic anywhere — so print the EFFECTIVE value and
+    # where it came from, and name the tasks that go quiet without it.
+    _root_users = ("ClaudeTestSweep / ClaudeTestSweepFull / "
+                   "ClaudeAgentsMdSyncCheck / ClaudeGitPushAll / ClaudeMd2PdfSync")
+    if PROJECTS_ROOT is None:
+        na(f"projects_root: not set — {_root_users} will no-op")
+    elif not PROJECTS_ROOT.is_dir():
+        bad(f"projects_root: {PROJECTS_ROOT} does not exist "
+            f"(source: {PROJECTS_ROOT_SOURCE}) — {_root_users} will no-op")
+    else:
+        ok(f"projects_root: {PROJECTS_ROOT} (source: {PROJECTS_ROOT_SOURCE})")
 
     # ── launcher (Windows Task Scheduler) ────────────────────────────────────
     print("\n[launcher]")
@@ -142,6 +162,14 @@ def main() -> int:
     rej_dir = BUNDLE_ROOT / "cron" / "logs" / "rejected"
     rej = len(list(rej_dir.glob("*"))) if rej_dir.is_dir() else 0
     (na if rej == 0 else bad)(f"rejected quarantine (cron/logs/rejected): {rej} file(s)")
+    # Sources the retry ceiling has given up on. A growing pending queue used to
+    # be the only symptom of a source that fails identically every night, and it
+    # never said WHICH source; this does.
+    for phase in ("flush", "compile_sessions"):
+        stuck = quarantined_count(phase)
+        if stuck:
+            bad(f"{phase}: {stuck} source(s) quarantined after WIKI_RETRY_LIMIT "
+                f"failures — see the open findings in FINDINGS.md")
 
     # ── artifact health (Semantic Artifact SLO) ──────────────────────────────
     # Deliberately separate from the pipeline-state block above: that one is
@@ -149,20 +177,33 @@ def main() -> int:
     # produce anything of value, and was it delivered?). A task can be green on
     # the first and empty on the second — that false-green gap is the point.
     print("\n[artifact health]")
-    runs = read_runs()
+    # The two newest yearly slices, not the whole history: this block asks
+    # "what did each task do last?", which never needed a decade of records.
+    runs = read_latest_runs()
     if not runs:
-        na("no runs.jsonl yet — no task has recorded a terminal verdict "
+        na("no runs-<year>.jsonl yet — no task has recorded a terminal verdict "
            "(cron/runs.py documents how to instrument one)")
     else:
+        freshness = freshness_windows()
         for task, rec in sorted(latest_by_task(runs).items()):
             verdict = rec.get("verdict", "?")
-            mark = ok if verdict == "green" else bad
             items = rec.get("useful_items")
             detail = f"useful={items}" if items is not None else "useful=n/a"
             size = rec.get("artifact_bytes")
             if size is not None:
                 detail += f", {size}B"
-            mark(f"{task}: {verdict} ({detail}, last {rec.get('ts', '?')})")
+            ts = rec.get("ts", "?")
+            # A verdict is only as good as it is recent. `green (last 2026-05-01)`
+            # printed in August is a task that has been silent for four months,
+            # and the word "green" is the last thing it should read as: the
+            # ledger records the last run, not the current state.
+            age = age_days(ts)
+            window = freshness.get(task)
+            stale = age is not None and window is not None and age > window
+            mark = bad if (verdict != "green" or stale) else ok
+            note = (f", STALE — last run {age:.0f}d ago, expected within "
+                    f"{window}d") if stale else ""
+            mark(f"{task}: {verdict} ({detail}, last {ts}{note})")
 
     # ── wiki ─────────────────────────────────────────────────────────────────
     print("\n[wiki]")

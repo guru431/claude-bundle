@@ -34,6 +34,12 @@ Requires ~/.claude/bin/md2pdf.py (a small wrapper around any MD->PDF
 converter). If you don't use the md+pdf pairing pattern, just leave this task
 disabled in the registry.
 """
+
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. The code is the source; the
+# doc reflects it. Keep it honest — it is what people read to decide whether to
+# enable this task.
+# bundle-io: offbox=nothing (local render) money=no writes=regenerates *.pdf under projects_root
 from __future__ import annotations
 
 import json
@@ -54,6 +60,9 @@ BUNDLE_ROOT = Path(__file__).resolve().parents[1]
 # bundle .env must be loaded before any os.environ.get() below is evaluated.
 sys.path.insert(0, str(Path(__file__).parent / "hooks"))
 from utils import _load_dotenv, find_bash  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from runs import record_run  # noqa: E402
 
 _load_dotenv()
 
@@ -206,6 +215,15 @@ def main() -> int:
             subprocess.run([BASH, str(TELEGRAM), msg], timeout=30, check=False)
         except Exception as e:  # noqa: BLE001
             log(f"telegram-send failed: {e}")
+
+    # Terminal ledger record (cron/runs.py). useful_items = PDFs regenerated —
+    # normally zero on a quiet night, which is why the note carries the pairs
+    # actually examined: "swept nothing at all" (a wrong projects root) is the
+    # state this is here to make visible.
+    record_run(task="ClaudeMd2PdfSync", process_rc=1 if failed else 0,
+               artifact_path=LOG_FILE, useful_items=len(regenerated),
+               delivery="n/a",
+               note=f"{skipped} up to date, {len(failed)} failed")
 
     # Non-zero so Task Scheduler records the run as failed and task-monitor
     # picks it up; processing itself stays best-effort (all files attempted).

@@ -13,6 +13,7 @@ Checks:
   3. per-task trigger times           (registry.yaml)
   4. disabled tasks disclosed as off  (registry.yaml)
   5. LLM provider chain + default     (utils.py — the code, not its docstring)
+  6. layout blocks list every top-level directory (CLAUDE.md, README.md)
 
 Deterministic, no LLM and no third-party deps: PyYAML when present, else a
 small line state machine. The name is historical — it started as a count check.
@@ -283,6 +284,43 @@ def check_provider_chain(problems: list[str]) -> None:
                                     f"documented as '{val}', utils.py has '{code_default}'")
 
 
+def check_layout_blocks(problems: list[str]) -> None:
+    """The layout diagrams in CLAUDE.md and README.md against the real tree.
+
+    Only first-level entries, and only the ones that exist: a diagram is a map,
+    not an inventory, and demanding every leaf be listed would make it useless.
+    But a top-level directory that is missing from the map, or one the map
+    invents, is exactly the drift that happened — CLAUDE.md's own table says
+    "New file structure section | Update the layout block in README.md AND in
+    this file", and nothing enforced it, so the block accumulated a dozen
+    missing entries while README.md stayed current.
+    """
+    # Tracked top-level directories, plus the two dot-directories that carry
+    # the guards (they are in the diagram and they matter).
+    actual = {p.name for p in ROOT.iterdir()
+              if p.is_dir() and p.name in
+              {"home-claude", "codex", "scripts", "config", "tests", "docs",
+               ".githooks", ".github"}}
+    for rel in ("CLAUDE.md", "README.md"):
+        path = ROOT / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        # The two files draw the same tree with different roots: CLAUDE.md uses
+        # a bare `.`, README.md names the repo. Both are the map this checks.
+        blocks = re.findall(r"(?ms)^```\n((?:\.|claude-bundle/)\n.*?)^```", text)
+        if not blocks:
+            problems.append(f"{rel}: no layout block found (a fenced block "
+                            f"starting with a bare `.`) — the structure guard "
+                            f"is blind on this file")
+            continue
+        block = max(blocks, key=len)
+        for name in sorted(actual):
+            if name not in block:
+                problems.append(f"{rel}: the layout block does not mention "
+                                f"`{name}/`, which exists in the tree")
+
+
 def check() -> int:
     total, n_disabled, names = registry_counts()
     print(f"registry: {total} tasks, {n_disabled} disabled "
@@ -331,6 +369,7 @@ def check() -> int:
     check_triggers(problems, tasks)
     check_disabled_disclosed(problems, tasks)
     check_provider_chain(problems)
+    check_layout_blocks(problems)
 
     if problems:
         print("DOC DRIFT — update the docs (or the registry / utils.py):")

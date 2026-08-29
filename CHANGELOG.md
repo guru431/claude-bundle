@@ -3,6 +3,31 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.15.1] - 2026-08-30
+
+### Fixed — a test that asked the host machine whether it should pass
+
+CI went red on `main` at 0.15.0: `test_cleanup_removes_run_dirs_and_keeps_the_named_one`
+failed on ubuntu-latest and passed on the developer's Windows box. Nothing was
+wrong with `cleanup_temp_roots` — the test consulted the real world twice over.
+It created `sweep-run-111` expecting it to be reclaimed as a dead run, but
+`_owner_alive` resolves that through `psutil`, which is optional by design:
+absent, it returns "alive" so an overlapping sweep's basetemp is never deleted.
+`psutil` is in no `requirements*.txt`, so on the runner the directory was
+skipped and the assertion failed. Even with `psutil` installed the test would
+be a coin toss on Linux, where pid 111 is an ordinary system process.
+
+Liveness is now stubbed in both cleanup tests, which leaves them testing the
+cleanup logic and nothing else. `test_cleanup_survives_undeletable_dir` needed
+the same stub for a different reason: with a live owner the directory is
+skipped before `rmtree_force` is reached, so its `== []` held whether or not
+the `PermissionError` was handled — green for the wrong reason. The live-owner
+branch (the Saturday overlap between `ClaudeTestSweep` and `...Full`) was only
+ever covered by accident, so it gets an explicit test of its own.
+
+`psutil` stays optional and undeclared: pinning it would not have fixed this,
+since the pid-namespace assumption fails on Linux either way.
+
 ## [0.15.0] - 2026-08-29
 
 Clears `FINDINGS.md` and `IDEAS.md` completely: 26 findings and 12 proposals,

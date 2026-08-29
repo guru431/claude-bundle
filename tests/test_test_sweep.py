@@ -248,7 +248,13 @@ def test_basetemp_passed_to_pytest(tmp_path, monkeypatch):
 
 
 def test_cleanup_removes_run_dirs_and_keeps_the_named_one(tmp_path, monkeypatch):
+    # Liveness is stubbed, not left to the host: _owner_alive falls back to
+    # "alive" when psutil is missing (CI) and otherwise asks the real process
+    # table, where a low pid like 111 is a running system process on Linux.
+    # Unstubbed, this test passed on the developer's Windows box and failed on
+    # ubuntu-latest — for reasons having nothing to do with the cleanup logic.
     monkeypatch.setattr(sweep.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(sweep, "_owner_alive", lambda name: False)
     (tmp_path / "sweep-run-111").mkdir()
     (tmp_path / "sweep-photos").mkdir()          # leftover from the older scheme
     keep = tmp_path / "sweep-run-222"
@@ -263,7 +269,11 @@ def test_cleanup_removes_run_dirs_and_keeps_the_named_one(tmp_path, monkeypatch)
 
 def test_cleanup_survives_undeletable_dir(tmp_path, monkeypatch):
     """A directory with a foreign DACL is skipped silently — cleanup may not fail."""
+    # Same stub, and here it is what makes the test mean anything: with a live
+    # owner the directory is skipped before rmtree_force is ever reached, so
+    # the empty result would hold even if the PermissionError were mishandled.
     monkeypatch.setattr(sweep.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(sweep, "_owner_alive", lambda name: False)
     (tmp_path / "sweep-run-111").mkdir()
 
     def denied(path):
@@ -271,6 +281,20 @@ def test_cleanup_survives_undeletable_dir(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sweep, "rmtree_force", denied)
     assert sweep.cleanup_temp_roots() == []
+
+
+def test_cleanup_leaves_the_tree_of_a_live_run_alone(tmp_path, monkeypatch):
+    """The Saturday overlap: ClaudeTestSweep and ...Full run at once, and the
+    one that finishes first must not delete the basetemp the other is writing
+    into. Stubbing liveness in the two tests above removed the only place this
+    branch was exercised, so it gets an explicit one."""
+    monkeypatch.setattr(sweep.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(sweep, "_owner_alive", lambda name: name == "sweep-run-111")
+    (tmp_path / "sweep-run-111").mkdir()
+    (tmp_path / "sweep-run-333").mkdir()
+
+    assert sweep.cleanup_temp_roots() == ["sweep-run-333"]
+    assert (tmp_path / "sweep-run-111").is_dir()
 
 
 # ── reaping abandoned pytest processes ───────────────────────────────────────

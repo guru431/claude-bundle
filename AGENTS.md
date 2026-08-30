@@ -33,12 +33,17 @@ checklist. Zero matches is mandatory.
 
 This check is **already automated** by [`.githooks/pre-commit`](.githooks/pre-commit)
 (denylist grep against an untracked `.sanitize-patterns` + a generic
-key/token-format scan). Don't re-implement it by hand — just activate it
-once per clone with [`scripts/enable-guard.sh`](scripts/enable-guard.sh)
-(or `scripts/enable-guard.ps1`); the bare equivalent is
-`git config core.hooksPath .githooks`. The hook expects `.sanitize-patterns`
-to contain regexes only — no comments or blank lines. Bypass a confirmed
-false positive with `git commit --no-verify`.
+key/token-format scan). Don't re-implement it by hand — the one-command way is
+[`scripts/enable-guard.sh`](scripts/enable-guard.sh) (or
+`scripts/enable-guard.ps1`), which sets the hook path and seeds a local
+`.sanitize-patterns.md` reference. The bare equivalent:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook expects `.sanitize-patterns` to contain regexes only — no comments or
+blank lines. Bypass a confirmed false positive with `git commit --no-verify`.
 
 ## Project-specific gotchas
 

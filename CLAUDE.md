@@ -115,6 +115,62 @@ This block is checked by `scripts/check-doc-counts.py` (it compares the
 first-level directory names against the real tree), so it cannot silently
 rot the way it did before — but the leaf entries are still discipline.
 
+## Architecture — the parts you can't see from one file
+
+**Two audiences, two rule files.** This `CLAUDE.md` governs work *on the
+repo*. `home-claude/CLAUDE.md` is a **payload** — the rules file that
+lands in a user's `~/.claude/`. Editing one never implies the other.
+`codex/AGENTS.md` is a structural mirror of `home-claude/CLAUDE.md`
+(universal sections only) and `scripts/check-agents-sync.py` fails CI
+when they drift.
+
+**`home-claude/cron/hooks/utils.py` is the hub.** Every Tier-2 script
+imports it, and it is where four separate concerns live: the machine-local
+manifest (`~/.claude/bundle.local.yaml`) and the `project_allowed()` /
+`working_copy_allowed()` privacy gate; the JSON state ledger with file
+locking, quarantine and per-source attempt counters; wiki page I/O
+(frontmatter parse/dump, `source_hash` dedup, project-name slugging,
+reserved-name checks); and the LLM layer — the `PROVIDERS` table,
+`llm_call()` with its cross-process queue and fallback chain. A change
+here reaches all 15 tasks at once; that is the reason `tests/` mostly
+exercises this file.
+
+**Fail-closed is the design, not an accident.** A manifest that won't
+parse makes `project_allowed()` deny everything (and `manifest_broken()`
+say so loudly); a `local` provider pointed at a non-local endpoint
+refuses; `PROJECT_MAP` / `KNOWN_PROJECTS` ship empty so a fresh install
+reads nothing it wasn't told to. `tests/test_guards.py` is the executable
+statement of these invariants — if a change makes one of them
+fail-*open*, that test is the thing that must not be "fixed".
+
+**The nightly chain is ordered and re-entrant.**
+`wiki-pipeline.py` runs `flush → compile → index` in one process, each
+phase a subprocess whose log folds into the pipeline log, `--dry-run` /
+`--no-llm` passed through to all of them. Sessions enter as JSONL tails
+dropped by the `session-*` hooks into `wiki/daily/.pending/`; the state
+ledger + `source_hash` are what make a re-run idempotent rather than
+duplicative. `compile-kb` is a separate, off-by-default source and is
+deliberately *not* in the chain.
+
+**`registry.yaml` is the only declaration of a scheduled task**, and
+three things are checked against it: `check-registry.py` (field/kind/
+trigger grammar, and that every `script:` path exists in the bundle),
+`check-doc-counts.py` (README + docs task counts), and
+`check-io-matrix.py`. That last one enforces a contract worth knowing
+before you add a task: **every task script must carry a machine-readable
+`# bundle-io: offbox=… money=… writes=…` header line**, and it must agree
+with the data/money matrix in `docs/cron-architecture.md`. It is how the
+bundle can honestly answer "what does this send off my machine, and what
+does it cost" without reading 15 scripts.
+
+**One implementation per cross-cutting rule.** The credential shapes live
+once in `home-claude/cron/lib/secret_shapes.py` and are *generated* into
+`secret-scan.sh`, which the pre-commit hook, the pre-push hook and CI all
+source — three detectors, one table (`tests/test_guards.py` asserts the
+shell pattern is the generated one). Same idea for `lib/dotenv.sh`, and
+for `findings_header()` / `ideas_header()` in `utils.py`. When you need a
+second copy of a rule, generate it or source it; do not paste it.
+
 ## What lives where — when changing X, also touch Y
 
 | Change | Also update |
@@ -220,19 +276,58 @@ file that gets committed. Its values must all be empty.
 6. **Commit**: include a `CHANGELOG.md` entry noting what was added and
    what sanitization was applied.
 
+## Commands
+
+Setup once: `pip install -r requirements.txt -r requirements-dev.txt`
+(Python 3.10+). Everything below runs from the repo root and is
+**offline** — no LLM key, no network. Nothing here touches your real
+`~/.claude/`.
+
+| What | Command |
+|---|---|
+| Fast test suite (the default; 60s budget) | `python -m pytest tests/ -q` |
+| One file | `python -m pytest tests/test_pipeline.py -q` |
+| One test | `python -m pytest tests/test_guards.py::test_valid_manifest_allows -q` |
+| The `integration` tests excluded by default | `python -m pytest tests/ -m integration -q` |
+| All five CI guards | `python scripts/check-registry.py && python scripts/check-doc-counts.py && python scripts/check-env-ref.py && python scripts/check-io-matrix.py && python scripts/check-agents-sync.py` |
+| Shell lint (CI parity — gates on warnings) | `{ git ls-files '*.sh'; git ls-files '.githooks/*'; } \| xargs shellcheck --severity=warning -e SC1091 -f gcc` |
+| Secret-format scan (same lib as pre-commit) | `. home-claude/cron/lib/secret-scan.sh && git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/'` |
+| Denylist grep (mandatory before every commit) | `git diff --cached \| grep -iEf .sanitize-patterns` |
+| Python compiles | `python -m compileall -q home-claude/cron home-claude/hooks home-claude/bin` |
+| Windows offline check (JSON/YAML/hooks/placeholders) | `powershell -File scripts/self-test.ps1` |
+| PowerShell parse-check | see the `powershell` job in `.github/workflows/ci.yml` |
+| Wiki pipeline end-to-end, spends nothing | `WIKI_LLM_PROVIDER=mock python home-claude/cron/wiki/wiki-pipeline.py --dry-run` |
+| The two shell tests of the push guards (by hand) | `bash home-claude/cron/tests/test_push_repo.sh`, `bash home-claude/cron/tests/test_guard_protected.sh` |
+
+`pytest.ini` is deliberately the reference implementation of the test
+policy the bundle ships (`home-claude/CLAUDE.md` § test policy): a bare
+`pytest` is the fast suite, `--durations=10` is on so the "mark
+`integration` **by measurement**" rule is actually measurable, and
+`testpaths` is mandatory. Keep it that way — it is documentation as much
+as config.
+
 ## Local verification
 
-- **Grep sanity** — see above. Mandatory.
-- **JSON validity** — `python -c "import json; json.load(open('home-claude/settings.json'))"`
-- **YAML parsing of `registry.yaml`** — `python -c "import yaml; print(len(yaml.safe_load(open('home-claude/cron/registry.yaml'))))"`
-- **Pipeline smoke test** — `WIKI_LLM_PROVIDER=mock python -m pytest tests/ -q` (offline, mock provider).
+- **Grep sanity** — mandatory, see the table and § Sanitization above.
 - **Hook smoke test** — pipe a sample JSON payload through each hook
-  script and confirm it exits 0 and emits valid JSON.
+  script and confirm it exits 0 and emits valid JSON. This is the one
+  check CI does not run.
 - **`claude-switch.ps1`** — run with `status` (it should not modify any
   file).
 - **PowerShell BOM** — if you edit `scripts/claude-switch.ps1` and it
   contains Cyrillic, add a UTF-8 BOM (see `home-claude/CLAUDE.md`
   "File Encoding" section).
+- **Shellcheck on Windows, two local-only traps.** Its default output
+  carries em-dashes that a CP-1251 console cannot encode
+  (`commitBuffer: invalid argument`) — hence `-f gcc` above. And a
+  working-tree `.sh` left over from before `.gitattributes` can still be
+  CRLF (`git ls-files --eol` shows `i/lf w/crlf`), which shellcheck
+  reports as SC1017 on every line. The index is LF and CI is unaffected;
+  fix the local copy with `rm <file> && git checkout -- <file>`.
+- **Exec bits are pinned** — CI fails on any change to the set
+  `{.githooks/pre-commit, .githooks/pre-push, home-claude/cron/github-push.sh,
+  scripts/enable-guard.sh}`. Adding or dropping `+x` is an intentional
+  decision, not a side effect.
 
 CI (`.github/workflows/ci.yml`) runs two jobs. **Ubuntu:** Python
 compileall, JSON validity, YAML parse + `script:` path guard, the

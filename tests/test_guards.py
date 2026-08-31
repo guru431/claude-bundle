@@ -261,10 +261,25 @@ def test_private_addresses_are_leak_only():
 # ── .env parsing: env wins over the file, in BOTH implementations ───────────
 
 def _bash():
+    """A bash that understands the paths we hand it — not merely the first in PATH.
+
+    Windows ships `C:\\Windows\\System32\\bash.exe`, the WSL launcher. It is a
+    `bash` by name only: given a Windows-shaped script path it prints nothing and
+    exits, so this test failed while passing by hand from Git Bash. Task
+    Scheduler's session 0 has System32 in PATH and Git\\bin not, which is exactly
+    where the nightly sweep runs.
+    """
     import shutil
-    return (shutil.which("bash")
-            or next((p for p in (r"C:\Program Files\Git\bin\bash.exe",)
-                     if Path(p).is_file()), None))
+    # `usr\bin` before `bin`: the latter prepends /mingw64/bin:/usr/bin to any
+    # PATH handed to it, which quietly outranks a caller's own entries.
+    for candidate in (r"C:\Program Files\Git\usr\bin\bash.exe",
+                      r"C:\Program Files\Git\bin\bash.exe"):
+        if Path(candidate).is_file():
+            return candidate
+    found = shutil.which("bash")
+    if found and Path(found).parent.name.lower() == "system32":
+        return None                      # WSL launcher, not a usable bash here
+    return found
 
 
 @pytest.mark.skipif(_bash() is None, reason="bash not available")

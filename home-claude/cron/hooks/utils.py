@@ -884,6 +884,12 @@ def find_bash() -> str | None:
     if explicit and os.path.isfile(explicit):
         return explicit
     found = shutil.which("bash")
+    # `C:\Windows\System32\bash.exe` is the WSL launcher, and System32 IS in
+    # session 0's PATH while Git\bin is not. It accepts the call and does
+    # nothing useful with a Windows path, so every alert would vanish quietly —
+    # the very failure this fallback chain exists to prevent.
+    if found and os.path.basename(os.path.dirname(found)).lower() == "system32":
+        found = None
     if found:
         return found
     default = r"C:\Program Files\Git\bin\bash.exe"

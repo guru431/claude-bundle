@@ -10,10 +10,16 @@ The bundle has two install profiles — figure out which one the user wants:
 - **Full**: Lite + Python hooks + wiki vault + cron pipeline +
   claude-switch + AGENTS.md mirror (the last two are optional companions).
   = Tier 1 + Tier 2. Needs Python 3.10+, Git, and an LLM backend for the
-  nightly jobs — a DeepSeek / OpenCode Go key, **or**
-  `WIKI_LLM_PROVIDER=claude`, which needs no key (it calls the already
-  signed-in `claude` CLI, spending the user's subscription). Telegram is
-  optional — alerts only.
+  nightly jobs — one of: `WIKI_LLM_PROVIDER=local` (an OpenAI-compatible
+  server on loopback; **nothing leaves the machine**), a DeepSeek / OpenCode Go
+  key, **or** `WIKI_LLM_PROVIDER=claude`, which needs no key (it calls the
+  already signed-in `claude` CLI, spending the user's subscription). Telegram
+  is optional — alerts only.
+
+  Offer `local` FIRST when the user mentions privacy, confidential work, an
+  air-gapped machine, or asks what leaves the box. It was previously reachable
+  only by reading `docs/llm-routing.md`, so the safest mode was the least
+  discoverable one.
 
 If the user said "lite", "minimal", "just the config", "no software", or
 just "set up Claude Code" — do **Lite** (Tier 1, but skip copying
@@ -151,12 +157,22 @@ the template would blank them:
 
 Ask the user (use AskUserQuestion):
 > Which LLM provider should the wiki + cron pipeline use?
->   1) DeepSeek (cheapest reliable, PAYG)
->   2) OpenCode Go (flat subscription, more model variety)
->   3) Claude (consumes your subscription — opt-in only)
+>   1) Local server (nothing leaves this machine — needs an
+>      OpenAI-compatible server on loopback: Ollama, llama.cpp, vLLM, LM Studio)
+>   2) DeepSeek (cheapest reliable, PAYG)
+>   3) OpenCode Go (flat subscription, more model variety)
+>   4) Claude (consumes your subscription — opt-in only)
 
-For options 1–2, get the key from the user and write it into
-`~/.claude/.env`. Option 3 needs no key:
+Lead with option 1 whenever the user mentions privacy, confidential work or
+an air-gapped machine. It was previously documented only in
+`docs/llm-routing.md`, which made the safest mode the least discoverable one.
+
+For options 2–3, get the key from the user and write it into
+`~/.claude/.env`. Options 1 and 4 need no key:
+- Local: `WIKI_LLM_PROVIDER=local`, plus `LOCAL_LLM_BASE_URL=http://localhost:11434/v1`
+  and `LOCAL_LLM_MODEL=<the model your server serves>`. Add
+  `WIKI_ALLOW_OFFBOX=0` as well and every off-box provider is refused
+  regardless of what else is configured.
 - DeepSeek: `DEEPSEEK_KEY=sk-...`
 - OpenCode Go: `OPENCODE_GO_API_KEY=sk-...`
 - Claude opt-in: `WIKI_LLM_PROVIDER=claude` — no key; calls the `claude`
@@ -211,9 +227,15 @@ Code uses (they look like `C--Users-user-projects-myapp`). Write into
 - `allow_projects:` — the allowlist if the user wants one (empty = all)
 - `skip_projects:` — any slugs to exclude from all sources
 
+**Also write `dry_run_until: <today + 7>` into `bundle.local.yaml`.** It holds
+EVERY phase in preview mode until that date: sources are collected, what would
+be sent is printed with a token estimate, and nothing is sent, written or
+recorded. `install.ps1` does this automatically; on this path you must. It
+expires on its own, so it needs no follow-up.
+
 Before enabling tasks, preview what would be sent without spending a
 token: `python "$DST/cron/wiki/wiki-flush-sessions.py" --dry-run` (prints
-the effective policy first).
+the effective policy and the effective configuration first).
 
 ### 9. Edit `registry.yaml` placeholders
 
@@ -288,8 +310,11 @@ For per-project AGENTS.md, ask the user which projects they want.
   expose (zabbix, n8n, mikrotik, custom MCPs from the source)
 - ❌ Do NOT use a mapped drive (`S:\`, `Z:\`, ...) in `registry.yaml`
   `script:` paths for Password-mode tasks — silent failure in session 0
-- ❌ Do NOT set `WIKI_LLM_PROVIDER=claude` as the default if the user
-  has a paid Claude subscription — cron jobs will eat the budget
+- ❌ Do NOT set `WIKI_LLM_PROVIDER=claude` unless the user picked it
+  explicitly. It is the one option that spends a Claude subscription on
+  unattended nightly jobs, so it must be a choice, never a default. (The rule
+  used to read "not if the user has a paid subscription", which excluded the
+  only situation the option applies in — it needs a signed-in `claude` CLI.)
 - ❌ Do NOT run `codex init` if Codex CLI is installed — it overwrites
   `AGENTS.md` and discards the split with `CLAUDE.md`
 
@@ -300,7 +325,7 @@ Profile: <lite | full>
 Lite:   deployed CLAUDE.md, settings.json, skills (templates — paths
         still need filling), commands (1 wired). Hooks: <skipped / X-of-Y
         enabled>.
-Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/15 tasks
+Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/16 tasks
         with Task Scheduler. LLM provider: <provider>. Telegram alerts:
         <yes/no>.   (omit this line for a lite-only deploy)
 Open items: <list of placeholders that still need real values, e.g.

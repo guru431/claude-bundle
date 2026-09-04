@@ -161,17 +161,39 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
 
 
 def running_wrappers() -> list[str]:
-    """Wrapper processes already running, if the platform lets us look cheaply."""
+    """Wrapper processes already running, if the platform lets us look cheaply.
+
+    `wmic` is REMOVED from Windows 11 24H2 and Server 2025. It used to be the
+    only Windows path here, and an OSError was swallowed into an empty list —
+    so on a current Windows the audit printed a confident "no resolver wrappers
+    running" whether or not any were. Three attempts now, and a failure of all
+    three says so instead of reading as a clean result.
+    """
     found = []
-    try:
-        if os.name == "nt":
-            out = subprocess.run(["wmic", "process", "get", "commandline"],
-                                 capture_output=True, text=True, timeout=60,
-                                 errors="replace").stdout
-        else:
-            out = subprocess.run(["ps", "-eo", "args"], capture_output=True,
-                                 text=True, timeout=60, errors="replace").stdout
-    except (OSError, subprocess.SubprocessError):
+    out = ""
+    if os.name == "nt":
+        attempts = [
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }"],
+            ["tasklist", "/v", "/fo", "csv"],
+            ["wmic", "process", "get", "commandline"],
+        ]
+    else:
+        attempts = [["ps", "-eo", "args"]]
+    for cmd in attempts:
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                                 errors="replace")
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if res.returncode == 0 and res.stdout.strip():
+            out = res.stdout
+            break
+    if not out:
+        print("  WARN: could not enumerate running processes "
+              f"({' / '.join(c[0] for c in attempts)} all failed) — "
+              "'no resolver wrappers' below is NOT a verified result",
+              file=sys.stderr)
         return found
     for line in out.splitlines():
         low = line.lower()

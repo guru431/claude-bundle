@@ -309,8 +309,8 @@ investigation, search for prior work in this order:
 
 1. **Project-level incident pages** — if you use the wiki pipeline from
    this bundle, look under `~/.claude/wiki/projects/<current-project>/`
-   for `incident-*`, `solution-*`, or `_troubles-*` pages. They contain
-   prior symptom → cause → fix breakdowns.
+   for `incident-*` or `solution-*` pages. They contain prior
+   symptom → cause → fix breakdowns.
 2. **Global incident index** — a compact list of past incidents across
    all your projects. Typical location:
    `~/.claude/memory/incidents.md`. You build it up by hand as you go —

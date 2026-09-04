@@ -13,7 +13,7 @@ Schedule: Sunday at 02:00.
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=nothing by default (a summary -> Telegram with ENABLE_TELEGRAM_ALERTS) money=no writes=nothing
+# bundle-io: offbox=a lint summary -> Telegram (only with WIKI_LINT_TELEGRAM=1) money=no writes=wiki pages (only with --fix)
 
 import difflib
 import json
@@ -32,13 +32,23 @@ from functools import lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-from utils import (BUNDLE_ROOT, WIKI_ROOT, LOG_MD, find_bash,  # noqa: E402
-                   is_reserved_page_name, mark_phase_success)
+from utils import (BUNDLE_ROOT, WIKI_ROOT, WIKI_NON_PAGES, LOG_MD,  # noqa: E402
+                   _unescape_blob, atomic_write_text, find_bash,
+                   is_reserved_page_name, mark_phase_success, read_page,
+                   sanitize_page_body, write_page)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from runs import record_run  # noqa: E402
 
-KBNEWS_DIR = BUNDLE_ROOT / "kb_news"
+# Same resolution as wiki-compile-kb.py: KB_SOURCE_DIR, then kb_sources/,
+# then the legacy kb_news/ (a private pipeline's name, kept only for
+# compatibility with an existing deployment).
+if os.environ.get("KB_SOURCE_DIR"):
+    KBNEWS_DIR = Path(os.environ["KB_SOURCE_DIR"]).expanduser()
+else:
+    KBNEWS_DIR = next((BUNDLE_ROOT / n for n in ("kb_sources", "kb_news")
+                       if (BUNDLE_ROOT / n).is_dir()),
+                      BUNDLE_ROOT / "kb_sources")
 TELEGRAM_SCRIPT = BUNDLE_ROOT / "cron" / "telegram-send.sh"
 CRON_LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 
@@ -48,8 +58,13 @@ BASH = find_bash()
 
 DATE = datetime.now().strftime("%Y-%m-%d")
 
-# Set to True to send Telegram alerts on lint errors.
-ENABLE_TELEGRAM_ALERTS = False
+# Telegram alerts on lint errors. Read from the environment, not hardcoded:
+# as a source constant it could not be turned on without editing a deployed
+# file, and — worse — `bundle-io` above claimed "offbox=nothing" for a script
+# that ships a summary to Telegram, so the data/money matrix the bundle offers
+# as its honest answer was wrong about this task.
+ENABLE_TELEGRAM_ALERTS = (os.environ.get("WIKI_LINT_TELEGRAM", "")
+                          .strip().lower() in ("1", "true", "yes", "on"))
 
 # Per-class counts from the previous run. WARNs are never zero on a real vault —
 # compiled kb pages carry link rot that nobody is going to clean — so an absolute
@@ -87,7 +102,7 @@ def find_all_pages() -> dict[str, list[Path]]:
         # _log.md is the script-managed per-project activity feed — every
         # project has one, so it would trip the ambiguous-name and
         # thin-content checks with pure noise.
-        if f.name in ("index.md", "CLAUDE.md", "log.md", "_log.md", "patterns.md"):
+        if f.name in WIKI_NON_PAGES:
             continue
         pages.setdefault(f.stem, []).append(f)
     return pages
@@ -451,7 +466,7 @@ def check_unprocessed_articles() -> list[str]:
     if not LOG_MD.exists() or not KBNEWS_DIR.exists():
         return infos
 
-    log_text = LOG_MD.read_text(encoding="utf-8")
+    log_text = LOG_MD.read_text(encoding="utf-8", errors="replace")
 
     articles_dir = KBNEWS_DIR / "articles"
     if articles_dir.exists():
@@ -464,8 +479,31 @@ def check_unprocessed_articles() -> list[str]:
 
 
 def check_index_sync(pages: dict[str, list[Path]]) -> list[str]:
-    """Check 7: index out of sync with files."""
+    """Check 7: index out of sync with files.
+
+    BOTH indexes. This only ever walked `kb/`, so `projects/index.md` — the one
+    people actually navigate, and the one `wiki-build-index.py` rewrites every
+    night — could fall arbitrarily far behind with the lint reporting zero
+    errors. Same rule, same message, one more loop.
+    """
     errors = []
+
+    projects_index = WIKI_ROOT / "projects" / "index.md"
+    projects_dir = WIKI_ROOT / "projects"
+    if projects_index.is_file() and projects_dir.is_dir():
+        index_text = projects_index.read_text(encoding="utf-8", errors="replace")
+        for proj_dir in sorted(projects_dir.iterdir()):
+            if not proj_dir.is_dir() or proj_dir.name.startswith((".", "_")):
+                continue
+            for f in sorted(proj_dir.glob("*.md")):
+                if f.name in WIKI_NON_PAGES:
+                    continue
+                rel = f"projects/{proj_dir.name}/{f.stem}"
+                if not any(form in index_text for form in (
+                        f"[[{rel}|", f"[[{rel}]]", f"[[{f.stem}]]")):
+                    errors.append(
+                        f"ERROR: {f.stem} missing from index projects/index.md "
+                        f"(run wiki-build-index.py)")
 
     for subdir in ["kb/concepts", "kb/tools", "kb/people"]:
         d = WIKI_ROOT / subdir
@@ -474,7 +512,7 @@ def check_index_sync(pages: dict[str, list[Path]]) -> list[str]:
         index_path = WIKI_ROOT / subdir.split("/")[0] / "index.md"
         if not index_path.exists():
             continue
-        index_text = index_path.read_text(encoding="utf-8")
+        index_text = index_path.read_text(encoding="utf-8", errors="replace")
         for f in d.glob("*.md"):
             # wiki-build-index.py emits the qualified form [[kb/<sec>/<stem>|<stem>]].
             # A bare [[stem]] still counts, so a hand-written or pre-existing
@@ -533,7 +571,7 @@ def load_baseline() -> dict[str, int]:
     if not BASELINE_FILE.exists():
         return {}
     try:
-        data = json.loads(BASELINE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(BASELINE_FILE.read_text(encoding="utf-8", errors="replace"))
         counts = data.get("counts", {})
         return {k: int(v) for k, v in counts.items()}
     except (json.JSONDecodeError, ValueError, OSError, AttributeError):
@@ -584,6 +622,32 @@ def send_telegram_alert(message: str):
             pass
 
 
+def fix_mechanical(pages: dict[str, list[Path]]) -> list[str]:
+    """`--fix`: repair the defect classes write_page already knows how to repair.
+
+    Glued `\\n` literals, a second H1, duplicated sections and placeholder lines
+    are all fixed by `sanitize_page_body(_unescape_blob(...))` — but only when
+    the page is next WRITTEN, and a page the compiler has finished with may not
+    be written again for months. Lint can see them today; this applies the same
+    transformation deliberately, through write_page, so the change is atomic and
+    `updated:` is stamped.
+
+    Deliberately mechanical only: nothing here needs judgement, so nothing here
+    needs an LLM. Semantic merges stay in wiki-conflict-resolve.py, which
+    previews by default.
+    """
+    fixed: list[str] = []
+    for paths in pages.values():
+        for path in paths:
+            fm, body = read_page(path)
+            new_body = sanitize_page_body(_unescape_blob(body), label=path.name)
+            if new_body.strip() == body.strip():
+                continue
+            write_page(path, fm, new_body)
+            fixed.append(f"FIXED: {path.relative_to(WIKI_ROOT)}")
+    return fixed
+
+
 def main():
     CRON_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_file = CRON_LOG_DIR / f"wiki-lint_{DATE}.log"
@@ -599,6 +663,10 @@ def main():
 
     pages = find_all_pages()
     log(f"Found wiki pages: {len(pages)}")
+
+    if "--fix" in sys.argv:
+        for line in fix_mechanical(pages):
+            log(f"  {line}")
 
     all_issues: list[str] = []
 
@@ -639,6 +707,12 @@ def main():
 
     for issue in all_issues:
         log(f"  {issue}")
+
+    # `--json` on stdout so bundle-status can show vault health without parsing
+    # a log written for humans.
+    if "--json" in sys.argv:
+        print(json.dumps({"stats": stats, "by_class": class_counts,
+                          "issues": all_issues}, ensure_ascii=False))
 
     # Opt-in via ENABLE_TELEGRAM_ALERTS at the top of this file — broken
     # links in compiled kb pages tend to produce weekly noise.

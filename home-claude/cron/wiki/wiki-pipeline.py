@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Ordered wiki pipeline: flush -> compile-sessions -> build-index in ONE run.
 
-The three nightly wiki phases normally run as three separate scheduled tasks
-(02:30 / 04:00 / 04:05). Those are independent timers, so nothing guarantees
-flush has finished before compile starts — and after a missed trigger
-(StartWhenAvailable), they can bunch up and fire almost together, leaving
-compile/index to read incomplete input (F6).
+THIS IS THE DEFAULT NIGHTLY TASK (`ClaudeWikiPipeline` in registry.yaml). The
+three phases also exist as separate tasks, shipping `enabled: false`, for anyone
+who deliberately wants them on separate timers.
 
-Each phase is idempotent and self-healing: a phase that sees nothing new just
-no-ops, and the next nightly cycle picks up whatever the previous one missed —
-so the separate-timer default never LOSES material, it can only defer it a
-cycle. If you'd rather have a hard ordering guarantee (and an accurate
-"processed tonight" status), run this orchestrator as a SINGLE task and disable
-the three separate ones. See docs/cron-architecture.md
+It used to be the other way round. Separate timers are safe in the sense that
+matters — each phase is idempotent and self-healing, so a bad ordering only ever
+DEFERS material a cycle, never loses it — but nothing guaranteed flush had
+finished before compile started, a missed trigger (StartWhenAvailable) could
+bunch all three together, "processed tonight" could therefore mislead, and one
+shared provider key got three windows to collect a 429 in instead of one. This
+orchestrator was already shipped and already tested; nothing was gained by
+keeping it opt-in. See docs/cron-architecture.md
 "Ordering & the wiki-pipeline orchestrator".
 
 Phases run to completion in sequence. A failing phase is logged (and alerted via
@@ -24,6 +24,11 @@ Usage:
   python wiki-pipeline.py            # run flush -> compile -> index in order
   python wiki-pipeline.py --dry-run  # pass --dry-run through to each phase
 """
+
+# Declared I/O for scripts/check-io-matrix.py, which fails when this line and
+# the table in docs/cron-architecture.md disagree. This is the UNION of the
+# phases it runs — it makes no call of its own.
+# bundle-io: offbox=session/daily-log text of allowed projects -> LLM provider (via the flush and compile phases) money=tokens writes=wiki/daily/, wiki/projects/, wiki/kb/ and the vault indexes
 import os
 import subprocess
 import sys

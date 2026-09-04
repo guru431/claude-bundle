@@ -12,7 +12,7 @@ optional Python hooks.)
 
 **Full** (~30–60 minutes): on top of lite, add the Python hooks, a
 Karpathy-style wiki vault, and a registry-driven Windows Task Scheduler
-automation — 15 scheduled tasks (seven disabled by default) that flush
+automation — 16 scheduled tasks (ten disabled by default) that flush
 Claude Code sessions into the wiki overnight. The installer also offers to
 wire two optional companion tools: an LLM provider switcher
 (`claude-switch.ps1`) and an `AGENTS.md` mirror for Codex CLI. Needs
@@ -41,17 +41,22 @@ claude-bundle/
 ├── home-claude/                       ← copied into ~/.claude/
 │   ├── CLAUDE.md                       Karpathy rules + tool selection + encoding
 │   ├── settings.json                   permissions + plugins + language
-│   ├── settings.example-with-hooks.json reference with the two example hooks wired in
-│   ├── hooks/                          user-level hooks
+│   ├── settings.example-with-hooks.json reference with all five hooks wired in
+│   ├── hooks/                          user-level hooks (all opt-in)
 │   │   ├── block-iptables-save-to-rules.py
+│   │   ├── bash-guard.py + bash-deny.yaml  declarative deny/ask rule table
 │   │   ├── md2pdf-on-edit.py
+│   │   ├── ps1-bom-guard.py            keep the BOM PS 5.1 needs
+│   │   ├── prompt-secret-warn.py       flag a credential pasted into a prompt
 │   │   └── README.md
 │   ├── skills/                         user-level skill templates
 │   │   ├── code-review-external/SKILL.md
 │   │   ├── code-selfcheck/             SKILL.md + catalog.example.json
 │   │   ├── personal-voice/SKILL.md
 │   │   └── README.md
-│   ├── commands/code-review-ext.md     user-level slash command
+│   ├── commands/                       user-level slash commands
+│   │   ├── code-review-ext.md
+│   │   └── wiki.md                     /wiki <words> — search the vault, no LLM
 │   ├── wiki/                           empty Karpathy-style vault skeleton
 │   │   ├── index.md
 │   │   ├── projects/<your-slugs>/      atomic pages (incident/solution/...)
@@ -60,7 +65,7 @@ claude-bundle/
 │   ├── bin/                            helper executables (full tier)
 │   │   ├── _run-hidden.vbs             hidden-window launcher for Task Scheduler
 │   │   └── md2pdf.py                   MD→PDF via headless Edge/Chrome
-│   └── cron/                           cron foundation + wiki pipeline + 15 tasks
+│   └── cron/                           cron foundation + wiki pipeline + 16 tasks
 │       ├── hooks/utils.py              shared LLM_call, JSONL parsing, wiki utils
 │       ├── lib/                         sourceable/importable shared code:
 │       │                                secret-scan.sh + secret_shapes.py (one
@@ -85,7 +90,7 @@ claude-bundle/
 │       ├── claude-healthcheck.sh       morning self-check
 │       ├── claude-warm-window.sh       ping the Claude 5h window (off by default)
 │       ├── memory-update.py            JSONL → memory MD
-│       ├── registry.yaml               15 tasks declared here
+│       ├── registry.yaml               16 tasks declared here
 │       └── admin/                      idempotent sync + DPAPI cred saver
 │           ├── sync.cmd, sync-tasks.ps1
 │           └── save-cred.cmd, save-cred.ps1
@@ -121,14 +126,16 @@ claude-bundle/
 ├── pytest.ini                         the reference implementation of the test policy
 ├── VERSION, requirements.txt, requirements-dev.txt
 │
-├── .githooks/{pre-commit,pre-push}    secret guards (activate: git config core.hooksPath .githooks)
+├── .githooks/{pre-commit,commit-msg,pre-push}  secret guards (activate: git config core.hooksPath .githooks)
 ├── .github/workflows/ci.yml           compileall + JSON/YAML validity + secret-guard + doc-count/registry/env/mirror/io-matrix guards + shellcheck (every shell script) + pytest + PowerShell parse/self-test CI
 │
 └── docs/
     ├── wiki-method.md                 how the Karpathy wiki pipeline works
     ├── cron-architecture.md           Task Scheduler + registry.yaml policies
     ├── mcp-servers.md                 declaring MCP servers: HTTP / direct path, never npx -y
-    └── llm-routing.md                 claude-switch vs utils.py::llm_call
+    ├── llm-routing.md                 claude-switch vs utils.py::llm_call
+    ├── decisions.md                   why the bundle does NOT do certain things
+    └── config-reference.md            generated index of every env var it reads
 ```
 
 ## What you actually get
@@ -163,8 +170,8 @@ from your real Claude Code sessions:
   and refreshes the stats table in `wiki/index.md`
 - A lint script catches broken links, orphan pages, missing frontmatter
 
-A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 15
-scheduled jobs (seven disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
+A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 16
+scheduled jobs (ten disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
 real `Register-ScheduledTask` calls — idempotent, marked, hidden
 windows, Password-mode by default (runs before login → survives
 overnight reboots).
@@ -177,8 +184,11 @@ involved. See [the test policy](home-claude/CLAUDE.md#test-policy-all-projects)
 for the rules the suites themselves are held to.
 
 LLM calls go through `utils.py::llm_call()` with a configurable fallback
-chain: **DeepSeek V4-Flash → OpenCode Go → None**. Claude is opt-in
-only — cron jobs will never silently burn your subscription.
+chain: **DeepSeek V4-Flash → OpenCode Go → DeepInfra → None**. Claude is
+opt-in only — cron jobs will never silently burn your subscription. Set
+`WIKI_LLM_PROVIDER` to a single provider name to use that one alone, or to
+`local` to point the whole pipeline at a server on your own machine and send
+nothing anywhere.
 
 For a per-task breakdown of what each job sends off-box, spends, or
 pushes, see the [data/money matrix](docs/cron-architecture.md#data-cost--publishing-per-task).
@@ -259,7 +269,7 @@ See [`INSTALL.md`](INSTALL.md) — ~15 steps, includes:
 - Running `cron/admin/save-cred.cmd` to DPAPI-stash your Windows password
 - Filling `registry.yaml` placeholders (`<bundle-install-path>`, `<user>`)
   — automatable via `scripts/bootstrap-registry.ps1`
-- Running `cron/admin/sync.cmd` to register all 15 tasks
+- Running `cron/admin/sync.cmd` to register all 16 tasks
 - Adapting `codex/AGENTS.md` if you also run Codex CLI
 
 Before deploying, run `powershell -File scripts/self-test.ps1` for a quick
@@ -275,7 +285,7 @@ status).
 | The wiki's actual contents | personal knowledge, often sensitive |
 | The full list of the source's projects | personal |
 | Project-specific MCP servers (Zabbix, n8n, Mikrotik, ...) | private infra |
-| YouTube KB pipeline (kb_news/) | requires channel config + content rights |
+| external-KB ingest (fills `kb_sources/`) | requires channel config + content rights |
 | OpenClaw monitoring, SearXNG-powered research tasks | private servers |
 | Personal Telegram bots | personal |
 
@@ -290,6 +300,10 @@ status).
 - Git for Windows (Git Bash)
 - Python 3.10+
 - An LLM backend for the nightly jobs — one of:
+  - `WIKI_LLM_PROVIDER=local` — **nothing leaves the machine**. Any
+    OpenAI-compatible server on loopback (Ollama, llama.cpp, vLLM, LM Studio).
+    The endpoint is *verified* to be local, so a mistyped URL refuses rather
+    than sending. The strongest privacy posture the bundle offers, OR
   - DeepSeek key (PAYG, cheapest reliable option), OR
   - OpenCode Go key (flat-rate subscription), OR
   - `WIKI_LLM_PROVIDER=claude` — **no key**; shells out to the `claude`

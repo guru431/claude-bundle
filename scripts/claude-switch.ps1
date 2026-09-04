@@ -79,11 +79,24 @@ $ErrorActionPreference = "Stop"
 # Env loader. Order: process env > user env > <script-dir>/.env > ~/.claude/.env
 # (the canonical bundle .env, shared with the cron pipeline).
 # ─────────────────────────────────────────────────────────────────────────────
+# The parser lives in scripts/lib/dotenv.ps1 — one implementation shared with
+# every other PowerShell script here, matched to the bash, Python and VBScript
+# ones. This file used to carry a FOURTH copy that handled `export `, quoting,
+# a BOM and CRLF differently from all three.
+#
+# The bundle deploys claude-switch.ps1 on its own to ~/.claude/, where lib/ does
+# not follow it, so a self-contained fallback stays for that case.
+$script:_dotEnvLib = Join-Path $PSScriptRoot 'lib/dotenv.ps1'
+if (Test-Path $script:_dotEnvLib) { . $script:_dotEnvLib }
+
 function Read-DotEnvValue([string]$envFile, [string]$name) {
     if (-not (Test-Path $envFile)) { return $null }
-    $line = Get-Content $envFile -Encoding UTF8 | Where-Object { $_ -match "^\s*$name\s*=" } | Select-Object -First 1
+    if (Get-Command Get-DotEnvValue -ErrorAction SilentlyContinue) {
+        return Get-DotEnvValue -Path $envFile -Name $name
+    }
+    $line = Get-Content $envFile -Encoding UTF8 | Where-Object { $_ -match "^\s*(export\s+)?$name\s*=" } | Select-Object -First 1
     if ($line) {
-        $v = ($line -replace "^\s*$name\s*=", "").Trim().Trim('"').Trim("'")
+        $v = ($line -replace "^\s*(export\s+)?$name\s*=", "").Trim().Trim('"').Trim("'")
         if ($v) { return $v }
     }
     return $null
@@ -178,9 +191,18 @@ function New-BackendUrl([string]$h, [int]$port, [string]$varName) {
     return "https://${authorityHost}:${port}"
 }
 
-$ccrHostPort = Get-EnvVar "CCR_HOST"
-if (-not $ccrHostPort) { $ccrHostPort = "127.0.0.1:3456" }
-$ccrHost, $ccrPort = Split-HostPort $ccrHostPort "CCR_HOST" 3456
+# Parsed LAZILY. At top level, `Split-HostPort` calls `exit 2` on a malformed
+# value — so a typo in CCR_HOST killed `claude-switch.ps1 status`, a read-only
+# command that has nothing to do with CCR, before it could print anything.
+$script:_ccrHost = $null
+$script:_ccrPort = $null
+function Get-CcrHostPort {
+    if ($null -ne $script:_ccrHost) { return @($script:_ccrHost, $script:_ccrPort) }
+    $hp = Get-EnvVar "CCR_HOST"
+    if (-not $hp) { $hp = "127.0.0.1:3456" }
+    $script:_ccrHost, $script:_ccrPort = Split-HostPort $hp "CCR_HOST" 3456
+    return @($script:_ccrHost, $script:_ccrPort)
+}
 
 function Test-SamePath([string]$a, [string]$b) {
     if (-not $a -or -not $b) { return $false }
@@ -200,6 +222,13 @@ $globalClaudeHome = $env:CLAUDE_CONFIG_DIR
 if (-not $globalClaudeHome) { $globalClaudeHome = Join-Path $HOME ".claude" }
 
 if ($ProjectPath) {
+    # ABSOLUTE. `git -C <dir> ls-files -- <pathspec>` resolves the pathspec
+    # RELATIVE TO <dir>, so a relative -ProjectPath produced a pathspec that
+    # matched nothing: `ls-files --error-unmatch` said "not tracked",
+    # `check-ignore` said "not ignored", and the API key was written into a file
+    # that could well have been in the index. The one check standing between a
+    # key and a commit failed OPEN on an ordinary relative path.
+    try { $ProjectPath = [System.IO.Path]::GetFullPath($ProjectPath) } catch { }
     $settingsDir = Join-Path $ProjectPath ".claude"
 } elseif ((Split-Path -Leaf $PSScriptRoot) -eq ".claude" -and
           -not (Test-SamePath $PSScriptRoot $globalClaudeHome)) {
@@ -374,6 +403,7 @@ function Get-CurrentMode($obj) {
     if ($envObj.PSObject.Properties.Match("ANTHROPIC_MODEL").Count -gt 0) {
         $modelStr = " → $($envObj.ANTHROPIC_MODEL)"
     }
+    $ccrHost, $ccrPort = Get-CcrHostPort
     $ccrPattern = "127\.0\.0\.1:$ccrPort|localhost:$ccrPort|$([regex]::Escape($ccrHost)):$ccrPort"
     $ollamaPattern = "$([regex]::Escape($ollamaHost)):$ollamaPort"
     if ($url -match $ccrPattern) { return "ccr$modelStr  ($url)" }
@@ -513,6 +543,8 @@ function Assert-SettingsGitSafe([string]$targetPath = $settingsPath) {
         return  # not a git repo at all — nothing to protect
     }
 
+    # $targetPath is already absolute (see the -ProjectPath normalisation
+    # above), which is what makes these pathspecs mean what they say.
     if ((Invoke-GitQuiet @("-C", $settingsDir, "ls-files", "--error-unmatch", "--", $targetPath)) -eq 0) {
         Write-Host ""
         Write-Host "ERROR: $targetPath is TRACKED by git." -ForegroundColor Red
@@ -577,6 +609,20 @@ function Test-TcpPort([string]$targetHost, [int]$port, [int]$timeoutMs = 3000) {
 # ─────────────────────────────────────────────────────────────────────────────
 function Set-Anthropic($obj) {
     $obj = Clear-Env $obj
+    # The `.bak` Save-Settings leaves behind holds the PREVIOUS settings — and
+    # the previous settings are the ones that carried a third-party API key in
+    # plaintext. Switching back to Anthropic looked like "the key is gone from
+    # this project"; the key sat in settings.local.json.bak indefinitely, and
+    # `.bak` is not in anybody's .gitignore.
+    $bak = $settingsPath + ".bak"
+    if (Test-Path $bak) {
+        try {
+            Remove-Item -LiteralPath $bak -Force
+            Write-Host "Removed: $bak (it still held the previous provider's key)" -ForegroundColor DarkGray
+        } catch {
+            Write-Host "WARN: could not remove $bak — it still contains the previous key." -ForegroundColor Yellow
+        }
+    }
     Write-Host "Mode: Anthropic (Claude default — no env override)" -ForegroundColor Green
     return $obj
 }
@@ -684,6 +730,7 @@ function Set-Ollama($obj, [string]$modelName) {
 
 function Set-CCR($obj, [string]$modelName) {
     $key = Require-Key "CCR_API_KEY"
+    $ccrHost, $ccrPort = Get-CcrHostPort
     $ccrUrl  = New-BackendUrl $ccrHost $ccrPort "CCR_HOST"
 
     # Probe — is CCR actually reachable?

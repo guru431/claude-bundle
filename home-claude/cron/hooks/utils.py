@@ -15,6 +15,7 @@ import sys
 import time
 from datetime import date, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 # BUNDLE_ROOT auto-derived: utils.py lives at <bundle>/cron/hooks/, so the
 # meta-repo root is two levels up. Works regardless of where the bundle is
@@ -23,6 +24,118 @@ BUNDLE_ROOT = Path(__file__).resolve().parents[2]
 WIKI_ROOT = BUNDLE_ROOT / "wiki"
 DAILY_DIR = WIKI_ROOT / "daily"
 PENDING_DIR = DAILY_DIR / ".pending"
+
+
+# ── .env, loaded FIRST ───────────────────────────────────────────────────────
+# Task Scheduler doesn't get the user env (incl. DEEPSEEK_KEY etc.), so we load
+# a bundle-local .env file. Existing env vars win (env > dotenv).
+#
+# This has to run before ANY module-level `os.environ.get(...)` below, and it
+# used to run three quarters of the way down the file. Everything defined above
+# that point read the environment as session 0 sees it — empty — so
+# `WIKI_RETRY_LIMIT` was pinned at its default on exactly the machines the .env
+# exists for, and `0 = no ceiling` could not be configured at all.
+def _load_dotenv() -> None:
+    dotenv = BUNDLE_ROOT / ".env"
+    if not dotenv.is_file():
+        return
+    # utf-8-sig: a BOM (what Notepad and `Set-Content` write by default on
+    # Windows) otherwise becomes part of the FIRST key's name, and that one
+    # variable silently goes missing.
+    for raw in dotenv.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        # `export KEY=value` is accepted here as well as in cron/lib/dotenv.sh —
+        # the shell parser has always taken it, and a file written for one of the
+        # two parsers has to work in both.
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        # Plain identifiers only, matching the bash parser in cron/lib/dotenv.sh.
+        # This is a SHAPE check, not a safety one: it drops a line with no '='
+        # (whose whole text would otherwise become the key) and names like
+        # `KEY[0]`. It does NOT reject `PATH=` — those characters are perfectly
+        # legal. What makes a `PATH=/evil` line inert is the `key not in
+        # os.environ` guard below, and that guard is the whole precedence rule:
+        # **env > dotenv**, a variable already in the environment is never
+        # overwritten from the file.
+        if not key or key[0].isdigit() or any(not (c.isalnum() or c == "_") for c in key):
+            continue
+        if key not in os.environ:
+            os.environ[key] = value.strip().strip('"').strip("'")
+
+
+_load_dotenv()
+
+
+# ── One place that reads an env flag, and says where the value came from ─────
+# Six separate findings had one cause: a configuration value that was misread,
+# with no diagnostic anywhere. `WIKI_LLM_PROVIDER=lokal` silently routed the
+# whole pipeline off-box; `WIKI_ALLOW_OFFBOX=off` meant "on"; a `.env` value read
+# before the file was loaded was invisible; `WIKI_LLM_LOCK_WAIT=15m` raised
+# ValueError at import time and took all 15 tasks down with it.
+#
+# So every flag goes through these three readers. They record what they resolved
+# and from where, config_report() prints it, and a value nobody can parse is an
+# ERROR the caller decides the direction of — never a silent default.
+_CONFIG_NOTES: list[tuple[str, str, str]] = []   # (name, effective value, source)
+_CONFIG_ERRORS: list[str] = []
+
+_TRUE_WORDS = {"1", "true", "yes", "on", "enabled", "enable"}
+_FALSE_WORDS = {"0", "false", "no", "off", "disabled", "disable"}
+
+
+def _env_source(name: str) -> str:
+    return "env/.env" if os.environ.get(name) is not None else "default"
+
+
+def _env_bool(name: str, default: bool, *, on_invalid: bool | None = None) -> bool:
+    """Read a boolean flag. `on_invalid` is the value an unparseable string gets.
+
+    None means "use the default". The DLP switches pass False: for a flag whose
+    whole job is to keep data on this machine, a plausible typo must fail closed.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        _CONFIG_NOTES.append((name, str(default), "default"))
+        return default
+    word = raw.strip().lower()
+    if word in _TRUE_WORDS:
+        _CONFIG_NOTES.append((name, "True", "env/.env"))
+        return True
+    if word in _FALSE_WORDS:
+        _CONFIG_NOTES.append((name, "False", "env/.env"))
+        return False
+    chosen = default if on_invalid is None else on_invalid
+    msg = (f"{name}={raw!r} is not a boolean "
+           f"(use one of {', '.join(sorted(_TRUE_WORDS | _FALSE_WORDS))}) "
+           f"— treating it as {chosen}")
+    print(f"ERROR: {msg}", file=sys.stderr)
+    _CONFIG_ERRORS.append(msg)
+    _CONFIG_NOTES.append((name, f"{chosen} (INVALID {raw!r})", "env/.env"))
+    return chosen
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    """Read an integer flag; an unparseable value warns and keeps the default."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        _CONFIG_NOTES.append((name, str(default), "default"))
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        msg = f"{name}={raw!r} is not an integer — using the default {default}"
+        print(f"ERROR: {msg}", file=sys.stderr)
+        _CONFIG_ERRORS.append(msg)
+        _CONFIG_NOTES.append((name, f"{default} (INVALID {raw!r})", "env/.env"))
+        return default
+    if minimum is not None and value < minimum:
+        value = minimum
+    _CONFIG_NOTES.append((name, str(value), "env/.env"))
+    return value
 
 # The OTHER root. BUNDLE_ROOT is where the pipeline's own files live and moves
 # with -PipelineRoot; CLAUDE_HOME is where Claude Code itself keeps config,
@@ -60,7 +173,7 @@ def _load_manifest() -> tuple[dict, bool]:
               "Install requirements.txt or remove the manifest.", file=sys.stderr)
         return {}, True
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
     except Exception as e:  # a broken manifest must not kill module import
         print(f"ERROR: bundle.local.yaml unreadable ({e}) — every project denied "
               "until it parses.", file=sys.stderr)
@@ -273,8 +386,17 @@ def project_allowed(project: str) -> bool:
 # record. One definition, because the index builder and bundle-status each had
 # their own and printed different page counts for the same vault with no way to
 # tell which number was real.
+# The UNION of the three lists that used to live in wiki-lint.py,
+# wiki-conflict-resolve.py and here. They disagreed — one knew `patterns.md`, one
+# knew `BOOTSTRAP_RUN.md` — so the same vault got a different page count, a
+# different orphan list and a different merge candidate depending on which script
+# asked. Callers import this one.
+# NB this is "files a SCRIPT manages", not "names a page may not have" — that
+# second rule is RESERVED_PAGE_NAMES, and it applies under projects/ only,
+# because `kb/tools/README.md` is a legitimate topic.
 WIKI_NON_PAGES = frozenset({
     "index.md", "CLAUDE.md", "log.md", "_log.md", "BOOTSTRAP_RUN.md",
+    "patterns.md",
 })
 
 
@@ -297,13 +419,21 @@ def working_copy_allowed(dir_name: str) -> bool:
     sitting in a directory called `myapp` — while the docs promise ONE policy
     honored by EVERY source.
 
-    Fails closed: the directory is allowed only when its own name AND every
-    slug that maps onto it are allowed.
+    Fails closed on exclusion: if ANY slug that maps onto this directory is
+    denied, the directory is denied.
+
+    When the map DOES resolve the directory, the resolved slugs are the whole
+    answer — the raw directory name is not also required to pass. It used to be,
+    and that turned a perfectly ordinary configuration (`project_map` renaming
+    `app` → `myapp`, plus `allow_projects: [myapp]`) into a silent no-op: the
+    allowlist does not list `app`, so every working copy was refused and the job
+    reported nothing to do.
     """
-    keys = {dir_name}
-    keys |= {slug for enc, slug in PROJECT_MAP.items()
-             if enc.rsplit("-", 1)[-1] == dir_name or slug == dir_name}
-    return all(project_allowed(k) for k in keys)
+    mapped = {slug for enc, slug in PROJECT_MAP.items()
+              if enc.rsplit("-", 1)[-1] == dir_name or slug == dir_name}
+    if mapped:
+        return all(project_allowed(k) for k in mapped)
+    return project_allowed(dir_name)
 
 
 def findings_header(project: str) -> str:
@@ -354,10 +484,60 @@ from secret_shapes import mask as _mask_secrets  # noqa: E402
 def mask_secrets(text: str) -> str:
     """Mask credential-looking strings before they are logged or sent onward.
 
-    Thin re-export of cron/lib/secrets.py::mask so callers keep importing it
-    from utils (where every other shared helper lives).
+    Thin re-export of cron/lib/secret_shapes.py::mask so callers keep importing
+    it from utils (where every other shared helper lives).
     """
     return _mask_secrets(text)
+
+
+# ── Masking as a POLICY, not as a habit ──────────────────────────────────────
+# `mask_secrets` shipped, was documented as running "before a log / FINDINGS /
+# Telegram" — and exactly one script called it. A key pasted into a chat went to
+# the provider verbatim, sat in `.pending/` in plain text and was copied into
+# `cron/logs/rejected/`. The masker is cheap and its table is already trusted for
+# Telegram, so it now runs on every sink by default.
+#
+# WIKI_MASK_SECRETS=0 turns it off for someone who would rather have the
+# unredacted text (debugging the masker itself). The default is on, and
+# docs/cron-architecture.md states the guarantee it buys: key-shaped tokens are
+# masked before leaving the box; hostnames and paths are NOT.
+MASK_SECRETS = _env_bool("WIKI_MASK_SECRETS", True)
+
+
+def masked(text: str) -> str:
+    """mask_secrets() when the policy is on; the text unchanged when it is off."""
+    if not text or not MASK_SECRETS:
+        return text
+    return _mask_secrets(text)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write a text file via temp-file + os.replace, creating parents.
+
+    The daily log, the vault indexes, AGENTS.md and FINDINGS.md were all written
+    with a bare `write_text`, so a crash mid-write left a truncated file — and
+    for the daily that is the worst case there is: its JSONLs are not marked
+    processed, so the next night appends a full second copy under the stump.
+    `write_page`/`save_state` already did this; now there is one helper and no
+    reason for a caller to hand-roll it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8", errors="replace")
+    tmp.replace(path)
+
+
+def safe_session_id(raw) -> str:
+    """A session id that is safe to use as a FILENAME.
+
+    The id comes from Claude Code and is a UUID in practice, but three
+    neighbouring call sites already sanitized it and `save_to_pending` did not:
+    a payload carrying `"session_id": "../../evil"` wrote `wiki/evil.md`. It also
+    made the round trip impossible — flush matches pending drafts by `f.stem`, so
+    an id with a separator in it could never be matched back to its transcript.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", str(raw or "unknown"))[:80]
+    return cleaned.strip(".") or "unknown"
 
 
 # ── Processed-state tracking ─────────────────────────────────────────────────
@@ -383,7 +563,7 @@ def load_state(persist: bool = True) -> dict:
     """
     if STATE_PATH.exists():
         try:
-            loaded = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            loaded = json.loads(STATE_PATH.read_text(encoding="utf-8", errors="replace"))
             if not isinstance(loaded, dict):
                 # Syntactically valid but structurally wrong ([] or a string)
                 # would sail through here and blow up later in .get()/setdefault().
@@ -423,7 +603,14 @@ def save_state(state: dict) -> None:
 
 
 def quarantine_raw(source_id: str, reason: str, raw: str) -> None:
-    """Best-effort: save a rejected/parse-failed raw LLM response for later inspection."""
+    """Best-effort: save a rejected/parse-failed raw LLM response for inspection.
+
+    Masked on the way in. This directory is where the ONLY surviving copy of a
+    quarantined payload lives (its sources are marked processed at the same
+    moment), it is aged out by log-retention, and it is a transcript — so a key
+    pasted into a chat used to end up here in plain text with a finding pointing
+    right at it.
+    """
     try:
         import re as _re
         d = BUNDLE_ROOT / "cron" / "logs" / "rejected"
@@ -431,7 +618,8 @@ def quarantine_raw(source_id: str, reason: str, raw: str) -> None:
         safe = _re.sub(r"[^A-Za-z0-9._-]", "_", str(source_id))[:80]
         safe_reason = _re.sub(r"[^A-Za-z0-9._-]", "_", str(reason))[:40]
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        (d / f"{stamp}_{safe}_{safe_reason}.txt").write_text(str(raw or ""), encoding="utf-8")
+        (d / f"{stamp}_{safe}_{safe_reason}.txt").write_text(
+            masked(str(raw or "")), encoding="utf-8", errors="replace")
     except Exception:
         pass
 
@@ -443,28 +631,34 @@ def mark_phase_success(phase: str) -> None:
     of one shared file, so two phases finishing together would otherwise drop one
     another's entry. The temp file is per-process for the same reason.
     """
-    lock = _acquire_state_lock()
-    if lock is None:
-        print(f"WARNING: mark_phase_success({phase}) skipped — no state lock",
-              file=sys.stderr)
+    # A dry run must not stamp a heartbeat. `dry_run_until` promises the same
+    # brake on EVERY phase, but the idle branches of flush/compile called this
+    # (and record_run) BEFORE checking it — so a preview week wrote
+    # last_success.json and green ledger rows for phases that had done nothing,
+    # and monitoring reported a healthy pipeline that was switched off.
+    if is_dry_run():
+        print(f"  [dry-run] mark_phase_success({phase}) skipped", file=sys.stderr)
         return
-    try:
-        p = STATE_PATH.with_name("last_success.json")
-        data = {}
-        if p.exists():
-            try:
-                loaded = json.loads(p.read_text(encoding="utf-8"))
-                data = loaded if isinstance(loaded, dict) else {}
-            except Exception:
-                data = {}
-        data[phase] = datetime.now().isoformat(timespec="seconds")
-        tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(p)
-    except Exception as e:
-        print(f"WARNING: mark_phase_success({phase}) failed: {e}", file=sys.stderr)
-    finally:
-        lock.unlink(missing_ok=True)
+    with _state_lock() as held:
+        if not held:
+            print(f"WARNING: mark_phase_success({phase}) skipped — no state lock",
+                  file=sys.stderr)
+            return
+        try:
+            p = STATE_PATH.with_name("last_success.json")
+            data = {}
+            if p.exists():
+                try:
+                    loaded = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+                    data = loaded if isinstance(loaded, dict) else {}
+                except Exception:
+                    data = {}
+            data[phase] = datetime.now().isoformat(timespec="seconds")
+            tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            tmp.replace(p)
+        except Exception as e:
+            print(f"WARNING: mark_phase_success({phase}) failed: {e}", file=sys.stderr)
 
 
 def state_get(section: str, key: str) -> set[str]:
@@ -476,40 +670,176 @@ def state_get(section: str, key: str) -> set[str]:
     return set(load_state(persist=False).get(section, {}).get(key, []))
 
 
-def _acquire_state_lock(timeout: float = 60.0) -> Path | None:
-    """Best-effort inter-process lock around .processed.json updates.
+# ── ONE file lock ────────────────────────────────────────────────────────────
+# There used to be two implementations of the same idea at different maturities.
+# The LLM queue had learned that breaking a stale lock with `unlink` is a TOCTOU
+# race — two waiters both see "stale", the first removes it and takes its own,
+# the second removes THAT fresh lock — and had been rewritten around an atomic
+# `os.replace`. The state lock still used the bare unlink, so two overlapping
+# phases could each drop the other's `.processed.json` update: a lost update
+# means processed sources get re-sent to the provider.
+#
+# And the PID check they shared did not work on Windows: `os.kill(pid, 0)` there
+# raises `SystemError`/sends CTRL_C_EVENT rather than probing the process, so
+# "the owner is gone, take over" never fired and every waiter sat out the full
+# stale timeout. Both are fixed once, here.
+def pid_alive(pid: int) -> bool:
+    """Whether a process exists. Anything uncertain counts as alive.
 
-    A slow flush run can overlap the compile runs scheduled after it; without
-    a lock the later save_state() would silently drop keys written in between
-    (load → modify → save race). Stale locks (>10 min) are broken. Returns the
-    lock path, or None on timeout.
-
-    None means "do not write": proceeding unlocked would reintroduce exactly the
-    lost update this lock exists to prevent, and a skipped state write is safe —
-    the phase is simply redone on the next scheduled run.
+    Erring towards "alive" matters: a false "dead" lets a waiter steal a lock
+    that is still held, which is the failure the lock exists to prevent.
     """
-    lock = STATE_PATH.with_name(STATE_PATH.name + ".lock")
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.time() + timeout
-    while True:
+    if pid <= 0:
+        return True          # garbage in the lock file — not ours to reclaim by PID
+    if os.name == "nt":
+        # `os.kill(pid, 0)` on Windows does NOT probe: signal 0 is mapped onto
+        # CTRL_C_EVENT, which either fails outright or interrupts a process group.
+        # OpenProcess is the actual question being asked.
         try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-            return lock
-        except FileExistsError:
+            import ctypes
+            from ctypes import wintypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                          False, pid)
+            if not handle:
+                # ERROR_INVALID_PARAMETER (87) is the only "no such process"
+                # answer; ACCESS_DENIED (5) means it exists and is not ours.
+                return ctypes.get_last_error() != 87
             try:
-                if time.time() - lock.stat().st_mtime > 600:
-                    lock.unlink(missing_ok=True)
+                code = wintypes.DWORD()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return code.value == STILL_ACTIVE
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True      # on any surprise fall back to the age-based wait
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # the process exists, it just is not ours
+    except OSError as e:
+        return getattr(e, "winerror", None) != 87
+    except Exception:
+        return True
+
+
+# Kept as the private spelling the tests monkeypatch.
+_pid_alive = pid_alive
+
+
+def _lock_owner_pid(path: Path) -> int | None:
+    """PID from the first field of the lock file, or None if unreadable."""
+    try:
+        return int(path.read_text(encoding="utf-8", errors="replace").split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+@contextlib.contextmanager
+def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
+               label: str):
+    """Cross-process lock on `path`. Yields True when it is actually held.
+
+    `fail_open=False` (the state ledger): a caller that could not take the lock
+    gets False and must NOT write — a skipped write costs one retry, an unlocked
+    write costs somebody else's update.
+    `fail_open=True` (the LLM queue): the caller proceeds anyway; risking a 429
+    beats silently skipping a nightly job.
+
+    An abandoned lock is taken over by RENAMING it (`os.replace` is atomic, so
+    exactly one waiter wins) either after `stale` seconds or as soon as its owner
+    PID is known to be dead.
+    """
+    acquired = False
+    deadline = time.time() + wait
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            try:
+                # O_CREAT|O_EXCL is atomic on every filesystem this runs on,
+                # including SMB — unlike a stat-then-write check.
+                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, f"{os.getpid()} "
+                             f"{datetime.now().isoformat(timespec='seconds')}\n".encode())
+                os.close(fd)
+                acquired = True
+                break
+            except FileExistsError:
+                try:
+                    age = time.time() - path.stat().st_mtime
+                except OSError:
+                    age = 0
+                owner = _lock_owner_pid(path)
+                owner_dead = owner is not None and not pid_alive(owner)
+                if age > stale or owner_dead:
+                    steal = path.with_name(f"{path.name}.stale.{os.getpid()}")
+                    try:
+                        os.replace(path, steal)
+                    except OSError:
+                        time.sleep(0.5)
+                        continue
+                    # Between the stat and the replace the holder may have
+                    # released and another process taken a fresh lock. Stole the
+                    # wrong one — put it back. Check the SAME signal the steal
+                    # was based on: a lock held by a dead owner has a fresh
+                    # mtime, so an age-only check would hand it straight back.
+                    try:
+                        if owner_dead:
+                            still_stale = _lock_owner_pid(steal) == owner
+                        else:
+                            still_stale = time.time() - steal.stat().st_mtime > stale
+                        if not still_stale:
+                            os.replace(steal, path)
+                            time.sleep(1)
+                            continue
+                    except OSError:
+                        pass
+                    reason = (f"owner PID {owner} is gone" if owner_dead
+                              else f"age {int(age)}s")
+                    print(f"  {label}: abandoned lock ({reason}) — taking it over",
+                          file=sys.stderr)
+                    steal.unlink(missing_ok=True)
                     continue
+                if time.time() >= deadline:
+                    if fail_open:
+                        print(f"  {label}: no slot after {int(wait)}s — proceeding "
+                              "unqueued (429 possible)", file=sys.stderr)
+                    else:
+                        print(f"WARNING: {label} timeout — skipping this write "
+                              "(a live writer holds it; the phase retries next run)",
+                              file=sys.stderr)
+                    break
+                time.sleep(1.0)
+    except OSError as e:
+        print(f"  {label}: unavailable ({e}) — "
+              f"{'proceeding unqueued' if fail_open else 'skipping this write'}",
+              file=sys.stderr)
+    try:
+        yield acquired or fail_open
+    finally:
+        # Only the holder releases. A caller that timed out must not delete
+        # someone else's lock, or the lock degrades into no lock at all.
+        if acquired:
+            try:
+                path.unlink(missing_ok=True)
             except OSError:
                 pass
-            if time.time() >= deadline:
-                print("WARNING: state lock timeout — skipping this state write "
-                      "(a live writer holds it; the phase retries next run)",
-                      file=sys.stderr)
-                return None
-            time.sleep(1.0)
+
+
+STATE_LOCK = STATE_PATH.with_name(STATE_PATH.name + ".lock")
+
+
+def _state_lock(timeout: float = 60.0):
+    """The `.processed.json` lock — `_file_lock` with the ledger's parameters."""
+    return _file_lock(STATE_LOCK, wait=timeout, stale=600.0, fail_open=False,
+                      label="state lock")
 
 
 def state_add(section: str, key: str, items) -> None:
@@ -521,10 +851,9 @@ def state_add(section: str, key: str, items) -> None:
     items = list(items)
     if not items:
         return
-    lock = _acquire_state_lock()
-    if lock is None:
-        return
-    try:
+    with _state_lock() as held:
+        if not held:
+            return
         state = load_state()
         bucket = state.setdefault(section, {}).setdefault(key, [])
         seen = set(bucket)
@@ -533,9 +862,6 @@ def state_add(section: str, key: str, items) -> None:
                 bucket.append(it)
                 seen.add(it)
         save_state(state)
-    finally:
-        if lock is not None:
-            lock.unlink(missing_ok=True)
 
 
 def state_remove(section: str, key: str, items) -> None:
@@ -543,10 +869,9 @@ def state_remove(section: str, key: str, items) -> None:
     items = list(items)
     if not items:
         return
-    lock = _acquire_state_lock()
-    if lock is None:
-        return  # see state_add: never write state we don't hold the lock for
-    try:
+    with _state_lock() as held:
+        if not held:
+            return  # see state_add: never write state we don't hold the lock for
         state = load_state()
         bucket = state.get(section, {}).get(key)
         if not bucket:
@@ -554,9 +879,6 @@ def state_remove(section: str, key: str, items) -> None:
         drop = set(items)
         state[section][key] = [it for it in bucket if it not in drop]
         save_state(state)
-    finally:
-        if lock is not None:
-            lock.unlink(missing_ok=True)
 
 
 # ── Bounded retries for sources that will never succeed ──────────────────────
@@ -572,10 +894,7 @@ def state_remove(section: str, key: str, items) -> None:
 # written to cron/logs/rejected/, ONE finding is filed, the marker is set and
 # the retries stop. Raise it if you would rather keep retrying; 0 disables the
 # ceiling and restores the old unbounded behaviour.
-try:
-    RETRY_LIMIT = max(0, int(os.environ.get("WIKI_RETRY_LIMIT", "3")))
-except ValueError:
-    RETRY_LIMIT = 3
+RETRY_LIMIT = _env_int("WIKI_RETRY_LIMIT", 3, minimum=0)
 
 
 def attempt_count(section: str, key: str) -> int:
@@ -592,10 +911,9 @@ def attempt_bump(section: str, key: str) -> int:
     taken — same trade as state_add: a skipped write costs one retry, a write
     without the lock costs somebody else's update.
     """
-    lock = _acquire_state_lock()
-    if lock is None:
-        return attempt_count(section, key) + 1
-    try:
+    with _state_lock() as held:
+        if not held:
+            return attempt_count(section, key) + 1
         state = load_state()
         attempts = state.setdefault(section, {}).setdefault("attempts", {})
         if not isinstance(attempts, dict):
@@ -604,48 +922,73 @@ def attempt_bump(section: str, key: str) -> int:
         attempts[key] = (current if isinstance(current, int) else 0) + 1
         save_state(state)
         return attempts[key]
-    finally:
-        lock.unlink(missing_ok=True)
 
 
 def attempt_reset(section: str, key: str) -> None:
     """Forget a source's failure count (it succeeded, or it was quarantined)."""
     if attempt_count(section, key) == 0:
         return
-    lock = _acquire_state_lock()
-    if lock is None:
-        return
-    try:
+    with _state_lock() as held:
+        if not held:
+            return
         state = load_state()
         attempts = state.get(section, {}).get("attempts")
         if isinstance(attempts, dict):
             attempts.pop(key, None)
             save_state(state)
-    finally:
-        lock.unlink(missing_ok=True)
+
+
+def mark_quarantined(section: str, key: str) -> None:
+    """Record that a source hit the retry ceiling and stopped being retried.
+
+    A SEPARATE list, not the attempt counter. quarantined_count() used to count
+    `attempts >= RETRY_LIMIT` — but every caller resets the counter on the same
+    line it quarantines the source, so no such value ever existed in the state
+    file and the check was dead: bundle-status printed "0 sources quarantined"
+    forever, including the release note that claimed it reported them.
+    """
+    state_add(section, "quarantined", [key])
+    attempt_reset(section, key)
+
+
+def quarantined(section: str) -> list[str]:
+    """The sources of this phase that have stopped retrying."""
+    return sorted(state_get(section, "quarantined"))
 
 
 def quarantined_count(section: str) -> int:
     """How many of this phase's sources have hit the ceiling and stopped retrying."""
-    attempts = load_state(persist=False).get(section, {}).get("attempts", {})
-    if not isinstance(attempts, dict) or not RETRY_LIMIT:
-        return 0
-    return sum(1 for v in attempts.values() if isinstance(v, int) and v >= RETRY_LIMIT)
+    return len(state_get(section, "quarantined"))
 
 
-def append_bundle_finding(title: str, context: str, what: str,
-                          proposal: str, priority: str = "P2") -> bool:
-    """File ONE finding in the BUNDLE's own FINDINGS.md. True if it was written.
+# ── ONE writer for FINDINGS.md ───────────────────────────────────────────────
+# Three implementations of "insert a finding at the top" had already drifted:
+# faced with a non-standard header one of them wrote a SECOND H1 while another
+# inserted before the first `## `. They also disagreed on masking, on atomicity
+# and on how a duplicate is detected. One function now, used by the pipeline,
+# test-sweep and agents-md-sync-check alike.
+def finding_is_open(path: Path, title: str) -> bool:
+    """Whether FINDINGS.md at `path` already carries an entry with this title."""
+    try:
+        existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    except OSError:
+        return False
+    return f"· {title} [" in existing
 
-    Used by the pipeline to report a source it has given up on. Deduped on the
-    title, because the alternative to an unbounded retry loop must not be an
-    unbounded pile of identical findings.
+
+def append_finding(path: Path, title: str, context: str, what: str,
+                   proposal: str, priority: str = "P2",
+                   project: str | None = None) -> bool:
+    """File ONE finding at the top of `path`. True if it was written.
+
+    Deduped on the title, because the alternative to an unbounded retry loop must
+    not be an unbounded pile of identical findings. Everything written is masked:
+    a finding quotes program output, and program output quotes credentials.
     """
-    path = BUNDLE_ROOT / "FINDINGS.md"
-    entry = (f"## {today_str()} · {title} [{priority}]\n"
-             f"**Context:** {context}\n"
-             f"**What:** {what}\n"
-             f"**Proposal:** {proposal}\n"
+    entry = (f"## {today_str()} · {masked(title)} [{priority}]\n"
+             f"**Context:** {masked(context)}\n"
+             f"**What:** {masked(what)}\n"
+             f"**Proposal:** {masked(proposal)}\n"
              f"**Status:** open\n\n")
     try:
         existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
@@ -657,12 +1000,49 @@ def append_bundle_finding(title: str, context: str, what: str,
         elif existing.lstrip().startswith("# Findings"):
             head, body = existing.rstrip("\n") + "\n\n", ""
         else:
-            head, body = findings_header(BUNDLE_ROOT.name), existing
-        path.write_text(head + entry + body, encoding="utf-8")
+            head, body = findings_header(project or path.parent.name), existing
+        atomic_write_text(path, head + entry + body)
         return True
     except OSError as exc:
         print(f"WARNING: could not file a finding in {path}: {exc}", file=sys.stderr)
         return False
+
+
+def close_finding(path: Path, title: str) -> bool:
+    """Delete the entry with this title (it was resolved). True if one went away.
+
+    Deleting is the documented close for a DONE finding — `git log` is the
+    record. A rejected one is moved to FINDINGS-archive.md by hand.
+    """
+    try:
+        if not path.exists():
+            return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    pattern = re.compile(
+        r"(?ms)^## \d{4}-\d{2}-\d{2} · " + re.escape(title) + r" \[[^\]]*\]\n.*?(?=^## |\Z)")
+    new = pattern.sub("", text)
+    if new == text:
+        return False
+    try:
+        atomic_write_text(path, new.rstrip("\n") + "\n")
+    except OSError:
+        return False
+    return True
+
+
+def append_bundle_finding(title: str, context: str, what: str,
+                          proposal: str, priority: str = "P2") -> bool:
+    """File ONE finding in the BUNDLE's own FINDINGS.md. True if it was written.
+
+    That file is `<BUNDLE_ROOT>/FINDINGS.md` — i.e. `~/.claude/FINDINGS.md` on a
+    default install, which is where the pipeline records a source it has given up
+    on. docs/cron-architecture.md and `bundle-status.py` both name the path now;
+    it used to be described only as "the bundle's own FINDINGS.md".
+    """
+    return append_finding(BUNDLE_ROOT / "FINDINGS.md", title, context, what,
+                          proposal, priority, project=BUNDLE_ROOT.name)
 
 
 def _migrated_state_from_log() -> dict | None:
@@ -681,7 +1061,7 @@ def _migrated_state_from_log() -> dict | None:
     if not LOG_MD.exists():
         return None
     try:
-        text = LOG_MD.read_text(encoding="utf-8")
+        text = LOG_MD.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     # `@<size>` is part of the key, not decoration: dropping it produces a
@@ -767,14 +1147,19 @@ def is_subagent_jsonl(jsonl_path: str) -> bool:
                     continue
                 try:
                     obj = json.loads(line)
-                    if obj.get("parentSessionId") or obj.get("parent_session_id"):
-                        return True
-                    if obj.get("type") == "system":
-                        msg = str(obj.get("message", ""))
-                        if "subagent" in msg.lower():
-                            return True
                 except json.JSONDecodeError:
                     continue
+                # A JSONL line is not required to be an OBJECT. A bare array or
+                # string parses fine and then raises AttributeError on .get(),
+                # taking the whole nightly phase down over one odd line.
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("parentSessionId") or obj.get("parent_session_id"):
+                    return True
+                if obj.get("type") == "system":
+                    msg = str(obj.get("message", ""))
+                    if "subagent" in msg.lower():
+                        return True
     except OSError:
         pass
     return False
@@ -796,12 +1181,16 @@ def parse_jsonl_messages(jsonl_path: str, last_n: int = 30) -> list[dict]:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(obj, dict):
+                    continue  # see is_subagent_jsonl: a line need not be an object
 
                 obj_type = obj.get("type", "")
                 if obj_type not in ("user", "assistant"):
                     continue
 
                 msg = obj.get("message", obj)
+                if not isinstance(msg, dict):
+                    continue
                 role = msg.get("role", obj_type)
                 if role not in ("user", "assistant"):
                     continue
@@ -833,19 +1222,24 @@ def parse_jsonl_messages(jsonl_path: str, last_n: int = 30) -> list[dict]:
 
 
 def save_to_pending(session_id: str, messages: list[dict], project: str = "unknown"):
-    """Save messages into .pending/ for later flush processing."""
+    """Save messages into .pending/ for later flush processing.
+
+    The id is sanitized (it becomes a filename) and the body is masked (this
+    file is a verbatim slice of a chat, it sits on disk until the next nightly
+    run, and it is then sent to the provider as-is).
+    """
     PENDING_DIR.mkdir(parents=True, exist_ok=True)
 
-    out_path = PENDING_DIR / f"{session_id}.md"
+    out_path = PENDING_DIR / f"{safe_session_id(session_id)}.md"
 
-    lines = [f"# Session {session_id}", f"Project: {project}", ""]
+    lines = [f"# Session {safe_session_id(session_id)}", f"Project: {project}", ""]
     for msg in messages:
         role_label = "USER" if msg["role"] == "user" else "ASSISTANT"
         lines.append(f"### {role_label}")
-        lines.append(msg["text"])
+        lines.append(masked(msg["text"]))
         lines.append("")
 
-    out_path.write_text("\n".join(lines), encoding="utf-8")
+    out_path.write_text("\n".join(lines), encoding="utf-8", errors="replace")
 
 
 def save_session_tail(data: dict, last_n: int = 30) -> tuple[str, str] | None:
@@ -853,15 +1247,25 @@ def save_session_tail(data: dict, last_n: int = 30) -> tuple[str, str] | None:
 
     Takes the already-parsed stdin JSON (dict). Returns (transcript_path,
     session_id) on a successful save, otherwise None (no transcript_path / file
-    missing / no messages). pre-compact uses the return value to then spawn the
-    background handoff.
+    missing / no messages / the project is denied by the privacy policy).
+
+    The gate matters here and was missing: `skip_projects: [secret]` is supposed
+    to be honored by EVERY source collector, and this one wrote the tail of a
+    denied project to `.pending/` the moment the session ended. Flush dropped it
+    the following night — but between the session and the night the name and the
+    content of a hidden project sat on disk, and the task monitor could carry it
+    off-box. precompact-handoff.py already applied the gate; now they agree.
     """
     session_id = data.get("session_id", "unknown")
     transcript_path = data.get("transcript_path", "")
-    if not transcript_path or not os.path.exists(transcript_path):
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    if not os.path.exists(transcript_path):
         return None
     parent_dir = os.path.basename(os.path.dirname(transcript_path))
     project = dir_to_project(parent_dir)
+    if not project_allowed(project):
+        return None
     messages = parse_jsonl_messages(transcript_path, last_n=last_n)
     if messages:
         save_to_pending(session_id, messages, project)
@@ -892,8 +1296,38 @@ def find_bash() -> str | None:
         found = None
     if found:
         return found
-    default = r"C:\Program Files\Git\bin\bash.exe"
-    return default if os.path.isfile(default) else None
+    # Both Git-for-Windows layouts. `Git\bin\bash.exe` is the launcher meant for
+    # outside callers; `Git\usr\bin\bash.exe` is the MSYS one, and it is what a
+    # scoop/portable install exposes. The tests already assumed the second while
+    # this list only knew the first.
+    for default in (r"C:\Program Files\Git\bin\bash.exe",
+                    r"C:\Program Files\Git\usr\bin\bash.exe"):
+        if os.path.isfile(default):
+            return default
+    return None
+
+
+def find_python() -> str:
+    """Absolute path to a usable python, or the best bare name available.
+
+    Order: PYTHON_EXE (what the installer writes into .env after its preflight)
+    → `python3` → `python` → sys.executable. The shell tasks used
+    `${PYTHON_EXE:-python}`, which on most Linux and macOS boxes names an
+    interpreter that does not exist — so every Telegram alert from a shell task
+    silently did nothing. Under Task Scheduler's session 0 the reverse applies:
+    a python.org install puts the interpreter on the USER path only, so a bare
+    `python` is not found and the night is silently empty.
+    """
+    import shutil
+
+    explicit = os.environ.get("PYTHON_EXE")
+    if explicit and os.path.isfile(explicit):
+        return explicit
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return sys.executable or "python"
 
 
 def today_str() -> str:
@@ -911,7 +1345,7 @@ def get_wiki_index() -> str:
     """Read wiki/index.md."""
     index_path = WIKI_ROOT / "index.md"
     if index_path.exists():
-        return index_path.read_text(encoding="utf-8")
+        return index_path.read_text(encoding="utf-8", errors="replace")
     return ""
 
 
@@ -927,13 +1361,13 @@ def get_latest_daily(project: str = "") -> str:
     text = ""
     daily_path = get_daily_path()
     if daily_path.exists():
-        text = daily_path.read_text(encoding="utf-8")
+        text = daily_path.read_text(encoding="utf-8", errors="replace")
     else:
         from datetime import timedelta
         yesterday = (date.today() - timedelta(days=1)).isoformat()
         yest_path = get_daily_path(yesterday)
         if yest_path.exists():
-            text = yest_path.read_text(encoding="utf-8")
+            text = yest_path.read_text(encoding="utf-8", errors="replace")
     if not text or not project:
         return text
     section = _daily_section(text, project)
@@ -988,7 +1422,7 @@ def get_project_log(project: str, max_lines: int = 120) -> str:
     log_path = WIKI_ROOT / "projects" / project / "_log.md"
     if not log_path.exists():
         return ""
-    text = log_path.read_text(encoding="utf-8")
+    text = log_path.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
     if len(lines) <= max_lines:
         return text
@@ -1054,34 +1488,7 @@ def get_recent_pages_preview(project: str, days: int = 7, limit: int = 12) -> st
 
 
 # ──────────────────── LLM API ────────────────────
-
-# Task Scheduler doesn't get the user env (incl. DEEPSEEK_KEY etc.), so we
-# load a project-local .env file. Existing env vars win (env > dotenv).
-def _load_dotenv() -> None:
-    dotenv = BUNDLE_ROOT / ".env"
-    if not dotenv.is_file():
-        return
-    for raw in dotenv.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        # Plain identifiers only, matching the bash parser in cron/lib/dotenv.sh.
-        # This is a SHAPE check, not a safety one: it drops a line with no '='
-        # (whose whole text would otherwise become the key) and names like
-        # `KEY[0]`. It does NOT reject `PATH=` — those characters are perfectly
-        # legal. What makes a `PATH=/evil` line inert is the `key not in
-        # os.environ` guard below, and that guard is the whole precedence rule:
-        # **env > dotenv**, a variable already in the environment is never
-        # overwritten from the file.
-        if not key or any(not (c.isalnum() or c == "_") for c in key):
-            continue
-        if key not in os.environ:
-            os.environ[key] = value.strip().strip('"').strip("'")
-
-
-_load_dotenv()
+# (.env is loaded at the very top of this module — see _load_dotenv there.)
 
 
 def _resolve_projects_root() -> tuple[Path | None, str]:
@@ -1094,22 +1501,32 @@ def _resolve_projects_root() -> tuple[Path | None, str]:
     filling in one file gave you half a working pipeline and no error — the
     other half just logged "not set" and no-opped.
 
-    The manifest wins; .env is a deprecated alias that warns once. Resolved
-    AFTER _load_dotenv() so a value that only exists in the file is still seen
-    in session 0, where Task Scheduler hands the task no user environment.
+    ONE VALUE, TWO NAMES — and neither is deprecated, because both are needed:
+    the shell tasks cannot read YAML and the Python tasks should not have to
+    duplicate the manifest. `bundle.local.yaml::projects_root` is the CANON that
+    a human edits; `.env::PROJECTS_ROOT` is its generated shell-side spelling,
+    written by scripts/bootstrap-registry.ps1 and scripts/install.ps1.
+    Documentation used to require the .env name while this code called it
+    DEPRECATED, so following either one produced a warning or a broken job.
+
+    Resolved AFTER _load_dotenv() so a value that only exists in the file is
+    still seen in session 0, where Task Scheduler hands the task no user
+    environment.
     """
     if _MANIFEST_PROJECTS_ROOT is not None:
+        # Export it so Python children (and anything reading the environment
+        # further down) see the same value without re-parsing the manifest.
+        os.environ.setdefault("PROJECTS_ROOT", str(_MANIFEST_PROJECTS_ROOT))
         return _MANIFEST_PROJECTS_ROOT, "bundle.local.yaml::projects_root"
     raw = (os.environ.get("PROJECTS_ROOT") or "").strip()
     if not raw:
         return None, "not set"
-    print("WARNING: PROJECTS_ROOT comes from .env — that name is DEPRECATED. "
-          "Move it to `projects_root:` in bundle.local.yaml, which is the one "
-          "place every job reads.", file=sys.stderr)
-    return Path(raw).expanduser(), ".env::PROJECTS_ROOT (deprecated alias)"
+    return Path(raw).expanduser(), ".env::PROJECTS_ROOT"
 
 
 PROJECTS_ROOT, PROJECTS_ROOT_SOURCE = _resolve_projects_root()
+_CONFIG_NOTES.append(("PROJECTS_ROOT", str(PROJECTS_ROOT or "not set"),
+                      PROJECTS_ROOT_SOURCE))
 
 # ── LLM provider registry — SINGLE SOURCE OF TRUTH ───────────────────────────
 # Every provider's env-var names, endpoint and default model live here, in one
@@ -1191,11 +1608,6 @@ PROVIDERS: dict[str, dict] = {
 # an explicit choice must not silently route elsewhere.
 DEFAULT_CHAIN = ["deepseek", "opencode", "deepinfra"]
 
-def _env_off(name: str, default: str = "1") -> bool:
-    """True when an env flag is switched off (0 / false / no)."""
-    return os.environ.get(name, default).strip().lower() in ("0", "false", "no")
-
-
 # Two DIFFERENT switches. They were conflated for a long time, and the comment
 # here described the stronger one while the code implemented the weaker.
 #
@@ -1204,7 +1616,13 @@ def _env_off(name: str, default: str = "1") -> bool:
 # the shipped default that first step is DeepSeek, off-box, and it happens
 # either way) and nothing about an explicitly chosen provider, which never
 # falls back at all. docs/llm-routing.md has always described it correctly.
-OFFBOX_FALLBACK = not _env_off("WIKI_OFFBOX_FALLBACK")
+#
+# Both read through _env_bool with `on_invalid=False`. The old reader recognised
+# exactly `0`, `false` and `no` as "off" and treated EVERY other spelling as on —
+# so `WIKI_ALLOW_OFFBOX=off` and `=disabled`, the two most plausible ways to
+# write it, silently meant "yes, send everything". For a switch whose entire
+# purpose is keeping data on this machine, an unparseable value fails closed.
+OFFBOX_FALLBACK = _env_bool("WIKI_OFFBOX_FALLBACK", True, on_invalid=False)
 
 # WIKI_ALLOW_OFFBOX=0 — the real thing people believed they were buying above:
 # a gate applied to EVERY call, refusing any provider whose registry row says
@@ -1212,7 +1630,20 @@ OFFBOX_FALLBACK = not _env_off("WIKI_OFFBOX_FALLBACK")
 # rather than "set WIKI_LLM_PROVIDER=local and trust that the chain never
 # fires". Enforced in _llm_openai_compat, on the same path and with the same
 # shape of message as the local-only endpoint check next to it.
-ALLOW_OFFBOX = not _env_off("WIKI_ALLOW_OFFBOX")
+ALLOW_OFFBOX = _env_bool("WIKI_ALLOW_OFFBOX", True, on_invalid=False)
+
+# How long to pause between consecutive provider calls in a batch phase. It was
+# a bare `time.sleep(5)` written out in two places, which put 30 of the fast
+# suite's 35 seconds inside `sleep` — and the bundle's own test policy says a
+# test over a second is either fixed or marked `integration`. Tests and CI set
+# it to 0.
+LLM_PACE_SECONDS = _env_int("WIKI_LLM_PACE_SECONDS", 5, minimum=0)
+
+
+def llm_pace() -> None:
+    """Sleep LLM_PACE_SECONDS between provider calls (no-op when it is 0)."""
+    if LLM_PACE_SECONDS > 0:
+        time.sleep(LLM_PACE_SECONDS)
 
 
 def _env_first(names: list[str], default: str = "") -> str:
@@ -1258,20 +1689,61 @@ def _provider_cfg(name: str) -> tuple[str, str, str]:
     """Resolve (api_key, base_url, model) for a registry provider."""
     p = PROVIDERS[name]
     key = _env_first(p["key_env"])
-    base = os.environ.get(p["base_url_env"], p["base_url_default"]) if p["base_url_env"] else p["base_url_default"]
-    model = os.environ.get(p["model_env"], p["model_default"])
-    return key, base, model
+    if p["base_url_env"]:
+        # `os.environ.get(env, default)` returns "" for a `DEEPSEEK_BASE_URL=`
+        # line in .env — an EMPTY value, not a missing one — and the call then
+        # POSTed to the bare path "/chat/completions" and raised MissingSchema
+        # once per retry. An empty override means "use the default".
+        base = (os.environ.get(p["base_url_env"]) or "").strip() or p["base_url_default"]
+    else:
+        base = p["base_url_default"]
+    model = (os.environ.get(p["model_env"]) or "").strip() or p["model_default"]
+    return key, base.rstrip("/"), model
 
 
-# Default provider for wiki/memory scripts. `or "deepseek"` so an empty
-# WIKI_LLM_PROVIDER= line in .env falls back to the default, not "".
-LLM_PROVIDER = os.environ.get("WIKI_LLM_PROVIDER", "deepseek") or "deepseek"
-if LLM_PROVIDER not in set(PROVIDERS) | {"claude", "mock"}:
-    # A typo must not silently route to the default branch — warn loudly.
-    print(f"WARNING: unknown WIKI_LLM_PROVIDER='{LLM_PROVIDER}' "
-          f"(valid: {', '.join(sorted(set(PROVIDERS) | {'claude', 'mock'}))}) — using 'deepseek'",
-          file=sys.stderr)
+# ── Which provider(s) a call goes to ─────────────────────────────────────────
+# `WIKI_LLM_PROVIDER` has THREE kinds of value:
+#
+#   unset / "" / "chain"  — the DEFAULT_CHAIN below, with fallback.
+#   a provider name       — that provider only, no fallback.
+#   "claude" / "mock"     — the two non-registry backends.
+#
+# The middle line is the change: "deepseek" used to be the name of the CHAIN as
+# well as of a provider, so a value naming one provider meant three. That is the
+# same defect class as WIKI_OFFBOX_FALLBACK vs WIKI_ALLOW_OFFBOX, and
+# docs/llm-routing.md already admitted the two "were conflated for a long time".
+# `chain` now names the chain. Setting the old value still works and says so
+# once, so nobody's .env breaks silently.
+#
+# An UNRECOGNISED value is fatal, not a fallback. It used to print a warning and
+# route to DeepSeek — and Task Scheduler's launcher does not redirect stderr, so
+# `WIKI_LLM_PROVIDER=lokal`, set for privacy, quietly shipped every transcript
+# off-box. This is the one place in the module where a bad configuration failed
+# OPEN; every manifest field with the same mistake denies everything.
+PROVIDER_CHAIN_NAME = "chain"
+_VALID_PROVIDERS = set(PROVIDERS) | {"claude", "mock", PROVIDER_CHAIN_NAME}
+
+_raw_provider = (os.environ.get("WIKI_LLM_PROVIDER") or "").strip()
+LLM_PROVIDER_INVALID = False
+if not _raw_provider:
+    LLM_PROVIDER = PROVIDER_CHAIN_NAME
+elif _raw_provider == "deepseek" and DEFAULT_CHAIN[0] == "deepseek":
+    print("WARNING: WIKI_LLM_PROVIDER=deepseek now means DeepSeek ONLY (no "
+          "fallback). Write WIKI_LLM_PROVIDER=chain — or leave it unset — for "
+          "the off-box chain it used to mean.", file=sys.stderr)
     LLM_PROVIDER = "deepseek"
+elif _raw_provider in _VALID_PROVIDERS:
+    LLM_PROVIDER = _raw_provider
+else:
+    LLM_PROVIDER = "invalid"
+    LLM_PROVIDER_INVALID = True
+    _msg = (f"unknown WIKI_LLM_PROVIDER={_raw_provider!r} "
+            f"(valid: {', '.join(sorted(_VALID_PROVIDERS))}) — every LLM call "
+            f"will REFUSE and nothing will be sent")
+    print(f"ERROR: {_msg}", file=sys.stderr)
+    _CONFIG_ERRORS.append(_msg)
+_CONFIG_NOTES.append(("WIKI_LLM_PROVIDER", LLM_PROVIDER,
+                      "env/.env" if _raw_provider else "default"))
 
 # Derived constants (names kept for the _llm_* callers below).
 DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL = _provider_cfg("deepseek")
@@ -1292,13 +1764,66 @@ OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL = _provider_cfg("opencode")
 #   3. Routing audit log (_audit_attempt): one JSONL line per HTTP attempt to
 #      cron/logs/provider_attempts_<date>.jsonl, for after-the-fact stats on the
 #      429/402 share, latency per provider and how often the fallback fired.
-_DEPLETED_PROVIDERS: set[str] = set()
-_DEPLETED_SKIPS: dict[str, int] = {}  # calls skipped because of depletion
+#
+# The breaker is now PERSISTENT as well as per-process. wiki-pipeline.py runs
+# each phase as its own subprocess, so a provider that answered 402 at 02:30 was
+# tried again from scratch — with the full backoff — at 04:00 and at 04:30. The
+# state lives in cron/state/depleted.json with a TTL, so the whole night learns
+# from the first refusal.
+_DEPLETED_TTL_SECONDS = 6 * 3600
+# Why a provider went dark, in LLMResult terms: a spent balance or a shut door
+# is a CONFIG problem the night cannot fix, exhausted 429 retries are transient.
+_DEPLETED_KIND = {"402": "config", "403": "config",
+                  "429": "transient", "529": "transient",
+                  "500": "transient", "502": "transient",
+                  "503": "transient", "504": "transient"}
+_DEPLETED_PATH = BUNDLE_ROOT / "cron" / "state" / "depleted.json"
+_DEPLETED_PROVIDERS: dict[str, str] = {}   # provider → why (402/403/429)
+_DEPLETED_SKIPS: dict[str, int] = {}       # calls skipped because of depletion
+_depleted_loaded = False
 _provider_logged = False
 
 
+def _load_depleted() -> None:
+    """Merge the on-disk breaker state into this process, dropping expired rows."""
+    global _depleted_loaded
+    if _depleted_loaded:
+        return
+    _depleted_loaded = True
+    try:
+        raw = json.loads(_DEPLETED_PATH.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(raw, dict):
+        return
+    now = time.time()
+    for provider, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        ts = entry.get("ts")
+        if not isinstance(ts, (int, float)) or now - ts > _DEPLETED_TTL_SECONDS:
+            continue
+        _DEPLETED_PROVIDERS.setdefault(provider, str(entry.get("reason", "?")))
+
+
+def mark_depleted(provider: str, reason: str) -> None:
+    """Take a provider out of service for this run and the next few hours."""
+    _DEPLETED_PROVIDERS[provider] = reason
+    try:
+        _load_depleted()
+        now = time.time()
+        data = {p: {"ts": now, "reason": r} for p, r in _DEPLETED_PROVIDERS.items()}
+        _DEPLETED_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DEPLETED_PATH.with_name(f"{_DEPLETED_PATH.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(_DEPLETED_PATH)
+    except OSError:
+        pass   # best-effort: the in-process set still works
+
+
 def _is_depleted(provider: str) -> bool:
-    """True if the provider was marked depleted this run (and count the skip)."""
+    """True if the provider is out of service (and count the skip)."""
+    _load_depleted()
     if provider in _DEPLETED_PROVIDERS:
         _DEPLETED_SKIPS[provider] = _DEPLETED_SKIPS.get(provider, 0) + 1
         return True
@@ -1310,7 +1835,8 @@ def _report_depleted_atexit() -> None:
     many calls were skipped (provider-outage diagnosis from the cron logs)."""
     if not _DEPLETED_PROVIDERS:
         return
-    parts = [f"{p} (skipped {_DEPLETED_SKIPS.get(p, 0)} calls)" for p in sorted(_DEPLETED_PROVIDERS)]
+    parts = [f"{p}/{_DEPLETED_PROVIDERS[p]} (skipped {_DEPLETED_SKIPS.get(p, 0)} calls)"
+             for p in sorted(_DEPLETED_PROVIDERS)]
     print(f"  [llm] run summary — depleted this run: {', '.join(parts)}", file=sys.stderr)
 
 
@@ -1358,19 +1884,25 @@ def _log_provider_once() -> None:
     if _provider_logged:
         return
     _provider_logged = True
-    if LLM_PROVIDER in PROVIDERS:
+    if LLM_PROVIDER_INVALID:
+        print("  [llm] provider=INVALID — every call is refused, nothing is sent",
+              file=sys.stderr)
+        return
+    if LLM_PROVIDER == PROVIDER_CHAIN_NAME:
+        # Print the fallback policy, not just the primary: "why did my
+        # local-only prompt reach a cloud gateway" is answered here — so the
+        # names come from DEFAULT_CHAIN itself. Hardcoded, the line kept
+        # saying "fallback=opencode" after DeepInfra joined the chain, i.e.
+        # the one line whose job is diagnosing where a request went was the
+        # line that lied about it.
+        chain = " → ".join(DEFAULT_CHAIN) if OFFBOX_FALLBACK else \
+            f"{DEFAULT_CHAIN[0]} (fallback=off, WIKI_OFFBOX_FALLBACK=0)"
+        extra = " [WIKI_ALLOW_OFFBOX=0 — off-box providers REFUSED]" if not ALLOW_OFFBOX else ""
+        print(f"  [llm] provider=chain: {chain}{extra}", file=sys.stderr)
+    elif LLM_PROVIDER in PROVIDERS:
         _, base, model = _provider_cfg(LLM_PROVIDER)
         extra = ""
-        if LLM_PROVIDER == "deepseek":
-            # Print the fallback policy, not just the primary: "why did my
-            # local-only prompt reach a cloud gateway" is answered here — so the
-            # names come from DEFAULT_CHAIN itself. Hardcoded, the line kept
-            # saying "fallback=opencode" after DeepInfra joined the chain, i.e.
-            # the one line whose job is diagnosing where a request went was the
-            # line that lied about it.
-            rest = " → ".join(DEFAULT_CHAIN[1:])
-            extra = f" (fallback={rest})" if OFFBOX_FALLBACK else " (fallback=off, WIKI_OFFBOX_FALLBACK=0)"
-        elif not PROVIDERS[LLM_PROVIDER].get("offbox", True):
+        if not PROVIDERS[LLM_PROVIDER].get("offbox", True):
             extra = (" (local-only, endpoint verified)" if _is_local_endpoint(base)
                      else " (local-only, but the endpoint is NOT local — every call "
                           "will be REFUSED)")
@@ -1386,6 +1918,38 @@ def _log_provider_once() -> None:
         print("  [llm] provider=mock (offline fixture responses)", file=sys.stderr)
 
 
+def config_report() -> list[str]:
+    """The EFFECTIVE configuration, one line per value, with its source.
+
+    Printed by bundle-status.py, by every `--dry-run`, and by self-test. Six
+    separate findings had one cause — a value that was misread with no visible
+    diagnostic — so the answer to "what is this pipeline actually configured to
+    do" now exists in one place instead of being reconstructed from source.
+    """
+    lines = [f"provider          = {LLM_PROVIDER}"
+             f"{'  ← INVALID, every call refused' if LLM_PROVIDER_INVALID else ''}"]
+    if LLM_PROVIDER == PROVIDER_CHAIN_NAME:
+        lines.append("chain             = " + " → ".join(DEFAULT_CHAIN) + " → None")
+    seen = set()
+    for name, value, source in _CONFIG_NOTES:
+        if name in seen:
+            continue
+        seen.add(name)
+        lines.append(f"{name:<17} = {value}  ({source})")
+    lines.append(f"{'dry_run_until':<17} = {DRY_RUN_UNTIL or 'not set'}  "
+                 f"(bundle.local.yaml)")
+    lines.append(f"{'privacy':<17} = {policy_summary()}")
+    if _CONFIG_ERRORS:
+        lines.append("ERRORS:")
+        lines.extend(f"  - {e}" for e in _CONFIG_ERRORS)
+    return lines
+
+
+def config_errors() -> list[str]:
+    """Configuration values nobody could parse (empty when all of them parsed)."""
+    return list(_CONFIG_ERRORS)
+
+
 def _dry_run_until() -> date | None:
     """`dry_run_until:` from bundle.local.yaml, or None.
 
@@ -1397,6 +1961,12 @@ def _dry_run_until() -> date | None:
     if raw is None:
         return None
     try:
+        # PyYAML resolves `2026-09-05 10:00` to a datetime, and `datetime` IS a
+        # `date` subclass — so the isinstance check below let it through and the
+        # `date.today() < DRY_RUN_UNTIL` comparison raised TypeError inside
+        # load_state(), i.e. in every phase. Take the date part.
+        if isinstance(raw, datetime):
+            return raw.date()
         return raw if isinstance(raw, date) else date.fromisoformat(str(raw).strip())
     except (TypeError, ValueError):
         print(f"ERROR: bundle.local.yaml 'dry_run_until' must be a YYYY-MM-DD "
@@ -1406,6 +1976,7 @@ def _dry_run_until() -> date | None:
 
 
 DRY_RUN_UNTIL: date | None = _dry_run_until()
+_dry_run_banner_shown = False
 
 
 def is_dry_run(argv: list[str] | None = None) -> bool:
@@ -1429,14 +2000,38 @@ def is_dry_run(argv: list[str] | None = None) -> bool:
     if any(a in ("--dry-run", "--no-llm") for a in args):
         return True
     if DRY_RUN_UNTIL is not None and date.today() < DRY_RUN_UNTIL:
-        print(f"  [dry-run] bundle.local.yaml says dry_run_until={DRY_RUN_UNTIL} "
-              f"— previewing only, nothing is sent or written. Delete the key "
-              f"to start early; it expires on its own.", file=sys.stderr)
+        # ONCE per process. is_dry_run() is called from load_state(), which every
+        # helper touches, so the banner printed dozens of identical lines into a
+        # night's log and buried everything else in it.
+        global _dry_run_banner_shown
+        if not _dry_run_banner_shown:
+            _dry_run_banner_shown = True
+            print(f"  [dry-run] bundle.local.yaml says dry_run_until={DRY_RUN_UNTIL} "
+                  f"— previewing only, nothing is sent or written. Delete the key "
+                  f"to start early; it expires on its own.", file=sys.stderr)
         return True
     return False
 
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+
+# YAML's actual rule for "this line is a key": an identifier, a colon, and then
+# either whitespace or end of line. A bare `":" in line` test read the list item
+# `- http://example.com` as the mapping `{"http": "//example.com"}`, so a page's
+# `sources:` list turned into a list of nonsense dicts and
+# source_already_processed could never match anything in it again.
+_KEY_LINE_RE = re.compile(r"^\s*[A-Za-z_][\w.-]*:(\s|$)")
+
+
+def _fm_unquote(value: str) -> str:
+    """Undo _fm_scalar's quoting so a page round-trips to the same values."""
+    s = value.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        inner = s[1:-1]
+        if s[0] == '"':
+            return inner.replace('\\"', '"').replace("\\\\", "\\")
+        return inner
+    return s
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -1453,6 +2048,10 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
 
     Returns (data, body). Returns ({}, text) when no frontmatter is present.
     """
+    # A BOM before the opening `---` makes the regex miss, so the whole file
+    # reads as body — and the next write_page then puts a SECOND frontmatter
+    # block on top of the first.
+    text = text.lstrip("﻿")
     m = FRONTMATTER_RE.match(text)
     if not m:
         return {}, text
@@ -1475,24 +2074,24 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
                     data[current_key] = current_list
                 else:
                     continue
-            if ":" in rest:
+            if _KEY_LINE_RE.match(rest):
                 k, _, v = rest.partition(":")
-                current_item = {k.strip(): v.strip()}
+                current_item = {k.strip(): _fm_unquote(v)}
                 current_list.append(current_item)
             else:
-                current_list.append(rest)
+                current_list.append(_fm_unquote(rest))
                 current_item = None
             continue
         if line.startswith("    ") and current_item is not None:
             inner = line.strip()
-            if ":" in inner:
+            if _KEY_LINE_RE.match(inner):
                 k, _, v = inner.partition(":")
-                current_item[k.strip()] = v.strip()
+                current_item[k.strip()] = _fm_unquote(v)
             continue
-        if ":" in line:
+        if _KEY_LINE_RE.match(line):
             k, _, v = line.partition(":")
             k = k.strip()
-            v = v.strip()
+            v = _fm_unquote(v)
             if v:
                 data[k] = v
                 current_key = None
@@ -1504,6 +2103,26 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
                 current_item = None
 
     return data, body
+
+
+def _fm_scalar(value) -> str:
+    """Quote a frontmatter value when leaving it bare would change its meaning.
+
+    A path or a URL carries `: ` and a colon-space is what makes a YAML mapping;
+    written unquoted, the value round-tripped as a different value (or as a
+    nested map) the next time the page was read.
+    """
+    s = "" if value is None else str(value)
+    if s == "":
+        return '""'
+    needs_quotes = (
+        s[0] in "-?:,[]{}#&*!|>'\"%@`" or
+        ": " in s or s.endswith(":") or "#" in s or
+        s.strip() != s
+    )
+    if needs_quotes:
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return s
 
 
 def dump_frontmatter(data: dict) -> str:
@@ -1522,12 +2141,12 @@ def dump_frontmatter(data: dict) -> str:
                     first = True
                     for ik, iv in item.items():
                         prefix = "  - " if first else "    "
-                        lines.append(f"{prefix}{ik}: {iv}")
+                        lines.append(f"{prefix}{ik}: {_fm_scalar(iv)}")
                         first = False
                 else:
-                    lines.append(f"  - {item}")
+                    lines.append(f"  - {_fm_scalar(item)}")
         else:
-            lines.append(f"{k}: {v}")
+            lines.append(f"{k}: {_fm_scalar(v)}")
     lines.append("---")
     lines.append("")
     return "\n".join(lines)
@@ -1542,7 +2161,9 @@ def read_page(path: Path) -> tuple[dict, str]:
     """
     if not path.exists():
         return {}, ""
-    text = path.read_text(encoding="utf-8", errors="replace")
+    # utf-8-sig: a BOM ahead of the opening `---` hid the frontmatter, and the
+    # next write then stacked a second block on top of the first.
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
     return parse_frontmatter(text)
 
 
@@ -1555,8 +2176,19 @@ def strip_leading_frontmatter(content: str) -> str:
     """
     if not re.match(r"\s*---\r?\n", content):
         return content
-    m = re.match(r"^\s*---\r?\n.*?\n---\r?\n", content, re.DOTALL)
-    return content[m.end():] if m else content
+    # `[^\n]*: ` on every line of the block: a frontmatter block is `key: value`
+    # lines and nothing else. Without that check the non-greedy `.*?` matched up
+    # to the NEXT `---` anywhere in the document — which for a page that opens
+    # with a thematic break and later has another one meant the whole
+    # introduction was silently eaten as if it were YAML.
+    m = re.match(r"^\s*---\r?\n((?:[^\n]*\r?\n)*?)---\r?\n", content, re.DOTALL)
+    if not m:
+        return content
+    block = m.group(1)
+    lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+    if lines and not all(re.match(r"^(-\s|[A-Za-z_][\w.-]*\s*:)", ln) for ln in lines):
+        return content
+    return content[m.end():]
 
 
 _LITERAL_NL = chr(92) + "n"  # '\' + 'n', built from chr() so the escaping level survives copies
@@ -1732,7 +2364,167 @@ def sanitize_page_body(body: str, label: str = "") -> str:
             f"  WARN sanitize_page{where}: placeholders={ph}, extra_h1={h1}, dup_sections={sec}",
             file=sys.stderr,
         )
-    return re.sub(r"\n{3,}", "\n\n", body)
+    return _collapse_blank_runs(body)
+
+
+def _collapse_blank_runs(body: str) -> str:
+    """Collapse 3+ blank lines to one — OUTSIDE fenced code.
+
+    A plain `re.sub(r"\\n{3,}", "\\n\\n")` reformatted the inside of code blocks,
+    where blank lines can be significant (a diff, a fixture, a here-doc that a
+    page is documenting). Everywhere else this file already treats fenced code
+    as untouchable; this was the last place that did not.
+    """
+    out: list[str] = []
+    blanks = 0
+    for line, in_code in iter_md_lines(body):
+        if in_code:
+            blanks = 0
+            out.append(line)
+            continue
+        if line.strip():
+            blanks = 0
+            out.append(line)
+            continue
+        blanks += 1
+        if blanks <= 1:
+            out.append(line)
+    return "\n".join(out)
+
+
+def normalize_body(body: str) -> str:
+    """The transformation write_page applies, available BEFORE the write.
+
+    `write_page` unfolds escaped newlines and sanitizes; a caller that then
+    checked "is this fragment already on the page?" was comparing raw text
+    against the transformed text on disk. It never matched, so every retry of a
+    daily appended one more `## Update (…)` block. One function, used by both
+    sides of the comparison.
+    """
+    return sanitize_page_body(_unescape_blob(body))
+
+
+def rewrite_is_sane(old_body: str, new_body: str) -> tuple[bool, str]:
+    """Is a full-page rewrite safe to apply? → (ok, reason).
+
+    A non-blind update replaces the page body wholesale, and the model does
+    sometimes "tidy up" half of it away. Two cheap signals catch that without
+    pretending to understand the content: a page that lost more than half its
+    length, and one that lost [[wikilinks]] — the vault's navigation is built out
+    of those, and losing them is the damage that is hardest to notice later.
+    Callers fall back to APPEND rather than dropping the change.
+    """
+    old = (old_body or "").strip()
+    new = (new_body or "").strip()
+    if not old:
+        return True, ""
+    if len(new) * 2 < len(old):
+        return False, f"rewrite would shrink the page {len(old)} → {len(new)} chars"
+    lost = extract_wikilinks(old) - extract_wikilinks(new)
+    if lost:
+        return False, f"rewrite would drop wikilinks: {', '.join(sorted(lost)[:5])}"
+    return True, ""
+
+
+_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
+
+
+def extract_wikilinks(text: str) -> set[str]:
+    """Every `[[target]]` in a page body, normalized (no alias, no anchor).
+
+    Lived in wiki-lint.py, where build-index could not reach it — which is why
+    "Linked from" backlinks did not exist even though the data was already being
+    collected for the orphan check.
+    """
+    return {m.group(1).strip() for m in _WIKILINK_RE.finditer(text or "")}
+
+
+def append_fragment(existing_body: str, fragment: str, date_str: str) -> str:
+    """Attach `fragment` to a page as a dated `## Update (…)` subsection.
+
+    The three transformations a fragment needs — no H1 of its own, headings one
+    level down so it nests, no heading claiming to be the CURRENT state — lived
+    in wiki-compile-sessions.py only. wiki-compile-kb.py appended raw text and
+    produced exactly the "page becomes two versions of itself" that these exist
+    to prevent, which lint could not even see because there was no `## Update (`
+    marker on it.
+
+    Returns the existing body unchanged when the fragment is already present, so
+    a replayed daily is idempotent.
+    """
+    fragment = _date_current_headings(_demote_headings(_strip_leading_h1(fragment.strip())),
+                                      date_str)
+    # Normalized on BOTH sides — the page holds the transformed text.
+    fragment = normalize_body(fragment).strip()
+    if not fragment:
+        return existing_body
+    if fragment in normalize_body(existing_body):
+        return existing_body
+    return existing_body.rstrip() + f"\n\n## Update ({date_str})\n\n" + fragment + "\n"
+
+
+def _strip_leading_h1(md: str) -> str:
+    """Drop the leading H1 of an appended fragment.
+
+    The model returns a WHOLE PAGE, title included. Appended as-is it becomes a
+    second H1 on an existing page, and the page turns into "two versions of
+    itself" — with no way to tell which title describes the current state. The
+    page already has a title; the duplicate carries no information.
+    """
+    lines = md.split("\n")
+    for i, ln in enumerate(lines):
+        if not ln.strip():
+            continue
+        if ln.startswith("# "):
+            del lines[i]
+            while i < len(lines) and not lines[i].strip():
+                del lines[i]
+        break  # first non-blank line isn't an H1 — nothing to strip
+    return "\n".join(lines)
+
+
+def _demote_headings(md: str) -> str:
+    """Push a fragment's headings one level down — it nests under `## Update (…)`.
+
+    Otherwise the update's sections sit at the same level as the page's own, so
+    the page ends up with two sections of the same name and, again, no way to
+    tell which one is current. Fenced code is left alone: `# comment` inside ```
+    is code, not a heading.
+    """
+    out: list[str] = []
+    for line, in_code in iter_md_lines(md):
+        # Up to H5: markdown won't render deeper anyway, and '#######' is junk.
+        if not in_code and re.match(r"^#{1,5} ", line):
+            line = "#" + line
+        out.append(line)
+    return "\n".join(out)
+
+
+# Headings that declare their content to be the current state. In an APPENDED
+# fragment such a heading lies: it is a snapshot taken on the source's date, not
+# the page's present state.
+_CURRENT_HEADING_RE = re.compile(
+    r"^(#{1,6})\s+(current\s+state|current\s+status|current\s+version"
+    r"|current\s+stats?|latest\s+state|overview|status)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _date_current_headings(md: str, date_str: str) -> str:
+    """Rename "current state" headings in a fragment into a dated snapshot.
+
+    A page has exactly one canonical current block — the one already there (or
+    the one written by a full rewrite, where the model did see the body).
+    Everything appended is history, so it gets stamped with a date and the page
+    never accumulates competing "current" states.
+    """
+    out: list[str] = []
+    for line, in_code in iter_md_lines(md):
+        m = None if in_code else _CURRENT_HEADING_RE.match(line)
+        if m:
+            line = f"{m.group(1)} State as of {date_str} (snapshot)"
+        out.append(line)
+    return "\n".join(out)
 
 
 def write_page(path: Path, frontmatter: dict, body: str) -> None:
@@ -1740,13 +2532,10 @@ def write_page(path: Path, frontmatter: dict, body: str) -> None:
     fm = dict(frontmatter)
     fm["updated"] = datetime.now().strftime("%Y-%m-%d")
     body = sanitize_page_body(_unescape_blob(body), label=path.name)
-    path.parent.mkdir(parents=True, exist_ok=True)
     out = dump_frontmatter(fm) + body.lstrip("\n")
     # Atomic write (temp file + os.replace) so a crash mid-write can't leave a
     # half-written page behind — same pattern as save_state().
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(out, encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_text(path, out)
 
 
 def source_hash(source_path: str | Path, chunk_size: int = 65536) -> str:
@@ -1801,6 +2590,12 @@ def add_source_to_frontmatter(page_frontmatter: dict, src_path: str, src_hash: s
     return fm
 
 
+# How many lines of `_log.md` are kept. It is a journal read from the head
+# (session-start injects it as "recent project context"), so the tail is the
+# part nobody reads and the part that costs prompt budget.
+LOG_MD_MAX_LINES = _env_int("WIKI_PROJECT_LOG_MAX_LINES", 600, minimum=50)
+
+
 def append_per_project_log(project: str, entries: list[str]) -> None:
     """Record entries in wiki/projects/{project}/_log.md (newest day on top).
 
@@ -1816,7 +2611,8 @@ def append_per_project_log(project: str, entries: list[str]) -> None:
     log_path = log_dir / "_log.md"
     today = datetime.now().strftime("%Y-%m-%d")
 
-    existing = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+    existing = (log_path.read_text(encoding="utf-8", errors="replace")
+                if log_path.exists() else "")
     if not existing:
         existing = f"# _log — {project}\n"
 
@@ -1844,7 +2640,16 @@ def append_per_project_log(project: str, entries: list[str]) -> None:
         rest = existing[len(head):].lstrip("\n")
         existing = head + "\n" + new_block + ("\n" + rest if rest else "")
 
-    log_path.write_text(existing, encoding="utf-8")
+    # Bounded. `_log.md` grew forever and, being just another `*.md` in the
+    # project folder, was then handed to the compiler as if it were a page —
+    # eating the prompt's body budget until every page went blind-append.
+    lines = existing.split("\n")
+    if len(lines) > LOG_MD_MAX_LINES:
+        head = lines[0] if lines and lines[0].startswith("#") else f"# _log — {project}"
+        kept = [ln for ln in lines[1:LOG_MD_MAX_LINES]]
+        existing = "\n".join([head] + kept +
+                             ["", f"_(older entries trimmed at {LOG_MD_MAX_LINES} lines)_", ""])
+    atomic_write_text(log_path, existing)
 
 
 def normalized_name_key(filename: str) -> str:
@@ -1866,11 +2671,26 @@ def find_existing_page_by_name(folder: Path, filename: str) -> Path | None:
     return None
 
 
-def _slugify_project(raw: str) -> str:
-    """Best-effort ASCII project slug from a free-form daily-log heading.
+# Separators that end a project NAME and start a description: a parenthesis, a
+# backtick, a colon, or a SPACED dash. A bare hyphen is not one — it is common
+# inside project names (claude-bundle) — and neither is a plain space, which is
+# common inside them too ("My App").
+_NAME_SEPARATOR_RE = re.compile(r"\s+[—–-]\s+|[(`:]")
 
-    Returns "" when nothing clean can be extracted (e.g. a non-ASCII heading),
-    so the caller can fall back to "main".
+
+def _slugify_project(raw: str) -> str:
+    """Project slug from a free-form daily-log heading.
+
+    Returns "" when nothing usable can be extracted, so the caller can fall back
+    to "main".
+
+    The whole label is slugified, not its first word. Splitting on the first
+    SPACE meant "My App" and "My Site" both became `my` and merged into one wiki
+    folder — two projects sharing one bucket, which also makes the privacy policy
+    ambiguous because it can only name the slug. And the character class was
+    ASCII-only, so any non-Latin heading slugified to "" and fell into `main`
+    together with every other one; lint then reported the project-collapse it had
+    itself been handed.
     """
     s = raw.strip()
     # Prefer text inside the first `backticks` (e.g. "Project `finance` (...)").
@@ -1878,39 +2698,54 @@ def _slugify_project(raw: str) -> str:
     if m:
         cand = m.group(1)
     else:
-        # Drop a leading "project" label, then take the first token up to a
-        # separator (space, em-dash, paren, colon, backtick). A plain hyphen is
-        # NOT a separator — it is common inside project names (e.g. claude-bundle).
-        s2 = re.sub(r"^project\b[:\s]*", "", s, flags=re.IGNORECASE)
-        # maxsplit by KEYWORD: passing it positionally is deprecated since
-        # Python 3.13 and the bundle supports 3.10+, so a fork running `-W error`
-        # in its CI would fail on this line.
-        cand = re.split(r"[\s(—`:]", s2, maxsplit=1)[0].strip()
-        if not cand:
+        # Drop a leading "project" label, then keep everything up to the first
+        # real separator.
+        s2 = re.sub(r"^project\b[:\s]*", "", s, flags=re.IGNORECASE).strip()
+        if not s2 or s2[0] in "—–-(`:":
             # The prefix was empty / a bare label (e.g. the
             # "Project — extracted facts (claude-bundle)" form) — fall back to
             # the first parenthesised group, which carries the real name.
             p = re.search(r"\(([^)]+)\)", s)
             cand = p.group(1).strip() if p else ""
-    slug = re.sub(r"[^a-z0-9]+", "-", cand.lower()).strip("-")
+        else:
+            # maxsplit by KEYWORD: passing it positionally is deprecated since
+            # Python 3.13 and the bundle supports 3.10+, so a fork running
+            # `-W error` in its CI would fail on this line.
+            cand = _NAME_SEPARATOR_RE.split(s2, maxsplit=1)[0].strip()
+    # \w with re.UNICODE keeps letters of any script, so a Cyrillic or CJK
+    # project keeps its own folder instead of being poured into `main`.
+    slug = re.sub(r"[^\w]+", "-", cand.lower(), flags=re.UNICODE).strip("-_")
     if not slug or len(slug) > 40:
         return ""
     return slug
+
+
+# The bucket a source with no project attribution lands in. `unknown` is what
+# the flush phase writes for a pending draft with no `Project:` line; it must
+# resolve to the same place normalize_wiki_path sends `projects/unknown/`, or
+# the compiler asks for a path the normalizer rewrites and the scope check then
+# rejects — three nights of that and the pair is quarantined with a finding
+# blaming the prompt.
+DEFAULT_PROJECT = "main"
+UNATTRIBUTED_NAMES = frozenset({"unknown", "unattributed", "n/a", "none", ""})
 
 
 def normalize_project_name(raw: str) -> str:
     """Collapse a free-form daily-log section name to a project key.
 
     Matches the configured KNOWN_PROJECTS first; if none match, derives a clean
-    ASCII slug from the heading so distinct projects keep distinct wiki folders
-    even with an empty KNOWN_PROJECTS (the shipped template default). Falls back
-    to "main" only when no usable name can be extracted.
+    slug from the heading so distinct projects keep distinct wiki folders even
+    with an empty KNOWN_PROJECTS (the shipped template default). Falls back to
+    "main" when no usable name can be extracted.
     """
     low = re.sub(r"^project:\s*", "", raw.strip().lower()).strip()
+    if low in UNATTRIBUTED_NAMES:
+        return DEFAULT_PROJECT
     for proj in sorted(KNOWN_PROJECTS, key=len, reverse=True):
         if low == proj or low.startswith(proj + " ") or low.startswith(proj + "—") or low.startswith(proj + "-") or low.startswith(proj + "("):
             return proj
-    return _slugify_project(raw) or "main"
+    slug = _slugify_project(raw) or DEFAULT_PROJECT
+    return DEFAULT_PROJECT if slug in UNATTRIBUTED_NAMES else slug
 
 
 # Names under which a project keeps working files, not wiki pages. A page named
@@ -1945,6 +2780,11 @@ def normalize_wiki_path(path: str) -> str:
         path = path[5:]
     path = path.lstrip("/")
     path = path.replace("\\", "/")
+    # Drop EMPTY segments. `projects//topic.md` used to survive as a three-part
+    # path whose middle part was "", so it passed the len(parts) check and wrote
+    # to a project folder named "" — a directory nothing else in the pipeline can
+    # name, address or clean up.
+    path = "/".join(p for p in path.split("/") if p)
 
     # Case-insensitive: "page.MD" from an LLM used to get a second suffix.
     if path and not path.lower().endswith(".md"):
@@ -2118,19 +2958,53 @@ def extract_first_json_object(text: str) -> str | None:
     return None
 
 
-def _ensure_list(parsed) -> list:
+def strip_edge_fences(text: str) -> str:
+    """Drop a ```-fence that wraps the WHOLE answer, at the edges only.
+
+    A prompt that shows its expected answer inside a fenced example gets that
+    fence back around the answer. Callers comparing the response to a literal
+    (`== "OK"`, `== "[]"`) then failed to recognise their own success case and
+    paid for a second call, or quarantined a perfectly good empty result.
+    Stripping at the EDGES only — never globally — is deliberate: a global sub
+    chews fenced code out of JSON string values.
+    """
+    out = re.sub(r'^\s*```[A-Za-z0-9_+-]*\s*\n?', '', text or '')
+    return re.sub(r'\n?\s*```\s*$', '', out).strip()
+
+
+def _ensure_list(parsed) -> list | None:
     """Callers iterate the result as a list of dicts — anything else (an LLM
-    returning a bare object/string) must become [] here, not an AttributeError
-    deep inside a compile loop."""
+    returning a bare object/string) is a FAILURE, not an empty result."""
     if isinstance(parsed, list):
         return parsed
     print(f"  LLM JSON is {type(parsed).__name__}, expected array — skipping",
           file=sys.stderr)
-    return []
+    return None
+
+
+def parse_llm_json_result(raw: str) -> tuple[bool, list[dict]]:
+    """Parse an LLM JSON array → (parsed_ok, items).
+
+    The two answers `[]` and "that did not parse" are different events and used
+    to be indistinguishable, because both came back as `[]`. The prompts
+    explicitly allow `[]` for "nothing here is worth a page", so callers wrote
+    their own `output.strip() == "[]"` check to tell them apart — and that check
+    was STRICTER than the parser: an answer of `[ ]`, or `[]` followed by a
+    comment, was read as a deterministic failure, counted against the retry
+    ceiling and quarantined after three nights with a finding blaming the
+    prompt. `parsed_ok and not items` is the real "the model found nothing".
+    """
+    items = _parse_llm_json(raw)
+    return (items is not None), (items or [])
 
 
 def parse_llm_json(raw: str) -> list[dict]:
-    """Parse JSON from an LLM response, fixing common breakage."""
+    """Parse JSON from an LLM response, fixing common breakage. [] on failure."""
+    return _parse_llm_json(raw) or []
+
+
+def _parse_llm_json(raw: str) -> list[dict] | None:
+    """The parser itself. None means "this response could not be used"."""
     # Strip the markdown wrapper at the EDGES only — a global re.sub chewed
     # fenced code blocks out of JSON strings (corrupting wiki-page content).
     cleaned = re.sub(r'^\s*```(?:json)?\s*', '', raw)
@@ -2172,7 +3046,7 @@ def parse_llm_json(raw: str) -> list[dict]:
             state = (e.pos, str(e)[:60])
             if state == prev_state:
                 print(f"  JSON loop stuck at pos {e.pos}: {state[1]}", file=sys.stderr)
-                return []
+                return None
             prev_state = state
 
             if "Invalid \\escape" in str(e):
@@ -2188,7 +3062,7 @@ def parse_llm_json(raw: str) -> list[dict]:
                 ch = fixed[pos] if pos < len(fixed) else ''
                 if not ch:
                     print("  JSON truncated at end of response, giving up", file=sys.stderr)
-                    return []
+                    return None
                 if ch == '\n':
                     fixed = fixed[:pos] + '\\n' + fixed[pos+1:]
                 elif ch == '\r':
@@ -2199,7 +3073,7 @@ def parse_llm_json(raw: str) -> list[dict]:
                     fixed = fixed[:pos] + fixed[pos+1:]
                 else:
                     print(f"  JSON unrepairable control char at pos {pos}", file=sys.stderr)
-                    return []
+                    return None
             elif "Expecting ',' delimiter" in str(e) or "Expecting property name" in str(e):
                 pos = e.pos
                 ch = fixed[pos] if pos < len(fixed) else ''
@@ -2207,7 +3081,7 @@ def parse_llm_json(raw: str) -> list[dict]:
                     # Error at end-of-input: the response was truncated
                     # (max_tokens hit) — nothing left to patch.
                     print("  JSON truncated at end of response, giving up", file=sys.stderr)
-                    return []
+                    return None
                 if ch == '\n':
                     fixed = fixed[:pos] + '\\n' + fixed[pos+1:]
                 elif ch == '\r':
@@ -2237,58 +3111,28 @@ def parse_llm_json(raw: str) -> list[dict]:
                                 except json.JSONDecodeError:
                                     pass
                         print(f"  Reformat also failed, skipping", file=sys.stderr)
-                        return []
+                        return None
             else:
                 # Unknown breakage (e.g. "Unterminated string" from a
-                # max_tokens cut) — give up gracefully; callers treat [] as
+                # max_tokens cut) — give up gracefully; callers treat None as
                 # "this response failed", they must not crash on a parse error.
                 print(f"  JSON unrepairable: {e}", file=sys.stderr)
-                return []
+                return None
 
     print(f"  JSON parse: 50 iterations exhausted, giving up", file=sys.stderr)
-    return []
+    return None
 
 
 LLM_LOCK = BUNDLE_ROOT / "cron" / "state" / ".llm.lock"
 # How long to wait for the queue before going anyway (fail-open).
-LLM_LOCK_WAIT = int(os.environ.get("WIKI_LLM_LOCK_WAIT", "900"))
+# Read through _env_int: a bare int() here raised ValueError at IMPORT time for
+# `WIKI_LLM_LOCK_WAIT=15m`, which took all 15 scheduled tasks down at once.
+LLM_LOCK_WAIT = _env_int("WIKI_LLM_LOCK_WAIT", 900, minimum=0)
 # A lock older than this is considered abandoned (process killed, host rebooted
 # mid-run). Without this a crashed job would wedge every later LLM call.
-LLM_LOCK_STALE = int(os.environ.get("WIKI_LLM_LOCK_STALE", "1800"))
+LLM_LOCK_STALE = _env_int("WIKI_LLM_LOCK_STALE", 1800, minimum=1)
 
 
-def _pid_alive(pid: int) -> bool:
-    """Whether a process exists. Anything uncertain counts as alive.
-
-    `os.kill(pid, 0)` works on Windows too: for a dead PID OpenProcess reports
-    ERROR_INVALID_PARAMETER (87) → OSError, for a live process owned by someone
-    else ERROR_ACCESS_DENIED → PermissionError. Erring towards "alive" matters:
-    a false "dead" would let a waiter steal a lock that is still held.
-    """
-    if pid <= 0:
-        return True          # garbage in the lock file — not ours to reclaim by PID
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True          # the process exists, it just is not ours
-    except OSError as e:
-        return getattr(e, "winerror", None) != 87
-    except Exception:
-        return True          # on any surprise fall back to the age-based wait
-
-
-def _lock_owner_pid(path: Path) -> int | None:
-    """PID from the first field of the lock file, or None if unreadable."""
-    try:
-        return int(path.read_text(encoding="utf-8").split()[0])
-    except (OSError, ValueError, IndexError):
-        return None
-
-
-@contextlib.contextmanager
 def _llm_queue():
     """Cross-process queue around a provider call.
 
@@ -2299,91 +3143,88 @@ def _llm_queue():
     minutes occasionally takes 90 and rolls into the next task's window. The
     serialization therefore has to live in the call itself, not the schedule.
 
-    Fail-open by construction: if the lock cannot be taken within
-    LLM_LOCK_WAIT the call proceeds anyway (risking a 429 beats silently
-    skipping a nightly job), and a filesystem error skips the queue entirely.
-    An abandoned lock is stolen after LLM_LOCK_STALE, or immediately once its
-    owner is known to be dead; a lock held by a live process is never removed
-    by the waiter.
+    Fail-open by construction: if the lock cannot be taken within LLM_LOCK_WAIT
+    the call proceeds anyway (risking a 429 beats silently skipping a nightly
+    job). `_file_lock` is the shared implementation — see it for how an
+    abandoned lock is taken over.
     """
-    acquired = False
-    deadline = time.time() + LLM_LOCK_WAIT
-    try:
-        LLM_LOCK.parent.mkdir(parents=True, exist_ok=True)
-        while True:
-            try:
-                # O_CREAT|O_EXCL is atomic on every filesystem this runs on,
-                # including SMB — unlike a stat-then-write check.
-                fd = os.open(str(LLM_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')}\n".encode())
-                os.close(fd)
-                acquired = True
-                break
-            except FileExistsError:
-                try:
-                    age = time.time() - LLM_LOCK.stat().st_mtime
-                except OSError:
-                    age = 0
-                # The holder is gone (killed, timed out, machine rebooted) —
-                # waiting out LLM_LOCK_STALE is pointless, the queue is free
-                # right now. The waiter logs nothing while it waits, so that
-                # half hour of idling reads as a hung script.
-                owner = _lock_owner_pid(LLM_LOCK)
-                owner_dead = owner is not None and not _pid_alive(owner)
-                if age > LLM_LOCK_STALE or owner_dead:
-                    # Take an abandoned lock over by RENAMING it, not by
-                    # unlinking. An unconditional unlink was a TOCTOU race: two
-                    # waiters both saw age > STALE, the first removed the lock
-                    # and immediately took its own, the second then removed
-                    # THAT fresh lock and took its own — both talked to the
-                    # provider in parallel on one key, which is exactly the
-                    # self-inflicted 429 the queue exists to prevent.
-                    # os.replace is atomic: exactly one waiter wins, the rest
-                    # get ENOENT and keep waiting.
-                    steal = LLM_LOCK.with_name(f"{LLM_LOCK.name}.stale.{os.getpid()}")
-                    try:
-                        os.replace(LLM_LOCK, steal)
-                    except OSError:
-                        time.sleep(1)
-                        continue
-                    # Between the stat and the replace the holder may have
-                    # released the queue and another process taken a fresh
-                    # lock. Stole the wrong one — put it back.
-                    # Check the same signal the steal was based on: a lock held
-                    # by a dead owner has a fresh mtime, so an age-only check
-                    # would hand it straight back in an endless loop.
-                    try:
-                        if owner_dead:
-                            still_stale = _lock_owner_pid(steal) == owner
-                        else:
-                            still_stale = time.time() - steal.stat().st_mtime > LLM_LOCK_STALE
-                        if not still_stale:
-                            os.replace(steal, LLM_LOCK)
-                            time.sleep(5)
-                            continue
-                    except OSError:
-                        pass
-                    reason = f"owner PID {owner} is gone" if owner_dead else f"age {int(age)}s"
-                    print(f"  llm-lock: abandoned lock ({reason}) — taking it over", file=sys.stderr)
-                    steal.unlink(missing_ok=True)
-                    continue
-                if time.time() >= deadline:
-                    print(f"  llm-lock: no slot after {LLM_LOCK_WAIT}s — proceeding "
-                          "unqueued (429 possible)", file=sys.stderr)
-                    break
-                time.sleep(5)
-    except OSError as e:
-        print(f"  llm-lock: unavailable ({e}) — proceeding unqueued", file=sys.stderr)
-    try:
-        yield
-    finally:
-        # Only the holder releases. A caller that timed out must not delete
-        # someone else's lock, or the queue degrades into no queue at all.
-        if acquired:
-            try:
-                LLM_LOCK.unlink(missing_ok=True)
-            except OSError:
-                pass
+    return _file_lock(LLM_LOCK, wait=LLM_LOCK_WAIT, stale=LLM_LOCK_STALE,
+                      fail_open=True, label="llm-lock")
+
+
+# ── One classification of "the LLM call did not work" ────────────────────────
+# Three scripts each had their own retry policy against one paragraph of
+# documentation. flush counted a provider outage against WIKI_RETRY_LIMIT (three
+# bad nights quarantined every active project); compile treated an HTTP 400 on
+# an oversized chunk as transient and replayed it forever; compile-kb never
+# counted anything at all. The difference they all needed is WHY the call failed,
+# and only the dispatcher knows that — so it says so.
+#
+#   ok            — there is text.
+#   transient     — network, 429/529, 5xx. Waiting fixes it; do NOT count it.
+#   deterministic — the answer arrived and is unusable, or the request itself is
+#                   (400/413/422, empty content). Retrying reproduces it: count it.
+#   config        — no key, no model, refused by a DLP gate, 402/403. Nothing
+#                   about tonight will fix this; it is fatal for the run.
+class LLMResult(NamedTuple):
+    text: str | None
+    kind: str = "ok"
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.kind == "ok" and bool(self.text)
+
+
+_KIND_ORDER = {"config": 0, "deterministic": 1, "transient": 2, "ok": 3}
+
+
+def worst_kind(kinds) -> str:
+    """The kind a caller should act on when several parts failed differently."""
+    kinds = [k for k in kinds if k]
+    if not kinds:
+        return "ok"
+    return min(kinds, key=lambda k: _KIND_ORDER.get(k, 1))
+
+
+def give_up_after_repeated_failure(section: str, marker: str, label: str,
+                                   kind: str, payload: str,
+                                   finding_title: str, finding_context: str,
+                                   finding_what: str, finding_proposal: str,
+                                   log=None) -> bool:
+    """Stop retrying a source that fails the same way every run.
+
+    Returns True when the source was QUARANTINED — payload saved to
+    cron/logs/rejected/, one finding filed, the marker recorded so nothing
+    retries it again.
+
+    `kind` is an LLMResult kind. `transient` never counts: a provider outage
+    really is fixed by waiting, and a ceiling on it would throw away content over
+    a bad week. `config` never counts either — it is not the SOURCE that is
+    broken, and quarantining every project because a key is missing would destroy
+    a night's material over a one-line fix.
+
+    This lived in wiki-compile-sessions.py while flush and compile-kb each did
+    something different; it is now the one implementation all three call.
+    """
+    def _log(msg: str) -> None:
+        (log or (lambda m: print(m, file=sys.stderr)))(msg)
+
+    if kind in ("transient", "config", "ok") or not RETRY_LIMIT:
+        return False
+    n = attempt_bump(section, marker)
+    if n < RETRY_LIMIT:
+        _log(f"  [{label}] deterministic failure {n}/{RETRY_LIMIT} — retrying next run")
+        return False
+
+    quarantine_raw(marker, "retry-limit-reached", payload)
+    mark_quarantined(section, marker)
+    _log(f"  [{label}] QUARANTINED after {n} deterministic failures — payload in "
+         f"cron/logs/rejected/, retries stop here")
+    if not append_bundle_finding(title=finding_title, context=finding_context,
+                                 what=finding_what, proposal=finding_proposal):
+        _log(f"  [{label}] (a finding for this source is already open)")
+    return True
 
 
 def llm_call(prompt: str, timeout: int = 600, model: str | None = None) -> str | None:
@@ -2418,43 +3259,61 @@ def llm_call(prompt: str, timeout: int = 600, model: str | None = None) -> str |
                               `offbox: True`, first call included. That is the
                               switch for "nothing leaves this machine".
     """
+    return llm_call_ex(prompt, timeout, model).text
+
+
+def llm_call_ex(prompt: str, timeout: int = 600,
+                model: str | None = None) -> LLMResult:
+    """llm_call, but it also says WHY a failure happened — see LLMResult.
+
+    `llm_call` stays the plain `str | None` call the twenty existing call sites
+    use; a caller that has to decide whether to retry uses this one.
+    """
     _log_provider_once()
+    if LLM_PROVIDER_INVALID:
+        return LLMResult(None, "config",
+                         "WIKI_LLM_PROVIDER is not a provider name — nothing was sent")
     if LLM_PROVIDER == "mock":
-        return _llm_mock(prompt, timeout)  # never leaves the box — no queue needed
+        # Never leaves the box — no queue needed.
+        text = _llm_mock(prompt, timeout)
+        return LLMResult(text, "ok" if text else "deterministic")
     with _llm_queue():
         return _llm_call_unlocked(prompt, timeout, model)
 
 
 def _llm_call_unlocked(prompt: str, timeout: int = 600,
-                       model: str | None = None) -> str | None:
+                       model: str | None = None) -> LLMResult:
     """Body of llm_call without the queue — the provider chain as-is."""
     if LLM_PROVIDER == "claude":
-        return _llm_claude(prompt, timeout)
-    if LLM_PROVIDER in PROVIDERS and LLM_PROVIDER != "deepseek":
+        text = _llm_claude(prompt, timeout)
+        return LLMResult(text, "ok" if text else "transient")
+    if LLM_PROVIDER in PROVIDERS:
         return _llm_openai_compat(LLM_PROVIDER, prompt, timeout, model=model)
 
     previous: str | None = None
+    kinds: list[str] = []
     for provider in DEFAULT_CHAIN:
         if previous is not None:
             if not OFFBOX_FALLBACK:
                 print(f"  {PROVIDERS[previous]['label']} failed → returning None "
                       "(WIKI_OFFBOX_FALLBACK=0 forbids the off-box fallback)", file=sys.stderr)
-                return None
+                return LLMResult(None, worst_kind(kinds), "fallback disabled")
             print(f"  {PROVIDERS[previous]['label']} failed, falling back to "
                   f"{PROVIDERS[provider]['label']}", file=sys.stderr)
-        out = _llm_openai_compat(provider, prompt, timeout, fallback_from=previous,
+        res = _llm_openai_compat(provider, prompt, timeout, fallback_from=previous,
                                  model=model)
-        if out is not None:
-            return out
+        if res.text is not None:
+            return res
+        kinds.append(res.kind)
         previous = provider
     print(f"  {PROVIDERS[previous]['label']} also failed → returning None "
           "(claude fallback disabled)", file=sys.stderr)
-    return None
+    return LLMResult(None, worst_kind(kinds), "whole chain failed")
 
 
 def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
                        fallback_from: str | None = None,
-                       model: str | None = None) -> str | None:
+                       model: str | None = None) -> LLMResult:
     """POST /chat/completions against any OpenAI-compatible provider.
 
     `model` overrides the provider's configured model for this call (see
@@ -2476,23 +3335,18 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
     key, base_url, configured_model = _provider_cfg(provider)
     model = model or configured_model
 
-    if not key and not cfg.get("key_optional"):
-        print(f"  {cfg['key_env'][0]} env var not set", file=sys.stderr)
-        return None
-    if not model:
-        print(f"  {cfg['model_env']} env var not set (no default for {label})", file=sys.stderr)
-        return None
-
-    # The global off-box gate (WIKI_ALLOW_OFFBOX=0). Checked BEFORE the key and
-    # the endpoint, and before any provider in the chain gets a turn: unlike
-    # WIKI_OFFBOX_FALLBACK it applies to the first call too, so "nothing leaves
-    # this machine" holds regardless of which provider was selected.
+    # The global off-box gate (WIKI_ALLOW_OFFBOX=0) goes FIRST — before the key,
+    # the model and the endpoint. The comment above it always claimed as much
+    # while the code checked the key first, so a run with no key AND the gate
+    # closed logged "DEEPSEEK_KEY not set" and never mentioned the refusal that
+    # actually applied. That is a confusing message about the one setting the
+    # user most needs to be sure of.
     if not ALLOW_OFFBOX and cfg.get("offbox", True):
         print(f"  {label} REFUSED: WIKI_ALLOW_OFFBOX=0 forbids any provider that "
               f"leaves this machine — nothing was sent. Use WIKI_LLM_PROVIDER=local "
               f"with a server of your own, or unset WIKI_ALLOW_OFFBOX.",
               file=sys.stderr)
-        return None
+        return LLMResult(None, "config", "WIKI_ALLOW_OFFBOX=0")
 
     # A provider declared local-only must actually be local. Refusing here is
     # the whole point: the transcript is already in hand, and shipping it to a
@@ -2502,10 +3356,19 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
               f"provider is declared local-only — nothing was sent. Point "
               f"{cfg['base_url_env']} at loopback, or name the host in "
               f"LOCAL_LLM_ALLOWED_HOSTS to allow it on purpose.", file=sys.stderr)
-        return None
+        return LLMResult(None, "config", "local-only provider, non-local endpoint")
+
+    if not key and not cfg.get("key_optional"):
+        print(f"  {cfg['key_env'][0]} env var not set", file=sys.stderr)
+        return LLMResult(None, "config", f"{cfg['key_env'][0]} not set")
+    if not model:
+        print(f"  {cfg['model_env']} env var not set (no default for {label})", file=sys.stderr)
+        return LLMResult(None, "config", f"{cfg['model_env']} not set")
 
     if _is_depleted(provider):
-        return None
+        return LLMResult(None, _DEPLETED_KIND.get(_DEPLETED_PROVIDERS[provider],
+                                                  "transient"),
+                         f"{label} already out of service ({_DEPLETED_PROVIDERS[provider]})")
 
     # Imported only once every refusal above has been cleared. Those branches
     # promise that nothing was sent, and a refusal that first needs `requests`
@@ -2540,8 +3403,8 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
                 # don't pay the latency of calling it again for every remaining
                 # project.
                 print(f"  {label} 402 insufficient_balance: {resp.text[:200]}", file=sys.stderr)
-                _DEPLETED_PROVIDERS.add(provider)
-                return None
+                mark_depleted(provider, "402")
+                return LLMResult(None, "config", f"{label} 402 insufficient_balance")
             if resp.status_code == 403:
                 # The model is not available to this account (a region opt-in
                 # that was never accepted, a plan that doesn't carry it) or a
@@ -2550,21 +3413,32 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
                 # "API error" below and every remaining call of the batch paid
                 # another round trip to a door that is known to be shut.
                 print(f"  {label} 403 forbidden: {resp.text[:200]}", file=sys.stderr)
-                _DEPLETED_PROVIDERS.add(provider)
-                return None
-            if resp.status_code in (429, 529):
+                mark_depleted(provider, "403")
+                return LLMResult(None, "config", f"{label} 403 forbidden")
+            # 5xx joins 429/529 in the backoff. A 502 from a gateway used to fall
+            # into the generic branch below and immediately cost a fallback to the
+            # next provider — a second bill for something that would have cleared
+            # in thirty seconds.
+            if resp.status_code in (429, 529, 500, 502, 503, 504):
                 if attempt == max_retries - 1:
-                    _DEPLETED_PROVIDERS.add(provider)  # retries exhausted — don't repeat this run
-                    print(f"  {label} {resp.status_code} retries exhausted → marking depleted for this run", file=sys.stderr)
-                    return None
+                    mark_depleted(provider, str(resp.status_code))
+                    print(f"  {label} {resp.status_code} retries exhausted → marking depleted", file=sys.stderr)
+                    return LLMResult(None, "transient",
+                                     f"{label} {resp.status_code} retries exhausted")
                 wait = cfg["backoff_base"] * (attempt + 1)
-                kind = "overloaded (529)" if resp.status_code == 529 else "rate limit (429)"
-                print(f"  {label} {kind}, retry {attempt+1}/{max_retries} in {wait}s", file=sys.stderr)
+                names = {429: "rate limit (429)", 529: "overloaded (529)"}
+                print(f"  {label} {names.get(resp.status_code, f'server error ({resp.status_code})')}, "
+                      f"retry {attempt+1}/{max_retries} in {wait}s", file=sys.stderr)
                 time.sleep(wait)
                 continue
             if resp.status_code != 200:
+                # Everything else in the 4xx range is about THIS request — an
+                # oversized payload, a malformed body, a filter. Retrying it
+                # reproduces it exactly, so it is deterministic and the caller
+                # counts it against the ceiling instead of waiting forever.
                 print(f"  {label} API error {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
-                return None
+                return LLMResult(None, "deterministic",
+                                 f"{label} HTTP {resp.status_code}")
             data = resp.json()
             # Defensive .get() chain: a missing choices/message/content means
             # "no answer" (return None) so the fallback fires — an empty string
@@ -2573,16 +3447,16 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
             content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
             if not content:
                 print(f"  {label} empty content (reasoning_only?)", file=sys.stderr)
-                return None
-            return content
+                return LLMResult(None, "deterministic", f"{label} empty content")
+            return LLMResult(content, "ok")
         except Exception as e:
             _audit_attempt(provider, model, f"exception:{type(e).__name__}", None, fallback_from)
             print(f"  {label} error: {e}", file=sys.stderr)
             if attempt < max_retries - 1:
                 time.sleep(cfg["retry_sleep"])
                 continue
-            return None
-    return None
+            return LLMResult(None, "transient", f"{label} {type(e).__name__}: {e}")
+    return LLMResult(None, "transient", f"{label} exhausted retries")
 
 
 def _llm_mock(prompt: str, timeout: int = 600) -> str | None:
@@ -2596,7 +3470,7 @@ def _llm_mock(prompt: str, timeout: int = 600) -> str | None:
     path = os.environ.get("WIKI_LLM_MOCK_RESPONSE")
     if path and os.path.isfile(path):
         try:
-            return Path(path).read_text(encoding="utf-8")
+            return Path(path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
     return "[]"

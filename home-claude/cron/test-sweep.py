@@ -37,7 +37,7 @@ Exit:  1 if anything is red or the run environment was broken — the task
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a masked summary of which suites broke -> Telegram Bot API money=no writes=FINDINGS.md of each affected project
+# bundle-io: offbox=a masked summary of which suites broke -> Telegram Bot API money=no writes=FINDINGS.md of each affected project, DELETES %TEMP%/sweep-* and KILLS abandoned pytest processes
 from __future__ import annotations
 
 import argparse
@@ -77,6 +77,12 @@ STATE_PATH = STATE_DIR / "test-sweep.json"
 # off at second 60 and report a timeout that says nothing.
 TIMEOUT_FAST = int(os.environ.get("TEST_SWEEP_TIMEOUT", "600"))
 TIMEOUT_FULL = int(os.environ.get("TEST_SWEEP_TIMEOUT_FULL", "3600"))
+# The whole RUN's budget, five minutes short of the task's `timeout_hours: 2`
+# in registry.yaml. Per-suite timeouts alone do not bound the run: twelve suites
+# at TIMEOUT_FULL is ten hours, and Task Scheduler kills the process long before
+# it reaches the line that writes state — so a long night lost every result it
+# had already collected, red ones included.
+RUN_BUDGET_SECONDS = int(os.environ.get("TEST_SWEEP_RUN_BUDGET", str(2 * 3600 - 300)))
 TELEGRAM_ENABLED = os.environ.get("TEST_SWEEP_TELEGRAM", "1") != "0"
 # Projects the sweep leaves alone (comma-separated), e.g. a suite that is run
 # by its own host on its own schedule.
@@ -88,13 +94,21 @@ SKIP_PROJECTS: set[str] = {
 # without tests is a policy question, not a breakage, and alerting on it daily
 # would train everyone to ignore the alert.
 EXIT_STATUS = {0: "ok", 1: "failed", 2: "interrupted", 3: "error", 4: "usage", 5: "no-tests"}
-# "no-pytest" joins "no-tests" outside ALERTING for the same reason: the sweep's
-# own interpreter choice (the project's venv) not having pytest installed is a
-# fact about the environment, not about the project's tests.
-ALERTING = {"failed", "error", "interrupted", "usage", "timeout"}
-# Statuses that mean "the suite is healthy or simply absent" — used for the
-# green marker and for closing a finding that this sweep filed earlier.
-RECOVERED = {"ok", "no-tests", "no-pytest"}
+# Anything NOT in that table is a crash, and a crash is the loudest thing a
+# suite can do: pytest killed by an access violation or 0xC000013A returns
+# something like -1073741510, which fell through as the cosmetic label
+# `exit-1073741510` — a status in no set at all. The log printed RED, no finding
+# was filed, Telegram said nothing, and the run's own `done()` returned 0.
+CRASH = "crash"
+# "no-pytest" and "no-tests" are NEUTRAL, not RECOVERED. Treating them as a
+# recovery meant a broken venv turned `failed` into `no-pytest`, deleted the
+# open finding and announced "Tests recovered" — the loudest possible way to
+# stop looking at a suite that is still red.
+ALERTING = {"failed", "error", "interrupted", "usage", "timeout", CRASH}
+NEUTRAL = {"no-tests", "no-pytest"}
+# Statuses that mean "the suite really is healthy" — used for the green marker
+# and for closing a finding that this sweep filed earlier.
+RECOVERED = {"ok"}
 
 
 def log(msg: str) -> None:
@@ -382,7 +396,7 @@ def reap_orphan_pytest() -> list[str]:
             # was reused (psutil checks create_time) — exactly the "parent is
             # dead" answer we want.
             if not is_reapable(info["name"] or "", " ".join(info["cmdline"] or ()),
-                               proc.parent() is not None,
+                               _has_live_parent(proc),
                                now - (info["create_time"] or now)):
                 continue
             age_h = (now - info["create_time"]) / 3600
@@ -391,6 +405,58 @@ def reap_orphan_pytest() -> list[str]:
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
             continue
     return killed
+
+
+def _has_live_parent(proc) -> bool:
+    """Whether an orphaned pytest still has a real parent.
+
+    `proc.parent() is not None` is the Windows answer. On POSIX an orphan is
+    REPARENTED to pid 1 (or to a subreaper), so parent() is never None and the
+    reaper never fired at all — the check was dead code on every Linux and macOS
+    install.
+    """
+    parent = proc.parent()
+    if parent is None:
+        return False
+    if os.name == "nt":
+        return True
+    try:
+        # pid 1 (init/systemd) means "adopted", i.e. the real parent is gone. A
+        # subreaper adopts too, but then the process is somebody's deliberate
+        # child and leaving it alone is the safe error.
+        return parent.pid != 1
+    except Exception:
+        return True
+
+
+def child_env() -> dict:
+    """The environment a foreign project's pytest is handed.
+
+    Importing `utils` loads the bundle's `.env` into `os.environ`, and the sweep
+    then ran every project's suite with `DEEPSEEK_KEY`, `TELEGRAM_BOT_TOKEN` and
+    `OPENCODE_GO_API_KEY` in its environment — including suites from cloned,
+    third-party repositories. Any conftest that dumps the environment on failure
+    printed the bundle's credentials, and `mask_secrets` only ever saw the tail
+    of the output.
+
+    Stripped: every name the bundle's own env template declares, plus anything
+    that merely LOOKS like a credential.
+    """
+    env = dict(os.environ)
+    template = BUNDLE_ROOT.parent / "config" / "llm-providers.example.env"
+    declared: set[str] = set()
+    try:
+        for line in template.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                declared.add(line.split("=", 1)[0].strip())
+    except OSError:
+        pass
+    secretish = re.compile(r"(?i)(key|token|secret|password|passwd|credential)")
+    for name in list(env):
+        if name in declared or secretish.search(name):
+            env.pop(name, None)
+    return env
 
 
 def run_suite(suite: Path, key: str, full: bool) -> dict:
@@ -420,13 +486,13 @@ def run_suite(suite: Path, key: str, full: bool) -> dict:
              else {"start_new_session": True})
     try:
         proc = subprocess.Popen(cmd, cwd=str(suite), stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, **group)
+                                stderr=subprocess.PIPE, env=child_env(), **group)
     except OSError as exc:                      # interpreter or directory vanished
         return {"status": "error", "seconds": round(time.time() - started, 1),
                 "tail": mask_secrets(str(exc)), "note": temp_note}
     try:
         out_b, err_b = proc.communicate(timeout=timeout)
-        status = EXIT_STATUS.get(proc.returncode, f"exit{proc.returncode}")
+        status = EXIT_STATUS.get(proc.returncode, CRASH)
         out = (out_b or b"").decode("utf-8", errors="replace")
         err = (err_b or b"").decode("utf-8", errors="replace")
     except subprocess.TimeoutExpired:
@@ -614,6 +680,12 @@ def main(argv=None) -> int:
             log(f"reaped an abandoned pytest ({entry})")
 
     state, results, changed, recovered = load_state(), {}, [], []
+    # A GLOBAL deadline, not just a per-suite timeout. 12 suites × TIMEOUT_FULL
+    # is longer than the task's own `timeout_hours` in registry.yaml, and Task
+    # Scheduler then killed the process before it ever wrote its state — so a
+    # long night lost every result, including the red ones.
+    deadline = time.time() + RUN_BUDGET_SECONDS
+    skipped_for_time: list[str] = []
     for root in projects:
         name = root.name
         if name in SKIP_PROJECTS:
@@ -628,9 +700,12 @@ def main(argv=None) -> int:
             if args.dry_run:
                 log(f"{key}: {suite} ({interpreter_for(suite)})")
                 continue
+            if time.time() >= deadline:
+                skipped_for_time.append(key)
+                continue
             res = run_suite(suite, key, args.full)
             results[key] = res
-            mark = {"ok": "OK ", "no-tests": "OK ", "no-pytest": "OK ",
+            mark = {"ok": "OK ", "no-tests": "N/A", "no-pytest": "N/A",
                     "env": "ENV"}.get(res["status"], "RED")
             log(f"{mark} {key}: {res['status']} in {res['seconds']}s "
                 f"— {summary_line(res['tail'])}")
@@ -673,6 +748,16 @@ def main(argv=None) -> int:
                         log(f"     recovered — closed the finding in {name}/FINDINGS.md")
                 except OSError as exc:
                     log(f"     finding not closed in {name}/FINDINGS.md: {exc}")
+            if res["status"] in NEUTRAL and previous in ALERTING:
+                # A suite that WAS red and now cannot be run at all is not a
+                # recovery: the previous status is kept so the finding stays
+                # open, and the reason is named in the log rather than being
+                # announced as good news.
+                log(f"     {res['status']} — the suite cannot run, so the earlier "
+                    f"'{previous}' stands; the finding stays open")
+                state[key] = {"status": previous, "seconds": res["seconds"],
+                              "date": DATE, "blocked_by": res["status"]}
+                continue
             state[key] = {"status": res["status"], "seconds": res["seconds"], "date": DATE}
 
     if args.dry_run:
@@ -690,6 +775,16 @@ def main(argv=None) -> int:
             if r["status"] == "ok" and r["seconds"] > 60 and not args.full]
     log(f"result: {len(results)} suite(s), red {len(red)}, "
         f"broken environment {len(env)}, over the 60s budget {len(slow)}")
+    if skipped_for_time:
+        log(f"run budget of {RUN_BUDGET_SECONDS}s reached — {len(skipped_for_time)} "
+            f"suite(s) not run this time: {', '.join(skipped_for_time[:8])}"
+            + (" …" if len(skipped_for_time) > 8 else ""))
+    if slow:
+        # The test policy says "mark integration BY MEASUREMENT". A measurement
+        # nobody is shown is not one, so the slow suites are named here and go
+        # into the ledger note.
+        log("over the 60s fast-suite budget (candidates for `integration`): "
+            + ", ".join(f"{k} {s:.0f}s" for k, s in sorted(slow, key=lambda x: -x[1])[:10]))
     if changed:
         lines = [f"Tests broke ({DATE}):"]
         lines += [f"• {k}: {r['status']} — {summary_line(r['tail'])}" for k, r in changed]

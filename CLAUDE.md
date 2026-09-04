@@ -67,7 +67,7 @@ preserve that discipline.
 │       ├── prompts/                     the LLM prompts those phases send
 │       ├── tests/                       shell tests for the push guards
 │       ├── admin/                       sync-tasks, save-cred (+ .cmd wrappers)
-│       ├── registry.yaml                the 15 scheduled tasks — source of truth
+│       ├── registry.yaml                the 16 scheduled tasks — source of truth
 │       ├── runs.py                      Semantic Artifact SLO ledger
 │       ├── bundle-status.py             read-only health snapshot
 │       ├── schtasks_status.py           Task Scheduler status parser
@@ -106,7 +106,9 @@ preserve that discipline.
 │   ├── wiki-method.md                  rules files and INSTALL
 │   ├── cron-architecture.md
 │   ├── llm-routing.md
-│   └── mcp-servers.md
+│   ├── mcp-servers.md
+│   ├── decisions.md                    ADRs — why the bundle does NOT do X
+│   └── config-reference.md             generated index of every env var
 ├── AGENTS.md                           per-project pointer for Codex CLI
 └── CLAUDE.md                           ← you are here
 ```
@@ -132,7 +134,7 @@ locking, quarantine and per-source attempt counters; wiki page I/O
 (frontmatter parse/dump, `source_hash` dedup, project-name slugging,
 reserved-name checks); and the LLM layer — the `PROVIDERS` table,
 `llm_call()` with its cross-process queue and fallback chain. A change
-here reaches all 15 tasks at once; that is the reason `tests/` mostly
+here reaches all 16 tasks at once; that is the reason `tests/` mostly
 exercises this file.
 
 **Fail-closed is the design, not an accident.** A manifest that won't
@@ -143,14 +145,20 @@ reads nothing it wasn't told to. `tests/test_guards.py` is the executable
 statement of these invariants — if a change makes one of them
 fail-*open*, that test is the thing that must not be "fixed".
 
-**The nightly chain is ordered and re-entrant.**
-`wiki-pipeline.py` runs `flush → compile → index` in one process, each
-phase a subprocess whose log folds into the pipeline log, `--dry-run` /
-`--no-llm` passed through to all of them. Sessions enter as JSONL tails
-dropped by the `session-*` hooks into `wiki/daily/.pending/`; the state
-ledger + `source_hash` are what make a re-run idempotent rather than
-duplicative. `compile-kb` is a separate, off-by-default source and is
-deliberately *not* in the chain.
+**The nightly chain is ordered and re-entrant.** `wiki-pipeline.py`
+(`ClaudeWikiPipeline`, the DEFAULT task) runs `flush → compile → index` in one
+process, each phase a subprocess whose log folds into the pipeline log,
+`--dry-run` / `--no-llm` passed through to all of them. The three phases also
+exist as separate tasks, shipping `enabled: false`. Sessions enter as JSONL
+tails dropped by the `session-*` hooks into `wiki/daily/.pending/`.
+
+What makes a re-run idempotent is the state ledger's PER-SOURCE MARKERS, each
+carrying a fingerprint of the content the run actually read: `<jsonl>@<size>`
+for flush, `DATE@fp` and `DATE#project@fp` for compile. (This paragraph used to
+credit `source_hash` — a function no shipped script calls, as
+`docs/wiki-method.md` says in as many words. A maintainer looking for the
+protection would have looked in the wrong place.) `compile-kb` is a separate,
+off-by-default source and is deliberately *not* in the chain.
 
 **`registry.yaml` is the only declaration of a scheduled task**, and
 three things are checked against it: `check-registry.py` (field/kind/
@@ -185,6 +193,25 @@ second copy of a rule, generate it or source it; do not paste it.
 | New offline check | Add it to `scripts/self-test.ps1` and, if it runs on Linux, to `.github/workflows/ci.yml`. |
 | New file structure section | Update the layout block in `README.md` AND in this file. |
 | Sanitization rule clarified | Add to "Sanitization checklist" below AND to `CHANGELOG.md`. |
+
+## FINDINGS.md / IDEAS.md in this repo
+
+Both files carry the CANONICAL header and nothing else — the exact text
+`cron/hooks/utils.py::findings_header()` / `ideas_header()` produce, which is
+what `append_bundle_finding` and `test-sweep.py` insert under. This repo used to
+carry a hand-written variant of its own, which is the one place a rule about
+"the header is the same in every project" must not be broken.
+
+Project-specific notes about the review cadence belong HERE, not in the header
+(`home-claude/CLAUDE.md` § Findings says so explicitly — "the file holds
+entries, not a chronicle of itself"):
+
+- Both files are `.gitignore`d — they are a working queue, not a deliverable.
+- Review both on the 1st of the month. Entries older than 90 days are stale;
+  `claude-task-monitor.sh` alerts on them when the full tier is running.
+- The verdicts on rejected ideas that bear on privacy or routing are published
+  in [`docs/decisions.md`](docs/decisions.md). `IDEAS-archive.md` is local and
+  never leaves the machine, so nothing that a reader needs may live only there.
 
 ## Sanitization checklist — pre-commit MUST-DO
 
@@ -329,17 +356,23 @@ as config.
   scripts/enable-guard.sh}`. Adding or dropping `+x` is an intentional
   decision, not a side effect.
 
-CI (`.github/workflows/ci.yml`) runs two jobs. **Ubuntu:** Python
-compileall, JSON validity, YAML parse + `script:` path guard, the
-doc/registry count guard (`scripts/check-doc-counts.py`), the
-universal-rules mirror check (`scripts/check-agents-sync.py`), the
-secret-format guard (now also scanning `.github/`, sourced from
-`home-claude/cron/lib/secret-scan.sh`), shellcheck, and the offline
-pipeline smoke test (`tests/`, `WIKI_LLM_PROVIDER=mock`). **Windows:** a
-PowerShell parse-check plus `scripts/self-test.ps1`. There is no
-dedicated hook-smoke-test CI step — that one stays a local check. Keep CI
-independent of any specific LLM provider — anyone forking the repo should
-be able to run it.
+CI (`.github/workflows/ci.yml`) runs two jobs. **Ubuntu** (matrix: 3.10 and
+3.x, so the declared minimum is actually exercised): Python compileall, JSON
+validity, YAML parse + `script:` path guard, all five guard scripts, the
+exec-bit and encoding guards, the generated-table checks (secret-scan.sh and
+`docs/config-reference.md` must match their generators), the secret-format
+guard (also scanning `.github/`), shellcheck over every tracked shell script,
+`cron/tests/*.sh`, the offline pipeline suite (`tests/`,
+`WIKI_LLM_PROVIDER=mock`, `CI=1` so a dependency SKIP becomes a failure) and
+`-m integration`. **Windows:** a PowerShell parse-check under BOTH pwsh 7 and
+Windows PowerShell 5.1 — the scripts execute under 5.1, so parsing them only
+with 7 let 7-only syntax through — plus `scripts/self-test.ps1` with
+requirements.txt installed.
+
+Hook smoke-testing is now `tests/test_hooks.py` (cross-platform, in the fast
+suite), so it is no longer a local-only check; `self-test.ps1` still runs its
+own two-payload version on Windows. Keep CI independent of any specific LLM
+provider — anyone forking the repo should be able to run it.
 
 ## Mirror / remote setup
 

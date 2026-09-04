@@ -263,6 +263,49 @@ if (Test-Path $st) {
         elseif ($rc -eq 3) { Warn "sync-tasks -DryRun: some tasks would be SKIPPED (partial sync):`n$out" }
         else { Bad "sync-tasks -DryRun exited $rc unexpectedly:`n$out" }
     } catch { Bad "sync-tasks -DryRun threw: $($_.Exception.Message)" }
+
+    # ── 6b. The parser and the action builder, on a BOOTSTRAPPED copy ────────
+    # On the source tree the run above stops at the placeholder guard, so
+    # Parse-RegistryYaml and Build-Action — the two functions that decide what
+    # every scheduled task actually executes — were exercised by nothing, here
+    # or in CI. A throwaway bootstrapped copy in %TEMP% runs them for real.
+    $regSrc = Join-Path $home_claude 'cron/registry.yaml'
+    $boot = Join-Path $root 'scripts/bootstrap-registry.ps1'
+    if ((Test-Path $regSrc) -and (Test-Path $boot)) {
+        $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("selftest-reg-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $tmpRoot 'cron/admin') -Force | Out-Null
+            New-Item -ItemType Directory -Path (Join-Path $tmpRoot 'bin') -Force | Out-Null
+            Copy-Item $regSrc (Join-Path $tmpRoot 'cron/registry.yaml') -Force
+            $txt = Get-Content (Join-Path $tmpRoot 'cron/registry.yaml') -Raw -Encoding UTF8
+            $txt = $txt.Replace('<bundle-install-path>', $tmpRoot).Replace('<user>', $env:USERNAME)
+            [System.IO.File]::WriteAllText((Join-Path $tmpRoot 'cron/registry.yaml'), $txt,
+                                           (New-Object System.Text.UTF8Encoding($false)))
+            # The launcher and every `script:` target must EXIST or sync-tasks
+            # skips the task before Build-Action ever runs.
+            Copy-Item (Join-Path $home_claude 'bin/_run-hidden.vbs') (Join-Path $tmpRoot 'bin/') -Force -ErrorAction SilentlyContinue
+            foreach ($m in [regex]::Matches($txt, '(?m)^\s*script:\s*(\S.*?)\s*$')) {
+                $target = $m.Groups[1].Value.Trim('"', "'")
+                if ($target -like "$tmpRoot*") {
+                    $dir = Split-Path $target -Parent
+                    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+                    if (-not (Test-Path $target)) { Set-Content -LiteralPath $target -Value '# self-test stub' -Encoding UTF8 }
+                }
+            }
+            $out2 = Invoke-Checked { & $st -DryRun -RegistryPath (Join-Path $tmpRoot 'cron/registry.yaml') } -AllStreams
+            $rc2 = $script:lastRc
+            $regTasks = ([regex]::Matches($txt, '(?m)^\s+-\s+name:')).Count
+            $seen = ([regex]::Matches($out2, '(?m)^\[(create|update|unchang|skipped|would)')).Count
+            if ($rc2 -notin @(0, 3)) { Bad "sync-tasks parser run on a bootstrapped copy exited ${rc2}:`n$out2" }
+            elseif ($out2 -match 'placeholder') { Bad "bootstrapped copy still tripped the placeholder guard:`n$out2" }
+            elseif ($seen -lt 1) { Bad "sync-tasks produced no per-task lines for $regTasks task(s) — the parser saw nothing:`n$out2" }
+            else { Ok "sync-tasks parser + Build-Action ran over $regTasks registry task(s) ($seen reported)" }
+        } catch {
+            Warn "bootstrapped sync-tasks probe could not run: $($_.Exception.Message)"
+        } finally {
+            Remove-Item $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 } else { Bad "sync-tasks.ps1 not found" }
 
 # ── 7. Placeholder report ────────────────────────────────────────────────────
@@ -386,6 +429,16 @@ if ($py -and -not $deployed) {
     }
 }
 
+# ── 12b. Generated config reference (source tree only) ──────────────────────
+if ((-not $deployed) -and $py) {
+    $cer = Join-Path $root 'scripts/check-env-ref.py'
+    if (Test-Path $cer) {
+        $out = Invoke-Checked { & $py $cer --check-table }
+        if ($script:lastRc -eq 0) { Ok "docs/config-reference.md is up to date" }
+        else { Bad "docs/config-reference.md is stale:`n$out" }
+    }
+}
+
 # ── 13. Privacy matrix guard (source tree only) ──────────────────────────────
 # The "Data, cost & publishing per task" table is the page a user reads to
 # decide whether to enable a task, and it had already drifted on the most
@@ -426,6 +479,77 @@ if ((-not $deployed) -and (Test-Path $hook) -and (Test-Path (Join-Path $root '.g
     $hp = & git -C $root config core.hooksPath 2>$null
     if ($hp -eq '.githooks') { Ok "secret-guard hook active (core.hooksPath=.githooks)" }
     else { Warn "secret-guard hook not active — run scripts/enable-guard.ps1 (git config core.hooksPath .githooks)" }
+}
+
+# ── 15. Encoding rules (BOM on .ps1 with non-ASCII, none on .sh) ─────────────
+# home-claude/CLAUDE.md § File Encoding states both rules and nothing enforced
+# either. They matter: PS 5.1 reads a BOM-less file in the system ANSI codepage,
+# so Cyrillic in a .ps1 turns into smart quotes that break string parsing — and
+# a BOM on a .sh breaks its `#!` line outright.
+$encBad = @()
+foreach ($f in (Get-ChildItem $root -Recurse -Include *.ps1, *.sh -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -notmatch '\\(\.git|__pycache__|node_modules)\\' })) {
+    $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    if ($f.Extension -eq '.sh') {
+        if ($hasBom) { $encBad += "$($f.Name): .sh must NOT have a BOM (it breaks the shebang)" }
+    } else {
+        $nonAscii = $false
+        foreach ($b in $bytes) { if ($b -gt 0x7F) { $nonAscii = $true; break } }
+        if ($nonAscii -and -not $hasBom) {
+            $encBad += "$($f.Name): .ps1 with non-ASCII content must be UTF-8 WITH BOM"
+        }
+    }
+}
+if ($encBad.Count -eq 0) { Ok "file encodings follow the BOM rules (.ps1 with BOM, .sh without)" }
+else { foreach ($e in $encBad) { Bad "encoding: $e" } }
+
+# ── 16. Deployment reality checks (only meaningful with -InstallPath) ────────
+# What actually breaks a night on a real deployment, none of which the offline
+# checks above could see: a credential file that was never saved, an interpreter
+# path that does not resolve, and tasks whose last run failed.
+if ($deployed) {
+    # 16a. The interpreters the tasks will really use, from the deployed .env —
+    # not whatever happens to be on THIS shell's PATH.
+    $envFile = Join-Path $deployRoot '.env'
+    if (Test-Path $envFile) {
+        foreach ($k in @('PYTHON_EXE', 'BASH_EXE')) {
+            $line = (Get-Content $envFile -Encoding UTF8 |
+                     Where-Object { $_ -match "^\s*$k\s*=\s*(\S.*)$" } | Select-Object -First 1)
+            if (-not $line) { Warn "$k is empty in .env — session 0 has no user PATH; the tasks will guess"; continue }
+            $null = $line -match "^\s*$k\s*=\s*(\S.*?)\s*$"
+            $val = $Matches[1].Trim('"', "'")
+            if (Test-Path -LiteralPath $val) { Ok "$k resolves: $val" }
+            else { Bad "$k=$val does not exist — every task of that kind will fail in session 0" }
+        }
+    } else { Warn ".env not found at $envFile — provider keys and interpreter paths are unset" }
+
+    # 16b. The DPAPI credential file that LogonType=Password tasks need. Without
+    # it sync-tasks cannot register them, and a task registered before the file
+    # was removed simply stops firing.
+    $regDeployed = Join-Path $deployRoot 'cron/registry.yaml'
+    if (Test-Path $regDeployed) {
+        $regTxt = Get-Content $regDeployed -Raw -Encoding UTF8
+        $needsCred = ($regTxt -notmatch '(?m)^\s*logon_type:\s*interactive\s*$') -or
+                     ($regTxt -match '(?m)^\s*logon_type:\s*password\s*$')
+        if ($needsCred) {
+            $credFile = Join-Path $env:LOCALAPPDATA 'claude-bundle-cred.dat'
+            if (Test-Path $credFile) { Ok "DPAPI credential present ($credFile)" }
+            else { Bad "logon_type: password tasks need $credFile — run cron/admin/save-cred.cmd (non-elevated)" }
+        }
+    }
+
+    # 16c. What Task Scheduler actually reports. -Verify is read-only and needs
+    # no elevation; until it existed the only answer to "did the night work?"
+    # was a hand-typed schtasks query.
+    $stDeployed = Join-Path $deployRoot 'cron/admin/sync-tasks.ps1'
+    if (Test-Path $stDeployed) {
+        $out = Invoke-Checked { & $stDeployed -Verify } -AllStreams
+        $rc = $script:lastRc
+        if ($rc -eq 0) { Ok "sync-tasks -Verify: every registered task is healthy" }
+        elseif ($rc -eq 3) { Warn "sync-tasks -Verify reported problems:`n$out" }
+        else { Warn "sync-tasks -Verify exited ${rc}:`n$out" }
+    }
 }
 
 # ── summary ──────────────────────────────────────────────────────────────────

@@ -31,8 +31,14 @@ The slug for this project is given in the prompt header — use it as-is.
 - **Wikilinks resolve by full path first.** A bare `[[name]]` resolves only if
   that name is unique across the vault, so link to pages outside this project’s
   folder as `[[projects/<slug>/<page>]]` or `[[kb/<section>/<page>]]`.
-- **Prefer `action: update`** over `create` when an existing page covers the
-  same topic. Only create when no existing page is a good home.
+- **`action` is advisory, and the FILE decides.** Write `update` when an
+  existing page covers the topic and `create` when none does — but the script
+  reads what is on disk: if the path exists it is an update (or an append when
+  you were shown page names only), and if it does not it is a create. Do not
+  rely on `action` to force either. It is kept because it makes your intent
+  reviewable in the quarantined payload when something is rejected.
+- **Prefer updating** an existing page over creating a near-duplicate. Only
+  create when no existing page is a good home.
 - **No frontmatter in your `content`.** The calling script adds the YAML
   `---` block (with `sources:` array). If you emit `---`, the script strips
   it — but cleaner if you just don’t.

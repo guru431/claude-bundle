@@ -73,16 +73,23 @@ def main() -> None:
     if not isinstance(payload, dict):
         emit()  # valid JSON but not an object (list/string) -> same no-op
 
-    ti = payload.get("tool_input") or {}
-    tr = payload.get("tool_response") or {}
+    # Neither field is guaranteed to be an object: a payload carrying
+    # `"tool_input": "x"` made .get() raise AttributeError, and the hook exited 1
+    # with a traceback instead of the silent no-op it documents.
+    ti = payload.get("tool_input")
+    tr = payload.get("tool_response")
+    ti = ti if isinstance(ti, dict) else {}
+    tr = tr if isinstance(tr, dict) else {}
+    tr_file = tr.get("file")
+    tr_file = tr_file if isinstance(tr_file, dict) else {}
 
     # cover Write/Edit/MultiEdit + tool_response.filePath fallback
     file_path = (
         ti.get("file_path")
         or tr.get("filePath")
-        or (tr.get("file") or {}).get("filePath")
+        or tr_file.get("filePath")
     )
-    if not file_path:
+    if not isinstance(file_path, str) or not file_path:
         emit()
 
     md_path = Path(file_path)

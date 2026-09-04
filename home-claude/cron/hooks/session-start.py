@@ -14,6 +14,7 @@ Time: <1s, no LLM calls.
 
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -50,9 +51,14 @@ except ValueError:
 # and the handoff is lost for the very session it was written for. We wait —
 # but only when pre-compact.py left an in-flight marker for THIS session, and
 # only for a bounded time. Set HANDOFF_WAIT_SECONDS=0 to never wait.
-HANDOFF_WAIT_SECONDS = 20
+# 45s, not 20. The writer calls the LLM with a 120-second timeout, so a 20-second
+# wait expired before a normal answer arrived and the handoff — written correctly,
+# on disk moments later — was missed by the very session it was written for.
+# A MANUAL /compact no longer detaches at all (pre-compact.py writes it inline),
+# so this wait is now only about the automatic case.
+HANDOFF_WAIT_SECONDS = 45
 try:
-    HANDOFF_WAIT_SECONDS = max(0, int(os.environ.get("HANDOFF_WAIT_SECONDS", "20")))
+    HANDOFF_WAIT_SECONDS = max(0, int(os.environ.get("HANDOFF_WAIT_SECONDS", "45")))
 except ValueError:
     pass
 # A marker older than this belongs to a writer that died without clearing it.
@@ -85,9 +91,20 @@ def detect_from_stdin() -> tuple[str, str, str]:
         data = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
         return "", "", ""
+    if not isinstance(data, dict):
+        return "", "", ""
     session_id = str(data.get("session_id") or "")
     transcript_path = data.get("transcript_path", "")
-    if not transcript_path:
+    if not isinstance(transcript_path, str) or not transcript_path:
+        # `cwd` as the fallback. Claude Code encodes the cwd into the project
+        # directory name by replacing `\`, `/` and `:` with `-` — exactly what
+        # dir_to_project() reads — so a payload with no transcript_path (a fresh
+        # session, a resume) can still be attributed, and PROJECT_MAP still
+        # applies. Without it the hook injected nothing at all.
+        cwd = data.get("cwd")
+        if isinstance(cwd, str) and cwd.strip():
+            encoded = re.sub(r"[\\/:]", "-", cwd.strip().rstrip("\\/"))
+            return dir_to_project(encoded), "", session_id
         return "", "", session_id
     parent_dir = os.path.dirname(transcript_path)
     parent_name = os.path.basename(parent_dir)

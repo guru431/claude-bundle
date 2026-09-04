@@ -11,6 +11,7 @@ Fixtures are real `schtasks /query /v /fo csv` rows.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -72,6 +73,35 @@ def test_signed_exit_code_becomes_unsigned():
 def test_last_run_normalized_to_cim_format(raw, expected):
     """The monitor parses the date strictly as '%Y-%m-%d %H:%M' — it must match."""
     assert st.normalize_last_run(raw) == expected
+
+
+@pytest.mark.parametrize("pattern, raw, expected", [
+    # en-GB: dd/MM/yyyy. `03/09/2026` is 3 September, NOT 9 March — which is
+    # what the ambiguous guessing list turned it into, silently.
+    ("dd/MM/yyyy", "03/09/2026 09:30:01", "2026-09-03 09:30"),
+    # …and from the 13th onwards it matched nothing at all and became 'never',
+    # the one value the monitor drops from its alert.
+    ("dd/MM/yyyy", "13/09/2026 09:30:01", "2026-09-13 09:30"),
+    # ja / lt / hu: yyyy/MM/dd — never parsed by any entry in the old list.
+    ("yyyy/MM/dd", "2026/09/03 09:30:01", "2026-09-03 09:30"),
+    # fr-CH and friends: single-letter tokens.
+    ("d.M.yyyy", "3.9.2026 09:30:01", "2026-09-03 09:30"),
+    ("dd-MM-yyyy", "03-09-2026 21:30:01", "2026-09-03 21:30"),
+])
+def test_locale_short_date_patterns_are_honoured(pattern, raw, expected):
+    """The machine's OWN short-date pattern resolves what guessing cannot."""
+    formats = st.locale_formats_from_pattern(pattern)
+    assert st.normalize_last_run(raw, formats) == expected
+
+
+def test_unparseable_date_is_unknown_not_never():
+    """'never' means "has not run yet" and the monitor EXCLUDES it from alerts.
+
+    Returning it for a date nobody could parse turned every failed task on half
+    the world's locales into a task the monitor deliberately kept quiet about.
+    """
+    assert st.normalize_last_run("13/09/2026 09:30:01", ("%m/%d/%Y %H:%M:%S",)) == "unknown"
+    assert st.normalize_last_run("not a date at all", ("%Y-%m-%d %H:%M:%S",)) == "unknown"
 
 
 def test_system_tasks_filtered_like_cim_branch():
@@ -143,8 +173,14 @@ def test_console_decoding_survives_a_missing_oem_codec():
 
 
 @pytest.mark.integration
+@pytest.mark.skipif(os.name != "nt", reason="schtasks.exe is Windows-only")
 def test_collect_sees_real_tasks():
-    """On Windows the fallback must actually work: live names and codes."""
+    """On Windows the fallback must actually work: live names and codes.
+
+    The skipif is not decoration: this is the only test in the file that shells
+    out, and `pytest -m integration` on a Linux CI runner would fail on a
+    missing binary rather than on anything about the code.
+    """
     tasks = st.collect()
     assert tasks
     assert all(isinstance(t["LastResult"], int) for t in tasks)

@@ -22,7 +22,7 @@
 - **`daily/.pending/`** — drafts of sessions awaiting flush
 
 `kb/` pages are compiled from external sources you point the pipeline at
-(e.g. YouTube channels via a `kb_news/`-style pipeline — not included in
+(e.g. your own transcript/article ingest writing into `kb_sources/` — not included in
 this bundle). The `projects/` pages are compiled from your own sessions
 and are the part that will actually fill up if you just use the system.
 

@@ -22,10 +22,41 @@
 # BASH_SOURCE (not $0): when the file is sourced from a test, $0 is the test's
 # path, SCRIPT_DIR pointed at cron/tests/ and the lib was silently not loaded.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# NOTHING here may ask a question. This runs in session 0, where there is no
+# terminal: git or the credential manager waiting for a password or a host-key
+# confirmation does not fail, it HANGS — past `timeout_hours`, so the next runs
+# are skipped as "already running" and the task monitor reads 267009 (running)
+# as OK. Three days of silence and nothing pushed.
+export GIT_TERMINAL_PROMPT=0
+export GCM_INTERACTIVE=never
+export GIT_ASKPASS=echo
+export SSH_ASKPASS=echo
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15}"
+
+# Wrap a network git call in a hard timeout when `timeout` is available.
+GIT_NET_TIMEOUT="${GIT_NET_TIMEOUT:-300}"
+git_net() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$GIT_NET_TIMEOUT" git "$@"
+    else
+        git "$@"
+    fi
+}
 if [ -f "$SCRIPT_DIR/lib/secret-scan.sh" ]; then
     # shellcheck source=lib/secret-scan.sh
     . "$SCRIPT_DIR/lib/secret-scan.sh"
 fi
+# Sourced HERE, next to the helpers that use it, not down in the main body: the
+# functions above are also loaded on their own by cron/tests/*.sh
+# (GIT_PUSH_ALL_LIB=1), which runs under `set -u`, and a `$BASH_BIN` resolved
+# only in the main body was an unbound variable there.
+if [ -f "$SCRIPT_DIR/lib/runtime.sh" ]; then
+    # shellcheck source=lib/runtime.sh
+    . "$SCRIPT_DIR/lib/runtime.sh"
+fi
+: "${BASH_BIN:=bash}"
+: "${PYTHON:=python3}"
 
 # Dry-run: show what WOULD be committed/pushed without changing anything (handy
 # for testing the guard logic). GIT_PUSH_ALL_DRY_RUN=1 bash cron/git-push-all.sh
@@ -44,7 +75,7 @@ git_push() {
         echo "[DRY] would push: $*" >> "$LOG_FILE"
         return 0
     fi
-    git push "$@" >> "$LOG_FILE" 2>&1
+    git_net push "$@" >> "$LOG_FILE" 2>&1
 }
 
 # Protected paths: their DELETION is never auto-committed at night (risk of
@@ -56,7 +87,14 @@ PROTECTED_RE='(^|/)(FINDINGS\.md|AGENTS\.md|CLAUDE\.md|registry\.yaml|project-kn
 # Sensitive paths, same family as the `git add --all` pathspec exclusions below.
 # The pathspec only stops US from staging them; a file the USER already staged
 # by hand stays in the index and would be swept into the auto-commit.
-SENSITIVE_RE='(^|/)\.env(\.[^/]+)?$'
+# From the shared table (cron/lib/secret-scan.sh, generated out of
+# secret_shapes.py). Three private copies of this list used to exist and they
+# disagreed: `.env.example` was blocked here and waved through by pre-commit,
+# while `credentials.json`, `.npmrc`, `.netrc`, `.pypirc`, `*.ppk`, `*.jks`,
+# `id_ecdsa`, `.git-credentials` and `terraform.tfstate` were known to none of
+# them. The local fallback keeps this script working if the lib is missing.
+SENSITIVE_RE="${SENSITIVE_PATH_PATTERN:-(^|/)\.env(\.[^/]+)?\$}"
+SENSITIVE_ALLOW_RE="${SENSITIVE_PATH_ALLOW:-\.env\.(example|sample|template|dist)\$}"
 
 # Hard-fail (never silently unstage — that would hide the user's own intent) a
 # repo whose index already contains a sensitive path. Returns non-zero so the
@@ -64,12 +102,13 @@ SENSITIVE_RE='(^|/)\.env(\.[^/]+)?$'
 guard_staged_sensitive() {
     local label="$1"
     local staged
-    staged=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null | grep -E "$SENSITIVE_RE")
+    staged=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
+        | grep -iE "$SENSITIVE_RE" | grep -ivE "$SENSITIVE_ALLOW_RE")
     [ -z "$staged" ] && return 0
     echo "[$label] SENSITIVE path already staged — repo skipped, nothing committed:" >> "$LOG_FILE"
     echo "$staged" | sed 's/^/    /' >> "$LOG_FILE"
     if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
-        bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: sensitive path staged in [$label] — repo skipped (not committed, not pushed):
+        "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: sensitive path staged in [$label] — repo skipped (not committed, not pushed):
 $staged
 (unstage it by hand, or gitignore it)" >> "$LOG_FILE" 2>&1
     fi
@@ -87,7 +126,7 @@ guard_protected_deletions() {
         [ -n "$p" ] && git reset -q HEAD -- "$p" >> "$LOG_FILE" 2>&1
     done <<< "$deleted"
     if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
-        bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: blocked auto-delete of protected file(s) in [$label]:
+        "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: blocked auto-delete of protected file(s) in [$label]:
 $deleted
 (left in the working tree, not committed — delete by hand)" >> "$LOG_FILE" 2>&1
     fi
@@ -116,7 +155,7 @@ guard_secrets() {
         # -f, not -x: on SMB/mapped drives the exec bit is lost and the gate
         # would silently never fire.
         if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
-            bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: secret-scan lib unavailable for [$label] — repo skipped (not committed, not pushed)." >> "$LOG_FILE" 2>&1
+            "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: secret-scan lib unavailable for [$label] — repo skipped (not committed, not pushed)." >> "$LOG_FILE" 2>&1
         fi
         return 1
     fi
@@ -129,7 +168,7 @@ guard_secrets() {
     echo "[$label] SECRET-shaped token blocked from auto-commit (repo FAILED, index left as it was):" >> "$LOG_FILE"
     printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
     if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
-        bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret in staged changes for [$label] — skipped (not committed, not pushed). Check by hand." >> "$LOG_FILE" 2>&1
+        "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret in staged changes for [$label] — skipped (not committed, not pushed). Check by hand." >> "$LOG_FILE" 2>&1
     fi
     return 1
 }
@@ -173,28 +212,31 @@ guard_secrets_preview() {
 # exists to close, one step later in the pipeline.
 # Args: <label> <branch>. Returns non-zero → caller must not push.
 guard_outgoing_secrets() {
-    local label="$1" branch="$2"
-    if ! command -v secret_scan_diff >/dev/null 2>&1; then
+    local label="$1" branch="$2" remote="${3:-origin}"
+    if ! command -v secret_scan_range >/dev/null 2>&1; then
         echo "[$label] SECRET-SCAN unavailable (lib not loaded) — NOT pushing (fail closed)" >> "$LOG_FILE"
         return 1
     fi
     local range hits
-    if git rev-parse --verify -q "origin/$branch" >/dev/null 2>&1; then
-        range="origin/$branch..$branch"
+    if git rev-parse --verify -q "$remote/$branch" >/dev/null 2>&1; then
+        range="$remote/$branch..$branch"
     else
         # First push of this branch: the whole reachable history is published.
         range="$branch"
     fi
-    # Per-commit patches, not the net diff: a token added in one outgoing commit
-    # and removed in a later one is invisible to `git diff A..B` yet still ships
-    # inside the published history.
-    hits=$(git log -p --unified=0 "$range" 2>/dev/null | secret_scan_diff)
+    # secret_scan_range walks the BLOBS the range introduces plus every commit
+    # MESSAGE. `git log -p` — what this used to do — shows no diff at all for a
+    # merge commit, so an "evil merge" that introduces a key on the merge itself
+    # produced zero hits and was pushed; and nothing scanned commit messages,
+    # where a pasted token is just as published. UTF-16 content is transcoded by
+    # the library before grepping, which `-I` alone treated as binary and skipped.
+    hits=$(secret_scan_range "$range")
     [ -z "$hits" ] && return 0
     echo "[$label] SECRET-shaped token in OUTGOING commits ($range) — push blocked:" >> "$LOG_FILE"
     printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
     # In dry-run the guard runs for the preview only — there is nothing to alert about.
     if [ "$DRY_RUN" != "1" ] && [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
-        bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret in unpushed commits of [$label] — NOT pushed. Rewrite the history that carries it and rotate the key." >> "$LOG_FILE" 2>&1
+        "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret in unpushed commits of [$label] — NOT pushed. Rewrite the history that carries it and rotate the key." >> "$LOG_FILE" 2>&1
     fi
     return 1
 }
@@ -216,6 +258,26 @@ push_repo() {
     # push would fail every night.
     if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
         echo "[$label] no branch (detached HEAD?), skipping" >> "$LOG_FILE"
+        skipped=$((skipped + 1)); return
+    fi
+    # An explicit opt-out, so a repo can stay out of the sweep without being
+    # renamed or moved.
+    if [ -f ".no-autopush" ]; then
+        echo "[$label] .no-autopush present — skipped by request" >> "$LOG_FILE"
+        skipped=$((skipped + 1)); return
+    fi
+    # The branch's OWN remote, not a hardcoded `origin`. A repo whose remote is
+    # called `upstream`, `forgejo` or anything else was counted FAILED and
+    # alerted about every single night, for the whole life of the deployment —
+    # and a repo with no remote at all did the same. Neither is an error; both
+    # are simply "nothing to push here".
+    local remote
+    remote=$(git config --get "branch.$branch.remote" 2>/dev/null)
+    if [ -z "$remote" ]; then
+        remote=$(git remote 2>/dev/null | head -n1)
+    fi
+    if [ -z "$remote" ]; then
+        echo "[$label] no git remote configured — nothing to push" >> "$LOG_FILE"
         skipped=$((skipped + 1)); return
     fi
     if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
@@ -269,10 +331,10 @@ push_repo() {
     # force-push on origin leaves refs/remotes/origin/<branch> stale, the hashes
     # match, and a needed push is silently skipped. Skipped in dry-run to stay
     # side-effect free; errors (offline/no remote) ignored so the sweep goes on.
-    [ "$DRY_RUN" = "1" ] || git fetch -q origin "$branch" >> "$LOG_FILE" 2>&1 || true
+    [ "$DRY_RUN" = "1" ] || git_net fetch -q "$remote" "$branch" >> "$LOG_FILE" 2>&1 || true
     local local_hash remote_hash
     local_hash=$(git rev-parse "$branch" 2>/dev/null)
-    remote_hash=$(git rev-parse "origin/$branch" 2>/dev/null)
+    remote_hash=$(git rev-parse "$remote/$branch" 2>/dev/null)
     if [ "$local_hash" = "$remote_hash" ]; then
         echo "[$label] up to date" >> "$LOG_FILE"
         skipped=$((skipped + 1)); return
@@ -281,17 +343,17 @@ push_repo() {
     # run and never went through the staged-diff guard above.
     if [ "$DRY_RUN" = "1" ]; then
         # Report only: the preview must show what would have been blocked.
-        if guard_outgoing_secrets "$label" "$branch"; then
+        if guard_outgoing_secrets "$label" "$branch" "$remote"; then
             echo "[$label] [DRY] outgoing secret-scan: clean" >> "$LOG_FILE"
         else
             echo "[$label] [DRY] outgoing secret-scan: PUSH WOULD BE BLOCKED (see above)" >> "$LOG_FILE"
         fi
-    elif ! guard_outgoing_secrets "$label" "$branch"; then
+    elif ! guard_outgoing_secrets "$label" "$branch" "$remote"; then
         failed=$((failed + 1))
         failed_repos="${failed_repos:+$failed_repos, }$label"
         return
     fi
-    if git_push origin "$branch"; then
+    if git_push "$remote" "$branch"; then
         echo "[$label] pushed $branch" >> "$LOG_FILE"
         pushed=$((pushed + 1))
     else
@@ -320,6 +382,22 @@ if [ -f "$SCRIPT_DIR/lib/dotenv.sh" ]; then
     . "$SCRIPT_DIR/lib/dotenv.sh"
     dotenv_load "$BUNDLE_ROOT/.env"
 fi
+have_python || exit 1
+have_bash || exit 1
+
+# A run lock. Two sweeps auto-committing and pushing the same repos at once is
+# how a nightly retry meets a still-running first attempt. `mkdir` is atomic on
+# every filesystem this touches, unlike a test-then-create on a lock file.
+LOCK_DIR="$LOG_DIR/.git-push-all.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    if [ -f "$LOCK_DIR/pid" ] && kill -0 "$(cat "$LOCK_DIR/pid" 2>/dev/null)" 2>/dev/null; then
+        echo "=== git-push-all: another sweep is running (pid $(cat "$LOCK_DIR/pid")) — exiting ===" >> "$LOG_FILE"
+        exit 0
+    fi
+    rm -rf "$LOCK_DIR" && mkdir "$LOCK_DIR" 2>/dev/null || true
+fi
+echo "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
+trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
 
 REPOS_DIR="${PROJECTS_ROOT:-$(dirname "$BUNDLE_ROOT")}"
 
@@ -389,7 +467,7 @@ echo "" >> "$LOG_FILE"
 # sweep that examines zero repos (pushed+skipped+failed = 0) is the wrong-root
 # failure, and it exits 0 without this.
 if [ "$DRY_RUN" != "1" ]; then
-    "${PYTHON_EXE:-python}" "$BUNDLE_ROOT/cron/runs.py" record \
+    "$PYTHON" "$BUNDLE_ROOT/cron/runs.py" record \
         --task ClaudeGitPushAll --rc "$([ "$failed" -gt 0 ] && echo 1 || echo 0)" \
         --artifact "$LOG_FILE" --useful "$((pushed + skipped + failed))" \
         --delivery n/a --note "pushed=$pushed skipped=$skipped failed=$failed" \
@@ -400,7 +478,7 @@ fi
 # catches a non-zero exit instead of every night reporting success).
 if [ "$failed" -gt 0 ]; then
     if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
-        bash "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: $failed failed repos: $failed_repos" >> "$LOG_FILE" 2>&1
+        "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: $failed failed repos: $failed_repos" >> "$LOG_FILE" 2>&1
     fi
     exit 1
 fi

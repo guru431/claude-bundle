@@ -43,15 +43,24 @@ Self-check (no files, no network):  python cron/runs.py selftest
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
+import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 # cron/<file>.py → bundle root
 BUNDLE_ROOT = Path(__file__).resolve().parents[1]
-RUNS_DIR = BUNDLE_ROOT / "cron" / "logs"
+# CLAUDE_BUNDLE_RUNS_DIR redirects the ledger. It exists because the test suite
+# ran against the REAL one: pytest wrote ClaudeTestSweep and
+# ClaudeWikiCompileSessions rows — with absolute paths carrying the developer's
+# username — into the live runs-<year>.jsonl, and bundle-status then reported
+# those green rows as if the nightly tasks had run.
+RUNS_DIR = Path(os.environ.get("CLAUDE_BUNDLE_RUNS_DIR")
+                or (BUNDLE_ROOT / "cron" / "logs"))
 # The pre-rotation file. Still read (an existing deployment's whole history
 # lives in it) but never written to again.
 LEGACY_RUNS_LOG = RUNS_DIR / "runs.jsonl"
@@ -123,14 +132,34 @@ def compute_verdict(process_rc, artifact_bytes, useful_items, delivery) -> str:
     return "green"
 
 
+def _is_dry_run() -> bool:
+    """True during a --dry-run / --no-llm run or inside the dry_run_until window.
+
+    A preview must not stamp the ledger. `dry_run_until` promises the same brake
+    on EVERY phase, but the idle branches recorded a run before checking it — so
+    a preview week produced a row of green verdicts for phases that had done
+    nothing at all, which is precisely the false-green the ledger exists to hunt.
+    """
+    try:
+        sys.path.insert(0, str(BUNDLE_ROOT / "cron" / "hooks"))
+        from utils import is_dry_run
+        return is_dry_run()
+    except Exception:
+        return False
+
+
 def record_run(task: str, *, process_rc: int, run_id: str | None = None,
                input_hash: str | None = None, artifact_path=None,
                useful_items: int | None = None, delivery: str | None = None,
                message_id=None, provider_attempts=None, note: str = "",
+               started_ts: float | None = None, provider: str | None = None,
                log_path: Path | None = None) -> dict:
     """Append ONE terminal run record to the current year's ledger slice.
 
     `log_path` overrides the destination (tests and the selftest use it).
+    `started_ts` is a `time.monotonic()` reading from the start of the run; it
+    becomes `duration_s`, which is what makes "the compile that used to take 20
+    minutes now takes 90" visible before it rolls into the next task's window.
     """
     artifact_bytes = artifact_hash = None
     rel_artifact = None
@@ -140,10 +169,13 @@ def record_run(task: str, *, process_rc: int, run_id: str | None = None,
         try:
             rel_artifact = str(p.resolve().relative_to(BUNDLE_ROOT))
         except (ValueError, OSError):
-            rel_artifact = str(artifact_path)
+            # Outside the bundle: keep the NAME only. The full path carries the
+            # developer's home directory, and this ledger is long-lived.
+            rel_artifact = Path(str(artifact_path)).name
 
     verdict = compute_verdict(process_rc, artifact_bytes, useful_items, delivery)
     now = datetime.now()
+    explicit_log = log_path is not None
     if log_path is None:
         log_path = runs_log_for(now.year)
     rec = {
@@ -160,15 +192,57 @@ def record_run(task: str, *, process_rc: int, run_id: str | None = None,
         "delivery": delivery,
         "message_id": message_id,
         "provider_attempts": provider_attempts,
+        "duration_s": (round(time.monotonic() - started_ts, 1)
+                       if started_ts is not None else None),
+        "provider": provider,
         "verdict": verdict,
         "note": note,
     }
+    if not explicit_log and _is_dry_run():
+        print(f"  [dry-run] ledger record for {task} not written ({verdict})",
+              file=sys.stderr)
+        return rec
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # A single-line append is atomic enough at this concurrency (one task = one
     # writer per run).
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     return rec
+
+
+@contextlib.contextmanager
+def terminal_record(task: str, **defaults):
+    """Guarantee ONE terminal ledger record, crash included.
+
+    The contract says every task writes a record at the end of its run — but not
+    one Python task guaranteed it. An unreadable log directory raised inside the
+    task's own `log()` helper, before `record_run` was ever reached, and the task
+    then looked identical to one that had never been instrumented: silent, with
+    the monitor reporting nothing wrong.
+
+    Usage::
+
+        with terminal_record("ClaudeMemoryUpdate", delivery="n/a") as rec:
+            ...
+            rec.update(useful_items=n, note="...")
+    """
+    fields = {"process_rc": 0, "delivery": None, "useful_items": None,
+              "note": "", "artifact_path": None}
+    fields.update(defaults)
+    fields["started_ts"] = time.monotonic()
+    try:
+        yield fields
+    except BaseException as exc:            # SystemExit and KeyboardInterrupt too
+        rc = getattr(exc, "code", 1) if isinstance(exc, SystemExit) else 1
+        fields["process_rc"] = rc if isinstance(rc, int) else 1
+        if fields["process_rc"]:
+            fields["note"] = (f"{fields.get('note') or ''} | "
+                              f"crashed: {type(exc).__name__}: {exc}").strip(" |")
+        with contextlib.suppress(Exception):
+            record_run(task, **fields)
+        raise
+    with contextlib.suppress(Exception):
+        record_run(task, **fields)
 
 
 def _read_one(log_path: Path) -> list[dict]:
@@ -297,11 +371,27 @@ def stale_tasks(log_path: Path | None = None,
     for task, window in sorted(windows.items()):
         rec = latest.get(task)
         if rec is None:
-            continue  # never instrumented — not the same claim as "went quiet"
+            continue  # never instrumented — reported by never_recorded() instead
         age = age_days(rec.get("ts", ""))
         if age is not None and age > window:
             out.append((task, age, window))
     return out
+
+
+def never_recorded(log_path: Path | None = None,
+                   registry: Path | None = None) -> list[str]:
+    """Enabled tasks with a time trigger that have NEVER written a record.
+
+    `stale_tasks` deliberately says nothing about them — "went quiet" and "was
+    never instrumented" are different claims — but that left an uninstrumented
+    task completely invisible: no ledger row, so nothing to be stale about, so
+    nothing anywhere says it exists. This is the set difference the readers need.
+    """
+    windows = freshness_windows(registry)
+    if not windows:
+        return []
+    seen = set(latest_by_task(read_latest_runs(log_path)))
+    return sorted(set(windows) - seen)
 
 
 # ---------- CLI (for shell tasks and the self-test) ----------
@@ -373,7 +463,9 @@ def main() -> None:
     r.add_argument("--note", default=None)
 
     sub.add_parser("selftest", help="check verdict classification")
-    sub.add_parser("stale", help="list tasks whose last verdict is too old")
+    st = sub.add_parser("stale", help="list tasks whose last verdict is too old")
+    st.add_argument("--json", action="store_true",
+                    help="machine-readable output (bundle-status reads this)")
 
     args = ap.parse_args()
     if args.cmd == "record":
@@ -382,11 +474,20 @@ def main() -> None:
         sys.exit(_selftest())
     elif args.cmd == "stale":
         # Exit 1 when anything is stale, so a shell monitor can branch on the
-        # code instead of parsing the text.
+        # code instead of parsing the text. The monitor also has to be able to
+        # tell "nothing is stale" from "this check crashed" — see --json.
         rows = stale_tasks()
-        for task, age, window in rows:
-            print(f"{task}: last verdict {age:.0f}d old (expected within {window:.0f}d)")
-        sys.exit(1 if rows else 0)
+        missing = never_recorded()
+        if args.json:
+            print(json.dumps({"stale": [{"task": t, "age_days": round(a, 1),
+                                         "window_days": w} for t, a, w in rows],
+                              "never_recorded": missing}, ensure_ascii=False))
+        else:
+            for task, age, window in rows:
+                print(f"{task}: last verdict {age:.0f}d old (expected within {window:.0f}d)")
+            for task in missing:
+                print(f"{task}: enabled, but never recorded a run")
+        sys.exit(1 if rows or missing else 0)
     else:
         ap.print_help()
 

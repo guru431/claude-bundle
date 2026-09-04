@@ -24,10 +24,16 @@ PROJECTS_ROOT="${PROJECTS_ROOT:-$(dirname "$BUNDLE_ROOT")}"
 # regex, also used by .githooks/pre-commit and git-push-all.sh). Source it
 # relative to THIS script's dir so it works regardless of cwd.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "$SCRIPT_DIR/lib/secret-scan.sh" ]; then
-  # shellcheck source=lib/secret-scan.sh
-  . "$SCRIPT_DIR/lib/secret-scan.sh"
+if [ ! -f "$SCRIPT_DIR/lib/secret-scan.sh" ]; then
+  # Fail CLOSED, like .githooks/pre-push. This script publishes to a PUBLIC
+  # remote; "the guard is missing" must never resolve to "the guard passed", and
+  # a hand-copied fallback regex is by definition the one that is out of date.
+  echo "BLOCKED: $SCRIPT_DIR/lib/secret-scan.sh not found — the secret scan cannot run." >&2
+  echo "Restore it before publishing." >&2
+  exit 1
 fi
+# shellcheck source=lib/secret-scan.sh
+. "$SCRIPT_DIR/lib/secret-scan.sh"
 
 CHECK_ONLY=0
 if [ "${1:-}" = "--check-only" ]; then CHECK_ONLY=1; shift; fi
@@ -96,9 +102,12 @@ fail=0
 
 # 1) sensitive filenames (allow *.example* templates and *.pub public keys)
 if [ -n "$added" ]; then
+  # SENSITIVE_PATH_PATTERN comes from the shared table (secret_shapes.py →
+  # cron/lib/secret-scan.sh), so this list, pre-commit's and git-push-all's are
+  # one list. `.pub` is a public key and stays allowed.
   bad=$(printf '%s\n' "$added" \
-    | grep -iE '(^|/)(\.env(\.[A-Za-z0-9]+)?$|.*\.pem$|.*\.key$|.*\.p12$|.*\.pfx$|id_rsa|id_ed25519|id_dsa|vault\.env|\.sanitize-patterns$)' \
-    | grep -ivE '\.example(\.|$)|\.pub$' || true)   # .pub = public key, safe (unanchored id_rsa was catching id_rsa.pub)
+    | grep -iE -e "$SENSITIVE_PATH_PATTERN" -e '(^|/)\.sanitize-patterns$' \
+    | grep -ivE -e "$SENSITIVE_PATH_ALLOW" -e '\.pub$' || true)
   if [ -n "$bad" ]; then
     # "$bad" quoted: an unquoted expansion word-splits a path containing spaces
     # into several bogus "files", so the block list misreports what was found.
@@ -106,12 +115,20 @@ if [ -n "$added" ]; then
   fi
 fi
 
-# 2) generic secret/token formats — reuse the shared SECRET_SCAN_PATTERN when
-#    the lib is sourced; otherwise fall back to an equivalent inline pattern.
-generic="${SECRET_SCAN_PATTERN:------BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{16,}|ccr-[A-Za-z0-9]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|[0-9]{8,10}:[A-Za-z0-9_-]{35}}"
-hits=$(printf '%s\n' "$diff_content" | grep -nE -e "$generic" || true)
-if [ -n "$hits" ]; then
+# 2) generic secret/token formats. secret_scan_range walks the BLOBS the range
+#    introduces plus every commit MESSAGE — which is what makes an "evil merge"
+#    visible (a merge commit shows no diff in `git log -p`, so a key introduced
+#    on the merge itself scanned clean) and what transcodes UTF-16 content that
+#    `grep -I` would otherwise dismiss as binary.
+#
+#    It also honours `# secret-scan:allow`. Without that, step 2 of the very
+#    procedure that publishes THIS bundle blocked on the bundle's own detector
+#    fixtures, and the only way past was GITHUB_PUSH_FORCE=1 — which switches
+#    off all four checks at once.
+if ! hits=$(secret_scan_range "${RANGE:-$BRANCH}" ".githooks/"); then
   echo "BLOCKED: possible secret/token in the publication:"; printf '%s\n' "$hits" | sed 's/^/  /'; fail=1
+elif [ -n "$hits" ]; then
+  printf '%s\n' "$hits" | sed 's/^/  /'      # e.g. the "N blob(s) over 1 MiB" note
 fi
 
 # 3) personal denylist from .sanitize-patterns
@@ -123,7 +140,12 @@ if [ -f "$sp" ]; then
   # denylist silently does nothing. Same treatment as .githooks/pre-push.
   grep -vE '^[[:space:]]*$' "$sp" 2>/dev/null | tr -d '\r' > "$pat" || true
   if [ -s "$pat" ]; then
-    hits=$(printf '%s\n' "$diff_content" | grep -inEf "$pat" || true)
+    # ADDED lines only. Scanning the whole patch matched the `-` side too, so
+    # the one commit that CLEANS a hostname out of the tree was blocked by the
+    # denylist that names it — leaving GITHUB_PUSH_FORCE=1, which disables all
+    # four checks, as the only way to publish the fix.
+    hits=$(printf '%s\n' "$diff_content" | grep -E '^\+' | grep -vE '^\+\+\+' \
+      | grep -inEf "$pat" || true)
     if [ -n "$hits" ]; then
       echo "BLOCKED: personal data (.sanitize-patterns) in the publication:"; printf '%s\n' "$hits" | sed 's/^/  /'; fail=1
     fi

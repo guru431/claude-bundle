@@ -33,10 +33,89 @@ MIN_COLUMNS = 12
 # `Last Run Time` formats by locale. A Russian locale prints
 # `18.08.2026 9:30:01`, an English one `8/18/2026 9:30:01 AM`; ISO is there for
 # the invariant culture.
+#
+# THE ORDER IS AMBIGUOUS AND CANNOT BE FIXED BY ADDING FORMATS. On en-GB
+# (`dd/MM/yyyy`) `03/09/2026` matches `%m/%d/%Y` first and silently becomes
+# 9 March; `13/09/2026` matches nothing at all. That is why the real answer is
+# `locale_date_formats()` below, which asks Windows what the short-date pattern
+# actually is. This list is the fallback for when it cannot.
 LAST_RUN_FORMATS = ('%d.%m.%Y %H:%M:%S', '%m/%d/%Y %I:%M:%S %p',
                     '%m/%d/%Y %H:%M:%S', '%Y-%m-%d %H:%M:%S')
 # schtasks prints "never ran" as 30.11.1999 0:00:00.
 NEVER_BEFORE_YEAR = 2000
+
+# What an unparseable date becomes. NOT 'never': `claude-task-monitor.sh`
+# EXCLUDES `LastRun == 'never'` from the alert, because "it has not run yet" is
+# not a failure — so every failed task on a `dd/MM/yyyy` or `yyyy/MM/dd` locale
+# was quietly dropped from the alert by the very fallback that exists to make
+# failures visible. 'unknown' is reported.
+UNKNOWN = 'unknown'
+
+
+def locale_date_formats() -> tuple[str, ...]:
+    """strptime patterns derived from the machine's OWN short-date format.
+
+    `GetLocaleInfoEx(LOCALE_SSHORTDATE)` returns the pattern Windows itself
+    prints with (`dd/MM/yyyy`, `yyyy-MM-dd`, `d.M.yyyy`, …). Translating that
+    into a strptime pattern removes the guesswork entirely; the ambiguous list
+    above then only has to cover the case where the call is unavailable (any
+    non-Windows host, where these functions are unit-tested).
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return ()
+    if not hasattr(ctypes, "WinDLL"):
+        return ()
+    try:
+        LOCALE_SSHORTDATE = 0x0000001F
+        buf = ctypes.create_unicode_buffer(80)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        n = kernel32.GetLocaleInfoEx(None, LOCALE_SSHORTDATE, buf, 80)
+        if not n:
+            return ()
+        pattern = buf.value
+    except Exception:
+        return ()
+    return locale_formats_from_pattern(pattern)
+
+
+def locale_formats_from_pattern(pattern: str) -> tuple[str, ...]:
+    """Translate a Windows short-date pattern into strptime formats.
+
+    Split out from locale_date_formats() so it can be tested on any platform —
+    the whole point of this change is behaviour on locales the CI host does not
+    have.
+    """
+    # Scanned left to right, longest token first — NOT a chain of str.replace().
+    # A chain re-matches the letters it just wrote: `dd` → `%d` and then the `d`
+    # rule fires on the `d` of `%d`, producing `%%d`, which strptime reads as a
+    # literal `%` and the whole pattern stops matching.
+    tokens = (("yyyy", "%Y"), ("yy", "%y"),
+              ("MMMM", "%B"), ("MMM", "%b"), ("MM", "%m"), ("M", "%m"),
+              ("dddd", "%A"), ("ddd", "%a"), ("dd", "%d"), ("d", "%d"))
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        if pattern[i] == "'":          # a quoted literal section
+            i += 1
+            continue
+        for token, repl in tokens:
+            if pattern.startswith(token, i):
+                out.append(repl)
+                i += len(token)
+                break
+        else:
+            out.append(pattern[i])
+            i += 1
+    pattern = "".join(out)
+    # Both clock spellings: schtasks prints 24h on some locales and 12h + AM/PM
+    # on others, and the date half is what this function is really about.
+    return (f"{pattern} %H:%M:%S", f"{pattern} %I:%M:%S %p")
+
+
+_LOCALE_FORMATS: tuple[str, ...] | None = None
 
 
 def normalize_result(raw: str) -> int:
@@ -54,16 +133,33 @@ def normalize_result(raw: str) -> int:
     return code + (1 << 32) if code < 0 else code
 
 
-def normalize_last_run(raw: str) -> str:
-    """`Last Run Time` → `%Y-%m-%d %H:%M` (the CIM branch's format), or 'never'."""
+def normalize_last_run(raw: str, formats: tuple[str, ...] | None = None) -> str:
+    """`Last Run Time` → `%Y-%m-%d %H:%M`, or 'never', or 'unknown'.
+
+    THREE outcomes, not two. A date that cannot be parsed used to come back as
+    'never' — the one value the monitor treats as "has not run yet, nothing to
+    alert about" — so on every `dd/MM/yyyy` locale from the 13th of the month
+    onwards, and on every `yyyy/MM/dd` locale always, failed tasks were silently
+    excluded from the alert.
+    """
+    global _LOCALE_FORMATS
     text = (raw or '').strip()
-    for fmt in LAST_RUN_FORMATS:
+    # The literal spellings schtasks uses for "this task has never run".
+    if text.lower() in ('', 'n/a', 'нет данных', 'never'):
+        return 'never'
+    if formats is None:
+        if _LOCALE_FORMATS is None:
+            _LOCALE_FORMATS = locale_date_formats()
+        # The machine's own pattern FIRST: it is unambiguous where the guessing
+        # list is not.
+        formats = _LOCALE_FORMATS + LAST_RUN_FORMATS
+    for fmt in formats:
         try:
             dt = datetime.strptime(text, fmt)
         except ValueError:
             continue
         return 'never' if dt.year < NEVER_BEFORE_YEAR else dt.strftime('%Y-%m-%d %H:%M')
-    return 'never'
+    return UNKNOWN
 
 
 def is_system_task(task_name: str) -> bool:

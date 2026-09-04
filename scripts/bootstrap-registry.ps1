@@ -135,6 +135,39 @@ Copy-Item $RegistryPath $backup -Force
 
 Write-Host "Wrote:  $RegistryPath" -ForegroundColor Green
 Write-Host "Backup: $backup" -ForegroundColor DarkGray
+
+# ── Generate .env::PROJECTS_ROOT from bundle.local.yaml::projects_root ───────
+# ONE VALUE, TWO NAMES. `projects_root:` in the manifest is the canon a human
+# edits; `PROJECTS_ROOT` in .env is its shell-side spelling, because the shell
+# tasks cannot read YAML. Nothing generated it, so the two had to be filled in
+# by hand — and filling in one left half the jobs working with no diagnostic
+# anywhere, while utils.py called the .env name DEPRECATED and the docs called
+# it REQUIRED. Only ever fills an EMPTY line; a value the user set stays.
+$deployRoot = Split-Path -Parent (Split-Path -Parent $RegistryPath)
+$envFile = Join-Path $deployRoot '.env'
+$manifest = Join-Path $deployRoot 'bundle.local.yaml'
+if ((Test-Path $envFile) -and (Test-Path $manifest)) {
+    $line = (Get-Content $manifest -Encoding UTF8 |
+             Where-Object { $_ -match '^\s*projects_root\s*:\s*(\S.*)$' } |
+             Select-Object -First 1)
+    if ($line -and $line -match '^\s*projects_root\s*:\s*(\S.*?)\s*$') {
+        $rootVal = $Matches[1].Trim('"', "'")
+        if ($rootVal -and $rootVal -notmatch '^<') {
+            $envLines = @(Get-Content $envFile -Encoding UTF8)
+            $wrote = $false
+            for ($i = 0; $i -lt $envLines.Count; $i++) {
+                if ($envLines[$i] -match '^\s*PROJECTS_ROOT\s*=\s*$') {
+                    $envLines[$i] = "PROJECTS_ROOT=$rootVal"; $wrote = $true; break
+                }
+                if ($envLines[$i] -match '^\s*PROJECTS_ROOT\s*=\s*\S') { break }
+            }
+            if ($wrote) {
+                [System.IO.File]::WriteAllLines($envFile, $envLines, [System.Text.UTF8Encoding]::new($false))
+                Write-Host "Generated: .env::PROJECTS_ROOT=$rootVal (from bundle.local.yaml)" -ForegroundColor Green
+            }
+        }
+    }
+}
 Write-Host ""
 Write-Host "Next: powershell -File scripts/self-test.ps1   (placeholder warning should clear)" -ForegroundColor Cyan
 Write-Host "Then (elevated): home-claude/cron/admin/sync.cmd" -ForegroundColor Cyan

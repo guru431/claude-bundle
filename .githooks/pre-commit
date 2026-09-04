@@ -10,13 +10,27 @@ set -eu
 repo_root=$(git rev-parse --show-toplevel)
 fail=0
 
+# The shared library is sourced FIRST: step 1 now uses its sensitive-path table
+# as well as step 2's token regex. Three hand-written copies of that path list
+# used to exist (here, github-push.sh, git-push-all.sh) and they disagreed —
+# `.env.example` was blocked by one and waved through by another, while
+# `credentials.json`, `.npmrc`, `.netrc`, `.pypirc`, `*.ppk`, `*.jks`,
+# `id_ecdsa`, `.git-credentials` and `terraform.tfstate` were known to none.
+lib="$repo_root/home-claude/cron/lib/secret-scan.sh"
+if [ -f "$lib" ]; then
+  # shellcheck source=/dev/null
+  . "$lib"
+fi
+
 # 1) Block sensitive filenames being newly added (allow *.example* templates)
 # --diff-filter=AR: a rename (`git mv safe.txt .env`) is an R, not an A.
 added=$(git diff --cached --name-only --diff-filter=AR || true)
 if [ -n "$added" ]; then
+  path_re="${SENSITIVE_PATH_PATTERN:-(^|/)\.env(\.[A-Za-z0-9]+)?\$|.*\.pem\$|.*\.key\$|id_rsa}"
+  allow_re="${SENSITIVE_PATH_ALLOW:-\.example(\.|\$)}"
   bad=$(printf '%s\n' "$added" \
-    | grep -iE '(^|/)(\.env(\.[A-Za-z0-9]+)?$|.*\.pem$|.*\.key$|.*\.p12$|.*\.pfx$|id_rsa|id_ed25519|id_dsa|vault\.env|\.sanitize-patterns(\.[A-Za-z0-9]+)?$)' \
-    | grep -ivE '\.example(\.|$)' || true)
+    | grep -iE -e "$path_re" -e '(^|/)\.sanitize-patterns(\.[A-Za-z0-9]+)?$' -e '(^|/)vault\.env$' \
+    | grep -ivE -e "$allow_re" -e '\.example(\.|$)' -e '\.pub$' || true)
   if [ -n "$bad" ]; then
     echo "BLOCKED: refusing to commit sensitive file(s):"
     printf '%s\n' "$bad" | sed 's/^/  /'
@@ -36,11 +50,8 @@ added_content=$(printf '%s\n' "$diff_content" | grep -E '^\+' | grep -vE '^\+\+\
 
 # 2) High-confidence secret/token formats (generic, very low false-positive)
 # Shared with the nightly cron/git-push-all.sh sweep — one source of truth for
-# the regex lives in home-claude/cron/lib/secret-scan.sh.
-lib="$repo_root/home-claude/cron/lib/secret-scan.sh"
+# the regex lives in home-claude/cron/lib/secret-scan.sh (already sourced above).
 if [ -f "$lib" ]; then
-  # shellcheck source=/dev/null
-  . "$lib"
   hits=$(printf '%s\n' "$diff_content" | secret_scan_diff || true)
   if [ -n "$hits" ]; then
     echo "BLOCKED: possible secret/token format in staged changes:"

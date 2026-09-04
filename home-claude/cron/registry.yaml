@@ -87,10 +87,18 @@ tasks:
     hidden: true
     timeout_hours: 72
 
-  - name: ClaudeWikiFlush
+  - name: ClaudeWikiPipeline
     project: main
-    description: Daily wiki flush — JSONL sessions → daily/YYYY-MM-DD.md (phase 1).
-    script: <bundle-install-path>\cron\wiki\wiki-flush-sessions.py
+    description: >-
+      Nightly wiki pipeline — runs flush, compile-sessions and build-index in
+      ORDER, in one process. This is the default; the three phase tasks below
+      are the advanced "run the phases separately" arrangement and ship
+      disabled. Ordering was never enforced between the three independent
+      timers, and after a missed trigger StartWhenAvailable can bunch them up
+      and fire them almost together — safe, because every phase is idempotent,
+      but it makes a per-night status unreliable and gives the shared provider
+      key three windows to collect a 429 in instead of one.
+    script: <bundle-install-path>\cron\wiki\wiki-pipeline.py
     kind: python
     trigger: Daily 02:30
     user: <user>
@@ -99,9 +107,26 @@ tasks:
     hidden: true
     timeout_hours: 72
 
+  - name: ClaudeWikiFlush
+    project: main
+    description: >-
+      Daily wiki flush (phase 1) — JSONL sessions to daily/YYYY-MM-DD.md.
+      ADVANCED, off by default. ClaudeWikiPipeline runs this phase in order
+      with the other two; enable this task only if you deliberately want the
+      three phases on separate timers.
+    script: <bundle-install-path>\cron\wiki\wiki-flush-sessions.py
+    kind: python
+    trigger: Daily 02:30
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    timeout_hours: 72
+    enabled: false
+
   - name: ClaudeWikiCompileKB
     project: main
-    description: Compile knowledge-news → wiki/kb/ (concepts/tools/people). Disabled by default — enable after you wire up a kb_news/ source directory.
+    description: Compile knowledge-news → wiki/kb/ (concepts/tools/people). Disabled by default — enable after you wire up a kb_sources/ source directory (or set KB_SOURCE_DIR).
     script: <bundle-install-path>\cron\wiki\wiki-compile-kb.py
     kind: python
     trigger: Daily 03:30
@@ -114,7 +139,9 @@ tasks:
 
   - name: ClaudeWikiCompileSessions
     project: main
-    description: Compile daily logs → wiki/projects/ (phase 2).
+    description: >-
+      Compile daily logs into wiki/projects/ (phase 2). ADVANCED, off by
+      default — see ClaudeWikiPipeline.
     script: <bundle-install-path>\cron\wiki\wiki-compile-sessions.py
     kind: python
     trigger: Daily 04:00
@@ -123,10 +150,13 @@ tasks:
     runlevel: limited
     hidden: true
     timeout_hours: 72
+    enabled: false
 
   - name: ClaudeWikiBuildIndex
     project: main
-    description: Rebuild wiki/projects/index.md and wiki/kb/index.md.
+    description: >-
+      Rebuild wiki/projects/index.md and wiki/kb/index.md (phase 3).
+      ADVANCED, off by default — see ClaudeWikiPipeline.
     script: <bundle-install-path>\cron\wiki\wiki-build-index.py
     kind: python
     trigger: Daily 04:05
@@ -135,6 +165,7 @@ tasks:
     runlevel: limited
     hidden: true
     timeout_hours: 72
+    enabled: false
 
   - name: ClaudeMd2PdfSync
     project: main

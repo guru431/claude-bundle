@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -250,7 +251,18 @@ def test_gen_scheduler_skips_windows_only_task(tmp_path: Path):
     """gen-scheduler must not emit a POSIX unit for a `platform: windows` task
     (ClaudeTaskMonitor) — guards against a Windows-only task leaking into
     systemd/launchd units."""
-    pytest.importorskip("yaml")  # gen-scheduler requires PyYAML
+    yaml = pytest.importorskip("yaml")  # gen-scheduler requires PyYAML
+
+    # Read the registry FIRST and assert the fixture this test needs actually
+    # exists. Without it the test was vacuous: delete every `platform: windows`
+    # task and it still passes, green and checking nothing.
+    reg = yaml.safe_load((ROOT / "home-claude" / "cron" / "registry.yaml")
+                         .read_text(encoding="utf-8"))
+    windows_only = [t["name"] for t in reg["tasks"]
+                    if str(t.get("platform", "")).lower() == "windows"]
+    assert windows_only, ("registry.yaml has no `platform: windows` task, so this "
+                          "test can no longer prove anything — point it at one")
+
     out_dir = tmp_path / "units"
     r = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "gen-scheduler.py"),
@@ -261,7 +273,7 @@ def test_gen_scheduler_skips_windows_only_task(tmp_path: Path):
     assert r.returncode == 0, f"gen-scheduler failed:\n{r.stdout}\n{r.stderr}"
     emitted = [p.name for p in out_dir.rglob("*") if p.is_file()]
     assert emitted, f"gen-scheduler wrote no unit files:\n{r.stdout}"
-    leaked = [n for n in emitted if "ClaudeTaskMonitor" in n]
+    leaked = [n for n in emitted for w in windows_only if w in n]
     assert not leaked, f"platform: windows task leaked into POSIX units: {leaked}"
 
 
@@ -519,7 +531,6 @@ def test_llm_call_latches_a_403(bundle: Path, monkeypatch):
     provider like 402 does. Falling through to the generic error handler left
     the circuit breaker open, and every remaining call of the batch paid another
     round trip to a door already known to be shut."""
-    import requests
     u = _load_utils(bundle, "utils_403")
     # Not token-shaped on purpose: the repo's own secret guard scans this diff.
     monkeypatch.setenv("DEEPSEEK_KEY", "unit-test-placeholder")
@@ -533,10 +544,18 @@ def test_llm_call_latches_a_403(bundle: Path, monkeypatch):
         calls["n"] += 1
         return Resp()
 
-    # _llm_openai_compat does `import requests` at call time, so patching the
-    # module object itself is what reaches it.
-    monkeypatch.setattr(requests, "post", fake_post)
-    assert u._llm_openai_compat("deepseek", "hi") is None
+    # A STUB module, not the real `requests`. requirements-dev.txt says the fast
+    # suite "needs no provider SDK", and a bare `import requests` here made that
+    # false: the suite was red on any machine without it and green on CI only
+    # because CI happens to install requirements.txt too. _llm_openai_compat
+    # imports requests at CALL time, so a stub in sys.modules is what it gets.
+    fake_requests = types.ModuleType("requests")
+    fake_requests.post = fake_post
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    res = u._llm_openai_compat("deepseek", "hi")
+    assert res.text is None
+    assert res.kind == "config", f"a 403 is not something waiting fixes: {res.kind}"
     assert calls["n"] == 1, "a 403 was retried instead of latched"
     assert "deepseek" in u._DEPLETED_PROVIDERS
     assert u._is_depleted("deepseek"), "the circuit breaker did not open on 403"

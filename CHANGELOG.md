@@ -3,6 +3,165 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.16.0] - 2026-09-04
+
+Clears FINDINGS.md and IDEAS.md: 40 findings and 25 proposals, resolved. Both
+files are back to their canonical header. The themes below are the ones that
+recurred across several entries — the rest is in `git log`.
+
+### One implementation per cross-cutting rule
+
+The rule existed; four rules had two or three implementations that had drifted.
+
+- **The LLM failure taxonomy.** `llm_call_ex()` returns an `LLMResult` with a
+  `kind` of `ok` / `transient` / `deterministic` / `config`, and one
+  `give_up_after_repeated_failure()` in `utils` consumes it. Flush, compile and
+  compile-kb had three retry policies against one paragraph of documentation:
+  flush counted a PROVIDER OUTAGE against `WIKI_RETRY_LIMIT` (three bad nights
+  quarantined every active project and marked its transcripts processed),
+  compile replayed an HTTP 400 on an oversized chunk forever, and compile-kb had
+  no ceiling at all. `transient` and `config` no longer count; only an answer
+  that arrived and could not be used does. See `docs/decisions.md` D-09.
+- **The file lock.** `_file_lock()` is now the one implementation; the LLM queue
+  and the state ledger are two parameterisations of it. The ledger lock still
+  broke a stale lock with `unlink` — the TOCTOU race the queue had already been
+  rewritten to avoid — so two overlapping phases could each drop the other's
+  `.processed.json` update and re-send processed sources to the provider. And
+  the shared PID check did not work on Windows (`os.kill(pid, 0)` maps to
+  CTRL_C_EVENT), so "the owner is dead, take over" never fired and every waiter
+  sat out the full 30-minute stale timeout.
+- **The credential table.** `secret_shapes.py` now also generates the
+  SENSITIVE PATH list, which pre-commit, `github-push.sh` and `git-push-all.sh`
+  each carried by hand and disagreed on. CI asserts all three generated tables
+  match their source.
+- **The .env parser.** `scripts/lib/dotenv.ps1` joins the bash, Python and
+  VBScript ones, and a single fixture is now parsed by the bash and Python
+  halves and asserted to agree key for key. It did not: a BOM ate the first
+  variable, `KEY = value` was dropped by one and trimmed by the other, and a key
+  with a leading digit was a bash ERROR that, under `set -e`, ended the load and
+  silently dropped every variable below it.
+- **Fragment merging.** `append_fragment()` / `rewrite_is_sane()` /
+  `normalize_body()` moved into `utils`. compile-kb appended raw text and
+  produced the "page becomes two versions of itself" the session compiler had
+  three functions to prevent.
+
+### Configuration that fails closed, and says what it resolved
+
+- **A typo'd `WIKI_LLM_PROVIDER` now REFUSES every call.** It used to print a
+  warning to a stderr the Task Scheduler launcher does not redirect and route
+  to DeepSeek — so `WIKI_LLM_PROVIDER=lokal`, set for privacy, shipped every
+  transcript off-box. This was the one place in `utils.py` where a bad
+  configuration failed open.
+- **`WIKI_ALLOW_OFFBOX=off` meant "on".** The old reader recognised exactly
+  `0`, `false` and `no`. Both DLP switches now go through `_env_bool` with
+  `on_invalid=False`: an unparseable value fails closed.
+- **`WIKI_LLM_PROVIDER=chain` names the chain**; `deepseek` means DeepSeek
+  alone. A value naming one provider used to select three (D-07).
+- **`.env` is loaded FIRST.** `WIKI_RETRY_LIMIT` was read three quarters of the
+  file above `_load_dotenv()`, so under Task Scheduler — which hands the task no
+  user environment, which is why the file exists — it was always the default.
+- **`config_report()`** prints the effective value and the SOURCE of every flag.
+  `bundle-status`, every `--dry-run` and each nightly log now open with it.
+- **`dry_run_until` covers every phase.** The heartbeat, the run ledger and
+  `wiki-conflict-resolve` ignored it, so a preview week stamped green rows for
+  phases that had done nothing.
+
+### Privacy
+
+- **Credential shapes are masked at every sink** (`WIKI_MASK_SECRETS=1`):
+  `.pending/`, `cron/logs/rejected/`, `FINDINGS.md`, `USER.md` and the payloads
+  sent to a provider. The masker shipped and exactly one script called it
+  (D-01).
+- **`save_session_tail()` honours the privacy gate.** A denied project's
+  transcript tail was written to `.pending/` the moment a session ended.
+- **The task monitor's findings watch honours it too** — it read every
+  project's `FINDINGS.md` and put the titles in a Telegram message.
+- **`test-sweep` no longer hands the bundle's own keys to foreign pytest runs.**
+  Importing `utils` loads `.env` into `os.environ`, and every project's suite —
+  cloned third-party repos included — inherited `DEEPSEEK_KEY`,
+  `TELEGRAM_BOT_TOKEN` and `OPENCODE_GO_API_KEY`.
+- **`agents-md-sync-check`'s public-repo gate was inverted.** It knew three
+  hosts and called every other remote private, so a Codeberg repo, a self-hosted
+  forge or a checkout with no remote had the leak gate switched OFF. Unknown now
+  counts as public, which is what its own docstring always claimed.
+- **`local` is offered first in onboarding.** The safest mode was documented
+  only in `docs/llm-routing.md`.
+
+### Data that was quietly lost
+
+- **A session dropped by a failed night no longer falls out of the window.**
+  The 48-hour filter was also the only thing keeping a failed source in the
+  queue; two bad nights and the material was gone, with its `.pending` copy
+  already deleted. `flush.seen_unprocessed` carries it regardless of mtime.
+- **`_enforce_source_date` no longer overwrites a live page.** A new
+  `incident-…-2026-03-01.md` next to an existing `incident-…-2026-01-05.md` was
+  silently redirected onto the January page and the body replaced. Reuse is now
+  limited to the append path, and enforcement runs BEFORE coalescing so two
+  dated entries of one response can no longer collide.
+- **A non-blind rewrite is sanity-checked** (lost wikilinks, >50% shrink) and
+  falls back to an append.
+- **`memory-update` no longer loses a day behind a wall.** One oversized message
+  ended the cap loop, discarding every older message of the day; the window is
+  now derived from the last green run (capped at 7 days) with hash dedup.
+- **`[ ]` is a valid empty result.** A string comparison stricter than the
+  parser turned a space inside the brackets into a deterministic failure and
+  quarantined the source on the third night.
+- **Project slugs keep whole names.** "My App" and "My Site" both became `my`;
+  a non-Latin heading became `main`.
+
+### Scheduling, guards and CI
+
+- **`ClaudeWikiPipeline` is the default nightly task**; the three phases ship
+  `enabled: false`. The orchestrator was already shipped and tested.
+- **The VBS launcher no longer exits 0 on a failed launch.** A missing
+  interpreter raised a WSH error before `WScript.Quit`, Task Scheduler recorded
+  Last Result 0, and the monitor had nothing to alert about. It now logs to
+  `cron/logs/launcher.log` and exits 9009.
+- **`install.ps1` merges `settings.json` instead of overwriting it**, backs up
+  unconditionally (including under `-Force`), pins `PYTHON_EXE` / `BASH_EXE` /
+  `PROJECTS_ROOT` in `.env` from its own preflight, and no longer aborts with a
+  PowerShell traceback where a diagnostic was written (PS 5.1 turns a redirected
+  native stderr into a terminating error under `Stop`).
+- **`uninstall.ps1` unregisters the tasks BEFORE deleting the tool that
+  unregisters them.** Every real uninstall landed in the fallback branch and was
+  told to run `schtasks /delete` by hand — the direct manipulation this project
+  forbids everywhere else.
+- **`check-agents-sync` compared two EMPTY strings** for `Coding Discipline` and
+  reported it as compared. `check-io-matrix` took `bundle-io` purely on trust
+  and is now cross-checked against the code — it immediately found two false
+  declarations. `check-registry` now runs the POSIX generator over every task,
+  so a trigger Task Scheduler accepts and systemd cannot express is caught
+  instead of silently skipped. `check-env-ref` reads the `PROVIDERS` table via
+  `ast`, which made twelve provider variables visible to it for the first time.
+- **CI**: a 3.10 + 3.x matrix, actions pinned by SHA, `permissions: contents:
+  read`, a Windows PowerShell **5.1** parse pass (the scripts execute under 5.1,
+  so parsing only with pwsh 7 let 7-only syntax through), `cron/tests/*.sh`,
+  `-m integration`, an encoding guard for the BOM rules, and `CI=1` so a
+  dependency SKIP becomes a failure.
+
+### New
+
+- `docs/decisions.md` — the sanitized ADRs. The verdicts on the privacy-relevant
+  proposals used to live only in the gitignored `IDEAS-archive.md`, so the
+  arguments behind a bundle that sells a privacy policy were unverifiable by the
+  people the policy is for.
+- `docs/config-reference.md` — generated, and CI fails when it is stale.
+- `/wiki <words>` + `cron/wiki/wiki-grep.py` — search the vault. Local files, no
+  LLM, no network (D-05).
+- `wiki-compile-sessions.py --replay DATE[#project]` — the quarantine finding
+  told the reader to "re-run this daily by hand" and no such mechanism existed.
+- Three hooks: `bash-guard.py` with a declarative `bash-deny.yaml`,
+  `ps1-bom-guard.py`, `prompt-secret-warn.py`. And `.githooks/commit-msg` — the
+  third channel to the remote, which nothing scanned.
+- `tests/conftest.py` (the suite ran against the developer's real environment
+  and wrote to the LIVE run ledger), `tests/test_hooks.py` (the hook layer had
+  no coverage at all) and `tests/test_guards_scripts.py` (mutation tests — no
+  guard script had a single test, which is exactly why one shipped broken).
+
+The fast suite is 6 seconds, down from 35: `WIKI_LLM_PACE_SECONDS` replaces two
+hardcoded `sleep(5)` calls, so the bundle's own reference implementation of its
+test policy finally obeys it.
+
 ## [0.15.1] - 2026-08-30
 
 ### Fixed — a test that asked the host machine whether it should pass
@@ -1252,7 +1411,9 @@ mattered: **several diagnoses were stale or wrong when written.** I-12 argued
 from "6 happy-path tests" (there were 7, and 5 were negative/regression tests);
 I-14 asked for compilers that already existed; I-15's headline benefit is
 impossible at the hook point it targets. The full verdict for every proposal,
-with reasons, is in the new `IDEAS-archive.md`. `IDEAS.md` is back to its header.
+with reasons, is in the (local, untracked) `IDEAS-archive.md`; the verdicts
+that bear on privacy and routing are published in
+[docs/decisions.md](docs/decisions.md). `IDEAS.md` is back to its header.
 
 Shipped ~600 lines; declined ~10k lines of proposed machinery on a 6.5k-line
 project. The rule applied: a framework that costs more credibility than the gap
@@ -1338,7 +1499,7 @@ it closes is a regression in what this bundle sells.
   `[[projects/<p>/<stem>|<stem>]]`, `[[kb/<sec>/<stem>|<stem>]]`. The rendered
   list is unchanged; the links now resolve unambiguously.
 
-### Explicitly declined (see `IDEAS-archive.md` for the full reasoning)
+### Explicitly declined (the full reasoning is in [docs/decisions.md](docs/decisions.md))
 
 - **The DLP/redaction gateway** (I-01) — a starter pack implying coverage it
   cannot warrant is worse than one documenting its boundary honestly.

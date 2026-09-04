@@ -38,7 +38,7 @@ agent instructions.
 
 | Path | What's copied | Prerequisites | Verification run |
 |---|---|---|---|
-| Lite — automated (`install.ps1 -Profile lite`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/`, `.bundle-version` stamp (no `.env`) | Windows PowerShell, VS Code + Claude Code ext | runs `self-test.ps1` automatically |
+| Lite — automated (`install.ps1 -Profile lite`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/`, `.bundle-version` stamp (no `.env`) | Windows PowerShell, VS Code + Claude Code ext | built-in check: the copied files exist and `settings.json` parses (the full `self-test.ps1` is for the full tier — it checks Python, YAML, hooks and the registry, none of which a lite install has) |
 | Lite — manual (Copy-Item snippet) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/` | Windows PowerShell | manual: `/help`, `/skills` in chat |
 | Full — automated (`install.ps1 -Profile full`) | Lite set + `hooks/`, `wiki/`, `bin/`, `cron/` + `.env` from template + registry bootstrap (optional `save-cred`/`sync`) | Python 3.10+, Git for Windows, an LLM backend | runs `self-test.ps1` automatically |
 | POSIX — lite (`install-lite.sh`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/`, `.bundle-version` stamp | bash (macOS/Linux) | manual: `/help`, `/skills` in chat |
@@ -119,9 +119,20 @@ one is offered, otherwise a direct interpreter path, never `npx -y` / `uv run`).
 
 ### 4. (Optional) Wire the hooks
 
-The default `settings.json` does NOT enable the two example hooks
-(`block-iptables-save-to-rules.py`, `md2pdf-on-edit.py`). To enable them,
-merge them in from `home-claude/settings.example-with-hooks.json`.
+The default `settings.json` enables NO hook. `home-claude/hooks/` ships five
+you can merge in from `home-claude/settings.example-with-hooks.json`, and
+`hooks/README.md` says which tier each one needs:
+
+| Hook | Event | What it does |
+|---|---|---|
+| `block-iptables-save-to-rules.py` | PreToolUse Bash | blocks the common `iptables-save > rules.v4` spellings |
+| `bash-guard.py` | PreToolUse Bash | a rule TABLE (`bash-deny.yaml`) — force-push to main, `rm -rf /`, printing a `.env`, `--no-verify` |
+| `md2pdf-on-edit.py` | PostToolUse Write/Edit | regenerates `foo.pdf` when `foo.md` changes |
+| `ps1-bom-guard.py` | PostToolUse Write/Edit | adds the UTF-8 BOM a non-ASCII `.ps1` needs under PS 5.1 |
+| `prompt-secret-warn.py` | UserPromptSubmit | warns the model when your prompt carries a credential (full tier — needs `cron/lib/`) |
+
+Take only the ones your tier supports; the table in `hooks/README.md` marks
+which need `~/.claude/cron/`.
 
 `md2pdf-on-edit.py` calls `bin/md2pdf.py`, which the full tier installs
 (step 8) — a lite install has no `bin/`, so the hook only ever reports
@@ -144,9 +155,11 @@ See `home-claude/hooks/README.md` for the per-entry tier table.
 
 ### 5. (Optional) Adapt the skill templates
 
-Both `code-review-external` and `personal-voice` are templates. Open
-each `SKILL.md` and replace `<placeholder>` paths. Without that they
-describe a pattern but won't run anything concrete.
+All three shipped skills — `code-review-external`, `code-selfcheck` and
+`personal-voice` — are templates. Open each `SKILL.md` and replace the
+`<placeholder>` paths (and, for `code-selfcheck`, copy
+`catalog.example.json` to `catalog.json` and put your own entries in it).
+Without that they describe a pattern but won't run anything concrete.
 
 ### 6. Verify
 
@@ -170,10 +183,19 @@ Edit to your preference (or remove the key for English default).
 
 - Git for Windows (Git Bash on `PATH`)
 - Python 3.10+ (`python --version`) with the bundle's Python deps:
-  `pip install -r requirements.txt` (installs `requests` + `PyYAML`,
-  used by the cron LLM calls and `registry.yaml` parsing — without
-  `requests` every LLM call fails with a misleading "DeepSeek error")
+  `pip install -r requirements.txt` — `requests` (every cron LLM call; a
+  function-local import, so `compileall` never catches it missing and it
+  surfaces at 02:30 as a misleading "DeepSeek error"), `PyYAML`
+  (`registry.yaml` and the privacy manifest — without it a manifest that exists
+  DENIES every project, by design), and `markdown-it-py` (only for
+  `bin/md2pdf.py`, which the opt-in md2pdf hook and task use)
 - An LLM backend (see [`docs/llm-routing.md`](docs/llm-routing.md)) — one of:
+  - **`WIKI_LLM_PROVIDER=local`** — nothing leaves the machine. Point
+    `LOCAL_LLM_BASE_URL` at any OpenAI-compatible server on loopback (Ollama,
+    llama.cpp, vLLM, LM Studio). The endpoint is verified to be local, so a
+    mistyped URL is refused rather than sent to. Belt and braces:
+    `WIKI_ALLOW_OFFBOX=0` refuses every off-box provider regardless of which
+    one is selected
   - **DeepSeek** PAYG account (https://platform.deepseek.com) — cheapest reliable option
   - **OpenCode Go** subscription (https://opencode.ai) — flat-rate bundle of ~12 models
   - **`WIKI_LLM_PROVIDER=claude`** — no key needed; it calls the `claude`
@@ -311,17 +333,26 @@ Fill in:
 - `DEEPSEEK_KEY=...` (or `OPENCODE_GO_API_KEY=...`)
 - `TELEGRAM_BOT_TOKEN=...` (if you want alerts)
 - `TELEGRAM_CHAT_ID=...`
-- `WIKI_LLM_PROVIDER=` — leave empty (or write `deepseek`, the same thing)
-  for the default chain **DeepSeek → OpenCode Go → DeepInfra**. Naming any
-  other provider (`opencode`, `local`, `claude`, ...) pins that one with no
-  fallback. To use DeepSeek alone, set `WIKI_OFFBOX_FALLBACK=0` — the
-  provider name cannot express it. See `docs/llm-routing.md`.
-- `PROJECTS_ROOT=...` — **required** by `git-push-all.sh` and
-  `md2pdf-sync.py` when the bundle is deployed at the documented default
-  `~/.claude` (they refuse to run without it). Point it at the folder
-  that holds the git repos / Markdown trees those tasks sweep. The
-  optional `PYTHON_EXE` / `BASH_EXE` overrides let those tasks find a
-  non-`PATH` interpreter.
+- `WIKI_LLM_PROVIDER=` — leave empty, or write `chain`, for the default
+  chain **DeepSeek → OpenCode Go → DeepInfra → None**. Naming any single
+  provider (`deepseek`, `opencode`, `local`, `claude`, ...) pins that one with
+  no fallback — including `deepseek`, which used to mean the whole chain and
+  now means DeepSeek alone (setting it prints a one-line notice). See
+  `docs/llm-routing.md`.
+- `PROJECTS_ROOT=...` — where your git repos / Markdown trees live, read by
+  `git-push-all.sh`, `md2pdf-sync.py` and the task monitor's findings watch.
+
+  **One value, two places, and neither is deprecated.** `projects_root:` in
+  `bundle.local.yaml` is the canon a human edits; `PROJECTS_ROOT` here is its
+  shell-side spelling, because the shell tasks cannot read YAML.
+  `install.ps1` and `bootstrap-registry.ps1` GENERATE this line from the
+  manifest, so on the guided path you set it once, in the manifest. On this
+  manual path, set both — and keep them equal.
+- `PYTHON_EXE` / `BASH_EXE` — absolute paths to the interpreters the scheduled
+  tasks run. `install.ps1` fills these in from its preflight; set them by hand
+  here. Not optional in practice under Task Scheduler: a Password-mode task
+  fires in session 0, which has no user `PATH`, so a python.org install (user
+  `PATH` only) is simply not found.
 
 `.env` is gitignored. The bundle never commits its values.
 
@@ -388,6 +419,20 @@ if (-not (Test-Path $manifestDst)) {
 notepad $manifestDst
 ```
 
+**Set `dry_run_until` while you are in there.** `install.ps1` writes
+`dry_run_until: <today + 7>` into the manifest it creates; on this manual path
+nothing does, so the first night ships everything from the last 48 hours to
+your provider before you have read a single preview. Add the line yourself:
+
+```yaml
+dry_run_until: 2026-09-11   # today + 7. Every phase previews only until then.
+```
+
+While the window is open every phase collects its sources, prints what it WOULD
+send (with a character/token estimate) and writes nothing — no LLM call, no
+state, no ledger row. It expires by itself, which is the point: a flag you have
+to remember to remove is a flag that stays on for a year.
+
 It lives next to `.env` and is **reinstall-safe** — unlike editing
 `cron/hooks/utils.py`, a later reinstall won't wipe it:
 
@@ -432,7 +477,7 @@ placeholders you just filled in in step 11.
 ```
 
 This auto-elevates to UAC once for the whole batch, then idempotently
-registers (or updates) all 15 tasks from `registry.yaml`. Output goes
+registers (or updates) all 16 tasks from `registry.yaml`. Output goes
 to `%TEMP%\sync-tasks_<timestamp>.log`.
 
 ### 14. Verify
@@ -489,6 +534,78 @@ For each of your projects you also want Codex to recognize, copy
 `AGENTS.md` and fill in the project-specific gotchas (~20 lines).
 
 ---
+
+## The first week
+
+The existing Troubleshooting section below covers failures during INSTALL. These
+are the questions the first week of actually running it produces, and none of
+them is a failure.
+
+**"It ran overnight and the wiki is still empty."** Three normal causes, in the
+order to check them:
+
+1. **`dry_run_until` is still in the future.** That is the point — every phase
+   collects sources, prints what it WOULD send, and writes nothing. The log
+   says so on its first line. Delete the key in `~/.claude/bundle.local.yaml`
+   to start early; it expires on its own.
+2. **There was nothing new.** `WIKI_BACKLOG_MAX=0` is the shipped default:
+   only sessions from the last 48 hours are read, and your archive is left
+   alone until you opt in. Set `WIKI_BACKLOG_MAX=20` to backfill 20 older
+   sessions a night.
+3. **Everything is in `.pending/` waiting for a flush that has not succeeded.**
+   `python ~/.claude/cron/bundle-status.py` prints the queue depth. A growing
+   queue means the flush is failing, and the same page says why.
+
+**"What exactly went to the provider?"** Two answers, both local:
+
+- `python ~/.claude/cron/wiki/wiki-flush-sessions.py --dry-run` prints the
+  effective configuration, the effective privacy policy, and — per project —
+  how many LLM calls and how many characters (with a rough token count) would
+  leave the machine. It sends nothing.
+- `cron/logs/provider_attempts_<date>.jsonl` has one line per HTTP attempt
+  after the fact: provider, model, status, latency, and whether a fallback
+  fired.
+
+**"What did it cost?"** The same audit log. Multiply the calls by your
+provider's rate; the dry run's character counts are the input side of that
+estimate. The [data/money matrix](docs/cron-architecture.md#data-cost--publishing-per-task)
+says which tasks can spend anything at all — most cannot.
+
+**"Where does it put things it gave up on?"** Two places, and
+`bundle-status.py` names both:
+
+- `<PipelineRoot>/FINDINGS.md` — that is `~/.claude/FINDINGS.md` on a default
+  install, NOT your project's. One entry per quarantined source, deduped on the
+  title.
+- `<PipelineRoot>/cron/logs/rejected/` — the payload itself, aged out by
+  `ClaudeLogRetention` after 14 days.
+
+Re-run one quarantined daily by hand once you have fixed the cause:
+
+```
+python ~/.claude/cron/wiki/wiki-compile-sessions.py --replay 2026-09-03
+python ~/.claude/cron/wiki/wiki-compile-sessions.py --replay 2026-09-03#myapp
+```
+
+**"How do I stop sending anything off this machine?"** Two lines in
+`~/.claude/.env`:
+
+```
+WIKI_LLM_PROVIDER=local
+LOCAL_LLM_BASE_URL=http://localhost:11434/v1
+LOCAL_LLM_MODEL=<whatever your server serves>
+WIKI_ALLOW_OFFBOX=0
+```
+
+The last line is the belt to the first one's braces: it refuses every provider
+whose registry row says `offbox: true`, whichever one is selected. And a
+`local` provider whose URL is not actually loopback is refused too — the
+endpoint is verified, not assumed, so a copied config cannot quietly turn
+"local" into "somebody else's server".
+
+**"How do I search what it has learned?"** `/wiki <words>` in a Claude Code
+session, or `python ~/.claude/cron/wiki/wiki-grep.py <words>` directly. Local
+files, no LLM, no network.
 
 ## Troubleshooting
 
@@ -568,6 +685,10 @@ cp -r home-claude/wiki home-claude/cron ~/.claude/
 # 2. Create + fill .env and the machine-local manifest (POSIX steps 9 + 12):
 cp config/llm-providers.example.env ~/.claude/.env
 cp config/bundle.local.example.yaml ~/.claude/bundle.local.yaml  # project map + privacy policy
+# Hold every phase in preview mode for the first week (see step 12) — nothing
+# is sent and nothing is written until you have read the previews:
+printf 'dry_run_until: %s
+' "$(date -d '+7 days' +%F 2>/dev/null || date -v+7d +%F)"     >> ~/.claude/bundle.local.yaml
 "${EDITOR:-nano}" ~/.claude/.env
 
 # 3. Generate scheduler units from the OS-neutral registry.yaml:
@@ -602,7 +723,11 @@ wiki compilers work unchanged on POSIX.
 
 ## Versioning
 
-The bundle carries a top-level `VERSION` file (semver). The installers
-copy it to `~/.claude/.bundle-version`; `scripts/self-test.ps1` compares
-the deployed stamp against the source and warns when a deployment is
-behind. To update a deployment, re-run the installer — it re-stamps.
+The bundle carries a top-level `VERSION` file (semver). The installers copy it
+to `<PipelineRoot>/.bundle-version` — that is `~/.claude/.bundle-version` on a
+default install, and the pipeline root, not the config root, on a split one
+(`install.ps1 -PipelineRoot`). `scripts/self-test.ps1` compares the deployed
+stamp against the source and warns when a deployment is behind; on a split
+install pass `-InstallPath <PipelineRoot>` or it looks in the wrong place. To
+update a deployment, re-run the installer — it re-stamps, merges your
+`settings.json` rather than overwriting it, and backs up anything it replaces.

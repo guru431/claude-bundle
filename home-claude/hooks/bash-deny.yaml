@@ -1,0 +1,59 @@
+# bash-guard.py's rule table — edit THIS file, not the hook.
+#
+# Every entry is one rule matched against the full Bash command string BEFORE
+# shell parsing, so it also sees a command wrapped in `ssh host "..."`.
+#
+#   pattern   — a Python regular expression (case-sensitive unless you add (?i))
+#   reason    — shown to the model verbatim; say WHAT to do instead, not just no
+#   severity  — deny (block outright) | ask (make the user confirm)
+#
+# The point of a table is that adding a rule is a data change. The iptables rule
+# below used to be a whole Python file of its own; anything you want to add now
+# is four lines here.
+#
+# These are guards against the obvious spellings, NOT a sandbox. A command can
+# still reach the same effect through a variable, a temp file plus `mv`, or a
+# script — see hooks/README.md. Do not let a pattern grow permissive in the hope
+# of catching more: a false positive blocks real work and teaches everyone to
+# reach for the bypass.
+
+rules:
+  - pattern: '(ip6?tables(?:-legacy|-nft)?-save|\bnetfilter-persistent\s+save\b)[^;&]*(?:>>?|\btee\b|\bsponge\b|\bdd\s+of=|(?<![\w-])-f\b|--file\b)[^;&]*rules\.v[46](?![\w.-])'
+    severity: deny
+    reason: >-
+      `iptables-save > /etc/iptables/rules.v[46]` is blocked. Dynamic rules
+      (sslh transparent, fail2ban, cascade MASQUERADE, iproute2 helpers) end up
+      in rules.v4, duplicate on boot and drift from the install script.
+      Instead: edit rules.v4 with Read+Edit, remove a runtime rule with an
+      explicit `iptables -D <chain> <rule>`, or re-run the relevant section of
+      your install script.
+
+  - pattern: '\bgit\s+push\b[^;&]*(--force(?!-with-lease)|(?<![\w-])-f\b)[^;&]*\b(main|master)\b'
+    severity: ask
+    reason: >-
+      A force-push to main/master rewrites published history for everyone who
+      has cloned it. Use `--force-with-lease` (which refuses if the remote moved
+      under you), or push to a branch and open a PR.
+
+  - pattern: '\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*[rR])\s+(/|/\*|~|~/\*|\$HOME/?\*?|[A-Za-z]:[\\/]\*?)\s*($|[;&|])'
+    severity: deny
+    reason: >-
+      `rm -rf` aimed at a filesystem root or a whole home directory. If you
+      meant a specific subdirectory, name it in full — this pattern only fires
+      on the bare root forms.
+
+  - pattern: '\b(cat|less|more|head|tail|bat)\b[^;&]*(^|[\s/])\.env(\.[A-Za-z0-9_.-]+)?(\s|$)'
+    severity: ask
+    reason: >-
+      Printing a .env puts live credentials into the transcript, which is then
+      stored on disk and — if the wiki pipeline is enabled — sent to an LLM
+      provider. To check whether a KEY exists, use
+      `grep -c '^NAME=' .env` instead of reading the file.
+
+  - pattern: '\bgit\s+(commit|push)\b[^;&]*--no-verify'
+    severity: ask
+    reason: >-
+      `--no-verify` switches off the secret-guard hooks for the whole
+      commit/push, not just the line you believe is a false positive. Prefer the
+      inline `# secret-scan:allow` marker, which is per-line and shows up in the
+      diff.

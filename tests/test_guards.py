@@ -241,6 +241,83 @@ def test_shell_scan_pattern_is_the_generated_one():
         "`python home-claude/cron/lib/secret_shapes.py`")
 
 
+def test_sensitive_path_tables_are_the_generated_ones():
+    """The two path tables in the shell library are generated too.
+
+    Three hand-written copies of "which filenames must never be committed" used
+    to exist — in pre-commit, github-push.sh and git-push-all.sh — and they
+    disagreed on `.env.example` and knew nothing of `credentials.json`,
+    `.npmrc`, `.netrc`, `.pypirc`, `*.ppk`, `*.jks`, `id_ecdsa`,
+    `.git-credentials` or `terraform.tfstate`.
+    """
+    shapes = _shapes()
+    text = (CRON / "lib" / "secret-scan.sh").read_text(encoding="utf-8")
+    for var, generated in (("SENSITIVE_PATH_PATTERN", shapes.sensitive_path_ere()),
+                           ("SENSITIVE_PATH_ALLOW", shapes.sensitive_path_allow_ere())):
+        m = re.search(rf"(?m)^{var}='(.*)'$", text)
+        assert m, f"{var} not found in cron/lib/secret-scan.sh"
+        assert m.group(1) == generated, (
+            f"the shell copy of {var} has drifted — regenerate it with "
+            f"`python home-claude/cron/lib/secret_shapes.py paths`")
+
+
+# Concrete strings, and what each detector must say about them. Every entry in
+# the first list is a real false positive that blocked a commit, and every entry
+# in the second is a real credential format that went through untouched.
+_MUST_NOT_MATCH = [
+    "task-management-system-v2",              # `sk-` inside an ordinary slug
+    "--disk-usage-threshold-pct 90",          # `ccr-` inside a flag name
+    "mask-secrets-in-output",
+    "kiosk-mode-launcher-2024",               # mask() turned this into `kio[REDACTED]`
+    "Python 3.10.0.1",                        # the `10.` branch had 3 octets
+    "artifact 1693526400:" + "a" * 40,        # a timestamp plus a sha1
+]
+_MUST_MATCH = [
+    "ghp_" + "A" * 24, "ghs_" + "A" * 24, "ghu_" + "B" * 24,
+    "glpat-" + "a" * 22, "npm_" + "b" * 36, "sk_live_" + "c" * 24,
+    "hf_" + "d" * 32, "SG." + "e" * 20 + "." + "f" * 20,
+    "xoxe-" + "g" * 20, "hooks.slack.com/services/" + "H" * 24,
+    "ASIA" + "B" * 16,
+    # Assembled rather than written out: a detector's own fixture that spells a
+    # real header verbatim matches ITSELF, and then the repo's secret guard
+    # blocks every commit touching this file. `# secret-scan:allow` is the
+    # documented escape hatch, but not writing the literal at all is better.
+    "-----BEGIN PGP PRIVATE" + " KEY BLOCK-----",
+    "AccountKey=" + "z" * 44,
+    "postgres://user:" + "pass@host/db",
+    "aws_secret_access_key = " + "k" * 40,
+]
+
+
+@pytest.mark.parametrize("sample", _MUST_NOT_MATCH)
+def test_ordinary_text_is_not_a_secret(sample):
+    """A false positive here blocks a commit, a push, CI and the nightly sweep.
+
+    It also mangles output: `mask()` shares this table, so `kiosk-mode-launcher`
+    came out of a FINDINGS entry as `kio[REDACTED-API-KEY]`.
+    """
+    shapes = _shapes()
+    assert not shapes.scan_regex().search(sample), f"false positive: {sample!r}"
+    assert shapes.mask(sample) == sample, f"mask() mangled ordinary text: {sample!r}"
+
+
+@pytest.mark.parametrize("sample", _MUST_MATCH)
+def test_real_credential_formats_are_caught(sample):
+    shapes = _shapes()
+    assert shapes.scan_regex().search(sample), f"missed credential format: {sample[:24]!r}"
+
+
+def test_sensitive_paths_cover_the_common_credential_files():
+    shapes = _shapes()
+    for p in (".env", "conf/.env.production.local", "id_ecdsa", "app/credentials.json",
+              ".npmrc", ".netrc", ".pypirc", "keys/site.ppk", "keys/store.jks",
+              ".git-credentials", "infra/terraform.tfstate", "cfg/secrets.yaml"):
+        assert shapes.is_sensitive_path(p), f"not treated as sensitive: {p}"
+    for p in (".env.example", "config/llm-providers.example.env", ".env.sample",
+              "README.md", "keys/site.pub"):
+        assert not shapes.is_sensitive_path(p), f"wrongly blocked: {p}"
+
+
 def test_private_addresses_are_leak_only():
     """A LAN address is not a credential.
 
@@ -269,17 +346,42 @@ def _bash():
     Scheduler's session 0 has System32 in PATH and Git\\bin not, which is exactly
     where the nightly sweep runs.
     """
+    import os
     import shutil
+    import subprocess
+
+    # An EXPLICIT override first, then git's own answer, then PATH, and only
+    # then the two hardcoded Program Files locations. The hardcoded pair used to
+    # come first and was the only real path: on a scoop/portable/D:-drive Git
+    # this returned None, the test SKIPPED, and the invariant it protects —
+    # env > dotenv, in the shell parser — vanished with no signal at all.
+    candidates = []
+    for env_name in ("CLAUDE_CODE_GIT_BASH_PATH", "BASH_EXE"):
+        if os.environ.get(env_name):
+            candidates.append(os.environ[env_name])
+    try:
+        exec_path = subprocess.run(["git", "--exec-path"], capture_output=True,
+                                   text=True, timeout=15).stdout.strip()
+        if exec_path:
+            # <git>/mingw64/libexec/git-core → <git>/usr/bin/bash.exe
+            git_root = Path(exec_path)
+            for _ in range(3):
+                git_root = git_root.parent
+            candidates += [str(git_root / "usr" / "bin" / "bash.exe"),
+                           str(git_root / "bin" / "bash.exe")]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    found = shutil.which("bash")
+    if found and Path(found).parent.name.lower() != "system32":
+        candidates.append(found)         # System32\bash.exe is the WSL launcher
     # `usr\bin` before `bin`: the latter prepends /mingw64/bin:/usr/bin to any
     # PATH handed to it, which quietly outranks a caller's own entries.
-    for candidate in (r"C:\Program Files\Git\usr\bin\bash.exe",
-                      r"C:\Program Files\Git\bin\bash.exe"):
-        if Path(candidate).is_file():
+    candidates += [r"C:\Program Files\Git\usr\bin\bash.exe",
+                   r"C:\Program Files\Git\bin\bash.exe"]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
             return candidate
-    found = shutil.which("bash")
-    if found and Path(found).parent.name.lower() == "system32":
-        return None                      # WSL launcher, not a usable bash here
-    return found
+    return None
 
 
 @pytest.mark.skipif(_bash() is None, reason="bash not available")
@@ -305,6 +407,69 @@ def test_shell_dotenv_does_not_override_the_environment(tmp_path: Path):
     out = subprocess.run([_bash(), str(script)], capture_output=True, text=True,
                          env=env, timeout=60).stdout.strip()
     assert out == "from-environment|from-dotenv"
+
+
+# ONE fixture, parsed by BOTH implementations, asserted to agree. Four parsers
+# of this file exist (bash, Python, VBScript, PowerShell) and they had drifted
+# on every one of these lines: `export `, a BOM on the first key, `KEY = value`,
+# a trailing space after a quoted value, and a key with a leading digit — which
+# in bash is not merely skipped but an ERROR that, under `set -e`, ended the
+# load and silently dropped every variable BELOW it.
+_DOTENV_FIXTURE = (
+    "﻿FIRST_KEY=first\n"          # BOM: the first key used to be lost
+    "# a comment\n"
+    "\n"
+    "export EXPORTED=yes\n"            # bash took it, Python did not
+    "SPACED = padded\n"                # Python trimmed, bash dropped the line
+    'QUOTED="in quotes"   \n'          # trailing space after the closing quote
+    "SINGLE='single'\n"
+    "1BADKEY=nope\n"                   # a leading digit: fatal in bash under set -e
+    "AFTER_BAD=reached\n"              # …so THIS line was the real casualty
+    "EMPTY=\n"
+)
+_DOTENV_EXPECTED = {
+    "FIRST_KEY": "first",
+    "EXPORTED": "yes",
+    "SPACED": "padded",
+    "QUOTED": "in quotes",
+    "SINGLE": "single",
+    "AFTER_BAD": "reached",
+    "EMPTY": "",
+}
+
+
+@pytest.mark.skipif(_bash() is None, reason="bash not available")
+def test_both_dotenv_parsers_read_the_same_fixture(tmp_path: Path, bundle_tree: Path,
+                                                   monkeypatch):
+    """The bash and Python parsers must agree, key for key, on one file."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(_DOTENV_FIXTURE, encoding="utf-8")
+
+    names = " ".join(_DOTENV_EXPECTED)
+    script = tmp_path / "probe.sh"
+    lib = (CRON / "lib" / "dotenv.sh").as_posix()
+    script.write_text(
+        "set -eu\n"
+        f". '{lib}'\n"
+        f"dotenv_load '{env_file.as_posix()}'\n"
+        f'for k in {names}; do printf "%s=%s\\n" "$k" "${{!k-<unset>}}"; done\n',
+        encoding="utf-8", newline="\n")
+    # A CLEAN environment: an inherited value would mask a key the parser failed
+    # to set, which is exactly the bug being tested for.
+    env = {k: v for k, v in os.environ.items() if k not in _DOTENV_EXPECTED}
+    res = subprocess.run([_bash(), str(script)], capture_output=True, text=True,
+                         env=env, timeout=60)
+    assert res.returncode == 0, f"the bash parser aborted:\n{res.stderr}"
+    from_bash = dict(line.split("=", 1) for line in res.stdout.strip().splitlines())
+    assert from_bash == _DOTENV_EXPECTED, "bash parser disagrees with the fixture"
+
+    # …and the Python one, on the same bytes.
+    (bundle_tree / ".env").write_text(_DOTENV_FIXTURE, encoding="utf-8")
+    for name in _DOTENV_EXPECTED:
+        monkeypatch.delenv(name, raising=False)
+    _import_utils(monkeypatch, bundle_tree)   # loading it runs _load_dotenv()
+    from_python = {k: os.environ.get(k, "<unset>") for k in _DOTENV_EXPECTED}
+    assert from_python == _DOTENV_EXPECTED, "Python parser disagrees with the fixture"
 
 
 def test_python_dotenv_does_not_override_the_environment(bundle_tree: Path, monkeypatch):

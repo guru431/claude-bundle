@@ -1,6 +1,6 @@
 # Cron architecture (Windows Task Scheduler)
 
-The bundle ships 15 scheduled tasks (seven disabled by default) managed
+The bundle ships 16 scheduled tasks (ten disabled by default) managed
 declaratively through one YAML file. This document explains the moving parts.
 
 ## The big picture
@@ -161,19 +161,20 @@ changes the second time.
 
 ## What ships in the bundle
 
-15 tasks (seven — `ClaudeWikiCompileKB`, `ClaudeMd2PdfSync`,
-`ClaudeWarmWindow`, `ClaudeGitPushAll`, `ClaudeAgentsMdSyncCheck`,
-`ClaudeTestSweep` and `ClaudeTestSweepFull` — ship
-`enabled: false`). Edit
-`registry.yaml` to disable any others you don't want before running
+16 tasks, ten of them shipping `enabled: false`: `ClaudeWikiCompileKB`,
+`ClaudeMd2PdfSync`, `ClaudeWarmWindow`, `ClaudeGitPushAll`,
+`ClaudeAgentsMdSyncCheck`, `ClaudeTestSweep`, `ClaudeTestSweepFull` — and the
+three wiki PHASE tasks, which `ClaudeWikiPipeline` now runs in order instead.
+Edit `registry.yaml` to disable any others you don't want before running
 `sync.cmd` the first time.
 
 | Task | Trigger | What it does |
 |---|---|---|
-| `ClaudeWikiFlush` | Daily 02:30 | JSONL sessions + sources → daily log |
+| `ClaudeWikiPipeline` | Daily 02:30 | the nightly wiki run: flush → compile-sessions → build-index, in order, in one process |
+| `ClaudeWikiFlush` | Daily 02:30 | JSONL sessions + sources → daily log (off by default — a phase of the pipeline above) |
 | `ClaudeWikiCompileKB` | Daily 03:30 | compile KB sources → `kb/*` (off by default) |
-| `ClaudeWikiCompileSessions` | Daily 04:00 | compile sessions → `projects/<slug>/*` |
-| `ClaudeWikiBuildIndex` | Daily 04:05 | rebuild `projects/index.md` + `kb/index.md`, refresh stats in `wiki/index.md` |
+| `ClaudeWikiCompileSessions` | Daily 04:00 | compile sessions → `projects/<slug>/*` (off by default — a phase of the pipeline above) |
+| `ClaudeWikiBuildIndex` | Daily 04:05 | rebuild `projects/index.md` + `kb/index.md`, refresh stats in `wiki/index.md` (off by default — a phase of the pipeline above) |
 | `ClaudeWikiLint` | Weekly Sun 02:00 | broken-link / orphan / project-collapse check |
 | `ClaudeLogRetention` | Weekly Sun 03:00 | prune `cron/logs/*.{log,jsonl}` older than 30 days |
 | `ClaudeAgentsMdSyncCheck` | Weekly Sun 07:30 | reconcile each project's `AGENTS.md` with its `CLAUDE.md` (off by default; needs `projects_root`) |
@@ -194,9 +195,13 @@ scripts self-guard on their presence).
 ## Data, cost & publishing per task
 
 Before enabling a task, know what it reaches out to. Everything not
-listed here (`ClaudeWikiBuildIndex`, `ClaudeWikiLint`, `ClaudeLogRetention`)
-is local-only: it never leaves your machine, spends nothing, and
-publishes nothing.
+listed here (`ClaudeWikiBuildIndex`, `ClaudeLogRetention`) is local-only:
+it never leaves your machine, spends nothing, and publishes nothing.
+
+`ClaudeWikiLint` used to be in that list, and the claim was false: it sends
+a summary to Telegram when the alert flag is on. The guard could not see it
+because a `bundle-io` field reading `nothing by default (…)` counted as
+"nothing"; both the loophole and the row are fixed below.
 
 That sentence used to be a promise nothing checked, and it was already
 wrong: `ClaudeAgentsMdSyncCheck` appeared in no row, so the blanket claim
@@ -208,15 +213,22 @@ this table reflects it.
 
 | Task | Sends data off-box (to whom) | Spends money | Publishes / pushes | Default state |
 |---|---|---|---|---|
+| `ClaudeWikiPipeline` (the default nightly run — flush → compile → index in one process) | session/daily-log text of allowed projects → your LLM provider. This is the same payload as the two phase tasks below, because it IS those phases | yes (PAYG tokens) | no | on |
 | Wiki flush + compile (`ClaudeWikiFlush`, `ClaudeWikiCompileSessions`, `ClaudeWikiCompileKB`) | session/source text of allowed projects → your LLM provider (DeepSeek / OpenCode Go). Plans are excluded unless `collect_plans: true` | yes (PAYG tokens) | no | on (KB compile off) |
 | `ClaudeMemoryUpdate` | your user messages (up to ~40 KB/night) + a slice of `~/.claude/memory/` → your LLM provider. With `MEMORY_CROSS_NOTES=1`, a **second** call on top of that, carrying messages from two or more projects at once | yes (PAYG tokens) | no | on (cross-notes off) |
 | `ClaudeHealthcheck` | host metrics → your LLM provider (see below) | yes (PAYG tokens) | no | on |
 | `ClaudeGitPushAll` | your git remotes | no | yes (`git push`) | off (opt-in) |
 | `ClaudeTaskMonitor` / alerts | failure summary → Telegram Bot API | no | no | on |
 | `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
-| `ClaudeMd2PdfSync` | nothing (local render) | no | no | off |
+| `ClaudeMd2PdfSync` | a failure summary → Telegram Bot API. The render itself is local | no | no | off |
+| `ClaudeWikiLint` | a lint summary → Telegram Bot API, only with `WIKI_LINT_TELEGRAM=1` | no | rewrites vault pages, only with `--fix` | on (alerts off) |
 | `ClaudeTestSweep` / `ClaudeTestSweepFull` | a summary of which suites broke → Telegram Bot API. No LLM is involved and no test output goes to a provider; tails are masked for credentials before they are logged or sent | no | writes a finding into each affected project's `FINDINGS.md`, and deletes its own finding again when the suite recovers | off (needs `projects_root`) |
 | `ClaudeAgentsMdSyncCheck` | the **whole** `CLAUDE.md` and `AGENTS.md` of every allowed project → your LLM provider. This is the widest per-project payload in the bundle: not a slice of a transcript but two complete rules files, including whatever hosts, paths and commands they name | yes (PAYG tokens; `AGENTS_SYNC_FIX_MODEL` can point the fix step at a costlier model) | **edits `AGENTS.md` in your working copies** and files a finding in their `FINDINGS.md`. The only task that writes into your repositories | off (needs `projects_root`) |
+
+`cron/wiki/wiki-conflict-resolve.py` is not in the table because it is not a
+scheduled task — it is run by hand. When you do run it, it sends a WHOLE vault
+page to your provider and, with `--apply`, rewrites that page; `--dry-run`
+prints what it would send and calls nothing.
 
 ### What `ClaudeHealthcheck` actually sends
 
@@ -291,18 +303,27 @@ means a broken flush — `bundle-status.py` reports its depth.
 
 ## Ordering & the wiki-pipeline orchestrator
 
-The nightly wiki phases run as separate tasks on staggered timers:
-`ClaudeWikiFlush` (02:30) → `ClaudeWikiCompileSessions` (04:00) →
-`ClaudeWikiBuildIndex` (04:05). Those are **independent** timers — nothing
-enforces that flush finishes before compile starts, and after a missed
-trigger (`StartWhenAvailable`) they can bunch up and fire almost together.
+**`ClaudeWikiPipeline` is the default**, and it is the whole nightly wiki
+run: flush → compile-sessions → build-index, in that order, in one process,
+each phase a subprocess whose log folds into the pipeline log. The three
+phase tasks (`ClaudeWikiFlush`, `ClaudeWikiCompileSessions`,
+`ClaudeWikiBuildIndex`) still exist and ship `enabled: false` — enable them
+only if you deliberately want the phases on separate timers.
 
-That is safe by design: every phase is **idempotent and self-healing**.
-Compile skips dailies it already compiled; a phase that sees nothing new
-just no-ops; whatever one night misses, the next night picks up. A bad
-ordering only ever **defers** material one cycle — it never loses it. The
-one real cost is that a "processed tonight" status can mislead on a night
-things bunch up.
+It used to be the other way round, and this document argued the split was
+"safe by design" — which it is, in the sense that matters: every phase is
+**idempotent and self-healing**. Compile skips dailies it already compiled; a
+phase that sees nothing new just no-ops; whatever one night misses, the next
+night picks up. A bad ordering only ever **defers** material one cycle — it
+never loses it.
+
+But safe is not the same as free, and the costs were all on the split side:
+nothing enforced that flush finished before compile started, a missed trigger
+(`StartWhenAvailable`) could bunch all three together, "processed tonight"
+could therefore mislead, and one shared provider key got three windows to
+collect a 429 in instead of one. The orchestrator was already shipped and
+already tested (`tests/test_pipeline.py` drives it end to end). Nothing was
+gained by keeping it opt-in.
 
 ### When a retry cannot help — the ceiling
 
@@ -332,15 +353,11 @@ text would be recorded as compiled by a process that never saw it. With the
 fingerprint, an append simply stops matching any marker, so the next run
 recompiles and `apply_changes` dedups the overlap.
 
-If you want a hard ordering guarantee (and an accurate per-night status),
-run the shipped orchestrator `cron/wiki/wiki-pipeline.py` as a **single**
-task instead — it runs flush → compile → index in sequence in one process:
-
-1. Add one registry entry pointing at `cron/wiki/wiki-pipeline.py`
-   (`kind: python`), e.g. `trigger: Daily 02:30`.
-2. Set `enabled: false` on `ClaudeWikiFlush`, `ClaudeWikiCompileSessions`,
-   and `ClaudeWikiBuildIndex` so they don't also run.
-3. Apply: `sync.cmd` (Windows) or re-run `gen-scheduler.py` (POSIX).
+To go back to separate timers: set `enabled: false` on `ClaudeWikiPipeline`
+and `enabled: true` on `ClaudeWikiFlush`, `ClaudeWikiCompileSessions` and
+`ClaudeWikiBuildIndex`, then apply with `sync.cmd` (Windows) or re-run
+`gen-scheduler.py` (POSIX). Never run both arrangements at once — the phases
+would execute twice a night.
 
 A failing phase is logged (and alerted via Telegram when configured) but
 does not abort the later phases; the run exits non-zero so the scheduler

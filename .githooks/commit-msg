@@ -1,0 +1,68 @@
+#!/bin/sh
+# commit-msg secret-guard for a PUBLIC repository.
+#
+# The third channel to the remote, and the one nothing watched. pre-commit scans
+# the staged DIFF and pre-push scans the BLOBS being published — a token pasted
+# into a commit message went through both untouched and reached the remote in
+# plain text, where `git log` shows it to everyone forever.
+#
+# Activate once per clone:   git config core.hooksPath .githooks
+#                            (scripts/enable-guard.sh does it for you)
+# Bypass a confirmed false positive:   git commit --no-verify
+set -eu
+
+msg_file="${1:-}"
+[ -n "$msg_file" ] && [ -f "$msg_file" ] || exit 0
+
+repo_root=$(git rev-parse --show-toplevel)
+lib="$repo_root/home-claude/cron/lib/secret-scan.sh"
+if [ ! -f "$lib" ]; then
+  # Fail CLOSED, like pre-push: "the guard is missing" must never resolve to
+  # "the guard passed" on a repository that is meant to be published.
+  echo "BLOCKED: $lib not found — the commit-message scan cannot run." >&2
+  echo "Restore it, or commit with --no-verify if you have checked by hand." >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+. "$lib"
+
+fail=0
+
+# Comment lines are stripped by git before the message is stored, so a token in
+# one is never published — and the commit template itself carries example text.
+body=$(grep -v '^#' "$msg_file" || true)
+
+if ! hits=$(printf '%s\n' "$body" | secret_scan_text); then
+  echo "BLOCKED: possible secret/token format in the commit message:"
+  printf '%s\n' "$hits" | sed 's/^/  /'
+  fail=1
+fi
+
+# Personal denylist — the same untracked .sanitize-patterns the other two hooks
+# read. A hostname or a username belongs out of a public commit message just as
+# much as out of a file.
+sp="$repo_root/.sanitize-patterns"
+if [ -f "$sp" ]; then
+  pat=$(mktemp 2>/dev/null || echo "$repo_root/.sanitize-patterns.tmp")
+  # tr -d '\r': a CRLF-saved .sanitize-patterns (the Windows default) leaves a
+  # trailing \r on every regex and silently disables the whole denylist.
+  grep -vE '^[[:space:]]*$' "$sp" 2>/dev/null | tr -d '\r' > "$pat" || true
+  if [ -s "$pat" ]; then
+    hits=$(printf '%s\n' "$body" | grep -inEf "$pat" || true)
+    if [ -n "$hits" ]; then
+      echo "BLOCKED: personal data (matched .sanitize-patterns) in the commit message:"
+      printf '%s\n' "$hits" | sed 's/^/  /'
+      fail=1
+    fi
+  fi
+  rm -f "$pat"
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo ""
+  echo "Commit aborted — this is a PUBLIC repository, and a commit message is"
+  echo "published exactly as written. Rewrite the message above, or for a"
+  echo "confirmed false positive: git commit --no-verify"
+  exit 1
+fi
+exit 0

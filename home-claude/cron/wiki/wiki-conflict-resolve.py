@@ -35,7 +35,11 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-from utils import BUNDLE_ROOT, WIKI_ROOT, llm_call, read_page, write_page  # noqa: E402
+from utils import (  # noqa: E402
+    BUNDLE_ROOT, WIKI_ROOT, WIKI_NON_PAGES, atomic_write_text, is_dry_run,
+    llm_call, read_page, write_page,
+)
+from untrusted import fence  # noqa: E402
 
 PROMPT_PATH = BUNDLE_ROOT / "cron" / "prompts" / "wiki-conflict-merge.md"
 LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
@@ -68,7 +72,10 @@ def find_collisions() -> list[Path]:
     for f in sorted(WIKI_ROOT.rglob("*.md")):
         if any(p in skip for p in f.relative_to(WIKI_ROOT).parts):
             continue
-        if f.name in ("index.md", "CLAUDE.md", "log.md", "_log.md", "patterns.md"):
+        # WIKI_NON_PAGES, not a fourth private copy of the list: wiki-lint,
+        # build-index and utils each carried their own and they had drifted, so
+        # the same vault yielded a different page set depending on who asked.
+        if f.name in WIKI_NON_PAGES:
             continue
         body = strip_code(f.read_text(encoding="utf-8", errors="replace"))
         h1 = [h.lstrip("# ").strip().lower() for h in re.findall(r"^# .+$", body, re.M)]
@@ -126,7 +133,12 @@ def merged_is_sane(original: str, merged: str) -> tuple[bool, str]:
             # punished the model for following the instruction.
             t = re.sub(r"^#{2,}\s*Update\s*\([^)]*\)\s*$", " ", t, flags=re.M)
         return set(re.findall(r"\d+(?:[.,]\d+)?", t))
-    lost_nums = numbers(original, drop_update_headers=True) - numbers(merged)
+    # Compared as NORMALIZED numbers: `2026-06-13` and `2026-6-13` are the same
+    # date, and a merge that reformats one used to be rejected for "losing" a
+    # number it had simply rewritten.
+    def norm(ns: set[str]) -> set[str]:
+        return {n.replace(",", ".").lstrip("0") or "0" for n in ns}
+    lost_nums = norm(numbers(original, drop_update_headers=True)) - norm(numbers(merged))
     if lost_nums:
         return False, f"lost numbers (likely a table/thresholds): {sorted(lost_nums)[:6]}"
 
@@ -142,7 +154,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=3)
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--dry-run", "--no-llm", dest="dry_run", action="store_true",
+                    help="list the pages that WOULD be merged; make no LLM call")
     args = ap.parse_args()
+
+    # `dry_run_until` promises the same brake on EVERY phase, and this script —
+    # which sends whole pages to a provider — was the one that ignored it.
+    dry = args.dry_run or is_dry_run()
 
     if not PROMPT_PATH.exists():
         print(f"ERROR: prompt not found: {PROMPT_PATH}", file=sys.stderr)
@@ -155,12 +173,28 @@ def main() -> int:
         # Explicitly, not silently: a truncated batch must not read as "all done".
         log(f"CAPPED by --limit: {len(pages) - args.limit} pages left untouched")
 
+    if dry:
+        for f in pages[:args.limit]:
+            body = f.read_text(encoding="utf-8", errors="replace")
+            log(f"  WOULD MERGE {f.relative_to(WIKI_ROOT).as_posix()} "
+                f"({len(body)} chars, ~{len(body) // 4} tokens)")
+        log("DRY RUN — no LLM call, nothing written.")
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(LOG_DIR / f"wiki-conflict-resolve_{DATE}.log",
+                          "\n".join(log_lines) + "\n")
+        return 0
+
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     ok = failed = 0
     for f in pages[:args.limit]:
         rel = f.relative_to(WIKI_ROOT).as_posix()
         fm, body = read_page(f)
-        prompt = prompt_tpl.replace("{PAGE_NAME}", f.name).replace("{PAGE_BODY}", body)
+        # FENCED, like every other prompt in the bundle. This was the one place
+        # a whole page — attacker-influenced text, since a page is compiled out
+        # of session transcripts — was interpolated into an instruction with no
+        # boundary at all.
+        prompt = (prompt_tpl.replace("{PAGE_NAME}", f.name)
+                  .replace("{PAGE_BODY}", fence(f"kind=wiki-page file={f.name}", body)))
 
         merged = llm_call(prompt, timeout=300)
         if not merged:
@@ -188,8 +222,8 @@ def main() -> int:
     log(f"done: ok={ok} failed={failed} "
         f"({'WRITTEN' if args.apply else 'preview only, write with --apply'})")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    (LOG_DIR / f"wiki-conflict-resolve_{DATE}.log").write_text(
-        "\n".join(log_lines) + "\n", encoding="utf-8", newline="\n")
+    atomic_write_text(LOG_DIR / f"wiki-conflict-resolve_{DATE}.log",
+                      "\n".join(log_lines) + "\n")
     return 0
 
 

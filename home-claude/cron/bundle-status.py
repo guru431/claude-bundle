@@ -23,6 +23,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
+    config_report, config_errors, quarantined,
     PROJECT_MAP, manifest_broken, policy_summary,
     BUNDLE_ROOT, WIKI_ROOT, PENDING_DIR, STATE_PATH, LLM_PROVIDER,
     DEFAULT_CHAIN, PROVIDERS, _env_first, ALLOW_OFFBOX,
@@ -31,7 +32,7 @@ from utils import (  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runs import (read_latest_runs, latest_by_task,  # noqa: E402
-                  freshness_windows, age_days)
+                  freshness_windows, age_days, never_recorded)
 
 
 def ok(msg):   print(f"  [ok] {msg}")
@@ -57,9 +58,9 @@ def main() -> int:
 
     # ── config ───────────────────────────────────────────────────────────────
     print("\n[config]")
-    # The chain the SELECTED provider actually uses: only "deepseek" (the
-    # default) falls back; any other explicit choice is that provider alone.
-    chain = DEFAULT_CHAIN if LLM_PROVIDER == "deepseek" else [LLM_PROVIDER]
+    # The chain the SELECTED provider actually uses: only `chain` (the default)
+    # falls back; any explicit provider name is that provider alone.
+    chain = DEFAULT_CHAIN if LLM_PROVIDER == "chain" else [LLM_PROVIDER]
     chain = [p for p in chain if p in PROVIDERS]
     keys = {p: _env_first(PROVIDERS[p]["key_env"]) for p in chain}
     # A key can perfectly well come from the process env instead of the file, so
@@ -100,6 +101,14 @@ def main() -> int:
         ok("WIKI_ALLOW_OFFBOX=0 — every off-box provider is refused; only a "
            "local server can answer")
     print(f"  policy: {policy_summary()}")
+    # The EFFECTIVE configuration, with the source of every value. Six separate
+    # defects had one cause — a value misread with no visible diagnostic — and
+    # this is where the answer to "what is this pipeline actually set to do"
+    # now lives.
+    for line in config_report():
+        print(f"  cfg | {line}")
+    for err in config_errors():
+        bad(f"config: {err}")
     print(f"  project_map entries: {len(PROJECT_MAP)}")
 
     # One value, two historical spellings (bundle.local.yaml::projects_root and
@@ -165,11 +174,18 @@ def main() -> int:
     # Sources the retry ceiling has given up on. A growing pending queue used to
     # be the only symptom of a source that fails identically every night, and it
     # never said WHICH source; this does.
-    for phase in ("flush", "compile_sessions"):
-        stuck = quarantined_count(phase)
+    for phase in ("flush", "compile_sessions", "compile_kb"):
+        stuck = quarantined(phase)
         if stuck:
-            bad(f"{phase}: {stuck} source(s) quarantined after WIKI_RETRY_LIMIT "
-                f"failures — see the open findings in FINDINGS.md")
+            # NAME them. The count alone used to be the whole report, and it was
+            # always 0 anyway: it counted `attempts >= RETRY_LIMIT`, while every
+            # caller resets that counter on the same line it quarantines the
+            # source. The list lives in its own state key now.
+            bad(f"{phase}: {len(stuck)} source(s) quarantined after "
+                f"WIKI_RETRY_LIMIT failures — {', '.join(stuck[:5])}"
+                + (f" (+{len(stuck) - 5})" if len(stuck) > 5 else ""))
+            print(f"      findings: {BUNDLE_ROOT / 'FINDINGS.md'}")
+            print(f"      payloads: {BUNDLE_ROOT / 'cron' / 'logs' / 'rejected'}")
 
     # ── artifact health (Semantic Artifact SLO) ──────────────────────────────
     # Deliberately separate from the pipeline-state block above: that one is
@@ -203,7 +219,16 @@ def main() -> int:
             mark = bad if (verdict != "green" or stale) else ok
             note = (f", STALE — last run {age:.0f}d ago, expected within "
                     f"{window}d") if stale else ""
+            duration = rec.get("duration_s")
+            if duration is not None:
+                detail += f", took {duration}s"
             mark(f"{task}: {verdict} ({detail}, last {ts}{note})")
+
+    # An ENABLED task that has never written a record is invisible to the block
+    # above: no row, so nothing to be stale about, so nothing anywhere says it
+    # exists. That is the same false-green the ledger was built to remove.
+    for task in never_recorded():
+        bad(f"{task}: enabled in registry.yaml, but has NEVER recorded a run")
 
     # ── wiki ─────────────────────────────────────────────────────────────────
     print("\n[wiki]")

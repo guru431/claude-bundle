@@ -119,6 +119,48 @@ function Resolve-Root($rootName) {
     return $mfClaudeHome
 }
 
+# ── 1b. Scheduled tasks come FIRST, before their own uninstaller is deleted ──
+# The order used to be the wrong way round: the file sweep removed
+# cron/admin/sync-tasks.ps1 and cron/registry.yaml, and only then did the
+# summary tell the user to run `sync-tasks.ps1 -Unregister`. Since the script
+# was gone by that point, every real uninstall landed in the fallback branch and
+# was told to run `schtasks /delete` by hand — the direct manipulation this
+# project forbids everywhere else. Worse, leftover tasks then fired scripts that
+# no longer existed, every night, forever.
+$syncTasks = Join-Path $mfPipelineRoot 'cron\admin\sync-tasks.ps1'
+if ($mf.tier -eq 'full' -and (Test-Path $syncTasks)) {
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $isAdmin = ([System.Security.Principal.WindowsPrincipal]$me).IsInRole(
+        [System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    # Are there any registry-managed tasks left at all?
+    $managed = @()
+    try {
+        $managed = @(Get-ScheduledTask -ErrorAction SilentlyContinue |
+                     Where-Object { "$($_.Description)" -like '*managed-by-registry*' })
+    } catch { $managed = @() }
+    if ($managed.Count -gt 0) {
+        if (-not $apply) {
+            Info "[dry-run] would unregister $($managed.Count) registry-managed task(s) first"
+        } elseif ($isAdmin) {
+            Info "unregistering $($managed.Count) registry-managed task(s)..."
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $syncTasks -Unregister
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "ERROR: -Unregister exited $LASTEXITCODE — stopping before any file is deleted." -ForegroundColor Red
+                Write-Host "       Fix the tasks first; nothing has been removed." -ForegroundColor Red
+                exit 3
+            }
+            Good "scheduled tasks unregistered"
+        } else {
+            Write-Host "ERROR: $($managed.Count) registry-managed scheduled task(s) still exist," -ForegroundColor Red
+            Write-Host "       and removing the files first would delete the tool that unregisters them." -ForegroundColor Red
+            Write-Host "       Run this ELEVATED (the uninstaller will do it for you), or first run:" -ForegroundColor Red
+            Write-Host "         powershell -File `"$syncTasks`" -Unregister" -ForegroundColor Red
+            Write-Host "       Nothing has been removed." -ForegroundColor Red
+            exit 3
+        }
+    }
+}
+
 # ── 2. Remove the files the installer wrote ─────────────────────────────────
 $removed = 0
 $gone = 0
@@ -201,15 +243,14 @@ if ($mf.tier -eq 'full') {
     # scheduler directly because it drifts from registry.yaml — telling users to
     # do exactly that as the official uninstall step contradicted its own rule
     # and left the registry describing tasks that no longer exist.
-    $syncTasks = Join-Path $mfPipelineRoot 'cron\admin\sync-tasks.ps1'
-    Warn "scheduled tasks are NOT unregistered by this script (that needs elevation)."
-    if (Test-Path $syncTasks) {
-        Warn "  Unregister them from the registry, elevated:"
-        Warn "    powershell -File `"$syncTasks`" -Unregister"
-        Warn "  (then delete $mfPipelineRoot\cron\registry.yaml if you are done with the pipeline)"
-    } else {
-        Warn "  cron/admin/sync-tasks.ps1 is already gone — list and remove the leftovers by hand:"
-        Warn "    schtasks /query /fo table | findstr /i claude     then: schtasks /delete /tn <name> /f"
+    # Step 1b above already unregistered them (or refused to touch a single file
+    # until they were). This is the closing note, not an instruction to go and
+    # do it now with a tool that no longer exists.
+    Info "scheduled tasks: unregistered in step 1b (registry-driven, never `schtasks /delete`)"
+    $regLeft = Join-Path $mfPipelineRoot 'cron\registry.yaml'
+    if (Test-Path $regLeft) {
+        Info "  registry.yaml is KEPT — it carries the paths and the password mode you"
+        Info "  filled in. Delete $regLeft yourself if you are done with the pipeline."
     }
 }
 if (-not $apply) {

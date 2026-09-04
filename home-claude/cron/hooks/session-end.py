@@ -19,6 +19,12 @@ def main():
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         return
+    # Valid JSON that is not an OBJECT (a bare list or string) sailed past the
+    # decoder and raised AttributeError on the first .get() — an exit 1 with a
+    # traceback shown to the user, for a hook documented as never raising on
+    # malformed input.
+    if not isinstance(data, dict):
+        return
 
     save_session_tail(data, last_n=30)
 

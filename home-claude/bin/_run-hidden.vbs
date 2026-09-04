@@ -11,10 +11,16 @@
 '              Password-mode tasks
 '
 ' Exit codes:
-'   0   — child exited 0
-'   N   — child exit code
-'   2   — bad arguments
-'   3   — unknown kind
+'   0    — child exited 0
+'   N    — child exit code
+'   2    — bad arguments
+'   3    — unknown kind
+'   9009 — the interpreter could not be launched (ERROR_FILE_NOT_FOUND, the
+'          same code cmd.exe uses). This one is the important addition: a
+'          missing or mistyped BASH_EXE / PYTHON_EXE made shell.Run raise a
+'          runtime error, WScript.Quit was never reached, the host exited 0,
+'          and Task Scheduler recorded Last Result 0. The task monitor then had
+'          nothing to alert about and the night was silently empty.
 
 Option Explicit
 
@@ -26,9 +32,15 @@ Dim kind, script, i, extra, cmd, shell, rc
 kind   = LCase(WScript.Arguments(0))
 script = WScript.Arguments(1)
 
+' Each extra argument is re-quoted, and an embedded quote is DOUBLED first.
+' Without that an argument that already carries `"` — which is what
+' sync-tasks.ps1 produced from a registry `script_args` entry — closed the
+' quoting early, and everything after it was re-split by the child's own parser.
+' It happened to work for `"--full"` because the two layers of quoting cancelled
+' out; an argument containing a space would have fallen apart.
 extra = ""
 For i = 2 To WScript.Arguments.Count - 1
-    extra = extra & " """ & WScript.Arguments(i) & """"
+    extra = extra & " """ & Replace(WScript.Arguments(i), """", """""") & """"
 Next
 
 Set shell = CreateObject("WScript.Shell")
@@ -97,6 +109,46 @@ Select Case kind
         WScript.Quit 3
 End Select
 
+' A LOG of launch failures. The launcher writes nothing anywhere, and Task
+' Scheduler's Last Result is the only trace a task leaves — so when the launch
+' itself failed there was no trace at all. One line into cron/logs/launcher.log
+' is the difference between "the pipeline is broken somewhere" and "BASH_EXE
+' points at a file that does not exist".
+Sub LogLaunchFailure(message)
+    Dim logDir, logPath, logFile
+    On Error Resume Next
+    logDir = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName)) & "\cron\logs"
+    If Not fso.FolderExists(logDir) Then fso.CreateFolder(logDir)
+    logPath = logDir & "\launcher.log"
+    Set logFile = fso.OpenTextFile(logPath, 8, True)
+    logFile.WriteLine Now & " " & message
+    logFile.Close
+    On Error Goto 0
+End Sub
+
+' Check the interpreter EXISTS before trying to run it: the error message can
+' then name the file, which a WSH runtime error cannot.
+Dim exePath
+exePath = ""
+If kind = "bash" Then exePath = bashExe
+If kind = "python" Then exePath = pythonExe
+If exePath <> "" And InStr(exePath, "\") > 0 Then
+    If Not fso.FileExists(exePath) Then
+        LogLaunchFailure "FATAL: " & kind & " interpreter not found: " & exePath & _
+            " (set BASH_EXE / PYTHON_EXE in <bundle>\.env) — script: " & script
+        WScript.Quit 9009
+    End If
+End If
+
 ' 0 = hidden window, True = wait for child to finish so the exit code propagates.
+On Error Resume Next
 rc = shell.Run(cmd, 0, True)
+If Err.Number <> 0 Then
+    LogLaunchFailure "FATAL: could not launch [" & cmd & "] — " & _
+        Err.Number & " " & Err.Description
+    Err.Clear
+    On Error Goto 0
+    WScript.Quit 9009
+End If
+On Error Goto 0
 WScript.Quit rc

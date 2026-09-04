@@ -14,7 +14,7 @@
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary -> Telegram Bot API money=no writes=nothing
+# bundle-io: offbox=a failure summary plus the TITLES of stale findings from every allowed project -> Telegram Bot API money=no writes=cron/state/task-monitor-seen.json
 
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -z "$BUNDLE_ROOT" ] || [ ! -d "$BUNDLE_ROOT/cron" ]; then
@@ -34,7 +34,12 @@ if [ -f "$CRON_DIR/lib/dotenv.sh" ]; then
     dotenv_load "$BUNDLE_ROOT/.env"
 fi
 
-PYTHON="${PYTHON_EXE:-python}"
+if [ -f "$CRON_DIR/lib/runtime.sh" ]; then
+    # shellcheck source=lib/runtime.sh
+    . "$CRON_DIR/lib/runtime.sh"
+fi
+have_python || exit 1
+have_bash || exit 1
 
 mkdir -p "$LOG_DIR"
 
@@ -47,7 +52,9 @@ echo "TRACE: BUNDLE_ROOT=$BUNDLE_ROOT" >> "$LOG_FILE"
 # --- Collect task statuses via PowerShell ---
 echo "TRACE: stage=tasks $(date '+%H:%M:%S')" >> "$LOG_FILE"
 TASK_STATUS=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$CRON_DIR" 2>>"$LOG_FILE" <<'PYSCRIPT'
-import subprocess, sys, json
+import subprocess, sys, json, os
+from datetime import datetime
+from pathlib import Path
 
 # argv[1] is $CRON_DIR — that is where schtasks_status (the fallback collection
 # path) is imported from.
@@ -112,17 +119,50 @@ if collect is schtasks_status.collect:
 # Result 0 = success, 267009 = still running, 267011 = not yet run, 267014 = terminated by user
 OK_CODES = {0, 267009, 267011, 267014}
 
-# Add task names here that you want to exclude from monitoring (e.g. tasks
-# that intentionally exit non-zero and send their own alerts).
-EXCLUDE_TASKS: set[str] = set()
+# Tasks excluded from monitoring — from the environment, so a deployment can
+# suppress a noisy neighbour without editing a shipped script. Comma-separated.
+EXCLUDE_TASKS = {x.strip() for x in os.environ.get('MONITOR_EXCLUDE_TASKS', '').split(',') if x.strip()}
+
+# Only alert on a pair (task, LastRun) that has not been alerted about before.
+# The monitor sent the SAME list every morning — a disabled task with an old
+# non-zero result, plus every third-party task on the machine — so a genuinely
+# new failure arrived inside a wall of text nobody read any more.
+STATE = Path(sys.argv[1]) / 'state' / 'task-monitor-seen.json'
+try:
+    seen = json.loads(STATE.read_text(encoding='utf-8'))
+    seen = seen if isinstance(seen, dict) else {}
+except (OSError, ValueError):
+    seen = {}
 
 failures = []
+digest = []
 for t in tasks:
     code = t['LastResult']
     if t['Name'] in EXCLUDE_TASKS:
         continue
-    if code not in OK_CODES and t['LastRun'] != 'never':
-        failures.append(t)
+    # A DISABLED task is supposed to be silent. Its last result is frozen at
+    # whatever it was when someone switched it off, and reporting that forever
+    # is noise about a decision that has already been made.
+    if str(t.get('State', '')).lower() in ('disabled', '3'):
+        continue
+    if code in OK_CODES or t['LastRun'] == 'never':
+        continue
+    if seen.get(t['Name']) == t['LastRun']:
+        digest.append(t)          # already reported — weekly digest only
+        continue
+    failures.append(t)
+    seen[t['Name']] = t['LastRun']
+
+try:
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(seen, indent=1), encoding='utf-8')
+except OSError:
+    pass
+
+# The standing failures are summarised once a week (Monday), not every morning.
+if digest and datetime.now().weekday() == 0:
+    NOTES.append(f'{len(digest)} task(s) still failing since an earlier alert: '
+                 + ', '.join(sorted(d['Name'] for d in digest))[:400])
 
 if failures:
     lines = []
@@ -251,7 +291,20 @@ STATUS_RE = re.compile(r'\*\*Status:\*\*\s*(\w+)', re.IGNORECASE)
 # (but still included in the stale check).
 NOISE_PREFIX = re.compile(r'^code-review[\s:\-]', re.IGNORECASE)
 
+# The SAME privacy gate every other collector uses. This loop reads the
+# FINDINGS.md of every directory under projects_root and puts their titles in a
+# Telegram message — so a project excluded by the policy was having its name and
+# its finding titles carried off-box by the one job that never asked.
+sys.path.insert(0, str(BUNDLE_ROOT / 'cron' / 'hooks'))
+try:
+    from utils import working_copy_allowed
+except Exception:
+    def working_copy_allowed(_name):
+        return True
+
 for findings in list(PROJECTS_ROOT.glob('*/FINDINGS.md')) + list(BUNDLE_ROOT.glob('FINDINGS.md')):
+    if findings.parent != BUNDLE_ROOT and not working_copy_allowed(findings.parent.name):
+        continue
     try:
         text = findings.read_text(encoding='utf-8', errors='replace')
     except OSError:
@@ -304,7 +357,15 @@ fi
 # registry trigger and exits 1 when something has gone quiet.
 echo "TRACE: stage=stale $(date '+%H:%M:%S')" >> "$LOG_FILE"
 STALE_OUT=$("$PYTHON" "$CRON_DIR/runs.py" stale 2>>"$LOG_FILE")
-if [ -n "$STALE_OUT" ]; then
+STALE_RC=$?
+# rc 0 = nothing stale, 1 = something is stale, anything else = the CHECK broke.
+# Branching on "is the output empty" made a traceback in the log indistinguishable
+# from a clean bill of health — for the check whose entire job is noticing silence.
+if [ "$STALE_RC" -gt 1 ]; then
+    echo "Stale check FAILED (rc=$STALE_RC) — see the log above" >> "$LOG_FILE"
+    ALERTS="${ALERTS:+$ALERTS
+}StaleVerdict: the staleness check itself failed (rc=$STALE_RC) — nothing was verified"
+elif [ -n "$STALE_OUT" ]; then
     echo "Stale verdicts:" >> "$LOG_FILE"
     printf '%s\n' "$STALE_OUT" >> "$LOG_FILE"
     ALERTS="${ALERTS:+$ALERTS

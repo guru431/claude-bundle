@@ -25,7 +25,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"<python-exe>\" \"C:/Users/<user>/.claude/hooks/block-iptables-save-to-rules.py\""
+            "command": "\"<python-exe>\" \"<claude-home>/hooks/block-iptables-save-to-rules.py\""
+          },
+          {
+            "type": "command",
+            "command": "\"<python-exe>\" \"<claude-home>/hooks/bash-guard.py\""
           }
         ]
       }
@@ -36,8 +40,22 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"<python-exe>\" \"C:/Users/<user>/.claude/hooks/md2pdf-on-edit.py\"",
+            "command": "\"<python-exe>\" \"<claude-home>/hooks/md2pdf-on-edit.py\"",
             "timeout": 130
+          },
+          {
+            "type": "command",
+            "command": "\"<python-exe>\" \"<claude-home>/hooks/ps1-bom-guard.py\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"<python-exe>\" \"<claude-home>/hooks/prompt-secret-warn.py\""
           }
         ]
       }
@@ -47,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"<python-exe>\" \"C:/Users/<user>/.claude/cron/hooks/session-start.py\""
+            "command": "\"<python-exe>\" \"<claude-home>/cron/hooks/session-start.py\""
           }
         ]
       }
@@ -57,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"<python-exe>\" \"C:/Users/<user>/.claude/cron/hooks/session-end.py\""
+            "command": "\"<python-exe>\" \"<claude-home>/cron/hooks/session-end.py\""
           }
         ]
       }
@@ -67,7 +85,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"<python-exe>\" \"C:/Users/<user>/.claude/cron/hooks/pre-compact.py\"",
+            "command": "\"<python-exe>\" \"<claude-home>/cron/hooks/pre-compact.py\"",
             "timeout": 130
           }
         ]

@@ -2,7 +2,7 @@
 """Wiki Index Builder — regenerate wiki indexes.
 
 1. wiki/projects/index.md — group each project's pages by type
-   (incident-, solution-, feedback-, ARCH-/_troubles-, other = topics)
+   (incident-, solution-, feedback-, ARCH-, other = topics)
 2. wiki/kb/index.md — group with counters and top-10 recently updated
 3. wiki/projects/{name}/_log.md — create skeleton if missing
    (compile scripts then append via append_per_project_log)
@@ -27,7 +27,8 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (WIKI_ROOT, WIKI_NON_PAGES, parse_frontmatter,  # noqa: E402
-                   mark_phase_success, is_dry_run)
+                   atomic_write_text, extract_wikilinks, mark_phase_success,
+                   is_dry_run)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from runs import record_run  # noqa: E402
@@ -42,9 +43,58 @@ KB_DIR = WIKI_ROOT / "kb"
 SKIP_FILES = WIKI_NON_PAGES
 
 
+def collect_backlinks() -> dict[str, list[str]]:
+    """page stem → the pages that link TO it.
+
+    docs/wiki-method.md says reverse links are what makes the vault navigable
+    and then admits nothing counts them. The data was already being gathered —
+    the orphan check walks every page's links — it just had nowhere to go. This
+    is that walk, kept, and rendered as a "Linked from" section in each index.
+    """
+    backlinks: dict[str, set[str]] = {}
+    skip = {".obsidian", "daily", ".pending", ".git"}
+    for f in WIKI_ROOT.rglob("*.md"):
+        parts = f.relative_to(WIKI_ROOT).parts
+        if any(p in skip for p in parts) or f.name in WIKI_NON_PAGES:
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for target in extract_wikilinks(text):
+            stem = target.rsplit("/", 1)[-1]
+            if stem == f.stem:
+                continue  # a page linking to itself is not a backlink
+            backlinks.setdefault(stem, set()).add(
+                f.relative_to(WIKI_ROOT).with_suffix("").as_posix())
+    return {k: sorted(v) for k, v in backlinks.items()}
+
+
+def render_backlinks(backlinks: dict[str, list[str]], stems: list[str],
+                     limit: int = 40) -> list[str]:
+    """The `## Linked from` block for an index, for the pages it lists."""
+    rows = [(s, backlinks.get(s) or []) for s in stems]
+    rows = [(s, srcs) for s, srcs in rows if srcs]
+    if not rows:
+        return []
+    lines = ["## Linked from", ""]
+    for stem, srcs in sorted(rows)[:limit]:
+        shown = ", ".join(f"[[{s}|{s.rsplit('/', 1)[-1]}]]" for s in srcs[:6])
+        more = f" (+{len(srcs) - 6})" if len(srcs) > 6 else ""
+        lines.append(f"- **{stem}** ← {shown}{more}")
+    if len(rows) > limit:
+        lines.append(f"- … and {len(rows) - limit} more")
+    lines.append("")
+    return lines
+
+
 def categorize_project_page(filename: str) -> str:
     """Classify a page by its filename prefix."""
     low = filename.lower()
+    # `_troubles-` is kept as a tolerated INPUT prefix — no shipped script has
+    # ever created one, so it can only come from a hand-written page, and
+    # bucketing it with the incidents is the useful thing to do with it. It is
+    # no longer advertised in CLAUDE.md as something to look for.
     if low.startswith("incident") or low.startswith("_troubles"):
         return "Incidents"
     if low.startswith("solution") or low.startswith("fix"):
@@ -98,6 +148,7 @@ def build_projects_index() -> tuple[int, int]:
 
     projects_count = 0
     pages_count = 0
+    all_stems: list[str] = []
     # build_kb_index() checks each of its directories; this one did not, so a
     # vault without wiki/projects/ (a split install where wiki/ was not copied,
     # or a hand-deleted folder) crashed the whole task with FileNotFoundError
@@ -116,6 +167,7 @@ def build_projects_index() -> tuple[int, int]:
         if not pages:
             continue
 
+        all_stems.extend(p.stem for p in pages)
         projects_count += 1
         pages_count += len(pages)
         ensure_project_log(proj_dir)
@@ -144,12 +196,14 @@ def build_projects_index() -> tuple[int, int]:
                 lines.append(f"- [[projects/{project}/{stem}|{stem}]] · {upd}")
             lines.append("")
 
+    lines.extend(render_backlinks(collect_backlinks(), all_stems))
+
     lines.append("---")
     lines.append("Back: [[index|Main index]]")
     lines.append("")
 
     out = PROJECTS_DIR / "index.md"
-    out.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(out, "\n".join(lines))
     return projects_count, pages_count
 
 
@@ -208,6 +262,10 @@ def build_kb_index() -> dict[str, int]:
                 lines.append(f"- [[kb/{sec}/{stem}|{stem}]]")
         lines.append("")
 
+    lines.extend(render_backlinks(collect_backlinks(),
+                                  [stem for sec in sections
+                                   for stem, _ in all_items[sec]]))
+
     lines.append("---")
     lines.append("Back: [[index|Main index]]")
     lines.append("")
@@ -217,7 +275,7 @@ def build_kb_index() -> dict[str, int]:
     if not KB_DIR.is_dir():
         print(f"No {KB_DIR} — nothing to index under kb/.")
         return counts
-    (KB_DIR / "index.md").write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(KB_DIR / "index.md", "\n".join(lines))
     return counts
 
 
@@ -226,7 +284,7 @@ def update_main_index(projects_count: int, pages_count: int, kb_counts: dict[str
     idx = WIKI_ROOT / "index.md"
     if not idx.exists():
         return
-    text = idx.read_text(encoding="utf-8")
+    text = idx.read_text(encoding="utf-8", errors="replace")
 
     today = datetime.now().strftime("%Y-%m-%d")
     new_table = (
@@ -243,7 +301,7 @@ def update_main_index(projects_count: int, pages_count: int, kb_counts: dict[str
         text = pattern.sub(new_table, text)
     else:
         text = text.rstrip() + "\n\n## Stats\n\n" + new_table
-    idx.write_text(text, encoding="utf-8")
+    atomic_write_text(idx, text)
 
 
 def main():

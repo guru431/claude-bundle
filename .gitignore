@@ -30,6 +30,12 @@ home-claude/bundle.local.yaml
 # (The * also covers the pre-commit hook's .sanitize-patterns.tmp fallback.)
 .sanitize-patterns*
 
+# The pre-push hook's temp directory, used when mktemp is unavailable. It lives
+# inside the repo, so an interrupted push left it in the working tree as an
+# untracked, unignored folder full of object ids. (The hook now also removes it
+# on every exit path — this is the second belt.)
+.pre-push.tmp/
+
 # A Claude Code workspace inside the bundle dir — local test artifacts only
 .claude/
 

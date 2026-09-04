@@ -18,7 +18,6 @@ import json
 import os
 import re
 import sys
-import time
 
 # Windows CP1251 → UTF-8
 if hasattr(sys.stdout, "reconfigure"):
@@ -30,26 +29,30 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (  # noqa: E402
-    RETRY_LIMIT,
     add_source_to_frontmatter,
-    append_bundle_finding,
+    append_fragment,
     append_per_project_log,
     attempt_reset,
-    attempt_bump,
+    config_report,
+    give_up_after_repeated_failure,
     iter_md_lines,
-    llm_call,
+    llm_call_ex,
+    llm_pace,
+    normalize_body,
     normalize_project_name,
     normalize_wiki_path,
-    parse_llm_json,
+    parse_llm_json_result,
     quarantine_raw,
     read_page,
-    sanitize_page_body,
+    rewrite_is_sane,
     state_add,
     state_get,
     strip_leading_frontmatter,
+    worst_kind,
     is_dry_run,
     mark_phase_success,
     write_page,
+    WIKI_NON_PAGES,
     BUNDLE_ROOT,
     WIKI_ROOT,
     DAILY_DIR,
@@ -176,17 +179,30 @@ def parse_daily_by_project(text: str) -> dict[str, str]:
 
 
 def get_existing_project_pages(project: str) -> dict[str, str]:
-    """Read existing wiki pages for a project."""
-    pages = {}
+    """Read existing wiki PAGES for a project, freshest first.
+
+    Two changes that matter for the prompt budget:
+      * WIKI_NON_PAGES is excluded. `_log.md` is a script-managed journal, not a
+        page, and it grows without bound — sent as if it were a page it ate the
+        body budget, tripped the size cap early and pushed the whole project onto
+        the blind-append path, where the model rewrites bodies it never read.
+      * Sorted by mtime. The truncation used to happen in `glob()` order, so
+        WHICH pages the model got to see was down to the filesystem; the recently
+        touched ones are the ones the day's notes are about.
+    """
+    pages: dict[str, str] = {}
     proj_dir = PROJECTS_DIR / project
-    if proj_dir.exists():
-        for f in proj_dir.glob("*.md"):
-            pages[f.stem] = f.read_text(encoding="utf-8", errors="replace")
+    if not proj_dir.exists():
+        return pages
+    files = [f for f in proj_dir.glob("*.md") if f.name not in WIKI_NON_PAGES]
+    for f in sorted(files, key=lambda p: p.stat().st_mtime if p.exists() else 0,
+                    reverse=True):
+        pages[f.stem] = f.read_text(encoding="utf-8", errors="replace")
     return pages
 
 
 def compile_project_data(project: str, data: str,
-                         existing_pages: dict[str, str]) -> tuple[list[dict], bool, bool]:
+                         existing_pages: dict[str, str]) -> tuple[list[dict], bool, str]:
     """Call the LLM to compile project data into wiki pages.
 
     A large data section (observed 161351 chars) deterministically makes the
@@ -194,18 +210,23 @@ def compile_project_data(project: str, data: str,
     boundaries (never mid-line/mid-paragraph) and call the LLM per part,
     concatenating results.
 
-    Returns (changes, complete, transient). A failed part no longer zeroes the whole
+    Returns (changes, complete, kind). A failed part no longer zeroes the whole
     project: successful parts are accumulated and applied (their content is not
     lost, nor retried forever as part of a big payload), while complete=False
     leaves the (daily, project) pair unmarked — the retry redoes the whole
     project, but already-succeeded parts overwrite idempotently and the failed
     part gets another chance.
 
-    `complete` is False when any part failed; `transient` says WHY. A part that
-    failed because llm_call returned None is a provider/network problem and
-    retrying is exactly right. A part whose answer arrived and could not be
-    parsed or validated is a prompt/normalizer bug — retrying reproduces it
-    forever, so the caller counts those against RETRY_LIMIT.
+    `complete` is False when any part failed; `kind` says WHY, in LLMResult
+    terms (the worst of the failures). `transient` — provider down, a 429, a
+    network error — is fixed by waiting and must not count against RETRY_LIMIT;
+    `config` is a missing key or a closed DLP gate and is fatal for the run, not
+    the source's fault; `deterministic` is an answer that arrived and could not
+    be used, and only that one is counted.
+
+    This used to be a bare bool, and it read every non-200 the same way — so an
+    HTTP 400 on an oversized chunk (which the docstring above itself calls a
+    deterministic bail) was retried nightly, forever.
 
     Each change carries `_bodies_withheld`: True when the LLM saw only page
     NAMES while producing it (page-count or byte cap), so apply_changes must
@@ -267,7 +288,7 @@ def compile_project_data(project: str, data: str,
 
     all_changes: list[dict] = []
     complete = True
-    transient = False   # at least one failure was "the provider did not answer"
+    kinds: list[str] = []   # LLMResult kinds of the failures, worst wins
     for part_idx, part in enumerate(parts):
         existing_list, existing_content, part_withheld = render_existing()
         part_label = f" (part {part_idx+1}/{len(parts)})" if len(parts) > 1 else ""
@@ -301,31 +322,47 @@ Answer STRICTLY in JSON format (array of objects):
   }}
 ]
 
+`action` states your INTENT and is advisory — the script decides by what is on
+disk (an existing path is an update, or an append when you were shown page names
+only). Keep it accurate anyway: it is what makes your intent readable if the
+change is rejected and quarantined.
+
+Return `[]` — an empty array — when nothing in the data is worth a page. That is
+a valid, expected answer, not a failure.
+
 JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
 
-        output = llm_call(full_prompt, timeout=600)
-        if not output:
-            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: llm_call returned None — part skipped, project left unmarked", file=sys.stderr)
+        res = llm_call_ex(full_prompt, timeout=600)
+        if not res.text:
+            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: "
+                  f"{res.kind} — {res.detail or 'no answer'}; part skipped, "
+                  f"project left unmarked", file=sys.stderr)
             complete = False
-            transient = True
+            kinds.append(res.kind)
             continue
+        output = res.text
 
         try:
-            result = parse_llm_json(output)
+            parsed_ok, result = parse_llm_json_result(output)
         except Exception as e:
             print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: parse_llm_json failed: {e} — part skipped", file=sys.stderr)
             complete = False
+            kinds.append("deterministic")
             continue
 
         if not result:
             # The prompt explicitly allows "[]" for "nothing here is worth a
-            # page", so a literal empty array is SUCCESS, not a failure —
-            # conflating the two made the intended 0-changes path unreachable
-            # and retried such a daily forever.
-            if re.sub(r"^\s*```(?:json)?|```\s*$", "", output).strip() == "[]":
+            # page", so an empty array is SUCCESS. That used to be decided by a
+            # string comparison STRICTER than the parser — `[ ]` with a space,
+            # or `[]` with a trailing comment, read as a deterministic failure,
+            # counted against the ceiling and was quarantined on the third night
+            # with a finding blaming the prompt. The parser's own verdict is the
+            # answer.
+            if parsed_ok:
                 continue
-            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: empty result (response {len(output)} chars) — part skipped", file=sys.stderr)
+            print(f"  ERROR compile {project} part {part_idx+1}/{len(parts)}: unparseable result (response {len(output)} chars) — part skipped", file=sys.stderr)
             complete = False
+            kinds.append("deterministic")
             continue
 
         all_changes.extend(result)
@@ -346,9 +383,9 @@ JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
                 if norm:
                     existing_pages[Path(norm).stem] = chg["content"]
         if part_idx < len(parts) - 1:
-            time.sleep(5)
+            llm_pace()
 
-    return all_changes, complete, transient
+    return all_changes, complete, worst_kind(kinds)
 
 
 def coalesce_changes(changes: list[dict]) -> list[dict]:
@@ -388,85 +425,35 @@ def coalesce_changes(changes: list[dict]) -> list[dict]:
     return out
 
 
-def _strip_leading_h1(md: str) -> str:
-    """Drop the leading H1 of an appended fragment.
-
-    The model returns a WHOLE PAGE, title included. Appended as-is it becomes a
-    second H1 on an existing page, and the page turns into "two versions of
-    itself" — with no way to tell which title describes the current state. The
-    page already has a title; the duplicate carries no information.
-    """
-    lines = md.split("\n")
-    for i, ln in enumerate(lines):
-        if not ln.strip():
-            continue
-        if ln.startswith("# "):
-            del lines[i]
-            while i < len(lines) and not lines[i].strip():
-                del lines[i]
-        break  # first non-blank line isn't an H1 — nothing to strip
-    return "\n".join(lines)
-
-
-def _demote_headings(md: str) -> str:
-    """Push the fragment's headings one level down — it nests under `## Update (…)`.
-
-    Otherwise the update's sections sit at the same level as the page's own, so
-    the page ends up with two sections of the same name and, again, no way to
-    tell which one is current. Demoting makes the update a subsection, which is
-    what it actually is: an addition made on a given date.
-
-    Fenced code is left alone: `# comment` inside ``` is code, not a heading.
-    """
-    out: list[str] = []
-    for line, in_code in iter_md_lines(md):
-        # Up to H5: markdown won't render deeper anyway, and '#######' is junk.
-        if not in_code and re.match(r"^#{1,5} ", line):
-            line = "#" + line
-        out.append(line)
-    return "\n".join(out)
-
-
-# Headings that declare their content to be the current state. In an APPENDED
-# fragment such a heading lies: it is a snapshot taken on the daily log's date,
-# not the page's present state.
-_CURRENT_HEADING_RE = re.compile(
-    r"^(#{1,6})\s+(current\s+state|current\s+status|current\s+version"
-    r"|current\s+stats?|latest\s+state|overview|status)\s*$",
-    re.IGNORECASE,
-)
-
-
-def _date_current_headings(md: str, date_str: str) -> str:
-    """Rename "current state" headings in a fragment into a dated snapshot.
-
-    A page has exactly one canonical current block — the one already there (or
-    the one written by a full rewrite, where the model did see the body).
-    Everything the nightly run appends is history, so it gets stamped with a
-    date and the page never accumulates competing "current" states.
-    """
-    out: list[str] = []
-    for line, in_code in iter_md_lines(md):
-        m = None if in_code else _CURRENT_HEADING_RE.match(line)
-        if m:
-            line = f"{m.group(1)} State as of {date_str} (snapshot)"
-        out.append(line)
-    return "\n".join(out)
+# _strip_leading_h1 / _demote_headings / _date_current_headings moved to
+# cron/hooks/utils.py behind append_fragment(): wiki-compile-kb.py needed the
+# same three transformations and, having no access to them, appended raw text.
 
 
 _DATE_SUFFIX_RE = re.compile(r"^(.*)-(\d{4}-\d{2}-\d{2})\.md$")
 
 
-def _enforce_source_date(rel_path: str, source_date: str) -> str:
+def _enforce_source_date(rel_path: str, source_date: str, blind: bool) -> str:
     """Force the date suffix in a filename to the TRUSTED daily-log date.
 
     The model invents the date in `<slug>-<date>.md` — it comes out of the
     model's head, not out of the data, and lands in the future often enough to
     matter (57 such pages in one meta-repo sample). The only trustworthy date
-    here is that of the source daily (always <= today). If a page under the same
-    slug already exists with ANY date, reuse it instead of minting a duplicate
-    under a new one. Paths with no date suffix (solution-*, architecture-*) are
-    left untouched.
+    here is that of the source daily (always <= today). Paths with no date
+    suffix (solution-*, architecture-*) are left untouched.
+
+    Three rules, in order:
+
+    1. **The page the model named already exists → that IS the page.** Updating
+       an existing dated incident keeps its own date; nothing is re-minted.
+    2. **Otherwise the date comes from the source**, never from the model.
+    3. **A DIFFERENT existing page under the same slug is reused only when the
+       write will be an append** (`blind`). Reusing it on the non-blind path was
+       a silent data loss: the model deliberately opened
+       `incident-timeout-2026-03-01.md` alongside an existing
+       `incident-timeout-2026-01-05.md`, the path was redirected onto the older
+       page, and the full-body write then replaced January's text with March's —
+       no reject, no log line, nothing in the journal.
     """
     parts = rel_path.split("/")
     if len(parts) != 3:
@@ -476,11 +463,16 @@ def _enforce_source_date(rel_path: str, source_date: str) -> str:
         return rel_path
     slug = m.group(1)
     folder = WIKI_ROOT / parts[0] / parts[1]
-    if folder.is_dir():
+    # 1) The named page exists — the model is updating it, not inventing a date.
+    if (folder / parts[2]).exists():
+        return rel_path
+    # 3) Append-only writes may fold into an existing page under the same slug.
+    if blind and folder.is_dir():
         pat = re.compile(r"^" + re.escape(slug) + r"-\d{4}-\d{2}-\d{2}\.md$")
         for existing in sorted(folder.glob("*.md")):
             if pat.match(existing.name):
                 return f"{parts[0]}/{parts[1]}/{existing.name}"
+    # 2) A new page, dated from the trusted source.
     return f"{parts[0]}/{parts[1]}/{slug}-{source_date}.md"
 
 
@@ -508,7 +500,14 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
     source_date = Path(source_daily).stem
     if source_date > DATE:
         source_date = DATE
-    for change in coalesce_changes(changes):
+
+    # Normalize and date-enforce FIRST, coalesce SECOND. The other order is what
+    # made coalesce_changes unable to do its job: two dated entries of one
+    # response were merged under the model's paths and only then pushed onto the
+    # same enforced path, so the second write replaced the first — exactly the
+    # loss coalescing exists to prevent.
+    staged: list[dict] = []
+    for change in changes:
         if not isinstance(change, dict):
             rejected.append(f"non-dict entry: {str(change)[:80]}")
             continue  # defensive: a malformed LLM array may yield non-dict entries
@@ -528,11 +527,15 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
             rejected.append(f"out-of-scope path: {rel_path}")
             continue
 
+        blind = bool(change.get("_bodies_withheld", blind_update))
         # The date in the filename is derived IN CODE from the trusted
-        # source_date, not taken from whatever the model wrote. The slug lookup
-        # inside also collapses would-be duplicates onto the existing page.
-        rel_path = _enforce_source_date(rel_path, source_date)
+        # source_date, not taken from whatever the model wrote.
+        rel_path = _enforce_source_date(rel_path, source_date, blind)
+        staged.append({**change, "path": rel_path, "content": content})
 
+    for change in coalesce_changes(staged):
+        rel_path = change["path"]
+        content = change["content"]
         full_path = WIKI_ROOT / rel_path
 
         content = strip_leading_frontmatter(content)
@@ -541,24 +544,30 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
         action_label = "updated" if full_path.exists() else "created"
         blind = bool(change.get("_bodies_withheld", blind_update))
         if blind and full_path.exists():
-            # The body is preserved (the model never saw it), but the fragment
-            # is normalized first: no H1 of its own, one level down so it nests
-            # under `## Update (…)`, and no heading claiming to be the current
-            # state. Without this the page accumulates "two versions of itself".
-            fragment = _demote_headings(_strip_leading_h1(content.strip()))
-            fragment = _date_current_headings(fragment, DATE)
-            # Sanitize BEFORE the containment check: write_page runs the body
-            # through sanitize_page_body anyway, and if the fragment changes
-            # after the comparison, what lands on disk is text the check will
-            # not find next time — so the next run appends a copy.
-            fragment = sanitize_page_body(fragment, label=full_path.name).strip()
-            # Idempotency is checked against the FRAGMENT, not the raw content:
-            # the page holds the transformed text, so comparing against the
-            # original would never match and every retry would append a copy.
-            if fragment in existing_body:
+            # The body is preserved (the model never saw it) and the fragment is
+            # normalized to nest under `## Update (…)`. append_fragment (utils)
+            # is the shared implementation — compile-kb used to append raw text
+            # and produced the "two versions of one page" this prevents.
+            merged = append_fragment(existing_body, content, DATE)
+            if merged == existing_body:
                 continue  # nothing new — keeps a retried daily idempotent
-            content = existing_body.rstrip() + f"\n\n## Update ({DATE})\n\n" + fragment + "\n"
+            content = merged
             action_label = "appended"
+        elif full_path.exists():
+            # A NON-blind update replaces the body wholesale, and the model does
+            # sometimes "tidy up" half of it away. Two cheap signals (lost
+            # wikilinks, a page that lost most of its length) fall back to an
+            # append rather than dropping content — the whole page is still in
+            # hand, so there is no reason to gamble it on a full rewrite.
+            sane, why = rewrite_is_sane(existing_body, normalize_body(content))
+            if not sane:
+                print(f"  WARN compile {project}: {rel_path} — {why}; appending "
+                      f"instead of replacing", file=sys.stderr)
+                merged = append_fragment(existing_body, content, DATE)
+                if merged == existing_body:
+                    continue
+                content = merged
+                action_label = "appended (rewrite refused)"
 
         new_fm = add_source_to_frontmatter(
             existing_fm,
@@ -575,56 +584,89 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
     return applied, rejected
 
 
-def give_up_after_repeated_failure(marker: str, project: str, daily_path: Path,
-                                   transient: bool, changes: list, rejected: list,
-                                   log) -> bool:
+def give_up_on_pair(marker: str, project: str, daily_path: Path, kind: str,
+                    changes: list, rejected: list, log) -> bool:
     """Stop retrying a (daily, project) pair that fails the same way every night.
 
-    Returns True when the pair was QUARANTINED — its payload saved, one finding
-    filed, the marker set so nothing retries it again.
+    A thin wrapper over utils.give_up_after_repeated_failure — the ceiling logic
+    used to live here while flush had its own copy and compile-kb had none, which
+    is how three scripts ended up with three retry policies against one paragraph
+    of documentation. This adds only the two things specific to compile-sessions:
+    the pair marker is recorded (so nothing retries it), and the finding names the
+    prompt/normalizer mismatch that is almost always the cause.
 
-    The rule this bounds is otherwise correct and load-bearing: a pair that
-    failed is left unmarked so its content is recompiled rather than lost. But
-    with no ceiling, a DETERMINISTIC failure — a path `normalize_wiki_path`
-    refuses, an answer that never parses — replays identically forever: same
-    call, same rejection, same `exit 1`, same 03:00 alert, and no run brings the
-    next one any closer to succeeding.
-
-    A transient failure (llm_call returned None: provider down, quota spent)
-    does NOT count. That one really is fixed by waiting, and putting a ceiling
-    on it would throw away content over a bad week.
+    A `transient` failure (provider down, quota spent) does NOT count — waiting
+    fixes it, and a ceiling on it would throw away content over a bad week. Nor
+    does `config`: a missing key is not the pair's fault.
     """
-    if transient or not RETRY_LIMIT:
-        return False
-    n = attempt_bump("compile_sessions", marker)
-    if n < RETRY_LIMIT:
-        log(f"  [{project}] deterministic failure {n}/{RETRY_LIMIT} for "
-            f"{daily_path.stem} — retrying next run")
-        return False
+    quarantined = give_up_after_repeated_failure(
+        section="compile_sessions",
+        marker=marker,
+        label=f"{project} {daily_path.stem}",
+        kind=kind,
+        payload="\n".join(rejected) if rejected else str(changes),
+        finding_title=f"compile-sessions gave up on {daily_path.stem}#{project}",
+        finding_context="`cron/wiki/wiki-compile-sessions.py` (retry ceiling, WIKI_RETRY_LIMIT)",
+        finding_what=(f"The (daily, project) pair `{daily_path.stem}#{project}` "
+                      f"failed repeatedly for a reason a retry cannot fix (the "
+                      f"model's answer arrived and was rejected — an unusable "
+                      f"path, or output that would not parse). Its payload is "
+                      f"quarantined in `cron/logs/rejected/`; the pair is now "
+                      f"marked compiled so the nightly run stops replaying it."),
+        finding_proposal=("Read the quarantined payload. Usually it is the compile "
+                          "prompt steering the model at a path outside "
+                          "`projects/<project>/`, or `normalize_wiki_path` being "
+                          "stricter than the prompt promises. Fix one of the two, "
+                          "then `wiki-compile-sessions.py --replay "
+                          f"{daily_path.stem}#{project}`."),
+        log=log)
+    if quarantined:
+        state_add("compile_sessions", "compiled_pairs", [marker])
+    return quarantined
 
-    payload = "\n".join(rejected) if rejected else str(changes)
-    quarantine_raw(f"{daily_path.stem}#{project}", "retry-limit-reached", payload)
-    state_add("compile_sessions", "compiled_pairs", [marker])
-    attempt_reset("compile_sessions", marker)
-    log(f"  [{project}] QUARANTINED after {n} deterministic failures on "
-        f"{daily_path.stem} — payload in cron/logs/rejected/, retries stop here")
-    filed = append_bundle_finding(
-        title=f"compile-sessions gave up on {daily_path.stem}#{project}",
-        context="`cron/wiki/wiki-compile-sessions.py` (retry ceiling, WIKI_RETRY_LIMIT)",
-        what=(f"The (daily, project) pair `{daily_path.stem}#{project}` failed "
-              f"{n} times in a row for a reason a retry cannot fix (the model's "
-              f"answer arrived and was rejected — an unusable path, or output "
-              f"that would not parse). Its payload is quarantined in "
-              f"`cron/logs/rejected/`; the pair is now marked compiled so the "
-              f"nightly run stops replaying it."),
-        proposal=("Read the quarantined payload. Usually it is the compile prompt "
-                  "steering the model at a path outside `projects/<project>/`, or "
-                  "`normalize_wiki_path` being stricter than the prompt promises. "
-                  "Fix one of the two and re-run this daily by hand."),
-    )
-    if not filed:
-        log(f"  [{project}] (a finding for this pair is already open)")
-    return True
+
+def _replay_target(argv: list[str]) -> str | None:
+    """`--replay DATE` or `--replay DATE#project` from the command line."""
+    for i, a in enumerate(argv):
+        if a == "--replay" and i + 1 < len(argv):
+            return argv[i + 1].strip()
+        if a.startswith("--replay="):
+            return a.split("=", 1)[1].strip()
+    return None
+
+
+def clear_markers(target: str) -> int:
+    """Drop every compile marker for `DATE` or `DATE#project`. Returns how many.
+
+    Markers carry a fingerprint (`DATE@fp`, `DATE#project@fp`), so a prefix match
+    is what identifies them; `attempts` and the quarantine list are cleared too,
+    or a replay of a quarantined pair would be skipped on the marker it was given
+    when it was given up on.
+    """
+    date_part = target.split("#", 1)[0]
+    cleared = 0
+
+    dailies = [d for d in state_get("compile_sessions", "compiled_dailies")
+               if d == date_part or d.startswith(f"{date_part}@")]
+    if dailies:
+        state_remove("compile_sessions", "compiled_dailies", dailies)
+        cleared += len(dailies)
+
+    prefix = target if "#" in target else f"{date_part}#"
+    pairs = [p for p in state_get("compile_sessions", "compiled_pairs")
+             if p.startswith(prefix)]
+    if pairs:
+        state_remove("compile_sessions", "compiled_pairs", pairs)
+        cleared += len(pairs)
+
+    quar = [q for q in state_get("compile_sessions", "quarantined")
+            if q.startswith(prefix)]
+    if quar:
+        state_remove("compile_sessions", "quarantined", quar)
+        cleared += len(quar)
+    for q in pairs + quar:
+        attempt_reset("compile_sessions", q)
+    return cleared
 
 
 def main():
@@ -639,6 +681,18 @@ def main():
             f.write(line + "\n")
 
     log(f"=== Wiki Compile Sessions {DATE} ===")
+    for line in config_report():
+        log(f"  cfg | {line}")
+
+    # `--replay DATE[#project]` clears the markers for one daily and recompiles
+    # it. The quarantine finding tells the reader to "re-run this daily by hand"
+    # and no such mechanism existed — the only way was hand-editing
+    # `.processed.json` under its lock, which is the sort of instruction nobody
+    # should be given.
+    replay = _replay_target(sys.argv[1:])
+    if replay:
+        cleared = clear_markers(replay)
+        log(f"REPLAY {replay}: cleared {cleared} marker(s) — recompiling")
 
     compiled = get_compiled_dailies()
     compiled_pairs = get_compiled_pairs()
@@ -659,10 +713,15 @@ def main():
 
     if is_dry_run():
         log("DRY RUN — dailies that WOULD be compiled (no LLM, no writes):")
+        grand = 0
         for daily_path, _fp, daily_text in dailies:
             raw = parse_daily_by_project(daily_text)
             projects = sorted({normalize_project_name(k) for k in raw})
-            log(f"  {daily_path.name}: {len(raw)} section(s) → projects {projects}")
+            chars = sum(len(v) for v in raw.values())
+            grand += chars
+            log(f"  {daily_path.name}: {len(raw)} section(s) → projects {projects}, "
+                f"{chars} chars (~{chars // 4} tokens)")
+        log(f"  TOTAL ~{grand // 4} tokens of daily text would reach the provider")
         log("DRY RUN — no pages written, no state changes.")
         return
 
@@ -696,7 +755,7 @@ def main():
             existing = get_existing_project_pages(project)
             log(f"  [{project}] existing pages: {len(existing)}, data: {len(data)} chars")
 
-            changes, complete, transient = compile_project_data(project, data, existing)
+            changes, complete, kind = compile_project_data(project, data, existing)
             # Apply the results of the successful parts even on partial failure —
             # their content is not lost, nor retried forever as part of a big
             # payload. Page visibility travels WITH each change (see
@@ -751,9 +810,8 @@ def main():
                 else:
                     # A part failed — the pair stays unmarked, the retry redoes
                     # the whole project (succeeded parts overwrite idempotently).
-                    if not give_up_after_repeated_failure(
-                            marker, project, daily_path, transient,
-                            changes, rejected, log):
+                    if not give_up_on_pair(marker, project, daily_path, kind,
+                                           changes, rejected, log):
                         failed += 1
                         log(f"  [{project}] → partial failure ({len(applied)} applied), pair NOT marked — retry next run")
                     else:
@@ -766,14 +824,14 @@ def main():
                 attempt_reset("compile_sessions", marker)
                 log(f"  [{project}] → 0 changes (LLM extracted nothing)")
             else:
-                if not give_up_after_repeated_failure(
-                        marker, project, daily_path, transient, changes, [], log):
+                if not give_up_on_pair(marker, project, daily_path, kind,
+                                       changes, [], log):
                     log(f"  [{project}] → ERROR (all parts failed)")
                     failed += 1
                 else:
                     compiled_pairs.add(marker)
 
-            time.sleep(5)
+            llm_pace()
 
         # Mark the daily compiled only when every project succeeded — an
         # LLM-provider outage must not permanently drop this daily's content.

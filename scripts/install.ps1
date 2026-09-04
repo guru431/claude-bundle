@@ -199,6 +199,61 @@ function Get-InstallDriveType($path) {
     } catch { return 'unknown' }
 }
 
+# ── Invoke-Native: a native call that cannot abort the script ────────────────
+# PowerShell 5.1 + `$ErrorActionPreference = 'Stop'` is a trap this installer
+# walked into: redirecting a native process's stderr (`2>$null`, `2>&1`) wraps
+# each stderr line in a NativeCommandError, and under `Stop` that is TERMINATING
+# — even when the process exited 0. Every "check, then print a helpful message"
+# branch downstream became unreachable, and `install.ps1 -Profile full -DryRun
+# -NonInteractive` aborted with a PowerShell traceback on the dependency check
+# instead of printing "python runtime deps missing".
+#
+# Returns @{ ExitCode; Output }, stderr captured and discarded, never throws.
+function Merge-SettingsJson {
+    param([string]$Source, [string]$Dest)
+    if (-not (Test-Path $Dest)) {
+        Copy-Item $Source $Dest -Force
+        Good "installed settings.json"
+        return
+    }
+    try {
+        $tpl  = Get-Content $Source -Raw -Encoding UTF8 | ConvertFrom-Json
+        $user = Get-Content $Dest   -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        Warn "settings.json could not be parsed ($($_.Exception.Message)) - leaving yours untouched"
+        return
+    }
+    $added = @()
+    foreach ($prop in $tpl.PSObject.Properties) {
+        if (-not $user.PSObject.Properties[$prop.Name]) {
+            $user | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value
+            $added += $prop.Name
+        }
+    }
+    $json = $user | ConvertTo-Json -Depth 20
+    # WITHOUT a BOM: Claude Code reads settings.json as UTF-8, and PS 5.1's
+    # Out-File / Set-Content default would put one there.
+    [System.IO.File]::WriteAllText($Dest, $json, (New-Object System.Text.UTF8Encoding($false)))
+    if ($added.Count -gt 0) { Good ("settings.json merged - added: " + ($added -join ', ')) }
+    else { Good "settings.json already carries every template key - yours kept as is" }
+}
+
+function Invoke-Native {
+    param([string]$Exe, [string[]]$Arguments = @())
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $Exe @Arguments 2>$null
+        $code = $LASTEXITCODE
+    } catch {
+        $out = ''
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    return @{ ExitCode = $code; Output = ($out | Out-String).Trim() }
+}
+
 # One-time consequences summary before the full tier does anything heavy.
 # All checks WARN and continue, EXCEPT a Windows-Store Python stub and missing
 # runtime deps (both hard stops — the full tier cannot work without them).
@@ -230,7 +285,11 @@ function Preflight-Full {
         Write-Host "       Install real Python 3.10+ (python.org) before the full tier." -ForegroundColor Red
         exit 1
     } else {
-        $pyVer = (& $pySource -c "import sys;print('%d.%d' % sys.version_info[:2])" 2>$null)
+        # Through Invoke-Native for the same reason as the dependency check
+        # below: a native call whose stderr is redirected is terminating under
+        # `Stop`, so a Python that prints a deprecation warning on startup would
+        # have aborted the installer here.
+        $pyVer = (Invoke-Native $pySource @('-c', "import sys;print('%d.%d' % sys.version_info[:2])")).Output
         if ($pyVer -notmatch '^(\d+)\.(\d+)$') {
             Write-Host "ERROR: $pySource did not report a version — it is not a usable interpreter." -ForegroundColor Red
             exit 1
@@ -241,8 +300,15 @@ function Preflight-Full {
             exit 1
         }
         Good "python: $pySource (3.10+ — reported $pyVer)"
-        & $pySource -c 'import requests, yaml' 2>$null
-        if ($LASTEXITCODE -ne 0) {
+        # Remembered so step 3b-2 can pin it in .env. Verifying "the interpreter
+        # the tasks will actually use" and then not recording it left session 0
+        # to guess.
+        $script:preflightPython = $pySource
+        # find_spec, not `import`: importing requests/yaml executes them, and a
+        # broken install then raises on stderr rather than answering the
+        # question. This form prints nothing and exits with a code.
+        $depProbe = Invoke-Native $pySource @('-c', 'import importlib.util as u,sys; sys.exit(0 if u.find_spec("requests") and u.find_spec("yaml") else 1)')
+        if ($depProbe.ExitCode -ne 0) {
             # Not optional for the full tier: cron/hooks/utils.py imports requests
             # at call time and registry parsing needs PyYAML, so warn-and-continue
             # would leave a deployment that only fails at 03:00. requirements.txt
@@ -315,6 +381,26 @@ if ($rootsSplit -and $Profile -eq 'lite') {
 if ($Profile -eq 'full') { Preflight-Full }
 
 # ── 0. Guard an existing config (do not silently overwrite) ───────────────────
+# ALWAYS back up a file that is about to change, -Force included. The backup
+# used to live entirely inside the `-not $Force` branch below — and -Force is
+# the flag the docs recommend for a non-interactive re-install, so the
+# recommended way to UPDATE the bundle was also the one path that kept no copy
+# of what it replaced.
+if (-not $DryRun) {
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    foreach ($f in @('CLAUDE.md', 'settings.json')) {
+        $dst = Join-Path $ClaudeHome $f
+        $src = Join-Path $srcHome $f
+        if ((Test-Path $dst) -and (Test-Path $src)) {
+            $a = (Get-FileHash $dst -Algorithm SHA256).Hash
+            $b = (Get-FileHash $src -Algorithm SHA256).Hash
+            if ($a -ne $b) {
+                Copy-Item $dst "$dst.bak-$stamp" -Force
+                Good "backed up $f -> $f.bak-$stamp"
+            }
+        }
+    }
+}
 if ((Test-ExistingConfig $ClaudeHome) -and -not $Force) {
     Warn "existing config found in $ClaudeHome (CLAUDE.md / settings.json)"
     if ($DryRun) {
@@ -347,10 +433,16 @@ if ($rootsSplit) {
 if ($DryRun) {
     Info "[dry-run] would copy CLAUDE.md, settings.json, skills/, commands/ -> $ClaudeHome"
 } else {
-    foreach ($f in @('CLAUDE.md', 'settings.json')) {
-        Copy-Item (Join-Path $srcHome $f) $ClaudeHome -Force
-        Add-Written (Join-Path $srcHome $f) (Join-Path $ClaudeHome $f) 'claude_home'
-    }
+    Copy-Item (Join-Path $srcHome 'CLAUDE.md') $ClaudeHome -Force
+    Add-Written (Join-Path $srcHome 'CLAUDE.md') (Join-Path $ClaudeHome 'CLAUDE.md') 'claude_home'
+    # settings.json is MERGED, not replaced. INSTALL.md tells the user to wire
+    # hooks into this file by hand and then says "to update, re-run the
+    # installer" — and the installer overwrote it, so following both
+    # instructions silently destroyed the hooks, the permissions, the plugins
+    # and the `language` setting. The user's own keys win; keys only the
+    # template has are added.
+    Merge-SettingsJson (Join-Path $srcHome 'settings.json') (Join-Path $ClaudeHome 'settings.json')
+    Add-Written (Join-Path $srcHome 'settings.json') (Join-Path $ClaudeHome 'settings.json') 'claude_home'
     foreach ($d in @('skills', 'commands')) {
         $s = Join-Path $srcHome $d
         if (Test-Path $s) {
@@ -467,6 +559,66 @@ if ($DryRun) {
 }
 # Your keys live here — manifest it as preserved so the uninstaller leaves it.
 if (Test-Path $envDst) { $script:preserved.Add('.env') }
+
+# ── 3b-2. Pin the interpreters the preflight just resolved ───────────────────
+# Preflight verifies "the interpreter the tasks will actually use", and then
+# nothing wrote it down: `PYTHON_EXE=` stayed empty in the template, the VBS
+# launcher fell back to the bare name `python.exe`, and a python.org install —
+# which puts the interpreter on the USER path only — is simply not found in
+# session 0, where Password-mode tasks fire. Combined with the launcher's old
+# silent exit 0 that produced a night that did nothing and reported success.
+#
+# Only fills an EMPTY line; a value the user set is never touched.
+function Set-EnvValueIfEmpty {
+    param([string]$Path, [string]$Key, [string]$Value)
+    if (-not (Test-Path $Path) -or -not $Value) { return $false }
+    $lines = @(Get-Content $Path -Encoding UTF8)
+    $hit = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match "^\s*$Key\s*=\s*$") { $lines[$i] = "$Key=$Value"; $hit = $true; break }
+        if ($lines[$i] -match "^\s*$Key\s*=\s*\S") { return $false }   # user set it
+    }
+    if (-not $hit) { $lines += "$Key=$Value" }
+    [System.IO.File]::WriteAllLines($Path, $lines, (New-Object System.Text.UTF8Encoding($false)))
+    return $true
+}
+if ($DryRun) {
+    Info "[dry-run] would pin PYTHON_EXE / BASH_EXE / PROJECTS_ROOT in .env"
+} elseif (Test-Path $envDst) {
+    if ($script:preflightPython -and (Set-EnvValueIfEmpty $envDst 'PYTHON_EXE' $script:preflightPython)) {
+        Good "pinned PYTHON_EXE=$script:preflightPython in .env (session 0 has no user PATH)"
+    }
+    $bashCmd = Get-Command bash -ErrorAction SilentlyContinue
+    $bashPath = $null
+    if ($bashCmd -and $bashCmd.Source -notmatch '(?i)\\System32\\') { $bashPath = $bashCmd.Source }
+    if (-not $bashPath) {
+        foreach ($c in @("$env:ProgramFiles\Git\bin\bash.exe", "$env:ProgramFiles\Git\usr\bin\bash.exe")) {
+            if (Test-Path $c) { $bashPath = $c; break }
+        }
+    }
+    if ($bashPath -and (Set-EnvValueIfEmpty $envDst 'BASH_EXE' $bashPath)) {
+        Good "pinned BASH_EXE=$bashPath in .env"
+    }
+    # One value, two names: `projects_root:` in bundle.local.yaml is the canon a
+    # human edits, `PROJECTS_ROOT` in .env is its shell-side spelling. The docs
+    # required the .env name while utils.py called it deprecated, so following
+    # either instruction produced a warning or a broken job. It is GENERATED
+    # from the manifest now — see cron/hooks/utils.py::_resolve_projects_root.
+    $manifestForRoot = Join-Path $PipelineRoot 'bundle.local.yaml'
+    if (Test-Path $manifestForRoot) {
+        $rootLine = (Get-Content $manifestForRoot -Encoding UTF8 |
+                     Where-Object { $_ -match '^\s*projects_root\s*:\s*(\S.*)$' } |
+                     Select-Object -First 1)
+        if ($rootLine -and $rootLine -match '^\s*projects_root\s*:\s*(\S.*?)\s*$') {
+            $rootVal = $Matches[1].Trim('"', "'")
+            if ($rootVal -and $rootVal -notmatch '^<') {
+                if (Set-EnvValueIfEmpty $envDst 'PROJECTS_ROOT' $rootVal) {
+                    Good "generated PROJECTS_ROOT=$rootVal in .env from bundle.local.yaml"
+                }
+            }
+        }
+    }
+}
 
 # ── 3c. bundle.local.yaml from the template (full only; never overwritten) ────
 # Project map + privacy policy live here (not in cron/hooks/utils.py) so they
@@ -623,6 +775,21 @@ if (Test-Path $regDeployed) {
     if ($rtxt -match '<(bundle-install-path|user)>') { Warn "registry.yaml still has <...> placeholders — run bootstrap-registry.ps1" }
     $taskCount = ([regex]::Matches($rtxt, '(?m)^\s+-\s+name:')).Count
     Info "registry.yaml task count: $taskCount"
+    # A BOOTSTRAPPED registry is the user's file, not ours: it carries the
+    # install path, the account and the password mode they chose. The manifest
+    # listed it as `written`, so the uninstaller deleted it — and the header of
+    # uninstall.ps1 promises the opposite. Once the placeholders are gone it is
+    # preserved.
+    if ($rtxt -notmatch '<(bundle-install-path|user)>') {
+        $keep = New-Object System.Collections.Generic.List[object]
+        foreach ($e in $script:written) {
+            if ("$($e.path)" -notlike '*registry.yaml') { $keep.Add($e) }
+        }
+        $script:written = $keep
+        if (-not ($script:preserved -contains 'cron/registry.yaml')) {
+            $script:preserved.Add('cron/registry.yaml')
+        }
+    }
 }
 if ($customPath) {
     Warn "ClaudeHome is not $defaultHome — Claude Code reads CLAUDE.md / settings.json from $ClaudeHome only if CLAUDE_CONFIG_DIR is exported to it (the cron/wiki files do run from where they were placed)"

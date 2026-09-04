@@ -46,56 +46,132 @@ class Shape(NamedTuple):
     no shorthand (`[[:space:]]` vs `\\s`), so both are written out rather than
     translated at runtime — a translator is one more thing that can be subtly
     wrong on exactly the pattern that matters.
+
+    `bounded` says the format is a PREFIX shape (`sk-…`, `ccr-…`, `ghp_…`) that
+    must not match in the middle of an ordinary identifier. Without it
+    `sk-[A-Za-z0-9_-]{16,}` fires on `task-management-system-v2` and
+    `ccr-[A-Za-z0-9]{8,}` on the tail of `--disk-usage-threshold-pct`: the
+    pre-commit hook, the pre-push hook, CI and the nightly push then all block a
+    perfectly ordinary branch, and `mask()` chews the same words out of FINDINGS
+    entries and Telegram alerts. The boundary is written once here and rendered
+    per dialect by `_bound_py` / `_bound_ere` — POSIX ERE has no lookbehind, so
+    the shell copy consumes one leading character instead, which is fine for
+    `grep`, whose only job is to decide whether the line matches.
     """
     name: str
     ere: str
     py: str
     roles: frozenset
     redaction: str
+    bounded: bool = False
+
+
+# One "not part of a token" character class, two dialects.
+_BOUND_CLASS = "A-Za-z0-9_-"
+_BOUND_PY = f"(?<![{_BOUND_CLASS}])"
+_BOUND_ERE = f"(^|[^{_BOUND_CLASS}])"
+
+
+def _bound_py(shape: Shape) -> str:
+    return (_BOUND_PY + shape.py) if shape.bounded else shape.py
+
+
+def _bound_ere(shape: Shape) -> str:
+    return (_BOUND_ERE + shape.ere) if shape.bounded else shape.ere
 
 
 def _shape(name, ere, py=None, roles=("scan", "mask", "leak"),
-           redaction="[REDACTED]") -> Shape:
+           redaction="[REDACTED]", bounded=False) -> Shape:
     return Shape(name, ere, py if py is not None else ere, frozenset(roles),
-                 redaction)
+                 redaction, bounded)
 
 
 # Order matters for masking only: the specific formats run before the generic
 # `name = value` rule, so a recognised token gets a named marker rather than the
 # anonymous one.
 SHAPES: tuple[Shape, ...] = (
+    # PEM **and** PGP. A PGP secret key ends `KEY BLOCK-----`, so the old
+    # `…PRIVATE KEY-----` never matched one; the optional ` BLOCK` adds it.
+    #
+    # Written as ONE widened shape rather than a second literal one on purpose:
+    # a shape whose pattern is a plain string matches its OWN definition, so
+    # spelling the PGP header out here made every detector in the bundle flag
+    # this file, `secret-scan.sh` and CI. `[A-Z ]*` keeps the pattern from being
+    # a literal, which is why the PEM shape never had that problem.
     _shape("pem-private-key",
-           r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+           r"-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----",
+           py=r"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----",
            redaction="[REDACTED-PRIVATE-KEY]"),
+    # All five GitHub token prefixes, not just three: `ghs_` (app installation),
+    # `ghu_` (user-to-server) and `ghr_` (refresh) are handed out by every GitHub
+    # App and were passing every detector in the bundle.
     _shape("github-token",
-           r"ghp_[A-Za-z0-9]{20,}",
-           redaction="[REDACTED-GITHUB-TOKEN]"),
+           r"gh[pousr]_[A-Za-z0-9]{20,}",
+           redaction="[REDACTED-GITHUB-TOKEN]", bounded=True),
     _shape("github-pat",
            r"github_pat_[A-Za-z0-9_]{20,}",
-           redaction="[REDACTED-GITHUB-TOKEN]"),
-    _shape("github-oauth",
-           r"gho_[A-Za-z0-9]{20,}",
-           redaction="[REDACTED-GITHUB-TOKEN]"),
+           redaction="[REDACTED-GITHUB-TOKEN]", bounded=True),
+    _shape("gitlab-token",
+           r"glpat-[A-Za-z0-9_-]{20,}",
+           redaction="[REDACTED-GITLAB-TOKEN]", bounded=True),
+    # AKIA is the long-lived key; ASIA is an STS session key, which is just as
+    # usable while it lives. ABIA/ACCA round out the documented set.
     _shape("aws-access-key",
-           r"AKIA[0-9A-Z]{16}",
-           redaction="[REDACTED-AWS-KEY]"),
+           r"(AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}",
+           py=r"(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}",
+           redaction="[REDACTED-AWS-KEY]", bounded=True),
+    # The 40-char secret has no distinguishing shape of its own, so it is matched
+    # only next to its own key NAME — the form every credentials file uses.
+    _shape("aws-secret-key",
+           r"aws_secret_access_key[[:space:]]*=[[:space:]]*[A-Za-z0-9/+=]{40}",
+           py=r"aws_secret_access_key\s*=\s*[A-Za-z0-9/+=]{40}",
+           redaction="aws_secret_access_key=[REDACTED-AWS-SECRET]"),
     _shape("slack-token",
-           r"xox[baprs]-[A-Za-z0-9-]{10,}",
-           redaction="[REDACTED-SLACK-TOKEN]"),
+           r"xox[baprse]-[A-Za-z0-9-]{10,}",
+           redaction="[REDACTED-SLACK-TOKEN]", bounded=True),
+    _shape("slack-webhook",
+           r"hooks\.slack\.com/services/[A-Za-z0-9/+]{20,}",
+           redaction="[REDACTED-SLACK-WEBHOOK]"),
     _shape("openai-style-key",
            r"sk-[A-Za-z0-9_-]{16,}",
-           redaction="[REDACTED-API-KEY]"),
+           redaction="[REDACTED-API-KEY]", bounded=True),
+    # Stripe live keys — `sk_live_`/`rk_live_` do NOT match the shape above
+    # (`sk_`, not `sk-`), so they went through untouched.
+    _shape("stripe-live-key",
+           r"[sr]k_live_[A-Za-z0-9]{20,}",
+           redaction="[REDACTED-STRIPE-KEY]", bounded=True),
     _shape("google-api-key",
            r"AIza[A-Za-z0-9_-]{16,}",
-           redaction="[REDACTED-GOOGLE-KEY]"),
+           redaction="[REDACTED-GOOGLE-KEY]", bounded=True),
+    _shape("sendgrid-key",
+           r"SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",
+           redaction="[REDACTED-SENDGRID-KEY]", bounded=True),
+    _shape("huggingface-token",
+           r"hf_[A-Za-z0-9]{30,}",
+           redaction="[REDACTED-HF-TOKEN]", bounded=True),
+    _shape("npm-token",
+           r"npm_[A-Za-z0-9]{36}",
+           redaction="[REDACTED-NPM-TOKEN]", bounded=True),
     _shape("ccr-key",
            r"ccr-[A-Za-z0-9]{8,}",
-           redaction="[REDACTED-API-KEY]"),
+           redaction="[REDACTED-API-KEY]", bounded=True),
+    # A connection string carries the password inline; the generic `name = value`
+    # rule below never sees it because the password has no name of its own.
+    _shape("db-url-credentials",
+           r"(postgres|postgresql|mysql|mongodb\+srv|mongodb|redis|amqp)://"
+           r"[^:@/[:space:]]+:[^@/[:space:]]+@",
+           py=r"(?:postgres|postgresql|mysql|mongodb\+srv|mongodb|redis|amqp)://"
+              r"[^:@/\s]+:[^@/\s]+@",
+           redaction="[REDACTED-DB-URL]"),
+    # Azure Storage connection strings.
+    _shape("azure-account-key",
+           r"AccountKey=[A-Za-z0-9+/=]{40,}",
+           redaction="AccountKey=[REDACTED]"),
     # A JWT is worth catching whole: the payload segment alone often carries the
     # account it was minted for, so a partially-masked token still leaks.
     _shape("jwt",
            r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+",
-           redaction="[REDACTED-JWT]"),
+           redaction="[REDACTED-JWT]", bounded=True),
     # The `"private_key_id"` field rather than the key body: a service-account
     # JSON is normally committed whole and its PEM body is already covered
     # above, but a truncated or reformatted export keeps the id.
@@ -103,15 +179,29 @@ SHAPES: tuple[Shape, ...] = (
            r'"private_key_id"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"',
            py=r'"private_key_id"\s*:\s*"[0-9a-f]{40}"',
            redaction='"private_key_id": "[REDACTED]"'),
+    # A RIGHT boundary as well as a left one. Without it the pattern matched the
+    # first 35 characters of any `<10 digits>:<40 hex>` string — a unix timestamp
+    # followed by a sha1, which is how half the build logs in the world name an
+    # artifact — and the commit was blocked.
     _shape("telegram-bot-token",
-           r"[0-9]{8,10}:[A-Za-z0-9_-]{35}",
-           py=r"\d{8,10}:[A-Za-z0-9_-]{35}",
-           redaction="[REDACTED-TELEGRAM-TOKEN]"),
+           r"[0-9]{8,10}:[A-Za-z0-9_-]{35}([^A-Za-z0-9_-]|$)",
+           py=r"\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])",
+           redaction="[REDACTED-TELEGRAM-TOKEN]", bounded=True),
     # NOT a secret format, so it never blocks a commit — but an internal address
     # copied into the AGENTS.md of a repo with a public remote is exactly the
     # class of thing this bundle exists to keep out of public files.
+    #
+    # Each branch spells out all four octets. The old `(?:192\.168|10|172\.…)`
+    # form left the `10` branch needing only THREE more octets, so `Python
+    # 3.10.0.1` matched — and agents-md-sync-check then refused every edit to a
+    # file carrying a version string.
     _shape("private-ipv4",
-           r"\b(?:192\.168|10|172\.(?:1[6-9]|2[0-9]|3[01]))\.[0-9]{1,3}\.[0-9]{1,3}\b",
+           r"(^|[^0-9.])(192\.168\.[0-9]{1,3}\.[0-9]{1,3}"
+           r"|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"
+           r"|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3})([^0-9.]|$)",
+           py=r"(?<![0-9.])(?:192\.168\.\d{1,3}\.\d{1,3}"
+              r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+              r"|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3})(?![0-9.])",
            roles=("leak",),
            redaction="[REDACTED-HOST]"),
     # Leak-only, and deliberately looser than the token shapes above: any of
@@ -123,10 +213,65 @@ SHAPES: tuple[Shape, ...] = (
     # so it fails towards caution, and catches a truncated or example-shortened
     # key that the strict shapes would let through.
     _shape("credential-prefix",
-           r"\b(?:sk-|ghp_|gho_|github_pat_|AIza|xox[baprs]-|ccr-)[A-Za-z0-9_-]{6,}",
+           r"(sk-|sk_live_|rk_live_|gh[pousr]_|github_pat_|glpat-|AIza|hf_|npm_"
+           r"|SG\.|xox[baprse]-|ccr-)[A-Za-z0-9_.-]{6,}",
+           py=r"(?:sk-|sk_live_|rk_live_|gh[pousr]_|github_pat_|glpat-|AIza|hf_|npm_"
+              r"|SG\.|xox[baprse]-|ccr-)[A-Za-z0-9_.-]{6,}",
            roles=("leak",),
-           redaction="[REDACTED]"),
+           redaction="[REDACTED]", bounded=True),
 )
+
+
+# ── Sensitive FILE NAMES (a different question from "does this line look like a
+# key") ───────────────────────────────────────────────────────────────────────
+# Three places used to answer it with three hand-written lists, and they had
+# drifted: `.env.example` was blocked by the nightly push and waved through by
+# pre-commit, `.env.production.local` passed everywhere, and `credentials.json`,
+# `.npmrc`, `.netrc`, `.pypirc`, `*.ppk`, `*.jks`, `id_ecdsa`,
+# `.git-credentials` and `terraform.tfstate` were known to none of them.
+#
+# One table, rendered into an ERE the shell guards source — same arrangement as
+# the credential shapes above, for the same reason.
+#
+# `.env.example` / `.env.sample` / `.env.template` are the deliberate exception:
+# they are the files a project SHOULD commit, so they are matched by
+# SENSITIVE_PATH_ALLOW_ERE and let through.
+SENSITIVE_PATHS: tuple[str, ...] = (
+    r"(^|/)\.env(\.[A-Za-z0-9_.-]+)?$",
+    r"(^|/)\.envrc$",
+    r"(^|/)(id_rsa|id_dsa|id_ecdsa|id_ed25519)$",
+    r"\.(pem|key|p12|pfx|ppk|jks|keystore)$",
+    r"(^|/)\.git-credentials$",
+    r"(^|/)\.(npmrc|netrc|pypirc)$",
+    r"(^|/)credentials(\.json|\.yaml|\.yml)?$",
+    r"(^|/)service-account.*\.json$",
+    r"(^|/)terraform\.tfstate(\.backup)?$",
+    r"(^|/)\.pgpass$",
+    r"(^|/)secrets?\.(json|ya?ml|toml|ini)$",
+)
+
+SENSITIVE_PATH_ALLOW: tuple[str, ...] = (
+    r"\.env\.(example|sample|template|dist)$",
+    r"\.example\.env$",
+)
+
+
+def sensitive_path_ere() -> str:
+    """The `SENSITIVE_PATH_PATTERN` alternation the shell guards source."""
+    return "|".join(SENSITIVE_PATHS)
+
+
+def sensitive_path_allow_ere() -> str:
+    """The `SENSITIVE_PATH_ALLOW` alternation — templates that may be committed."""
+    return "|".join(SENSITIVE_PATH_ALLOW)
+
+
+def is_sensitive_path(path: str) -> bool:
+    """True when a repository path must never be committed (templates excepted)."""
+    p = path.replace("\\", "/")
+    if re.search(sensitive_path_allow_ere(), p):
+        return False
+    return bool(re.search(sensitive_path_ere(), p))
 
 # The generic fallback: `API_TOKEN=value`, `{'API_TOKEN': 'value'}`. Mask-only —
 # far too broad to block a commit on, but it is what catches a credential whose
@@ -153,17 +298,17 @@ def shell_ere() -> str:
     Regenerated here so the shell copy can be asserted against it in CI instead
     of being trusted. See the module docstring.
     """
-    return "|".join(s.ere for s in shapes("scan"))
+    return "|".join(_bound_ere(s) for s in shapes("scan"))
 
 
 def scan_regex() -> re.Pattern:
     """Python equivalent of the shell scan pattern (for tests and tooling)."""
-    return re.compile("|".join(f"(?:{s.py})" for s in shapes("scan")))
+    return re.compile("|".join(f"(?:{_bound_py(s)})" for s in shapes("scan")))
 
 
 def leak_regex() -> re.Pattern:
     """What must not be written into a public repository."""
-    return re.compile("|".join(f"(?:{s.py})" for s in shapes("leak")))
+    return re.compile("|".join(f"(?:{_bound_py(s)})" for s in shapes("leak")))
 
 
 def mask(text: str) -> str:
@@ -178,9 +323,19 @@ def mask(text: str) -> str:
         return text
     text = _PEM_BLOCK.sub("[REDACTED-PRIVATE-KEY]", text)
     for shape in shapes("mask"):
-        text = re.sub(shape.py, shape.redaction, text)
+        # _bound_py, not shape.py: masking has to use the same boundary the
+        # scanner does, or `mask("kiosk-mode-launcher-2024")` turns into
+        # `kio[REDACTED-API-KEY]` — a redaction that destroys ordinary prose.
+        text = re.sub(_bound_py(shape), shape.redaction, text)
     return _GENERIC_KV.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
 
 
-if __name__ == "__main__":  # `python cron/lib/secrets.py` prints the shell ERE
-    print(shell_ere())
+if __name__ == "__main__":  # prints whichever generated table the guard needs
+    import sys
+    which = sys.argv[1] if len(sys.argv) > 1 else "scan"
+    if which == "paths":
+        print(sensitive_path_ere())
+    elif which == "paths-allow":
+        print(sensitive_path_allow_ere())
+    else:
+        print(shell_ere())

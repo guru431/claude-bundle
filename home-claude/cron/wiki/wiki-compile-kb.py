@@ -31,9 +31,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (  # noqa: E402
     add_source_to_frontmatter,
-    llm_call,
+    append_fragment,
+    config_report,
+    give_up_after_repeated_failure,
+    llm_call_ex,
+    llm_pace,
     normalize_wiki_path,
-    parse_llm_json,
+    parse_llm_json_result,
     quarantine_raw,
     read_page,
     state_add,
@@ -56,7 +60,24 @@ for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
     os.environ.pop(env_key, None)
 
 KB_DIR = WIKI_ROOT / "kb"
-KBNEWS_DIR = BUNDLE_ROOT / "kb_news"
+# The external-source directory. `kb_news` was the name of a PRIVATE pipeline
+# the bundle was extracted from — it means nothing to anyone else, and a
+# sanitized public bundle should not carry a stranger's project name as a
+# directory contract. `kb_sources/` is the name now; the old one is still
+# accepted so an existing deployment keeps working, and KB_SOURCE_DIR overrides
+# both.
+def _kb_source_dir():
+    explicit = os.environ.get("KB_SOURCE_DIR")
+    if explicit:
+        return Path(explicit).expanduser()
+    for name in ("kb_sources", "kb_news"):
+        candidate = BUNDLE_ROOT / name
+        if candidate.is_dir():
+            return candidate
+    return BUNDLE_ROOT / "kb_sources"
+
+
+KBNEWS_DIR = _kb_source_dir()
 PROMPT_PATH = BUNDLE_ROOT / "cron" / "prompts" / "wiki-compile-kb.md"
 CRON_LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 
@@ -111,7 +132,8 @@ def read_existing_pages() -> dict[str, str]:
     return pages
 
 
-def compile_article(article_path: Path, existing_pages: dict[str, str]) -> list[dict] | None:
+def compile_article(article_path: Path,
+                    existing_pages: dict[str, str]) -> tuple[list[dict] | None, str]:
     """Call the LLM to compile one article into wiki pages."""
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
     try:
@@ -150,28 +172,19 @@ Answer STRICTLY in JSON format (array of objects):
 
 JSON only, no markdown wrapper, no commentary."""
 
-    output = llm_call(full_prompt, timeout=600)
-    if not output:
-        return None
-    # parse_llm_json handles fenced output, broken escapes and truncation —
-    # a greedy regex + bare json.loads choked on trailing commentary here.
-    result = parse_llm_json(output)
-    if result:
-        return result
-    # parse_llm_json returns [] for BOTH "unparseable" and "the model correctly
-    # answered []" — and the prompt explicitly allows []. Collapsing the two into
-    # None made a legitimate "nothing worth extracting" a permanent failure: the
-    # article never entered the state and was re-sent to the LLM every night.
-    if _is_empty_array(output):
-        return []
-    return None
-
-
-def _is_empty_array(raw: str) -> bool:
-    """True when the response is literally an empty JSON array (fence tolerated)."""
-    text = re.sub(r"^\s*```(?:json)?\s*", "", raw)
-    text = re.sub(r"\s*```\s*$", "", text).strip()
-    return text == "[]"
+    res = llm_call_ex(full_prompt, timeout=600)
+    if not res.text:
+        return None, res.kind
+    # parse_llm_json_result handles fenced output, broken escapes and truncation,
+    # and — crucially — reports whether the answer PARSED separately from whether
+    # it was empty. The prompt explicitly allows `[]` for "no entity here"; a
+    # local string comparison used to decide that, and it was stricter than the
+    # parser, so `[ ]` with a space read as a permanent failure and the article
+    # was re-sent every night forever.
+    parsed_ok, result = parse_llm_json_result(res.text)
+    if parsed_ok:
+        return result, "ok"
+    return None, "deterministic"
 
 
 def apply_changes(changes: list[dict], existing_pages: dict[str, str],
@@ -261,14 +274,16 @@ def main():
             f.write(line + "\n")
 
     log(f"=== Wiki Compile KB {DATE} ===")
+    for line in config_report():
+        log(f"  cfg | {line}")
 
-    # Source dir is optional — the bundle ships without kb_news/ (the
-    # YouTube-transcript pipeline isn't included). If you don't wire up your
-    # own source, just keep this task disabled in registry.yaml.
+    # Source dir is optional — the bundle ships without one (the
+    # transcript-ingest pipeline that filled it is not included). If you don't
+    # wire up your own source, just keep this task disabled in registry.yaml.
     if not KBNEWS_DIR.exists():
         log(f"No source directory at {KBNEWS_DIR} — nothing to compile, exiting.")
         record_run(task="ClaudeWikiCompileKB", process_rc=0, useful_items=None,
-                   delivery="n/a", note="no kb_news/ source dir")
+                   delivery="n/a", note="no KB source dir")
         return
 
     processed = get_processed_files()
@@ -299,7 +314,7 @@ def main():
         rel = str(article_path.relative_to(KBNEWS_DIR)).replace("\\", "/")
         log(f"[{i+1}/{len(new_files)}] Processing: {rel}")
 
-        changes = compile_article(article_path, existing_pages)
+        changes, kind = compile_article(article_path, existing_pages)
         if changes is not None and not changes:
             # Valid empty result: the model read the article and found no entity
             # worth a page. That is a successful no-op — mark it processed so it
@@ -350,12 +365,33 @@ def main():
                 log(f"  → ERROR: 0 applied of {len(changes)} changes — marked processed")
         else:
             # Not recorded in state → retried next run. Journal the failure only.
+            #
+            # …but not FOREVER. This branch had no ceiling at all: an article
+            # whose answer never parsed was re-sent every single night, paying
+            # for the same unusable response indefinitely. It now shares the
+            # bundle's one give-up rule, which counts `deterministic` failures
+            # and ignores `transient` and `config` ones.
             hard_failure = True
-            log(f"  → ERROR: compile failed")
-            update_log(rel, ["(ERROR)"])
+            log(f"  → ERROR: compile failed ({kind})")
+            update_log(rel, [f"(ERROR: {kind})"])
+            if give_up_after_repeated_failure(
+                    section="compile_kb", marker=rel, label=rel, kind=kind,
+                    payload=f"{rel}: the model's answer could not be parsed",
+                    finding_title=f"compile-kb gave up on {rel}",
+                    finding_context="`cron/wiki/wiki-compile-kb.py` (retry ceiling, WIKI_RETRY_LIMIT)",
+                    finding_what=(f"The KB source `{rel}` produced an answer that "
+                                  f"could not be used, the same way, on every "
+                                  f"attempt. It is now marked processed so the "
+                                  f"nightly run stops paying for it."),
+                    finding_proposal=("Read the quarantined payload in "
+                                      "`cron/logs/rejected/`. Usually the source is "
+                                      "too large for the provider, or the prompt asks "
+                                      "for a path shape `normalize_wiki_path` refuses."),
+                    log=log):
+                state_add("compile_kb", "processed", [rel])
 
         if i < len(new_files) - 1:
-            time.sleep(5)
+            llm_pace()
 
     # kb/index.md is rebuilt by wiki-build-index.py, scheduled after the
     # compile tasks — no duplicate index writer here.

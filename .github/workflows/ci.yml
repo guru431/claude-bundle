@@ -9,16 +9,39 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only by default. A workflow that only lints and tests has no business
+# holding a write token, and the default for a repo can be more than that.
+permissions:
+  contents: read
+
+# A new push supersedes an in-flight run of the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   checks:
-    name: lint + secret-guard (ubuntu)
+    name: lint + secret-guard (ubuntu, py${{ matrix.python }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # BOTH ends of the supported range. CI ran "3.x" only — the newest
+        # release — so 3.10, the version README and the installer's own preflight
+        # declare as the minimum, was never actually exercised. A 3.11+ syntax
+        # or stdlib call would have passed every check and then failed on a
+        # user's machine.
+        python: ["3.10", "3.x"]
     steps:
-      - uses: actions/checkout@v4
+      # Actions pinned by SHA, not by tag: a tag is mutable, and these run with
+      # the repository checked out.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         with:
-          python-version: "3.x"
+          python-version: ${{ matrix.python }}
+          cache: pip
 
       - name: Install Python deps (requests + PyYAML)
         run: python -m pip install --quiet -r requirements.txt
@@ -71,6 +94,9 @@ jobs:
       - name: Env template / docs reference guard
         run: python scripts/check-env-ref.py
 
+      - name: Generated config reference is up to date
+        run: python scripts/check-env-ref.py --check-table
+
       - name: Privacy matrix guard (docs vs each task's declared I/O)
         run: python scripts/check-io-matrix.py
 
@@ -84,13 +110,39 @@ jobs:
           # NB: the tree is deliberately NOT uniform — most *.sh are 644 and the
           # *.py checkers are 644 too. This freezes today's state; changing which
           # files are executable is a separate, intentional decision.
-          expected=".githooks/pre-commit .githooks/pre-push home-claude/cron/github-push.sh scripts/enable-guard.sh"
+          expected=".githooks/commit-msg .githooks/pre-commit .githooks/pre-push home-claude/cron/github-push.sh scripts/enable-guard.sh"
           actual=$(git ls-files -s | awk '$1=="100755"{print $4}' | sort | xargs)
           if [ "$actual" != "$expected" ]; then
             echo "exec-bit drift!"; echo "  expected: $expected"; echo "  actual:   $actual"
             exit 1
           fi
           echo "exec bits: pinned set unchanged"
+
+      - name: Encoding guard (.sh without BOM, .ps1 with one when non-ASCII)
+        run: |
+          # home-claude/CLAUDE.md § File Encoding states both rules; nothing
+          # enforced either. A BOM on a .sh breaks its shebang, and a BOM-LESS
+          # .ps1 carrying non-ASCII is read by PS 5.1 in the system ANSI
+          # codepage — Cyrillic then turns into smart quotes that break parsing.
+          fail=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            bom=$(head -c 3 "$f" | od -An -tx1 | tr -d ' \n')
+            case "$f" in
+              *.sh)
+                if [ "$bom" = "efbbbf" ]; then
+                  echo "::error::$f has a UTF-8 BOM — it breaks the shebang"; fail=1
+                fi ;;
+              *.ps1)
+                if [ "$bom" != "efbbbf" ] && LC_ALL=C grep -qP '[^\x00-\x7F]' "$f" 2>/dev/null; then
+                  echo "::error::$f has non-ASCII content and no BOM — PS 5.1 will mis-decode it"; fail=1
+                fi ;;
+            esac
+          done <<EOF
+          $(git ls-files '*.sh' '*.ps1')
+          EOF
+          [ "$fail" -eq 0 ] && echo "encoding: rules hold"
+          exit "$fail"
 
       - name: Secret guard (high-confidence token formats)
         run: |
@@ -116,6 +168,24 @@ jobs:
           fi
           echo "secret guard: clean"
 
+      - name: Generated tables match their source
+        run: |
+          # secret-scan.sh and its two path tables are GENERATED from
+          # cron/lib/secret_shapes.py. Checking it here as well as in
+          # tests/test_guards.py costs nothing and catches a hand-edit of the
+          # shell copy — which is the one way this "one implementation per
+          # cross-cutting rule" arrangement can silently come apart.
+          . home-claude/cron/lib/secret-scan.sh
+          gen_scan=$(python home-claude/cron/lib/secret_shapes.py)
+          gen_paths=$(python home-claude/cron/lib/secret_shapes.py paths)
+          gen_allow=$(python home-claude/cron/lib/secret_shapes.py paths-allow)
+          rc=0
+          [ "$SECRET_SCAN_PATTERN" = "$gen_scan" ] || { echo "::error::SECRET_SCAN_PATTERN is not the generated one"; rc=1; }
+          [ "$SENSITIVE_PATH_PATTERN" = "$gen_paths" ] || { echo "::error::SENSITIVE_PATH_PATTERN is not the generated one"; rc=1; }
+          [ "$SENSITIVE_PATH_ALLOW" = "$gen_allow" ] || { echo "::error::SENSITIVE_PATH_ALLOW is not the generated one"; rc=1; }
+          [ "$rc" -eq 0 ] && echo "generated tables: in sync"
+          exit "$rc"
+
       - name: ShellCheck (every shell script in the repo)
         run: |
           # Not "if available … else skip": a missing shellcheck silently turned
@@ -139,18 +209,53 @@ jobs:
           echo "$files" | xargs -r shellcheck --severity=warning -e SC1091
           echo "shellcheck: done"
 
+      - name: Push-guard shell tests
+        run: |
+          # cron/tests/*.sh cover push_repo and the protected-deletion guard —
+          # the invariants of the ONE task that auto-commits and pushes every
+          # repository on the machine. CLAUDE.md listed them as "by hand", which
+          # for an unattended guard means "not run".
+          git config --global user.email ci@example.invalid
+          git config --global user.name  "CI"
+          git config --global init.defaultBranch main
+          for t in home-claude/cron/tests/test_*.sh; do
+            echo "--- $t"
+            bash "$t"
+          done
+
       - name: Pipeline smoke test (offline mock LLM provider)
+        env:
+          CI: "1"          # tests/conftest.py turns a dependency SKIP into a failure
         run: |
           python -m pip install --quiet -r requirements-dev.txt
-          python -m pytest tests/ -q
+          python -m pytest tests/ -q --durations=10
+
+      - name: Integration tests (platform-neutral ones)
+        env:
+          CI: "1"
+        run: |
+          # `-m integration` was defined, documented and never run anywhere. The
+          # Windows-only ones skip themselves by platform.
+          python -m pytest tests/ -q -m integration
 
   powershell:
     name: powershell syntax (windows)
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
-      - name: Parse-check all .ps1
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.x"
+          cache: pip
+
+      - name: Install Python deps
+        # self-test's YAML steps only WARN without PyYAML, so half the checks it
+        # advertises were silently skipped in the one job that runs it.
+        run: python -m pip install --quiet -r requirements.txt
+
+      - name: Parse-check all .ps1 (pwsh 7)
         shell: pwsh
         run: |
           $errs = 0
@@ -159,6 +264,22 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e) | Out-Null
             if ($e) { Write-Host "PARSE ERROR: $($_.FullName)"; $e | ForEach-Object { Write-Host "  $($_.Message)" }; $errs++ }
             else { Write-Host "ok: $($_.Name)" }
+          }
+          if ($errs -gt 0) { exit 1 }
+
+      - name: Parse-check all .ps1 (Windows PowerShell 5.1 — the one that RUNS them)
+        shell: powershell
+        run: |
+          # The scripts EXECUTE under 5.1: Task Scheduler, sync.cmd and the
+          # installer all call `powershell`, not `pwsh`. Parsing them only with
+          # pwsh 7 meant 7-only syntax (`??`, `?:`, ternaries, chain operators)
+          # passed CI and failed at 02:30 on a user's machine.
+          $errs = 0
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $e = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e) | Out-Null
+            if ($e) { Write-Host "PARSE ERROR (5.1): $($_.FullName)"; $e | ForEach-Object { Write-Host "  $($_.Message)" }; $errs++ }
+            else { Write-Host "ok (5.1): $($_.Name)" }
           }
           if ($errs -gt 0) { exit 1 }
 

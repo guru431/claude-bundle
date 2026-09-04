@@ -36,12 +36,31 @@ try:
 except AttributeError:
     pass
 
-# `-f`/`--file` is iptables-save's own redirect to a file (writes the same
-# persistent rules.v[46] directly), so it must be blocked alongside shell `>`
-# and `| tee`. `--file` already contains the `-f` substring, but both spellings
-# are listed for clarity.
+# What is actually matched, and why each piece is shaped the way it is:
+#
+#   ip6?tables(-legacy|-nft)?-save — the alternative BINARY NAMES. On any Debian
+#       with the nft backend `iptables-legacy-save` and `iptables-nft-save` are
+#       ordinary spellings of the same command, and neither matched.
+#   netfilter-persistent save — the packaged wrapper that does exactly this and
+#       was not covered at all.
+#   the sink — shell `>`/`>>`, `tee`, `dd of=`, `sponge`, or iptables-save's own
+#       `-f`/`--file`. The `-f` alternative now needs a real option boundary:
+#       written bare it matched the `-f` inside `grep -f`, `--foo` and any word
+#       ending in "-f", so ordinary commands were denied.
+#   rules\.v[46] with a right boundary — `rules.v4.bak` and `rules.v4.txt` are
+#       backups and scratch files, not the live persistent ruleset.
+#
+# This is a guard against the obvious spellings, not a sandbox: a command can
+# still reach the same file through a variable, a temp file plus `mv`, or a
+# script. hooks/README.md says so; do not let this pattern grow permissive.
 PATTERN = re.compile(
-    r"(iptables-save|ip6tables-save)[^;&]*([>]+|tee|-f|--file)[^;&]*rules\.v[46]"
+    r"("
+    r"ip6?tables(?:-legacy|-nft)?-save"
+    r"|\bnetfilter-persistent\s+save\b"
+    r")"
+    r"[^;&]*"
+    r"(?:>>?|\btee\b|\bsponge\b|\bdd\s+of=|(?<![\w-])-f\b|--file\b)"
+    r"[^;&]*rules\.v[46](?![\w.-])"
 )
 
 REASON = (
@@ -64,10 +83,18 @@ def main() -> int:
     if not isinstance(data, dict):
         return 0  # valid JSON but not an object — nothing to inspect
 
-    tool_input = data.get("tool_input") or {}
-    command = tool_input.get("command") or ""
-    if not command:
-        return 0  # not a Bash call or empty
+    # `tool_input` is not guaranteed to be an object, and `command` is not
+    # guaranteed to be a string — a payload carrying `"tool_input": "x"` or
+    # `"command": ["a", "b"]` raised AttributeError and exited 1 with a
+    # traceback, while hooks/README.md promises these "never raise on malformed
+    # input". Exit 1 does not block the tool call, but the traceback goes to the
+    # user.
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return 0
+    command = tool_input.get("command")
+    if not isinstance(command, str) or not command:
+        return 0  # not a Bash call, or nothing to inspect
 
     if PATTERN.search(command):
         out = {

@@ -36,6 +36,7 @@ AGENTS_MD = ROOT / "codex" / "AGENTS.md"
 # in now, because sections() indexes H2 AND H3.
 REQUIRED = [
     "Findings",
+    "File Operations",
     "Tool Selection Rules",
     "Coding Discipline",
     "Test policy",
@@ -74,8 +75,15 @@ _SYNONYMS = [
 ]
 
 
-def sections(path: Path) -> dict[str, str]:
+def sections(path: Path, subtree: bool = False) -> dict[str, str]:
     """Split a rules file into {heading: body}, indexing H2 AND H3.
+
+    With `subtree=True` an H2's body is the whole SUBTREE — its own text plus
+    every H3 under it. That is what content comparison needs: `## Coding
+    Discipline` in CLAUDE.md has no text of its own before its first `###`, so
+    the per-heading form gave it an EMPTY body, and comparing empty to empty
+    passed no matter what the four Karpathy rules underneath it said. The guard
+    reported "compared by content (…Coding Discipline…)" while comparing nothing.
 
     H3 too, because the two files do not agree on nesting: what CLAUDE.md keeps
     as an H3 under `## Working methodology` ("Error Recovery", "File Encoding")
@@ -91,16 +99,32 @@ def sections(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     heading = None
     body: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("## ") or line.startswith("### "):
+    h2_heading = None
+    h2_body: list[str] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        is_h2 = line.startswith("## ")
+        is_h3 = line.startswith("### ")
+        if is_h2 or is_h3:
             if heading is not None:
-                out[heading] = "\n".join(body)
+                out.setdefault(heading, "\n".join(body))
+            if is_h2:
+                if subtree and h2_heading is not None:
+                    out[h2_heading] = "\n".join(h2_body)
+                h2_heading = line.split(" ", 1)[1].strip()
+                h2_body = []
+            elif subtree and h2_heading is not None:
+                h2_body.append(line)
             heading = line.split(" ", 1)[1].strip()
             body = []
-        elif heading is not None:
+            continue
+        if heading is not None:
             body.append(line)
+        if subtree and h2_heading is not None:
+            h2_body.append(line)
     if heading is not None:
-        out[heading] = "\n".join(body)
+        out.setdefault(heading, "\n".join(body))
+    if subtree and h2_heading is not None:
+        out[h2_heading] = "\n".join(h2_body)
     return out
 
 
@@ -129,8 +153,12 @@ def check() -> int:
             return 1
     claude_s = sections(CLAUDE_MD)
     agents_s = sections(AGENTS_MD)
+    # A second, subtree-aware index for the content comparison — see sections().
+    claude_full = sections(CLAUDE_MD, subtree=True)
+    agents_full = sections(AGENTS_MD, subtree=True)
 
     problems: list[str] = []
+    compared_chars = 0
     for req in REQUIRED:
         c = find(claude_s, req)
         a = find(agents_s, req)
@@ -140,7 +168,22 @@ def check() -> int:
             problems.append(f"codex/AGENTS.md missing universal section: '{req}'")
         if c is None or a is None or req not in COMPARED:
             continue
-        if normalize(c[1]) != normalize(a[1]):
+        cf = find(claude_full, req)
+        af = find(agents_full, req)
+        c_norm = normalize(cf[1] if cf else c[1])
+        a_norm = normalize(af[1] if af else a[1])
+        # An EMPTY normalized body means the comparison verified nothing. That
+        # is a guard failure, not a pass: it is exactly the state `## Coding
+        # Discipline` was in, and the guard reported it as compared.
+        if not c_norm or not a_norm:
+            problems.append(
+                f"universal section '{req}' compares as EMPTY "
+                f"(CLAUDE.md {len(c_norm)} chars, AGENTS.md {len(a_norm)} chars) "
+                f"— the content check would pass vacuously; fix the extractor "
+                f"or move the section out of COMPARED")
+            continue
+        compared_chars += len(c_norm)
+        if c_norm != a_norm:
             problems.append(
                 f"universal section '{req}' has drifted: "
                 f"CLAUDE.md '{c[0]}' and AGENTS.md '{a[0]}' no longer say the "
@@ -156,8 +199,9 @@ def check() -> int:
     # only thing checked for most of them.
     presence_only = [r for r in REQUIRED if r not in COMPARED]
     print(f"agents-sync: {len(COMPARED)} section(s) compared by content "
-          f"({', '.join(COMPARED)}); {len(presence_only)} checked for presence "
-          f"only ({', '.join(presence_only)})")
+          f"({', '.join(COMPARED)}), {compared_chars} normalized chars; "
+          f"{len(presence_only)} checked for presence only "
+          f"({', '.join(presence_only)})")
     return 0
 
 

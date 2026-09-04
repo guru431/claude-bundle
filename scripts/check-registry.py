@@ -141,6 +141,36 @@ def check_task(task: dict) -> list[str]:
         problems.append("repeat_for is set without repeat_every — the repetition never fires")
     if str(task.get("kind", "")).lower() == "exec" and not task.get("execute"):
         problems.append("kind: exec requires an 'execute:' field")
+
+    # Fields that no platform will ever read. A registry line that looks like a
+    # schedule and schedules nothing is the failure mode this guard exists for,
+    # and these two were not covered: `startup_delay` is documented as "Ignored"
+    # for a calendar trigger, and `restart_interval` does nothing without
+    # `restart_count`.
+    trig_kind = str(task.get("trigger", "")).strip().split(" ", 1)[0].lower()
+    if task.get("startup_delay") and trig_kind in ("daily", "weekly", "monthly"):
+        problems.append(
+            f"startup_delay is set on a '{trig_kind}' trigger — it applies to "
+            f"AtStartup/AtLogOn only and is ignored here")
+    if task.get("restart_interval") and not task.get("restart_count"):
+        problems.append("restart_interval is set without restart_count — no retry happens")
+
+    # RUN the POSIX generator over this task. check-registry validated the
+    # trigger grammar with its own regex while gen-scheduler.py returned None —
+    # a documented, deliberate `skip` — for combinations that grammar accepts:
+    # `repeat_every` on a Weekly trigger, `PT30M` on a Daily one. So the "silent
+    # skip" this guard was written to prevent could still reach a release, and
+    # the same registry line ran on a different schedule on Linux than on
+    # Windows. Asking the generator itself is the only check that cannot drift.
+    if task.get("enabled") is not False and str(task.get("platform", "")).lower() != "windows":
+        if task.get("trigger") and gen.systemd_oncalendar(task) is None:
+            problems.append(
+                f"trigger '{task.get('trigger')}'"
+                + (f" + repeat_every '{task.get('repeat_every')}'"
+                   if task.get("repeat_every") else "")
+                + " is valid for Task Scheduler but gen-scheduler.py cannot "
+                  "express it, so the POSIX unit would be SKIPPED — the same "
+                  "line would run on two different schedules")
     return problems
 
 

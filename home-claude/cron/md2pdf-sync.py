@@ -39,7 +39,7 @@ disabled in the registry.
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=nothing (local render) money=no writes=regenerates *.pdf under projects_root
+# bundle-io: offbox=a failure summary -> Telegram Bot API (the render itself is local) money=no writes=regenerates *.pdf under projects_root
 from __future__ import annotations
 
 import json

@@ -1,4 +1,19 @@
 # Dev/test-only dependencies (CI + local `pytest tests/`).
 # Runtime deps are in requirements.txt; the pipeline smoke test uses the offline
 # `mock` LLM provider, so it needs no provider SDK — just a test runner.
+#
+# PyYAML is listed here as well as in requirements.txt on purpose. It is what
+# `tests/test_guards.py` needs to check the fail-closed manifest behaviour — the
+# bundle's cardinal invariant — and those tests are guarded by
+# `pytest.importorskip("yaml")`. Without a hard dev dependency a missing PyYAML
+# turned seven checks of "a malformed privacy policy denies everything" into
+# silent SKIPs that `-q` renders as dots. (tests/conftest.py turns such a skip
+# into a failure when CI=1, so the two halves cannot drift.)
 pytest>=7
+PyYAML
+# shellcheck, as a pip package, so `{ git ls-files '*.sh'; git ls-files
+# '.githooks/*'; } | xargs shellcheck --severity=warning -e SC1091 -f gcc`
+# — the CI-parity command from CLAUDE.md § Commands — actually runs on a
+# developer machine. It used to require a system install nobody had, so the
+# lint gate was CI-only and every shell finding was discovered after the push.
+shellcheck-py>=0.9

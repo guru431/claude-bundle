@@ -55,8 +55,8 @@ TRIGGER_MONTHLY = re.compile(r"Monthly day=(\d{1,2}) (\d{1,2}):(\d{2})")
 TRIGGER_SIMPLE = ("AtLogOn", "AtStartup")
 
 
-def load_tasks() -> list[dict]:
-    text = REGISTRY.read_text(encoding="utf-8")
+def load_tasks(registry: Path | None = None) -> list[dict]:
+    text = (registry or REGISTRY).read_text(encoding="utf-8")
     try:
         import yaml
         return yaml.safe_load(text)["tasks"]
@@ -275,13 +275,24 @@ def main() -> int:
     ap.add_argument("--out-dir", default="scheduler-units")
     ap.add_argument("--all", action="store_true",
                     help="include tasks marked enabled: false")
+    ap.add_argument("--registry", default=None,
+                    help="read this registry.yaml instead of the bundle source. "
+                         "Use the DEPLOYED copy (<install-path>/cron/registry.yaml) "
+                         "to regenerate units after editing your own schedule — "
+                         "otherwise changing a trigger on POSIX meant editing the "
+                         "repository, and the next `git pull` reverted it")
     args = ap.parse_args()
 
     install_path = str(Path(args.install_path).expanduser()) \
         if args.install_path.startswith("~") else args.install_path
     out = Path(args.out_dir)
 
-    tasks = load_tasks()
+    registry = Path(args.registry).expanduser() if args.registry else REGISTRY
+    if not registry.is_file():
+        print(f"ERROR: registry not found: {registry}", file=sys.stderr)
+        return 1
+    print(f"registry: {registry}")
+    tasks = load_tasks(registry)
     targets = ["systemd", "launchd"] if args.target == "both" else [args.target]
     written = 0
     for task in tasks:

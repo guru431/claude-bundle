@@ -40,7 +40,7 @@ Schedule: weekly (see cron/registry.yaml).
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=nothing money=no writes=DELETES old cron/logs/* and projects/*/memory/handoff-*.md
+# bundle-io: offbox=nothing money=no writes=DELETES old cron/logs/*.log, cron/logs/*.jsonl, cron/logs/rejected/*.txt and projects/*/memory/handoff-*.md
 import os
 import re
 import sys
@@ -132,6 +132,8 @@ HANDOFF_RETENTION_DAYS = _window("WIKI_HANDOFF_RETENTION_DAYS", 7)
 # — cron/runs.py bounds it by slicing per year instead.
 KEEP_FOREVER_RE = re.compile(r"^runs(-\d{4})?\.jsonl$")
 DRY_RUN = any(a in ("--dry-run", "--no-llm") for a in sys.argv[1:])
+# Today's own log file — excluded from the count, see prune().
+OWN_LOG_NAME = f"log-retention_{date.today().isoformat()}.log"
 
 
 def prune(files, days: int, label: str) -> tuple[int, int, int]:
@@ -149,7 +151,11 @@ def prune(files, days: int, label: str) -> tuple[int, int, int]:
     kept = 0
     freed = 0
     for f in files:
-        if KEEP_FOREVER_RE.match(f.name):
+        if KEEP_FOREVER_RE.match(f.name) or f.name == OWN_LOG_NAME:
+            # This script's OWN log was counted as a swept file, so
+            # `useful_items` was at least 1 on every run — and the whole point of
+            # that number is to catch a sweep pointed at the wrong tree, which by
+            # construction it never could.
             kept += 1
             continue
         try:

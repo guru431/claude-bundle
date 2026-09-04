@@ -63,6 +63,10 @@ esac
 
 tmpdir=$(mktemp -d 2>/dev/null || echo "$repo_root/.pre-push.tmp")
 mkdir -p "$tmpdir"
+# The fallback path is INSIDE the repository, so an interrupted push used to
+# leave `.pre-push.tmp/` sitting in the working tree — untracked, unignored, and
+# full of object ids. Clean up on every exit path, signals included.
+trap 'rm -rf "$tmpdir"' EXIT INT TERM
 objects="$tmpdir/objects"
 blobs="$tmpdir/blobs"
 
@@ -85,11 +89,42 @@ fi
 awk '{print $1}' "$objects" \
   | git cat-file --batch-check='%(objectname) %(objecttype) %(objectsize)' 2>/dev/null \
   | awk -v max="$max_blob_bytes" '$2 == "blob" && $3 <= max {print $1}' > "$blobs" || true
-[ -s "$blobs" ] || { rm -rf "$tmpdir"; exit 0; }
-
-count=$(wc -l < "$blobs" | tr -d ' ')
+count=0
+if [ -s "$blobs" ]; then
+  count=$(wc -l < "$blobs" | tr -d ' ')
+fi
 if [ "$count" -gt "$progress_threshold" ]; then
   echo "pre-push: scanning $count new blobs (no remote has them yet)..."
+fi
+
+# SAY what was skipped. "scanned everything under 1 MiB" is a different promise
+# from "scanned everything", and the hook only ever made the second one out
+# loud — a key pasted into a big generated file was published in silence.
+oversize=$(awk '{print $1}' "$objects" \
+  | git cat-file --batch-check='%(objecttype) %(objectsize)' 2>/dev/null \
+  | awk -v max="$max_blob_bytes" '$1 == "blob" && $2 > max' | wc -l | tr -d ' ')
+if [ "${oversize:-0}" -gt 0 ]; then
+  echo "pre-push: NOTE — $oversize blob(s) over $max_blob_bytes bytes were NOT scanned"
+fi
+
+# 2b) COMMIT MESSAGES. Nothing scanned them: a token pasted into a commit body
+# is published exactly as written and `git log` shows it forever. .githooks/
+# commit-msg catches new ones, but this hook also publishes commits made before
+# the guard was enabled or with --no-verify.
+# shellcheck disable=SC2086 — both vars must word-split.
+if [ -n "$excludes" ]; then
+  msgs=$(git log --format='%H%n%B%n' $shas --not $excludes 2>/dev/null || true)
+else
+  msgs=$(git log --format='%H%n%B%n' $shas 2>/dev/null || true)
+fi
+if [ -n "$msgs" ]; then
+  msg_hits=$(printf '%s\n' "$msgs" | grep -nE -e "$SECRET_SCAN_PATTERN" \
+             | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
+  if [ -n "$msg_hits" ]; then
+    echo "BLOCKED: possible secret/token format in an outgoing COMMIT MESSAGE:"
+    printf '%s\n' "$msg_hits" | sed 's/^/  /'
+    fail=1
+  fi
 fi
 
 # Personal denylist — concrete values from untracked .sanitize-patterns
@@ -109,16 +144,25 @@ fi
 # step 4, which is the only step that can fail the push. So a false alarm here
 # costs seconds, never a wrong verdict — and a clean push exits right now.
 suspect=0
-if git cat-file --batch < "$blobs" 2>/dev/null | grep -qaE -e "$SECRET_SCAN_PATTERN"; then
+if [ -s "$blobs" ] && git cat-file --batch < "$blobs" 2>/dev/null | grep -qaE -e "$SECRET_SCAN_PATTERN"; then
   suspect=1
 fi
-if [ "$suspect" -eq 0 ] && [ -s "$pat" ]; then
+if [ "$suspect" -eq 0 ] && [ -s "$blobs" ] && [ -s "$pat" ]; then
   if git cat-file --batch < "$blobs" 2>/dev/null | grep -qaiEf "$pat"; then
     suspect=1
   fi
 fi
 if [ "$suspect" -eq 0 ]; then
   rm -rf "$tmpdir"
+  trap - EXIT INT TERM
+  # `fail` can already be 1 from the commit-message scan above, which runs
+  # whether or not the push carries any new blob.
+  if [ "$fail" -ne 0 ]; then
+    echo ""
+    echo "Push aborted — this is a PUBLIC repository."
+    echo "For a confirmed false positive: git push --no-verify"
+    exit 1
+  fi
   exit 0
 fi
 
@@ -126,6 +170,7 @@ fi
 # Redirect, not a pipe: a pipe runs the loop in a subshell and every `fail=1`
 # is lost when it exits.
 while read -r sha; do
+  [ -n "$sha" ] || continue
   path=$(grep -m1 "^$sha " "$objects" | cut -d' ' -f2- || true)
   # .githooks/ documents token FORMATS on purpose — same exclusion as
   # pre-commit and the CI secret guard.
@@ -148,6 +193,7 @@ while read -r sha; do
 done < "$blobs"
 
 rm -rf "$tmpdir"
+trap - EXIT INT TERM
 
 if [ "$fail" -ne 0 ]; then
   echo ""

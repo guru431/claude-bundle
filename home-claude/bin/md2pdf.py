@@ -111,14 +111,25 @@ def find_browser() -> str:
 def md_to_html(md_path: Path) -> str:
     import re
 
-    src = md_path.read_text(encoding="utf-8")
+    src = md_path.read_text(encoding="utf-8-sig", errors="replace")
 
     try:
         from markdown_it import MarkdownIt  # noqa: WPS433
 
-        md = MarkdownIt("commonmark", {"html": True, "linkify": True, "typographer": False})
+        # `linkify: True` on its own does NOTHING here: the `commonmark` preset
+        # leaves the linkify RULE disabled, and the feature also needs the
+        # optional `linkify-it-py` package, which requirements.txt does not
+        # install. So it was a setting that read as a feature and was not one.
+        # Enable it only when the package is actually importable.
+        md = MarkdownIt("commonmark", {"html": True, "typographer": False})
         md.enable("table")
         md.enable("strikethrough")
+        try:
+            import linkify_it  # noqa: F401,WPS433
+            md.options["linkify"] = True
+            md.enable("linkify")
+        except ImportError:
+            pass
         body = md.render(src)
     except ImportError:
         try:
@@ -144,12 +155,17 @@ def md_to_html(md_path: Path) -> str:
             return match.group(0)
         candidate = (md_dir / src_val).resolve()
         if candidate.is_file():
-            return f'{attr}="file:///{str(candidate).replace(chr(92), "/")}"'
+            # as_uri(), not a hand-built "file:///" + path: on POSIX the manual
+            # form yields `file:////home/...` and never percent-encodes a space.
+            return f'{attr}="{candidate.as_uri()}"'
         return match.group(0)
 
     body = re.sub(r'(src|href)="([^"]+)"', fix_src, body)
 
-    title = md_path.stem.replace("_", " ").replace("-", " ")
+    # ESCAPED: a filename can carry `<`, `&` or a quote, and an unescaped one
+    # breaks out of the <title> element and corrupts the document.
+    import html as _html
+    title = _html.escape(md_path.stem.replace("_", " ").replace("-", " "))
     return (
         f"<!DOCTYPE html><html><head>"
         f'<meta charset="utf-8"><title>{title}</title>'
@@ -163,10 +179,21 @@ def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
     # own cwd (access denied / file not where you looked) and still returns 0
     pdf_path = pdf_path.resolve()
     before_mtime = pdf_path.stat().st_mtime if pdf_path.is_file() else None
-    url = "file:///" + str(html_path.resolve()).replace("\\", "/")
+    # Path.as_uri(), not a hand-built "file:///" + path. On POSIX the manual
+    # form produced `file:////home/...` (four slashes) because the path already
+    # begins with one, and it never percent-encoded a space or a `#`.
+    url = html_path.resolve().as_uri()
+    # A PRIVATE profile directory. Without it headless attaches to an already
+    # running Edge/Chrome, which returns 0 and prints nothing — the failure the
+    # mtime guard below had to be invented to catch. With it there is nothing to
+    # attach to.
+    profile_dir = tempfile.mkdtemp(prefix="md2pdf-profile-")
     cmd = [
         browser,
         "--headless",
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
         "--disable-gpu",
         "--no-pdf-header-footer",
         "--export-tagged-pdf",
@@ -174,7 +201,10 @@ def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
         f"--print-to-pdf={pdf_path}",
         url,
     ]
-    result = subprocess.run(cmd, capture_output=True, timeout=120)
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
     stderr = result.stderr.decode(errors="replace")[:500]
     if result.returncode != 0 or not pdf_path.is_file():
         raise RuntimeError(f"browser failed (rc={result.returncode}): {stderr}")

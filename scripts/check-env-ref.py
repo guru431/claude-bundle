@@ -32,6 +32,7 @@ Exit 0 = template and docs agree; exit 1 = drift (printed per var).
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -93,6 +94,24 @@ CODE_ONLY = {
     # never loads the pipeline .env, so declaring it there would do nothing;
     # documented in home-claude/hooks/README.md instead.
     "CLAUDE_MD2PDF",
+    # Same reasoning: bash-guard.py is a lifecycle hook, so it runs in the
+    # Claude Code client session and never loads the pipeline .env. Points it at
+    # an alternative rules file; documented in hooks/README.md.
+    "CLAUDE_BASH_DENY",
+    # DERIVED, not configured: cron/lib/runtime.sh resolves them from
+    # PYTHON_EXE / BASH_EXE (which ARE in the template) and exports them for the
+    # rest of the script. Declaring them in .env would let a stale value win
+    # over a working resolution.
+    "PYTHON",
+    "BASH_BIN",
+    # Generated into cron/lib/secret-scan.sh from cron/lib/secret_shapes.py and
+    # sourced by the guards. A user-editable copy in .env would be a fourth
+    # place for the sensitive-path list to drift.
+    "SENSITIVE_PATH_PATTERN",
+    "SENSITIVE_PATH_ALLOW",
+    # Test seam only: redirects the run ledger so pytest cannot write into a
+    # real deployment's cron/logs/runs-<year>.jsonl (see tests/conftest.py).
+    "CLAUDE_BUNDLE_RUNS_DIR",
 }
 
 # Provided by the OS / the shell, not by the bundle.
@@ -121,9 +140,46 @@ SH_ASSIGN_RE = re.compile(
     re.MULTILINE)
 
 
+def provider_table_vars() -> set[str]:
+    """Env-var names declared INSIDE the PROVIDERS table in utils.py.
+
+    They are read as `os.environ.get(p["base_url_env"])` — through a variable,
+    so the literal-argument regex below cannot see them. That made all twelve
+    provider variables invisible to this guard: adding a provider by following
+    the recipe in CLAUDE.md § "What lives where" produced three new names that
+    nothing then required to appear in the .env template. Parsed with `ast`
+    rather than matched with another regex, because the table is data and the
+    shape of that data is exactly what has to be read.
+    """
+    utils = CODE_ROOT / "cron" / "hooks" / "utils.py"
+    if not utils.is_file():
+        return set()
+    try:
+        tree = ast.parse(utils.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        target = None
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target = node.target.id
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name):
+            target = node.targets[0].id
+        if target != "PROVIDERS" or node.value is None:
+            continue
+        for literal in ast.walk(node.value):
+            if isinstance(literal, ast.Constant) and isinstance(literal.value, str) \
+                    and re.fullmatch(r"[A-Z][A-Z0-9_]*", literal.value):
+                names.add(literal.value)
+    return names
+
+
 def code_env_vars() -> dict[str, set[str]]:
     """Every env var the shipped code reads → the files that read it."""
     out: dict[str, set[str]] = {}
+    for name in provider_table_vars():
+        out.setdefault(name, set()).add("home-claude/cron/hooks/utils.py (PROVIDERS)")
     for path in sorted(CODE_ROOT.rglob("*")):
         if path.suffix not in CODE_SUFFIXES or not path.is_file():
             continue
@@ -238,5 +294,82 @@ def check() -> int:
     return 0
 
 
+def emit_table() -> str:
+    """The generated body of docs/config-reference.md.
+
+    One table of every environment variable the bundle reads, with WHO reads it.
+    Answering "what can I configure, and where does that value go" previously
+    meant grepping the source: a variable could live in the code, in the
+    template and in three docs, and no single page listed them together.
+
+    Generated rather than written, and `--check-table` asserts the committed
+    page still matches — so the reference cannot rot the way a hand-kept table
+    would.
+    """
+    env_text = ENV_TEMPLATE.read_text(encoding="utf-8")
+    declared = set(DECL_RE.findall(env_text))
+    commented = {m.group(1) for m in COMMENTED_RE.finditer(env_text)}
+    known = declared | commented
+    code = code_env_vars()
+    rows = []
+    for var in sorted(known | set(code)):
+        if var in OS_ENV:
+            continue
+        if var in declared:
+            where_tpl = "declared"
+        elif var in commented:
+            where_tpl = "optional (commented)"
+        elif var in CODE_ONLY:
+            where_tpl = "not in .env (internal)"
+        else:
+            where_tpl = "—"
+        readers = ", ".join(f"`{r}`" for r in sorted(code.get(var, []))) or "—"
+        rows.append(f"| `{var}` | {where_tpl} | {readers} |")
+
+    return "\n".join([
+        "# Configuration reference (generated)",
+        "",
+        "Every environment variable the bundle reads, where it appears in",
+        "`config/llm-providers.example.env`, and which shipped files read it.",
+        "",
+        "**Do not edit this file by hand.** It is produced by",
+        "`python scripts/check-env-ref.py --emit-table`, and CI fails when the",
+        "committed copy disagrees with the code (`--check-table`). The canonical",
+        "descriptions live next to each variable in the `.env` template; this",
+        "page is the index.",
+        "",
+        "The two OTHER kinds of configuration are not env vars and are not listed",
+        "here: the per-machine manifest `bundle.local.yaml` (project map and",
+        "privacy policy — see `config/bundle.local.example.yaml`) and the task",
+        "declarations in `cron/registry.yaml`.",
+        "",
+        "| Variable | In the .env template | Read by |",
+        "|---|---|---|",
+        *rows,
+        "",
+        f"_{len(rows)} variables._",
+        "",
+    ])
+
+
 if __name__ == "__main__":
+    if "--emit-table" in sys.argv:
+        # Written to the file directly, not printed for a shell redirect: on a
+        # Windows console `>` encodes stdout in the ANSI codepage, and the em
+        # dashes in this table would land as CP1251 bytes in a file everything
+        # else reads as UTF-8.
+        page = ROOT / "docs" / "config-reference.md"
+        page.write_text(emit_table(), encoding="utf-8")
+        print(f"wrote {page.relative_to(ROOT).as_posix()}")
+        sys.exit(0)
+    if "--check-table" in sys.argv:
+        page = ROOT / "docs" / "config-reference.md"
+        want = emit_table()
+        have = page.read_text(encoding="utf-8") if page.is_file() else ""
+        if have.replace("\r\n", "\n") != want:
+            print("docs/config-reference.md is out of date — regenerate it:")
+            print("  python scripts/check-env-ref.py --emit-table > docs/config-reference.md")
+            sys.exit(1)
+        print("config-reference: up to date")
+        sys.exit(0)
     sys.exit(check())

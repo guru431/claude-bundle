@@ -30,6 +30,7 @@ param(
     [switch]$Force,
     [switch]$Adopt,
     [switch]$Unregister,
+    [switch]$Verify,
     [string[]]$Only,
     [string]$RegistryPath,
     [string]$LogPath,
@@ -73,6 +74,7 @@ if ($ArgsFile) {
         elseif ($t -eq '-Force')  { $Force  = $true }
         elseif ($t -eq '-Adopt')  { $Adopt  = $true }
         elseif ($t -eq '-Unregister') { $Unregister = $true }
+        elseif ($t -eq '-Verify') { $Verify = $true }
         elseif ($t -eq '-Only' -or $t -eq '-RegistryPath' -or $t -eq '-LogPath') {
             if ($i -ge $tokens.Count -or $tokens[$i].StartsWith('-')) {
                 Write-Host "ERROR: $t requires a value" -ForegroundColor Red
@@ -85,18 +87,24 @@ if ($ArgsFile) {
         }
         else {
             Write-Host "ERROR: unsupported argument '$t'" -ForegroundColor Red
-            Write-Host "       Allowed: -DryRun -Force -Adopt -Unregister -Only <names> -RegistryPath <path> -LogPath <path>" -ForegroundColor Red
+            Write-Host "       Allowed: -DryRun -Force -Adopt -Unregister -Verify -Only <names> -RegistryPath <path> -LogPath <path>" -ForegroundColor Red
             exit 1
         }
     }
 }
 
 # ── default log path: %TEMP%\sync-tasks_<timestamp>.log ──────────────────────
-if (-not $LogPath) {
+# A DRY RUN changes nothing and therefore has nothing to keep a record of. It
+# used to open a transcript anyway, so every `-DryRun` — including the one
+# scripts/self-test.ps1 makes on every run — left another timestamped file in
+# %TEMP% that nothing ever cleaned up. An explicit -LogPath still wins.
+if (-not $LogPath -and -not $DryRun) {
     $stamp = (Get-Date).ToString('yyyy-MM-dd_HHmmss')
     $LogPath = Join-Path $env:TEMP "sync-tasks_$stamp.log"
 }
-try { Start-Transcript -Path $LogPath -IncludeInvocationHeader | Out-Null } catch {}
+if ($LogPath) {
+    try { Start-Transcript -Path $LogPath -IncludeInvocationHeader | Out-Null } catch {}
+}
 
 # ── locate registry ──────────────────────────────────────────────────────────
 if (-not $RegistryPath) {
@@ -112,7 +120,11 @@ $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = ([System.Security.Principal.WindowsPrincipal]$me).IsInRole(
     [System.Security.Principal.WindowsBuiltInRole]::Administrator
 )
-if (-not $isAdmin -and -not $DryRun) {
+# -Verify is read-only (Get-ScheduledTask / Get-ScheduledTaskInfo need no
+# elevation), and requiring admin for it would defeat the point: the whole
+# reason it exists is that "did the night work?" should be answerable without a
+# UAC prompt.
+if (-not $isAdmin -and -not $DryRun -and -not $Verify) {
     Write-Host "ERROR: must run elevated. Use sync.cmd or pass -DryRun" -ForegroundColor Red
     exit 1
 }
@@ -141,6 +153,16 @@ function Unwrap-Value([string]$v) {
     $v = $v.Trim()
     if ($v.Length -ge 2 -and $v[0] -eq "'" -and $v[-1] -eq "'") {
         return $v.Substring(1, $v.Length - 2) -replace "''", "'"
+    }
+    # DOUBLE quotes too. Only single quotes were unwrapped, so a registry entry
+    # written `- "--full"` — perfectly ordinary YAML — reached Task Scheduler as
+    # the literal three-character argument `"--full"`, and `enabled: "false"`
+    # unwrapped to the non-empty STRING "false", which is truthy: the task was
+    # registered as enabled.
+    if ($v.Length -ge 2 -and $v[0] -eq '"' -and $v[-1] -eq '"') {
+        $v = $v.Substring(1, $v.Length - 2) -replace '\\"', '"'
+        # Fall through to the scalar coercions below so a quoted 'false' is
+        # still recognised as the boolean it is written to be.
     }
     if ($v -eq 'true')  { return $true }
     if ($v -eq 'false') { return $false }
@@ -577,6 +599,58 @@ if ($Unregister) {
     exit 0
 }
 
+# ── -Verify: is the night actually working? ──────────────────────────────────
+# READ-ONLY and needs no elevation. Until this existed the only way to answer
+# "are my scheduled tasks in the state the registry describes, and did they
+# succeed?" was a hand-typed `schtasks /query` — the direct manipulation this
+# project forbids everywhere else. scripts/self-test.ps1 calls it.
+if ($Verify) {
+    Write-Host ""
+    Write-Host "=== sync-tasks.ps1 -Verify ===" -ForegroundColor Cyan
+    Write-Host "Registry: $RegistryPath"
+    Write-Host ""
+    $okCount = 0; $warn = 0; $absent = 0
+    foreach ($task in $reg.tasks) {
+        if ($Only -and ($Only -notcontains $task.name)) { continue }
+        if ("$($task.platform)".ToLower() -eq 'posix') { continue }
+        $enabledInRegistry = -not ($task.enabled -eq $false)
+        $cur = Get-ScheduledTask -TaskName $task.name -ErrorAction SilentlyContinue
+        if (-not $cur) {
+            if ($enabledInRegistry) {
+                Write-Host ("[MISSING  ] " + $task.name + " — enabled in registry.yaml but not registered") -ForegroundColor Red
+                $warn++
+            } else {
+                Write-Host ("[absent   ] " + $task.name + " — disabled in registry.yaml") -ForegroundColor DarkGray
+                $absent++
+            }
+            continue
+        }
+        $info = Get-ScheduledTaskInfo -TaskName $task.name -ErrorAction SilentlyContinue
+        $state = "$($cur.State)"
+        $last = if ($info) { $info.LastTaskResult } else { $null }
+        $lastRun = if ($info -and $info.LastRunTime) { $info.LastRunTime.ToString('yyyy-MM-dd HH:mm') } else { 'never' }
+        $next = if ($info -and $info.NextRunTime -and $info.NextRunTime.Year -gt 1) { $info.NextRunTime.ToString('yyyy-MM-dd HH:mm') } else { 'none' }
+        $line = "$($task.name) — state=$state last=$last ($lastRun) next=$next"
+        # 0 ok, 267009 running, 267011 not yet run, 267014 stopped by the user.
+        $okCodes = @(0, 267009, 267011, 267014)
+        if ($enabledInRegistry -and $state -eq 'Disabled') {
+            Write-Host ("[WARN     ] " + $line + " — enabled in registry.yaml, Disabled in Task Scheduler") -ForegroundColor Yellow
+            $warn++
+        } elseif ($null -ne $last -and $okCodes -notcontains $last) {
+            Write-Host ("[WARN     ] " + $line + " — last run failed") -ForegroundColor Yellow
+            $warn++
+        } else {
+            Write-Host ("[ok       ] " + $line) -ForegroundColor Green
+            $okCount++
+        }
+    }
+    Write-Host ""
+    Write-Host "=== Summary === ok: $okCount  warn: $warn  absent (disabled): $absent" -ForegroundColor Cyan
+    try { Stop-Transcript | Out-Null } catch {}
+    if ($warn -gt 0) { exit 3 }
+    exit 0
+}
+
 # ── launcher redistribution ──────────────────────────────────────────────────
 # The canonical _run-hidden.vbs ships with the bundle at <install>\bin\ and is
 # versioned. `launcher:` may point somewhere else entirely — that is the
@@ -636,6 +710,16 @@ $summary = @{ created = 0; updated = 0; unchanged = 0; skipped = 0; failed = 0 }
 
 foreach ($task in $reg.tasks) {
     if ($Only -and ($Only -notcontains $task.name)) { continue }
+
+    # `platform: posix` means the task belongs to systemd/launchd (see
+    # scripts/gen-scheduler.py). Registering it in Task Scheduler produced a task
+    # that fires a script written for another OS — and the field existed
+    # precisely to say it should not.
+    if ("$($task.platform)".ToLower() -eq 'posix') {
+        Write-Host ("[skipped: posix-only] " + $task.name + " — platform: posix, this task belongs to systemd/launchd") -ForegroundColor DarkGray
+        $summary.skipped++
+        continue
+    }
 
     $actionInfo = Build-Action $task $launcher
     $wantedExec = $actionInfo.execute

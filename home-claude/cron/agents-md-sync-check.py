@@ -34,6 +34,8 @@ Schedule: weekly.
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
 # bundle-io: offbox=the FULL CLAUDE.md and AGENTS.md of every allowed project -> LLM provider money=tokens writes=AGENTS.md + FINDINGS.md in your working copies
+import argparse
+import difflib
 import json
 import os
 import re
@@ -51,12 +53,16 @@ from utils import (  # noqa: E402
     BUNDLE_ROOT,
     PROJECTS_ROOT,
     findings_header,
+    is_dry_run,
     llm_call,
     manifest_broken,
+    masked,
     parse_llm_json,
     policy_summary,
+    strip_edge_fences,
     working_copy_allowed,
 )
+from untrusted import fence  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runs import record_run  # noqa: E402
@@ -198,6 +204,17 @@ def read_file(path: Path) -> str | None:
         return None
 
 
+def _atomic_write(path: Path, text: str, newline: str = "\n") -> None:
+    """Temp file + replace. This job edits files in OTHER people's repositories.
+
+    A bare `write_text` there means a crash mid-write truncates somebody's
+    AGENTS.md or FINDINGS.md — and the nightly push then commits the stump.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8", errors="replace", newline=newline)
+    tmp.replace(path)
+
+
 def detect_newline(path: Path) -> str:
     """The line ending the file is stored with.
 
@@ -283,11 +300,28 @@ def verify_report(report: str, agents_md: str) -> tuple[str, list[str]]:
     return "\n".join(cleaned).strip(), dropped
 
 
-def is_public_repo(project_dir: Path) -> bool:
-    """Whether the repo has a remote on a public host.
+# A remote counts as PRIVATE only when it is unmistakably one: loopback, an
+# RFC1918 address, a `.local`/`.internal` name, or a plain filesystem path.
+# Everything else — Codeberg, sourcehut, a self-hosted Forgejo, a repo with no
+# remote at all — is treated as public.
+_PRIVATE_REMOTE_RE = re.compile(
+    r"(?i)(^|[@/])("
+    r"localhost|127\.\d+\.\d+\.\d+|::1"
+    r"|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+"
+    r"|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+"
+    r"|[A-Za-z0-9-]+\.(local|internal|lan|home|test)(:|/|$)"
+    r")")
 
-    Unknown counts as public: the leak gate is only worth having if it fails
-    towards caution.
+
+def is_public_repo(project_dir: Path) -> bool:
+    """Whether AGENTS.md here could end up published.
+
+    Unknown counts as PUBLIC: the leak gate is only worth having if it fails
+    towards caution. That was the intent all along, but the implementation
+    inverted it — it listed three hosts and called every other remote private,
+    so a Codeberg repo, a self-hosted forge, or a checkout with no remote had
+    the gate switched OFF, and an edit carrying a LAN address into AGENTS.md
+    would have been written and then committed by the nightly push.
     """
     try:
         res = subprocess.run(
@@ -296,8 +330,25 @@ def is_public_repo(project_dir: Path) -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return True
-    remotes = res.stdout.decode("utf-8", errors="replace")
-    return any(host in remotes for host in ("github.com", "gitlab.com", "bitbucket.org"))
+    remotes = res.stdout.decode("utf-8", errors="replace").strip()
+    if not remotes:
+        return True                       # no remote at all — assume it may be pushed
+    urls = [ln.split()[1] for ln in remotes.splitlines() if len(ln.split()) > 1]
+    if not urls:
+        return True
+    allowed = {h.strip().lower() for h in
+               os.environ.get("SYNC_CHECK_PRIVATE_HOSTS", "").split(",") if h.strip()}
+
+    def private(url: str) -> bool:
+        if url.startswith(("/", "./", "../", "file://")) or re.match(r"^[A-Za-z]:[\\/]", url):
+            return True
+        if _PRIVATE_REMOTE_RE.search(url):
+            return True
+        return any(host and host in url.lower() for host in allowed)
+
+    # ANY public remote makes the repo public — one private mirror is not a
+    # reason to relax the gate.
+    return not all(private(u) for u in urls)
 
 
 def apply_edits(agents_md: str, edits: list[dict],
@@ -339,7 +390,10 @@ def autofix(project: str, claude_md: str, agents_md: str, report: str,
             agents_path: Path, public: bool) -> tuple[list[str], list[str]]:
     """Resolve the drift by editing AGENTS.md. Returns (applied, unfixed)."""
     prompt = FIX_PROMPT_TEMPLATE.format(
-        project=project, claude_md=claude_md, agents_md=agents_md, report=report
+        project=project,
+        claude_md=fence(f"kind=claude-md project={project}", claude_md),
+        agents_md=fence(f"kind=agents-md project={project}", agents_md),
+        report=report,
     )
     raw = llm_call(prompt, timeout=300, model=FIX_MODEL)
     if not raw:
@@ -360,8 +414,21 @@ def autofix(project: str, claude_md: str, agents_md: str, report: str,
             f"{len(new_text)} characters"
         ]
 
-    agents_path.write_text(new_text, encoding="utf-8",
-                           newline=detect_newline(agents_path))
+    # The DIFF goes into the log before the write. `ClaudeGitPushAll` commits and
+    # pushes this file the next night, so without a record of what changed the
+    # only account of a model editing somebody's repository was the commit it
+    # produced — read, if ever, after the fact.
+    diff = "".join(difflib.unified_diff(
+        agents_md.splitlines(keepends=True), new_text.splitlines(keepends=True),
+        fromfile=f"a/{agents_path.name}", tofile=f"b/{agents_path.name}"))
+    try:
+        (LOG_DIR / f"agents-sync-{project}_{date.today().isoformat()}.diff").write_text(
+            diff, encoding="utf-8", errors="replace")
+    except OSError:
+        pass
+    print(diff, file=sys.stderr)
+
+    _atomic_write(agents_path, new_text, detect_newline(agents_path))
     return applied, failed
 
 
@@ -395,21 +462,21 @@ automatically (the rest has already been applied to AGENTS.md).
 <details>
 <summary>LLM diagnosis</summary>
 
-{report}
+{masked(report)}
 </details>
 
 """
     if not findings_path.exists():
-        findings_path.write_text(findings_header(project) + entry, encoding="utf-8")
+        _atomic_write(findings_path, findings_header(project) + entry)
         return
 
-    existing = findings_path.read_text(encoding="utf-8")
+    existing = findings_path.read_text(encoding="utf-8", errors="replace")
     lines = existing.split("\n")
     insert_at = next((i for i, l in enumerate(lines) if l.startswith("## ")), len(lines))
-    findings_path.write_text(
+    _atomic_write(
+        findings_path,
         "\n".join(lines[:insert_at]) + "\n" + entry + "\n".join(lines[insert_at:]),
-        encoding="utf-8", newline=detect_newline(findings_path),
-    )
+        detect_newline(findings_path))
 
 
 def check_pair(project: str, claude_path: Path, agents_path: Path,
@@ -436,15 +503,35 @@ def check_pair(project: str, claude_path: Path, agents_path: Path,
                            "AGENTS.md is missing while CLAUDE.md exists.")
         return True, 0, True
 
+    if is_dry_run():
+        # The most invasive task in the bundle — it edits files in OTHER
+        # people's repositories and ships both files to a provider — was the one
+        # with no preview at all. `--dry-run` (and the `dry_run_until` window,
+        # which this script never consulted) now name exactly what would be sent.
+        log(f"  {project}: DRY RUN — would send CLAUDE.md ({len(claude_md)} chars) "
+            f"+ AGENTS.md ({len(agents_md)} chars), ~{(len(claude_md) + len(agents_md)) // 4} "
+            f"tokens; AGENTS.md would NOT be edited", log_path)
+        return False, 0, True
+
+    # Both files go in FENCED. They are ordinary project documentation, but the
+    # answer decides what gets written into somebody's repository, so the
+    # instruction has to be able to say "everything inside is data".
     response = llm_call(
-        PROMPT_TEMPLATE.format(project=project, claude_md=claude_md, agents_md=agents_md),
+        PROMPT_TEMPLATE.format(
+            project=project,
+            claude_md=fence(f"kind=claude-md project={project}", claude_md),
+            agents_md=fence(f"kind=agents-md project={project}", agents_md)),
         timeout=300,
     )
     if response is None:
         log(f"  {project}: LLM_FAIL (skipping)", log_path)
         return False, 0, False
 
-    response = response.strip()
+    # The prompt SHOWS its answer format inside a ``` fence, so the model often
+    # returns `OK` inside one too. Unfenced first: otherwise the run fell through
+    # to the drift branch and paid for a second, larger fix call to rewrite a
+    # file that was already in sync.
+    response = strip_edge_fences(response)
     if response == "OK" or response.startswith(("OK\n", "OK ")):
         log(f"  {project}: OK", log_path)
         return False, 0, True
@@ -489,6 +576,14 @@ def check_pair(project: str, claude_path: Path, agents_path: Path,
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description="CLAUDE.md ↔ AGENTS.md sync check")
+    ap.add_argument("--project", help="check this project only")
+    ap.add_argument("--dry-run", "--no-llm", dest="dry_run", action="store_true",
+                    help="print the plan; make no LLM call and edit nothing")
+    args, _unknown = ap.parse_known_args()
+    if args.dry_run:
+        sys.argv.append("--dry-run")   # so utils.is_dry_run() agrees
+
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"agents-md-sync-check_{date.today().isoformat()}.log"
     log("=== AGENTS.md sync check START ===", log_path)
@@ -523,6 +618,8 @@ def main() -> int:
         if not project_dir.is_dir():
             continue
         project = project_dir.name
+        if args.project and project != args.project:
+            continue
         # working_copy_allowed, not project_allowed: this walk is over git
         # checkouts, whose directory names are a different namespace from the
         # resolved slugs the policy is written in (see utils).
@@ -557,4 +654,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # An exception anywhere above used to skip `done()` entirely: the ledger got
+    # no record at all, so a crashed run and an uninstrumented task were the same
+    # thing to bundle-status. A cp1251-encoded FINDINGS.md in one project was
+    # enough to do it, taking every remaining project with it.
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 — a terminal record is the point
+        print(f"FATAL: {type(exc).__name__}: {exc}", file=sys.stderr)
+        record_run(task="ClaudeAgentsMdSyncCheck", process_rc=1, useful_items=0,
+                   delivery="n/a", note=f"crashed: {type(exc).__name__}: {exc}"[:300])
+        raise

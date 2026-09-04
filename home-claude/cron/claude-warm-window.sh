@@ -43,6 +43,11 @@ if [ -f "$(dirname "$0")/lib/dotenv.sh" ]; then
     . "$(dirname "$0")/lib/dotenv.sh"
     dotenv_load "$BUNDLE_ROOT/.env"
 fi
+if [ -f "$(dirname "$0")/lib/runtime.sh" ]; then
+    # shellcheck source=lib/runtime.sh
+    . "$(dirname "$0")/lib/runtime.sh"
+fi
+have_python || exit 1
 
 # Locate the claude CLI. Override with CLAUDE_BIN (in the bundle .env or the
 # machine env) if it isn't on PATH — e.g. in session 0, before logon, where PATH
@@ -54,8 +59,21 @@ echo "=== Warm-up $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$LOG_FILE"
 # Neutral cwd ($HOME) — don't pick up a project CLAUDE.md / .mcp.json.
 # --setting-sources project (empty there) silences user hooks; --strict-mcp-config
 # + an empty config disables MCP; --no-session-persistence avoids session files.
-OUT=$( cd "$HOME" && unset ANTHROPIC_API_KEY && "$CLAUDE" -p "hi" \
-    --model claude-haiku-4-5-20251001 \
+# EVERY ANTHROPIC_* variable is unset, not just the API key. `claude-switch.ps1`
+# sets ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN to point the CLI at a third-
+# party gateway — so a warm-up meant to open the Anthropic 5-hour window would
+# have gone to that gateway instead, warming nothing and spending someone else's
+# quota to do it.
+#
+# WARM_MODEL (default: the `haiku` ALIAS, not a dated snapshot) — a pinned
+# snapshot id stops existing when the model is retired, and then the one task
+# whose job is proving the CLI works fails for a reason that has nothing to do
+# with the CLI.
+OUT=$( cd "$HOME" \
+    && unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
+             ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL \
+    && "$CLAUDE" -p "hi" \
+    --model "${WARM_MODEL:-haiku}" \
     --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
     --setting-sources project \
     --no-session-persistence \
@@ -72,7 +90,7 @@ fi
 # Terminal ledger record (cron/runs.py), written BEFORE the exit so the failing
 # path is recorded too — a ping that never lands is precisely what this task
 # exists to reveal, and it used to leave the ledger silent.
-"${PYTHON_EXE:-python}" "$BUNDLE_ROOT/cron/runs.py" record \
+"$PYTHON" "$BUNDLE_ROOT/cron/runs.py" record \
     --task ClaudeWarmWindow --rc "$PING_RC" --artifact "$LOG_FILE" \
     --delivery n/a --note "claude -p ping" >>"$LOG_FILE" 2>&1 || true
 

@@ -21,6 +21,7 @@ Schedule: daily at 02:00.
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
 # bundle-io: offbox=your user messages of allowed projects + a slice of ~/.claude/memory -> LLM provider (a SECOND call with MEMORY_CROSS_NOTES=1) money=tokens writes=~/.claude/memory/*.md
+import hashlib
 import json
 import os
 import re
@@ -38,19 +39,23 @@ from utils import (  # noqa: E402
     CLAUDE_HOME,
     PROJECTS_BASE,
     SKIP_DIRS,
+    config_report,
     dir_to_project,
     extract_first_json_object,
     find_bash,
     is_dry_run,
     is_subagent_jsonl,
     llm_call,
+    masked,
     parse_jsonl_messages,
     policy_summary,
     project_allowed,
+    state_add,
+    state_get,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runs import record_run  # noqa: E402
+from runs import last_known_good, record_run  # noqa: E402
 
 # From utils, not re-derived here: one definition of "where Claude Code lives"
 # (see utils.CLAUDE_HOME) instead of four copies that can drift apart.
@@ -115,13 +120,23 @@ def cap_newest_messages(bits: list[str], proj_name: str,
     """
     kept: list[str] = []
     total = 0
+    oversized = 0
     for txt in reversed(bits):
         add = len(txt) + (len(MSG_SEP) if kept else 0)
         if total + add > cap:
-            break
+            # `continue`, not `break`. One long message — a pasted log, a stack
+            # trace — is a WALL: breaking on it threw away every older message of
+            # the day behind it, and the log line said "capped", not "you got
+            # roughly nothing". Skipping it keeps the rest of the day's context.
+            oversized += 1
+            continue
         kept.append(txt)
         total += add
     kept.reverse()
+
+    if oversized:
+        log(f"  {proj_name}: skipped {oversized} oversized message(s) that would "
+            f"not fit in {cap} chars — the messages behind them are kept")
 
     if not kept:
         # One message alone exceeds the cap. Its tail is still better context
@@ -138,6 +153,31 @@ def cap_newest_messages(bits: list[str], proj_name: str,
     return MSG_SEP.join(kept)
 
 
+MAX_CATCHUP_DAYS = 7
+
+
+def collection_window_hours(default_hours: int = 24) -> int:
+    """How far back to look, based on when this task last SUCCEEDED.
+
+    A fixed 24-hour window has no memory of its own: a machine that was off, or
+    a task that failed, simply loses that day — `StartWhenAvailable` catches up
+    exactly one missed run, and nothing else ever revisits it. The ledger already
+    records the last green run, so the window is derived from it, capped at
+    MAX_CATCHUP_DAYS so a month-old install does not ship a month of transcripts
+    to a provider in one night.
+    """
+    rec = last_known_good("ClaudeMemoryUpdate")
+    if not rec:
+        return default_hours
+    try:
+        age_h = (datetime.now() - datetime.fromisoformat(rec["ts"])).total_seconds() / 3600
+    except (KeyError, TypeError, ValueError):
+        return default_hours
+    # +2h of overlap: a session written while the previous run was in flight
+    # must not fall between the two windows. Dedup below removes the repeats.
+    return int(max(default_hours, min(age_h + 2, MAX_CATCHUP_DAYS * 24)))
+
+
 def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
     """Collect user messages from JSONLs modified in the last N hours, by project."""
     cutoff = datetime.now().timestamp() - hours * 3600
@@ -145,6 +185,8 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
     # resolve to the same project name, and capping each dir's chunk separately
     # would let the merge order decide what survives.
     proj_bits: dict[str, list[str]] = {}
+    already_sent = state_get("memory", "sent_hashes")
+    sent_now: set[str] = set()
 
     # We don't filter by directory name here — every project dir under
     # ~/.claude/projects/ is considered. Customize the glob if you only
@@ -198,6 +240,13 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
                     continue
                 if "session-end-hook" in txt:
                     continue
+                # Dedup by content hash across runs. With a catch-up window the
+                # same message can fall into two consecutive windows; without
+                # this it would be paid for twice and appended to USER.md twice.
+                digest = hashlib.sha256(txt.encode("utf-8", "replace")).hexdigest()[:16]
+                if digest in already_sent:
+                    continue
+                sent_now.add(digest)
                 bits.append(txt)
 
         if bits:
@@ -206,6 +255,8 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
             # silently drop the first one's messages.
             proj_bits.setdefault(proj_name, []).extend(bits)
 
+    if sent_now and not is_dry_run():
+        state_add("memory", "sent_hashes", sorted(sent_now))
     return {proj: cap_newest_messages(bits, proj) for proj, bits in proj_bits.items()}
 
 
@@ -285,7 +336,7 @@ CURRENT USER.md:
 {context_window(user_md)}
 
 TODAY'S USER MESSAGES (by project):
-{summary}
+{masked(summary)}
 
 OUTPUT: return strict JSON:
 {{"add": "markdown fragment to append to USER.md (or empty string if nothing)"}}
@@ -425,10 +476,16 @@ def run_incident_extract() -> None:
 def main() -> int:
     log(f"=== Memory Update {DATE} ===")
     log(f"Policy: {policy_summary()}")
+    for line in config_report():
+        log(f"  cfg | {line}")
     if not PROJECTS_DIR.is_dir():
         log(f"No projects dir at {PROJECTS_DIR} — nothing to process.")
         return 0
-    msgs = collect_today_user_messages(hours=24)
+    window = collection_window_hours()
+    if window > 24:
+        log(f"Catch-up window: {window}h (the last green run was longer ago than "
+            f"a day — a missed day used to be lost for good)")
+    msgs = collect_today_user_messages(hours=window)
     log(f"Collected user messages from {len(msgs)} projects")
 
     if is_dry_run():

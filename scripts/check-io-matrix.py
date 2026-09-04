@@ -94,14 +94,57 @@ def declared_io(path: Path) -> dict[str, str] | None:
 
 
 def _is_nothing(value: str) -> bool:
-    """True when a field claims nothing happens.
+    """True when a field claims nothing happens — and ONLY then.
 
-    Only the leading word counts: `nothing (local render)` and `nothing by
-    default (a summary -> Telegram with ENABLE_TELEGRAM_ALERTS)` are still
-    "nothing" for matrix purposes, and the parenthetical is the honest detail.
+    "Only the leading word counts" was a loophole big enough to drive the whole
+    guard through: `nothing by default (a summary -> Telegram …)` read as
+    "nothing", so wiki-lint — which posts to the Bot API — was covered by the
+    section's local-only sentence, and docs/cron-architecture.md said in as many
+    words that the task "never leaves your machine". A qualifier that names a
+    destination is a disclosure, not a footnote.
     """
-    first = re.split(r"[\s(,;]", value.strip().lower(), maxsplit=1)[0]
-    return first in _NOTHING
+    low = value.strip().lower()
+    first = re.split(r"[\s(,;]", low, maxsplit=1)[0]
+    if first not in _NOTHING:
+        return False
+    # A parenthetical that mentions a destination or a condition makes the claim
+    # conditional, and a conditional claim belongs in the table.
+    return not re.search(r"(?:->|→|telegram|http|api|provider|by default|unless|with )", low)
+
+
+# Network / spend / destructive primitives, and the field each one obliges. This
+# is the cross-check the guard was missing: the `bundle-io` header was pure
+# self-declaration, so a script could import `requests`, POST to an API and
+# still claim `offbox=nothing`. The header is what the bundle offers as its
+# honest answer to "what does this send off my machine" — it has to be checked
+# against the code, not just against the docs.
+_CODE_SIGNALS = (
+    (r"requests\.(?:post|get|put|patch|delete)", "offbox"),
+    (r"urllib\.request|httpx\.|http\.client", "offbox"),
+    (r"(?m)^\s*curl\s|[^\w]curl\s+-", "offbox"),
+    (r"telegram-send\.sh|send_telegram|api\.telegram\.org", "offbox"),
+    (r"llm_call|llm_call_ex|llm-call\.py", "offbox"),
+    (r"git\s+push|git_push|git_net\s+push", "offbox"),
+    (r"ssh\s+-", "offbox"),
+)
+_MONEY_SIGNALS = (r"llm_call|llm_call_ex|llm-call\.py",)
+
+
+def code_contradicts(path: Path, io: dict[str, str]) -> list[str]:
+    """Fields the SCRIPT'S OWN CODE proves cannot be 'nothing'."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    # The declaration line itself mentions these words; do not match on it.
+    text = IO_LINE_RE.sub("", text)
+    out = []
+    for pattern, field in _CODE_SIGNALS:
+        if re.search(pattern, text) and _is_nothing(io.get(field, "")):
+            out.append(f"declares {field}={io.get(field)!r} but the code matches "
+                       f"/{pattern}/ — it does leave this machine")
+    for pattern in _MONEY_SIGNALS:
+        if re.search(pattern, text) and _is_nothing(io.get("money", "")):
+            out.append(f"declares money={io.get('money')!r} but the code calls an "
+                       f"LLM — that is metered")
+    return out
 
 
 def matrix_section(text: str) -> str:
@@ -155,7 +198,16 @@ def check() -> int:
         # publishing claim: the matrix column is about what leaves or is
         # modified OUTSIDE it.
         writes_outward = not _is_nothing(io["writes"]) and not re.match(
-            r"(?i)\s*(wiki|cron|logs|deletes|~/\.claude)", io["writes"])
+            r"(?i)\s*(wiki|cron|logs|~/\.claude)", io["writes"])
+        # A `writes=DELETES …` field used to be read as local-only merely because
+        # it STARTED with the word "deletes" — so the one task that removes files
+        # could describe anything it liked after that word and still count as
+        # having no outward effect.
+        if re.match(r"(?i)\s*deletes", io["writes"]):
+            writes_outward = not re.match(
+                r"(?i)\s*deletes\s+(old\s+)?(wiki|cron|logs|~/\.claude)", io["writes"])
+        for contradiction in code_contradicts(path, io):
+            problems.append(f"{name}: {contradiction}")
         notable = (not _is_nothing(io["offbox"])
                    or not _is_nothing(io["money"])
                    or writes_outward)

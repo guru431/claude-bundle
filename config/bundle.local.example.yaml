@@ -68,6 +68,13 @@ skip_projects: []
 skip_dirs: []
 #   - C--Windows-System32
 
+# skip_jsonl_projects: a backwards-compatible alias, kept so an older config
+# keeps excluding what it always did. It is FOLDED INTO skip_projects — there
+# is no longer any source it excludes that skip_projects would not. Prefer
+# skip_projects for anything new; this key was undocumented until now, which
+# meant a config could carry an exclusion nothing in the docs explained.
+skip_jsonl_projects: []
+
 # ── A safe first week ────────────────────────────────────────────────────────
 
 # dry_run_until: hold EVERY phase in preview mode until this date (YYYY-MM-DD).

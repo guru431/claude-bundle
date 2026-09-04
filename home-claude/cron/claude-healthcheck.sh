@@ -26,6 +26,18 @@ if [ -f "$(dirname "$0")/lib/dotenv.sh" ]; then
     . "$(dirname "$0")/lib/dotenv.sh"
     dotenv_load "$BUNDLE_ROOT/.env"
 fi
+if [ -f "$(dirname "$0")/lib/runtime.sh" ]; then
+    # shellcheck source=lib/runtime.sh
+    . "$(dirname "$0")/lib/runtime.sh"
+fi
+have_python || exit 1
+have_bash || exit 1
+
+# Mount points EXCLUDED from the disk check (an ERE matched against the mount
+# point). Without it `/snap/*` — squashfs images, permanently 100% full by
+# design — made every Linux morning open with a "disk 100%" alert, and macOS
+# added `devfs`. A daily false alarm is how a real one stops being read.
+HEALTHCHECK_DISK_EXCLUDE="${HEALTHCHECK_DISK_EXCLUDE:-^/(snap|dev|run|sys|proc|boot/efi)|^/System/Volumes|squashfs}"
 
 DATE=$(date +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/healthcheck_${DATE}.log"
@@ -124,7 +136,8 @@ while read -r pct fs; do
         MAX_DISK_FS="$fs"
     fi
 done <<EOF
-$(df -P 2>/dev/null | awk 'NR > 1 && $5 ~ /%/ { gsub(/%/, "", $5); print $5, $6 }')
+$(df -P -l 2>/dev/null | awk -v ex="$HEALTHCHECK_DISK_EXCLUDE" '
+    NR > 1 && $5 ~ /%/ && $6 !~ ex { gsub(/%/, "", $5); print $5, $6 }')
 EOF
 
 # --- Optional: remote Linux server via SSH ---
@@ -133,14 +146,21 @@ EOF
 # ports are handled there.
 REMOTE_DATA=""
 if [ -n "$REMOTE_SSH_HOST" ]; then
-    REMOTE_DATA=$(ssh -T "$REMOTE_SSH_HOST" bash -s <<'REMOTE_SCRIPT' 2>&1
+    # BatchMode + timeouts: in session 0 there is no terminal, so an unknown
+    # host key or a passphrase prompt does not fail — it BLOCKS, until Task
+    # Scheduler's own timeout hours later, while the monitor reads the still-
+    # running task as healthy.
+    SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=15"
+    SSH_OPTS="$SSH_OPTS -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
+    # shellcheck disable=SC2086 — SSH_OPTS is a list of flags and must split.
+    REMOTE_DATA=$(ssh -T $SSH_OPTS "$REMOTE_SSH_HOST" bash -s <<'REMOTE_SCRIPT' 2>&1
 echo "=== Remote Linux host ==="
 echo "--- uptime ---"
 uptime
 echo "--- memory ---"
 free -h
 echo "--- disk ---"
-df -h /
+df -P /
 REMOTE_SCRIPT
 )
 fi
@@ -178,7 +198,6 @@ PROMPT_FILE="$PROMPT_DIR/healthcheck.md"
 PROMPT=""
 [ -f "$PROMPT_FILE" ] && PROMPT=$(cat "$PROMPT_FILE")
 
-PYTHON="${PYTHON_EXE:-python}"
 
 # Capture LLM output: llm-call.py exits 1 on LLM None/error, 2 on empty stdin.
 # On failure (provider depleted -> llm_call returns None) alert + exit 1,
@@ -209,7 +228,7 @@ if [ $rc -ne 0 ] || [ -z "$ANALYSIS" ]; then
     # what the comment above the check promises can't happen. A full disk is
     # still a full disk when the narrator is down.
     echo "FATAL: LLM analysis failed (rc=$rc, empty=$([ -z "$ANALYSIS" ] && echo yes || echo no))" >> "$LOG_FILE"
-    bash "$BUNDLE_ROOT/cron/telegram-send.sh" "healthcheck: LLM analysis failed ($DATE)" >>"$LOG_FILE" 2>&1
+    "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "healthcheck: LLM analysis failed ($DATE)" >>"$LOG_FILE" 2>&1
     ANALYSIS="(LLM analysis unavailable — the provider failed; disk severity below is measured, not inferred)"
     LLM_FAILED=1
 fi
@@ -225,8 +244,8 @@ DELIVERY="n/a"
 if [ "$MAX_DISK_PCT" -ge "$DISK_THRESHOLD" ]; then
     ALERT_MSG="healthcheck ($DATE): disk ${MAX_DISK_PCT}% on ${MAX_DISK_FS} (threshold ${DISK_THRESHOLD}%)
 
-$(printf '%s' "$ANALYSIS" | head -c 3000)"
-    bash "$BUNDLE_ROOT/cron/telegram-send.sh" "$ALERT_MSG" >>"$LOG_FILE" 2>&1
+$ANALYSIS"
+    "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "$ALERT_MSG" >>"$LOG_FILE" 2>&1
     tg_rc=$?
     if [ $tg_rc -eq 0 ]; then
         echo "Alert sent to Telegram" >> "$LOG_FILE"

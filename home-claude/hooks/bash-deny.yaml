@@ -28,6 +28,14 @@ rules:
       explicit `iptables -D <chain> <rule>`, or re-run the relevant section of
       your install script.
 
+  - pattern: '\bcommit\b[^;&]*(@''|''@)'
+    severity: deny
+    reason: >-
+      A PowerShell here-string (@'...'@) in a `git commit` run through Bash. Bash
+      has no such syntax, so the @ characters land in the commit message itself.
+      The fix is shell-agnostic: write the message to a file and
+      `git commit -F <file>`. A single-line `git commit -m "..."` is fine.
+
   - pattern: '\bgit\s+push\b[^;&]*(--force(?!-with-lease)|(?<![\w-])-f\b)[^;&]*\b(main|master)\b'
     severity: ask
     reason: >-

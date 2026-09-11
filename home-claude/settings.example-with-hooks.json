@@ -90,6 +90,26 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"<python-exe>\" \"<claude-home>/hooks/session-telegram.py\""
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"<python-exe>\" \"<claude-home>/hooks/session-telegram.py\""
+          }
+        ]
+      }
     ]
   },
   "enabledPlugins": {

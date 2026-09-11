@@ -482,6 +482,142 @@ def test_python_dotenv_does_not_override_the_environment(bundle_tree: Path, monk
     assert os.environ["ONLY_IN_FILE"] == "from-dotenv"
 
 
+# ── UTF-16: the encoding all three detectors used to be blind to ────────────
+
+def _utf16_blob(tmp_path: Path) -> Path:
+    """A UTF-16LE file carrying a token-shaped string, BOM and all.
+
+    UTF-16 is what `>` and `Out-File` produce by default in Windows
+    PowerShell 5.1, and this is a Windows-first bundle. `grep -I` calls such a
+    file binary and reports nothing, so pre-commit, pre-push and the nightly
+    sweep all answered "clean" for a key a text editor shows plainly.
+    """
+    path = tmp_path / "notes.txt"
+    body = "hello\n" + "ghp_" + "A" * 30 + "\n"          # secret-scan:allow
+    path.write_bytes(b"\xff\xfe" + body.encode("utf-16-le"))
+    return path
+
+
+@pytest.mark.skipif(_bash() is None, reason="bash not available")
+def test_secret_scan_reads_utf16(tmp_path: Path):
+    """secret_scan_text transcodes before grepping; the raw bytes match nothing."""
+    blob = _utf16_blob(tmp_path)
+    lib = (CRON / "lib" / "secret-scan.sh").as_posix()
+    script = tmp_path / "probe.sh"
+    script.write_text(
+        f". '{lib}'\n"
+        f"if secret_scan_text < '{blob.as_posix()}'; then echo MISSED; "
+        f"else echo CAUGHT; fi\n",
+        encoding="utf-8", newline="\n")
+    res = subprocess.run([_bash(), str(script)], capture_output=True, text=True,
+                         timeout=60)
+    assert "CAUGHT" in res.stdout, \
+        f"a UTF-16 file with a token scanned clean:\n{res.stdout}\n{res.stderr}"
+
+
+@pytest.mark.skipif(_bash() is None, reason="bash not available")
+def test_secret_scan_diff_names_the_file(tmp_path: Path):
+    """A hit has to say WHICH file. `grep -n` numbered the already-filtered
+    stream, so the report was an ordinal matching nothing the author could open.
+    """
+    lib = (CRON / "lib" / "secret-scan.sh").as_posix()
+    diff = tmp_path / "sample.diff"
+    diff.write_text(
+        "diff --git a/src/app.py b/src/app.py\n"
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        '+token = "ghp_' + "B" * 30 + '"\n',             # secret-scan:allow
+        encoding="utf-8", newline="\n")
+    script = tmp_path / "probe.sh"
+    script.write_text(
+        f". '{lib}'\n"
+        f"secret_scan_diff < '{diff.as_posix()}' || true\n",
+        encoding="utf-8", newline="\n")
+    res = subprocess.run([_bash(), str(script)], capture_output=True, text=True,
+                         timeout=60)
+    assert "src/app.py" in res.stdout, \
+        f"the hit did not name the file:\n{res.stdout}\n{res.stderr}"
+
+
+def test_a_flag_that_exists_only_in_dotenv_reaches_its_constant(bundle_tree: Path,
+                                                                monkeypatch):
+    """`.env` is loaded BEFORE the constants are computed, not after.
+
+    WIKI_RETRY_LIMIT was read at import time from os.environ while _load_dotenv()
+    ran further down the module, so under Task Scheduler — session 0, where the
+    user environment does not exist and `.env` is the only source — the ceiling
+    was always the hardcoded 3 and `0` ("no ceiling") could not be set at all.
+    Every other flag was read after the load; this one was the single ordering
+    violation, which is exactly the kind that survives review.
+    """
+    (bundle_tree / ".env").write_text("WIKI_RETRY_LIMIT=7\n", encoding="utf-8")
+    monkeypatch.delenv("WIKI_RETRY_LIMIT", raising=False)
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.RETRY_LIMIT == 7, \
+        "a value present only in .env did not reach the module constant"
+
+
+def test_a_typo_in_the_provider_name_sends_nothing(bundle_tree: Path, monkeypatch):
+    """An unknown WIKI_LLM_PROVIDER refuses every call instead of falling back.
+
+    The old behaviour warned on stderr and routed to `deepseek`. The plausible
+    typo is a privacy-motivated one — `=lokal`, meant to be `local` — and Task
+    Scheduler discards stderr, so the entire pipeline shipped its transcripts to
+    three off-box gateways while the person who set it believed nothing was
+    leaving the machine.
+    """
+    monkeypatch.setenv("WIKI_LLM_PROVIDER", "lokal")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.LLM_PROVIDER_INVALID is True
+    res = utils.llm_call_ex("anything")
+    assert res.text is None
+    assert res.kind == "config", "a typo is not something that clears on its own"
+    assert utils.llm_call("anything") is None
+    assert "INVALID" in " ".join(utils.config_report())
+
+
+@pytest.mark.parametrize("value", ["2999-01-02", "2999-01-02 10:00",
+                                   "2999-01-02 10:00:00"])
+def test_dry_run_until_accepts_a_value_carrying_a_time(bundle_tree: Path, monkeypatch,
+                                                       value: str):
+    """Both spellings of "with a time" used to defeat the brake, differently.
+
+    `10:00:00` is a valid YAML timestamp, so PyYAML returns a datetime — and
+    datetime IS a date subclass, so it passed the isinstance check and
+    `date.today() < DRY_RUN_UNTIL` raised TypeError inside load_state(), i.e. in
+    every phase. `10:00` is NOT a valid YAML timestamp, so it stayed a string,
+    date.fromisoformat rejected it, and the field was ignored — which for this
+    field means the first night shipped the archive off-box before anyone read a
+    preview.
+    """
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(
+        f"dry_run_until: {value}\n", encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.DRY_RUN_UNTIL is not None, f"{value!r} was ignored, not parsed"
+    assert utils.is_dry_run([]) is True
+
+
+def test_the_dry_run_banner_prints_once_per_process(bundle_tree: Path, monkeypatch,
+                                                    capsys):
+    """is_dry_run() is called from load_state(), which every helper touches, so
+    an unguarded banner put dozens of identical lines into a night's log and
+    buried everything else in it."""
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(
+        "dry_run_until: 2999-01-02\n", encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    capsys.readouterr()
+    assert utils.is_dry_run([]) is True
+    first = capsys.readouterr()
+    for _ in range(5):
+        assert utils.is_dry_run([]) is True
+    again = capsys.readouterr()
+    assert "dry-run" in (first.out + first.err)
+    assert "dry-run" not in (again.out + again.err), \
+        "the dry-run banner repeats on every call"
+
+
 # ── markdown: a heading inside fenced code is not a heading ─────────────────
 
 def test_fenced_headings_are_not_treated_as_markup(bundle_tree: Path, monkeypatch):

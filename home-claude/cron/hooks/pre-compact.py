@@ -15,7 +15,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import save_session_tail
+from utils import safe_session_id, save_session_tail
 
 
 def handoff_paths(transcript_path: str, session_id: str) -> tuple[str, str]:
@@ -27,8 +27,11 @@ def handoff_paths(transcript_path: str, session_id: str) -> tuple[str, str]:
     silently got no handoff at all.
     """
     mem_dir = os.path.join(os.path.dirname(transcript_path), "memory")
-    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
-    return mem_dir, os.path.join(mem_dir, f".handoff-{safe_id}.pending")
+    # utils.safe_session_id, not a fourth hand-rolled filter: the marker name has
+    # to match the one session-start.py waits on and the one the handoff writer
+    # clears, and three inlined copies of "keep the alphanumerics" is how those
+    # three names drift apart.
+    return mem_dir, os.path.join(mem_dir, f".handoff-{safe_session_id(session_id)}.pending")
 
 
 def mark_in_flight(marker: str, mem_dir: str) -> bool:

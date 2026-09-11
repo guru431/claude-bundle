@@ -190,6 +190,27 @@ def test_env_ref_sees_variables_declared_in_the_PROVIDERS_table(repo: Path):
     assert "DEEPINFRA_BASE_URL" in r.stdout
 
 
+def test_env_ref_sees_a_variable_only_powershell_reads(repo: Path):
+    """A knob read only by a `.ps1` still has to be in the template.
+
+    The scan covered `.py` and `.sh` only, so anything `claude-switch.ps1` read
+    out of `.env` was invisible: `API_TIMEOUT_MS` reached the template because
+    somebody noticed by hand, and the next such variable would not have. The
+    scan is deliberately narrow — the bundle's own `.env` readers, not a blanket
+    `$env:` sweep, which on Windows admin scripts is all noise.
+    """
+    tmpl = repo / "config" / "llm-providers.example.env"
+    text = tmpl.read_text(encoding="utf-8")
+    assert "API_TIMEOUT_MS" in text
+    tmpl.write_text(
+        "\n".join(l for l in text.splitlines() if "API_TIMEOUT_MS" not in l) + "\n",
+        encoding="utf-8")
+    r = _run_guard("check-env-ref.py", repo)
+    assert r.returncode == 1, \
+        f"a PowerShell-only env var missing from the template went unnoticed:\n{r.stdout}"
+    assert "API_TIMEOUT_MS" in r.stdout
+
+
 def test_doc_counts_catches_a_task_count_that_drifted(repo: Path):
     pytest.importorskip("yaml")
     reg = repo / "home-claude" / "cron" / "registry.yaml"

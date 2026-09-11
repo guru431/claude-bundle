@@ -64,6 +64,23 @@
 #   fires at 01:00, then every 4h until ~24h later. Implemented in
 #   sync-tasks.ps1 via the <Repetition> block of the trigger XML.
 #
+# ── `timeout_hours` policy ─────────────────────────────────────────────────
+#   The ceiling is the ONLY thing that ends a task that has stopped making
+#   progress. In session 0 there is no terminal: an ssh asking for a passphrase,
+#   a `git push` waiting on credentials or a black-holed TCP connection does not
+#   fail — it BLOCKS. Task Scheduler keeps the instance alive, every later
+#   trigger is dropped (MultipleInstancesPolicy=IgnoreNew), and the monitor reads
+#   the state as "running" = healthy. With a 72h ceiling that is three days of
+#   silence from a task that reports nothing wrong.
+#
+#   So: set it to roughly two to three times the task's real runtime, not to a
+#   number that "surely can't be exceeded". A task killed at its ceiling shows up
+#   as a failed run — which is the point; the next trigger then gets to run.
+#   ClaudeTaskMonitor also alerts on a task that is still `running` past its own
+#   timeout_hours, so a ceiling that is far too high blinds that check as well.
+#   The LLM tasks are the exception in degree, not in kind: their calls queue
+#   behind a shared provider key, so their ceilings are hours, not minutes.
+#
 # ── settings ───────────────────────────────────────────────────────────────
 #   All tasks are registered with StartWhenAvailable=True — if a trigger is
 #   missed (machine off / asleep / not present), Task Scheduler catches up at
@@ -85,7 +102,9 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    timeout_hours: 72
+    # One or two LLM calls over a night of sessions — minutes in practice, hours
+    # only when the provider queue is long. 4h is well past both.
+    timeout_hours: 4
 
   - name: ClaudeWikiPipeline
     project: main
@@ -105,7 +124,11 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    timeout_hours: 72
+    # The longest task in the bundle: three phases, one LLM call per session and
+    # per project, all of them queued behind one provider key. Deliberately
+    # generous — but bounded, so a wedged provider connection cannot hold the
+    # instance for days and silently skip every following night.
+    timeout_hours: 12
 
   - name: ClaudeWikiFlush
     project: main
@@ -121,7 +144,8 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    timeout_hours: 72
+    # One phase of the pipeline above, so half its ceiling.
+    timeout_hours: 6
     enabled: false
 
   - name: ClaudeWikiCompileKB
@@ -134,7 +158,8 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    timeout_hours: 72
+    # One LLM call per KB source; same order of magnitude as the flush phase.
+    timeout_hours: 6
     enabled: false
 
   - name: ClaudeWikiCompileSessions
@@ -149,7 +174,8 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    timeout_hours: 72
+    # One phase of the pipeline above, so half its ceiling.
+    timeout_hours: 6
     enabled: false
 
   - name: ClaudeWikiBuildIndex
@@ -164,7 +190,8 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    timeout_hours: 72
+    # No LLM at all — a walk over the vault. Minutes, even on a large one.
+    timeout_hours: 1
     enabled: false
 
   - name: ClaudeMd2PdfSync
@@ -190,7 +217,14 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    timeout_hours: 72
+    # A push over a dozen repos is minutes. The ceiling used to be 72h, and this
+    # is the task that most needs a low one: a `git push` that blocks on
+    # credentials in session 0 held the instance for three days, during which
+    # every following night's trigger was dropped and nothing was pushed at all
+    # while the monitor read the task as "running". The per-call network
+    # timeouts (`git_net`, GIT_TERMINAL_PROMPT=0) are the first line; this is the
+    # backstop for whatever they do not cover.
+    timeout_hours: 2
     enabled: false
 
   - name: ClaudeHealthcheck
@@ -203,7 +237,9 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    timeout_hours: 72
+    # Metric collection plus ONE 600s LLM call — minutes. The ssh block has its
+    # own BatchMode/ConnectTimeout guards; 2h is the backstop behind them.
+    timeout_hours: 2
 
   - name: ClaudeTaskMonitor
     project: main
@@ -216,7 +252,29 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    timeout_hours: 72
+    # Every collection it makes carries its own 60s timeout; the whole run is
+    # seconds. A monitor that hangs is the one hang nobody else reports, so its
+    # own ceiling is the tightest in the registry.
+    timeout_hours: 1
+
+  - name: ClaudeTaskMonitorPosix
+    project: main
+    description: >-
+      POSIX counterpart of ClaudeTaskMonitor — reports FAILED systemd --user
+      units (Linux) or launchd agents with a non-zero last exit (macOS) that
+      belong to the bundle, to Telegram. Disabled by default; enable it on
+      Linux/macOS after generating the units with scripts/gen-scheduler.py.
+    script: <bundle-install-path>\cron\claude-task-monitor.py
+    kind: python
+    platform: posix
+    trigger: Daily 09:30
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    # Two `systemctl`/`launchctl` queries, each with its own timeout.
+    timeout_hours: 1
+    enabled: false
 
   - name: ClaudeWikiLint
     project: main
@@ -228,7 +286,8 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    timeout_hours: 72
+    # A link/orphan walk over the vault plus an optional Telegram post.
+    timeout_hours: 2
 
   - name: ClaudeAgentsMdSyncCheck
     project: main
@@ -240,7 +299,9 @@ tasks:
     logon_type: password
     runlevel: limited
     hidden: true
-    timeout_hours: 72
+    # Up to two 300s LLM calls per project, queued behind one provider key.
+    # 6h covers a couple of dozen projects with room to spare.
+    timeout_hours: 6
     enabled: false
 
   - name: ClaudeTestSweep

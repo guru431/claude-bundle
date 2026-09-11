@@ -48,6 +48,18 @@ diff_content=$(git diff --cached --unified=0 -- . ':(exclude).githooks/' 2>/dev/
 # as the only way through. '+++' is a file header, not content.
 added_content=$(printf '%s\n' "$diff_content" | grep -E '^\+' | grep -vE '^\+\+\+' || true)
 
+# The personal denylist is read HERE rather than in step 3, because step 2b
+# below needs it too — a UTF-16 file has to be checked against both tables in
+# the one pass that can read it.
+sp="$repo_root/.sanitize-patterns"
+pat=$(mktemp 2>/dev/null || echo "$repo_root/.sanitize-patterns.tmp")
+: > "$pat"
+if [ -f "$sp" ]; then
+  # tr -d '\r': a CRLF-saved .sanitize-patterns (the default on Windows) would
+  # leave a trailing \r on every regex and silently disable the whole denylist.
+  grep -vE '^[[:space:]]*$' "$sp" 2>/dev/null | tr -d '\r' > "$pat" || true
+fi
+
 # 2) High-confidence secret/token formats (generic, very low false-positive)
 # Shared with the nightly cron/git-push-all.sh sweep — one source of truth for
 # the regex lives in home-claude/cron/lib/secret-scan.sh (already sourced above).
@@ -62,23 +74,45 @@ else
   echo "WARNING: $lib not found — skipping generic token scan." >&2
 fi
 
-# 3) Personal denylist — concrete values from untracked .sanitize-patterns
-sp="$repo_root/.sanitize-patterns"
-if [ -f "$sp" ]; then
-  pat=$(mktemp 2>/dev/null || echo "$repo_root/.sanitize-patterns.tmp")
-  # tr -d '\r': a CRLF-saved .sanitize-patterns (the default on Windows) would
-  # leave a trailing \r on every regex and silently disable the whole denylist.
-  grep -vE '^[[:space:]]*$' "$sp" 2>/dev/null | tr -d '\r' > "$pat" || true
-  if [ -s "$pat" ]; then
-    hits=$(printf '%s\n' "$added_content" | grep -inEf "$pat" || true)
-    if [ -n "$hits" ]; then
-      echo "BLOCKED: personal data (matched .sanitize-patterns) in staged changes:"
-      printf '%s\n' "$hits" | sed 's/^/  /'
-      fail=1
+# 2b) UTF-16 staged files. `git diff` calls them binary and prints "Binary files
+# differ" instead of a single `+` line, so steps 2 and 3 read NOTHING for them —
+# and UTF-16 is what `>` and `Out-File` produce by default in Windows
+# PowerShell 5.1, the shell this bundle is written for. A key pasted into such a
+# file was invisible to every one of the three detectors. Here the STAGED
+# content is read whole and decoded before either table is applied.
+if [ -f "$lib" ]; then
+  staged_names=$(git diff --cached --name-only --diff-filter=ACMR -- . ':(exclude).githooks/' 2>/dev/null || true)
+  u16_hits=$(printf '%s\n' "$staged_names" | while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    bom=$(git show ":$f" 2>/dev/null | od -An -tx1 -N2 | tr -d ' \n')
+    case "$bom" in fffe|feff) ;; *) continue ;; esac
+    if ! h=$(git show ":$f" 2>/dev/null | secret_scan_text); then
+      printf '%s: %s\n' "$f" "$h"
     fi
+    if [ -s "$pat" ]; then
+      h=$(git show ":$f" 2>/dev/null | secret_scan_decode | grep -inEf "$pat" || true)
+      if [ -n "$h" ]; then
+        printf '%s: %s\n' "$f" "$h"
+      fi
+    fi
+  done || true)
+  if [ -n "$u16_hits" ]; then
+    echo "BLOCKED: possible secret or personal data in a staged UTF-16 file:"
+    printf '%s\n' "$u16_hits" | sed 's/^/  /'
+    fail=1
   fi
-  rm -f "$pat"
 fi
+
+# 3) Personal denylist — concrete values from untracked .sanitize-patterns
+if [ -s "$pat" ]; then
+  hits=$(printf '%s\n' "$added_content" | grep -inEf "$pat" || true)
+  if [ -n "$hits" ]; then
+    echo "BLOCKED: personal data (matched .sanitize-patterns) in staged changes:"
+    printf '%s\n' "$hits" | sed 's/^/  /'
+    fail=1
+  fi
+fi
+rm -f "$pat"
 
 if [ "$fail" -ne 0 ]; then
   echo ""

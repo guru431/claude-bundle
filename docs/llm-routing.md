@@ -71,11 +71,15 @@ and explicitly clears the env in `anthropic` mode to fall back to OAuth.
 
 ```
 WIKI_LLM_PROVIDER env var:
-  "deepseek"  →  DeepSeek V4-Flash  →  OpenCode Go  →  DeepInfra  →  None
+  unset / ""  →  the chain (same as "chain")
+  "chain"     →  DeepSeek V4-Flash  →  OpenCode Go  →  DeepInfra  →  None
+  "deepseek"  →  DeepSeek V4-Flash  →  None
   "opencode"  →  OpenCode Go (mimo-v2.5-pro)  →  None
   "deepinfra" →  DeepInfra (deepseek-ai/DeepSeek-V3.1)  →  None
+  "local"     →  your own OpenAI-compatible server  →  None  [nothing leaves the box]
   "claude"    →  claude CLI (sonnet)  →  None  [opt-in only]
   "mock"      →  canned text from $WIKI_LLM_MOCK_RESPONSE  →  "[]"  [tests/CI]
+  anything else  →  REFUSED, nothing is sent (see "A name that isn't one" below)
 ```
 
 `mock` (like `claude`) is special-cased in `llm_call()`, not a `PROVIDERS`-table
@@ -98,7 +102,7 @@ call proceeds anyway — a 429 beats a silently skipped nightly job — while a 
 older than `WIKI_LLM_LOCK_STALE` (1800s) is treated as abandoned by a killed
 process. A waiter that timed out never removes the holder's lock.
 
-The default is `deepseek`. **Claude is never the silent fallback** — the
+The default is the chain. **Claude is never the silent fallback** — the
 chain returns `None` (and the calling script logs an error) rather than
 silently chew through your Claude subscription. If a wiki compile fails
 because DeepSeek is down, that's a Telegram alert, not a $5 surprise.
@@ -106,19 +110,34 @@ because DeepSeek is down, that's a Telegram alert, not a $5 surprise.
 The chain order lives in `utils.py::DEFAULT_CHAIN`. Precisely which values
 select it:
 
-- `WIKI_LLM_PROVIDER` **unset, empty, or `deepseek`** — the whole chain.
-  `deepseek` is the chain's *name*, not a way to pin DeepSeek alone: the two
-  spellings are indistinguishable to the code, and `INSTALL.md` step 9 has
-  always suggested writing it out.
-- **any other registry key** (`opencode`, `deepinfra`, `local`, `claude`,
-  `mock`) — that provider only, no fallback. An explicit choice of a
-  non-default provider must not silently route elsewhere.
+- `WIKI_LLM_PROVIDER` **unset, empty, or `chain`** — the whole chain.
+- **any registry key** (`deepseek`, `opencode`, `deepinfra`, `local`, plus
+  `claude` and `mock`) — that provider only, no fallback. An explicit choice of
+  a provider must not silently route elsewhere.
 
-So to run DeepSeek and *nothing else*, the switch is
-`WIKI_OFFBOX_FALLBACK=0`, which suppresses every off-box step of the chain —
-not a `WIKI_LLM_PROVIDER` value. Two gateways sit behind the primary rather
-than one: with a single fallback, both being down at once leaves the pipeline
-dark for a whole night.
+`deepseek` used to be the chain's *name* rather than a way to pin DeepSeek
+alone — a value that names one provider and means three. That is the defect
+class this bundle keeps finding in its own configuration, so the chain now has
+a name of its own (`chain`) and a provider name means the provider. A `deepseek`
+left over from an older install still selects DeepSeek — which is what it reads
+as — and prints one deprecation warning per process.
+
+To run DeepSeek and *nothing else*: `WIKI_LLM_PROVIDER=deepseek`. The older
+`WIKI_OFFBOX_FALLBACK=0` says the same thing in two variables that only make
+sense read together, so it is deprecated (still honoured, with a warning).
+
+Two gateways sit behind the primary rather than one: with a single fallback,
+both being down at once leaves the pipeline dark for a whole night.
+
+### A name that isn't one
+
+An unrecognised `WIKI_LLM_PROVIDER` **refuses every call and sends nothing**.
+It does not fall back to the chain. This matters more than it sounds: the
+plausible typo is a privacy-motivated one — `WIKI_LLM_PROVIDER=lokal`, set by
+someone who wanted nothing to leave the machine — and the old behaviour was to
+warn on stderr (which Task Scheduler discards) and route the entire pipeline,
+transcripts included, to DeepSeek → OpenCode Go → DeepInfra. Every other
+misread field in this bundle fails closed; this one now does too.
 
 This public default (DeepSeek direct primary, OpenCode Go fallback) is
 deliberate because DeepSeek PAYG is universally available with no
@@ -132,10 +151,12 @@ All cron-side provider config lives in **one** table,
 `utils.py::PROVIDERS` — env-var names, endpoints, default models, and
 the call parameters (`max_tokens` / `temperature` / `max_retries`). The
 module-level constants (`DEEPSEEK_*`, `OPENCODE_*`) are derived from it.
-An unknown `WIKI_LLM_PROVIDER` value is rejected loudly (stderr warning,
-fallback to `deepseek`) instead of silently routing to the default
-branch. This table below mirrors the registry — keep the two in sync
-(and the `.env` template too):
+An unknown `WIKI_LLM_PROVIDER` value refuses every call — see "A name that
+isn't one" above. The table below mirrors the registry — keep the two in sync
+(and the `.env` template too). `max_input_chars` is the per-provider payload
+ceiling: an oversized prompt is a *deterministic* rejection, so it is cut here
+(with a visible marker in the text) rather than re-sent identically for three
+nights until the source is quarantined.
 
 | Provider key | Key env (first non-empty wins) | Base URL | Default model | Model override env |
 |---|---|---|---|---|
@@ -167,14 +188,16 @@ Two separate mechanisms, worth not confusing:
   deliberately non-loopback but trusted server (an inference box on your
   LAN), name its host in `LOCAL_LLM_ALLOWED_HOSTS` (comma-separated) —
   making it an explicit decision instead of an unnoticed URL.
-- **`WIKI_OFFBOX_FALLBACK=0` controls the FALLBACK CHAIN, nothing else.**
-  The default `deepseek` chain falls back to the OpenCode Go gateway when
+- **`WIKI_OFFBOX_FALLBACK=0` controls the FALLBACK CHAIN, nothing else —
+  and is deprecated.** The chain falls back to the OpenCode Go gateway when
   DeepSeek fails, which would push a prompt off-box *because* the primary
   broke; this flag forbids that. It is not a DLP switch: it does not
   restrict where an explicitly chosen provider points, and it does not
   stop the FIRST provider in the chain (DeepSeek — off-box) from being
-  called. An explicit `local` never falls back to anything in the first
-  place — it is that provider alone, or `None`.
+  called. Since a provider name now pins that provider, `WIKI_OFFBOX_FALLBACK=0`
+  means exactly `WIKI_LLM_PROVIDER=deepseek`; prefer the latter. An explicit
+  `local` never falls back to anything in the first place — it is that
+  provider alone, or `None`.
 - **`WIKI_ALLOW_OFFBOX=0` is the DLP switch.** It refuses every provider
   whose registry row says `offbox: True`, on every call including the
   first, with the same "nothing was sent" refusal the local-only endpoint

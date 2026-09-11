@@ -25,6 +25,7 @@ entries you need into your `settings.json`.
 > | `PostToolUse` → `md2pdf-on-edit.py` | Tier 1 | a real Python interpreter + `bin/md2pdf.py` (ships full-tier) + markdown-it-py + Edge/Chrome |
 > | `PostToolUse` → `ps1-bom-guard.py` | Tier 1 | a real Python interpreter |
 > | `UserPromptSubmit` → `prompt-secret-warn.py` | **Tier 2 only** | `cron/lib/secret_shapes.py` (full-tier install) |
+> | `Stop` / `Notification` → `session-telegram.py` | **Tier 2 only** | `cron/telegram-send.sh` + `TELEGRAM_*` in `.env` |
 > | `SessionStart` / `SessionEnd` / `PreCompact` → `cron/hooks/*.py` | **Tier 2 only** | the full-tier `~/.claude/cron/` install |
 >
 > **Lite** (config only, no Python): take **none** of them — every hook here is
@@ -125,6 +126,24 @@ once — it lands in a JSONL, the nightly flush sends that JSONL to a provider,
 and the memory pass can copy facts out of it into `USER.md`, which is then
 re-sent in every later prompt. Uses the same shape table as every other
 detector, `cron/lib/secret_shapes.py`, so it needs a full-tier install.
+
+## session-telegram.py
+
+**Stop / Notification.** Sends one Telegram line when a session that ran longer
+than `CLAUDE_STOP_ALERT_MINUTES` (default 20, `0` disables) finishes or stops to
+ask for a permission — the two moments worth a phone buzz when you started
+something autonomous and walked away. Everything else the bundle alerts on is a
+nightly task; this is the only signal about the session in front of you.
+
+Short sessions are deliberately silent: they end while you are still watching,
+and a channel that buzzes for those stops being read.
+
+It sends the project name, the trigger and the duration — never the prompt, the
+answer or any transcript text. The name goes through the same privacy gate as
+the rest of the pipeline, so a project excluded in `bundle.local.yaml` is
+reported as "a project". Delivery is `cron/telegram-send.sh`, so it needs a
+full-tier install and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`; without them it
+exits silently, like every other failure path in it.
 
 ## Wiring them up
 

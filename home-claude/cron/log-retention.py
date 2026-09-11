@@ -54,7 +54,7 @@ sys.path.insert(0, str(Path(__file__).parent / "hooks"))
 from utils import _load_dotenv, PROJECTS_BASE  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runs import record_run  # noqa: E402
+from runs import terminal_record  # noqa: E402
 
 _load_dotenv()
 
@@ -136,13 +136,29 @@ DRY_RUN = any(a in ("--dry-run", "--no-llm") for a in sys.argv[1:])
 OWN_LOG_NAME = f"log-retention_{date.today().isoformat()}.log"
 
 
+def _is_own(f: Path) -> bool:
+    """A file this sweep must never count: its own log and the run ledger.
+
+    `useful_items` exists to catch a sweep pointed at the WRONG tree — a run that
+    looked at nothing. This script's own log and `runs-<year>.jsonl` are created
+    by the bundle itself, so they are present in every empty logs/ directory;
+    counting them (as `kept`, which main() adds to `swept` along with `deleted`)
+    put the number at 1 or more on every run and made that detection
+    unreachable by construction.
+    """
+    return bool(KEEP_FOREVER_RE.match(f.name)) or f.name == OWN_LOG_NAME
+
+
 def prune(files, days: int, label: str) -> tuple[int, int, int]:
     """Delete files older than `days`. Returns (deleted, kept, freed_bytes).
+
+    Neither count includes the files _is_own() names — they are this task's own
+    footprint, not evidence that it found anything to rotate.
 
     days == 0 disables this class entirely — see _window().
     """
     if days == 0:
-        listed = list(files)
+        listed = [f for f in files if not _is_own(f)]
         log(f"{label}: window is 0 — rotation DISABLED for this class, "
             f"{len(listed)} file(s) kept.")
         return 0, len(listed), 0
@@ -151,12 +167,7 @@ def prune(files, days: int, label: str) -> tuple[int, int, int]:
     kept = 0
     freed = 0
     for f in files:
-        if KEEP_FOREVER_RE.match(f.name) or f.name == OWN_LOG_NAME:
-            # This script's OWN log was counted as a swept file, so
-            # `useful_items` was at least 1 on every run — and the whole point of
-            # that number is to catch a sweep pointed at the wrong tree, which by
-            # construction it never could.
-            kept += 1
+        if _is_own(f):
             continue
         try:
             st = f.stat()
@@ -178,6 +189,16 @@ def prune(files, days: int, label: str) -> tuple[int, int, int]:
 
 
 def main() -> int:
+    # ONE terminal ledger record per run, the crash included (cron/runs.py).
+    # A `record_run` at the end of main() is only reached by the paths that get
+    # there: an unreadable logs/ or projects/ tree raised before it, and a
+    # crashed sweep was then indistinguishable from an uninstrumented task.
+    # A dry run still records nothing — record_run() itself detects it.
+    with terminal_record("ClaudeLogRetention", delivery="n/a") as rec:
+        return _prune_all(rec)
+
+
+def _prune_all(rec: dict) -> int:
     verb = "would free" if DRY_RUN else "freed"
     log(f"=== log retention {date.today().isoformat()}"
         f"{' (DRY RUN)' if DRY_RUN else ''} ===")
@@ -213,16 +234,12 @@ def main() -> int:
             f"{h_deleted} removed, {h_kept} kept, {verb} {h_freed} bytes.")
         swept += h_deleted + h_kept
 
-    # Terminal ledger record (cron/runs.py). useful_items = files this sweep
-    # actually looked at: zero means it found nothing at all to rotate, which
+    # useful_items = files this sweep actually looked at, excluding its own log
+    # and the run ledger: zero means it found nothing at all to rotate, which
     # for a task pointed at the wrong tree looks identical to a healthy run.
-    # A dry run records nothing — it promises to change no file, and the ledger
-    # is a file.
-    if not DRY_RUN:
-        record_run(task="ClaudeLogRetention", process_rc=0,
-                   useful_items=swept, delivery="n/a",
-                   note=f"windows {RETENTION_DAYS}/{REJECTED_RETENTION_DAYS}/"
-                        f"{HANDOFF_RETENTION_DAYS}d")
+    rec.update(useful_items=swept,
+               note=f"windows {RETENTION_DAYS}/{REJECTED_RETENTION_DAYS}/"
+                    f"{HANDOFF_RETENTION_DAYS}d")
     return 0
 
 

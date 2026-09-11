@@ -3,6 +3,130 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [0.17.0] - 2026-09-11
+
+Clears FINDINGS.md and IDEAS.md again: the 0.16.0 release closed most of that
+backlog but never emptied the files, so this pass verified every entry against
+the shipped code rather than against the release notes. What follows is what was
+still open — plus two entries filed after 0.16.0. Eight partial or declined items
+are recorded in the local archives with their reasoning; nothing was dropped in
+silence.
+
+### UTF-16 was invisible to all three secret guards
+
+`>` and `Out-File` in Windows PowerShell 5.1 write UTF-16 by default, and this is
+a Windows-first bundle. A key pasted into such a file scanned clean everywhere:
+`git diff --cached` calls it binary and prints no added lines (pre-commit),
+`grep -I` reports nothing (pre-push's precise pass), and the commit-message hook
+read the raw bytes. 0.16.0 added `iconv` to `secret_scan_text` but the fast path
+that decides whether to *call* it still grepped NUL-interleaved bytes, so the
+precise pass was never reached.
+
+- `secret_scan_decode` is now the one place that knows about UTF-16; the
+  pre-push fast path strips NULs before matching (deliberately over-eager — a
+  false suspicion costs one extra pass), the denylist pass and `commit-msg`
+  decode first, and pre-commit reads the staged blob whole for any file with a
+  UTF-16 BOM. Regression tests cover it; there were none.
+- `secret_scan_diff` prints `path: +line`. It used to number the
+  already-filtered stream, so a hit named an ordinal matching nothing the author
+  could open.
+
+### Configuration that lies about itself
+
+- `dry_run_until: 2026-09-05 10:00` was silently ignored. It is not a valid YAML
+  timestamp (no seconds), so it stayed a string, `date.fromisoformat` rejected
+  it, and the brake was dropped with a warning nobody reads in session 0 — for
+  the one field whose job is keeping a first night from shipping the archive
+  off-box before anyone reads a preview. Both spellings now parse.
+- `docs/llm-routing.md` still documented the OLD behaviour of an unknown
+  `WIKI_LLM_PROVIDER` ("fallback to `deepseek`") months after the code began
+  refusing every call. The same page, and the `.env` template, still taught
+  `deepseek` as the chain's name. `WIKI_OFFBOX_FALLBACK` is now deprecated: since
+  a provider name pins that provider, it says the same as
+  `WIKI_LLM_PROVIDER=deepseek`.
+- `config_report()` reports the two interpreters RESOLVED, and says when
+  `PYTHON_EXE` names a file that is not there. In session 0 that pair decides
+  whether the night runs at all.
+- Tests for three invariants that had none: a flag present only in `.env` reaches
+  its constant, a typo'd provider sends nothing, and the dry-run window survives
+  a value carrying a time.
+
+### Money and data the pipeline was spending twice
+
+- **`max_input_chars` per provider.** An oversized prompt is a *deterministic*
+  rejection: the retry loop cannot help, the caller counts it against the retry
+  ceiling, and after three nights the source is quarantined — for a payload that
+  would have been answered one paragraph shorter. It is cut before the request,
+  with a visible marker.
+- **A 403 latches on the second consecutive one.** The breaker persists for six
+  hours across processes, so latching on the first would let one bad minute at a
+  proxy hand the whole night's payload to the next provider in the chain.
+- **Flush reads a delta, not the file.** A session that grew was re-read and
+  re-sent whole every night.
+- **Daily logs are dated by the session, not by the run.** The 02:30 flush filed
+  last night's evening session under this morning's date; a backlog sweep piled a
+  month into one file.
+- **Compile's pair markers hash the project's own section**, so an append to a
+  daily no longer invalidates every project in it and re-sends them all.
+
+### Privacy reached the collectors it had missed
+
+`masked()` now runs before `fence()` in flush, compile, compile-kb and the
+AGENTS.md sync job — it guarded the sinks on disk but not the payloads going
+out. `project_allowed()` reached compile-sessions (which sent every section of a
+daily, including projects excluded after that daily was written) and the
+subproject promotion in flush. The vault skeleton ships a `.gitignore` for
+`daily/.pending/` and `.processed.json*`, which `ClaudeGitPushAll` would
+otherwise commit. `docs/cron-architecture.md` said "No redaction pass" — the
+opposite of what ships since 0.16.0 — and now describes what is and is not
+masked.
+
+### A task that stops firing has no failing run
+
+- `ClaudeHealthcheck` reads the ledger and alerts when `ClaudeTaskMonitor` has
+  not recorded a run in 30 hours. The monitor watches everything except itself.
+- A task still RUNNING past its own `timeout_hours` is a failure, not the `OK`
+  code `267009`. Every `timeout_hours: 72` is gone; the reasoning per task is in
+  the registry header.
+- `ClaudeTaskMonitorPosix` brings the same alert to `systemd --user` and
+  launchd. The full tier shipped to Linux and macOS with no task-failure alert
+  at all.
+- A remote disk over `HEALTHCHECK_REMOTE_DISK_PCT` now decides whether to page.
+  It used to be text inside a prompt.
+- `terminal_record` is used by the tasks it was written for, so a crash before
+  the last line still lands a row in the ledger.
+
+### Guards that were checking less than they claimed
+
+- `check-env-ref.py` reads `.ps1` through the bundle's own `.env` accessors.
+  `API_TIMEOUT_MS` — read only by `claude-switch.ps1` — reached the template
+  because somebody noticed by hand.
+- `docs/config-reference.md` now indexes all THREE kinds of configuration:
+  environment variables, `bundle.local.yaml` keys, and `registry.yaml` task
+  fields, generated from the code that defines them.
+- `self-test.ps1` checks that every rule in `bash-deny.yaml` compiles. The hook
+  fails open by design, so a bad regex there means the guard allows everything
+  and says nothing.
+- The suite no longer writes into the repository it is testing:
+  `tests/test_agents_md_sync.py` imported the real `cron/` and its `main()`
+  created log files in the working tree.
+
+### New
+
+- `hooks/session-telegram.py` (opt-in) — one Telegram line when a session longer
+  than `CLAUDE_STOP_ALERT_MINUTES` finishes or stops for a permission. Project
+  name, trigger and duration; never the prompt or the transcript, and the name
+  goes through the privacy gate.
+- `scripts/get-key.ps1` + `claude-switch.ps1 -KeyHelper` — write an
+  `apiKeyHelper` instead of the key itself into `settings.local.json`.
+- `install.ps1 -Diff` — what a re-install would change, from the manifest,
+  writing nothing.
+- `docs/examples/` — a synthetic daily log, the page compiled from it and the
+  index entry, generated with the `mock` provider. The bundle asked people to
+  spend tokens before showing them the output.
+- `AGENTS.md` is a pointer again (40 lines, was 97) and now names the parts of
+  the repo it had never heard of.
+
 ## [0.16.0] - 2026-09-04
 
 Clears FINDINGS.md and IDEAS.md: 40 findings and 25 proposals, resolved. Both

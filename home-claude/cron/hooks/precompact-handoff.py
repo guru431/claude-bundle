@@ -19,7 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from untrusted import fence  # noqa: E402
-from utils import dir_to_project, llm_call, parse_jsonl_messages, project_allowed  # noqa: E402
+from utils import (dir_to_project, llm_call, parse_jsonl_messages,  # noqa: E402
+                   project_allowed, safe_session_id)
 
 # Character budget for the transcript tail fed to the LLM. The slice keeps
 # the END of the conversation — the freshest messages matter most for handoff.
@@ -33,10 +34,9 @@ def _clear_marker(transcript: str, session_id: str) -> None:
     ones where no handoff is produced. A marker nobody clears turns into a
     pointless wait at the start of the next session.
     """
-    safe = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
     try:
         os.unlink(os.path.join(os.path.dirname(transcript), "memory",
-                               f".handoff-{safe}.pending"))
+                               f".handoff-{safe_session_id(session_id)}.pending"))
     except OSError:
         pass
 
@@ -95,7 +95,7 @@ def main(transcript: str | None = None, session_id: str | None = None,
     # One file per session: two sessions compacting in the same project used to
     # overwrite each other's handoff. The write is atomic (tmp + replace) so a
     # SessionStart racing this process reads a whole file or nothing at all.
-    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
+    safe_id = safe_session_id(session_id)
     out_path = out_dir / f"handoff-{safe_id}.md"
     tmp_path = out_dir / f".handoff-{safe_id}.md.tmp"
 

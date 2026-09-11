@@ -184,6 +184,44 @@ if [ -n "$WIN_REMOTE_HOST" ]; then
         }' 2>&1)
 fi
 
+# --- Deterministic severity: the REMOTE disks ---
+# REMOTE_DATA (`df -P /` over ssh) and WIN_DATA (Get-PSDrive C) used to reach the
+# LLM prompt and nowhere else, so "the remote disk is at 98%" could never decide
+# whether to wake anybody: the paging decision was built from the local `df -P -l`
+# alone, and the one place the remote figure appeared was a sentence the model
+# wrote. Same rule as above — the LLM explains, the measurement pages.
+#
+# The threshold defaults to the local one, so enabling a remote host does not
+# silently come with a different standard.
+REMOTE_DISK_THRESHOLD="${HEALTHCHECK_REMOTE_DISK_PCT:-$DISK_THRESHOLD}"
+case "$REMOTE_DISK_THRESHOLD" in
+    ''|*[!0-9]*)
+        echo "WARNING: HEALTHCHECK_REMOTE_DISK_PCT='$REMOTE_DISK_THRESHOLD' is not an integer 0..100 — using $DISK_THRESHOLD" >> "$LOG_FILE"
+        REMOTE_DISK_THRESHOLD="$DISK_THRESHOLD" ;;
+    *)
+        if [ "$REMOTE_DISK_THRESHOLD" -gt 100 ]; then
+            echo "WARNING: HEALTHCHECK_REMOTE_DISK_PCT=$REMOTE_DISK_THRESHOLD is above 100 (unreachable) — using $DISK_THRESHOLD" >> "$LOG_FILE"
+            REMOTE_DISK_THRESHOLD="$DISK_THRESHOLD"
+        fi ;;
+esac
+
+REMOTE_MAX_PCT=0
+REMOTE_MAX_FS=""
+while read -r pct fs; do
+    [ -n "$pct" ] || continue
+    case "$pct" in *[!0-9]*) continue ;; esac
+    if [ "$pct" -gt "$REMOTE_MAX_PCT" ]; then
+        REMOTE_MAX_PCT="$pct"
+        REMOTE_MAX_FS="$fs"
+    fi
+done <<EOF
+$(printf '%s\n' "$REMOTE_DATA" | awk -v host="${REMOTE_SSH_HOST:-remote}" '
+    NF >= 6 && $5 ~ /^[0-9]+%$/ { gsub(/%/, "", $5); print $5, host ":" $6 }')
+$(printf '%s\n' "$WIN_DATA" | awk -v host="${WIN_REMOTE_HOST:-remote-windows}" '
+    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $1 + $2 > 0 {
+        printf "%d %s\n", ($1 * 100) / ($1 + $2), host ":C:" }')
+EOF
+
 METRICS="$LOCAL_DATA
 
 $REMOTE_DATA
@@ -236,13 +274,89 @@ fi
 # --- Alert on the verdict ---
 # Without this the analysis only ever reached the log: an urgent finding was
 # invisible unless someone opened cron/logs/ by hand. Severity comes from the
-# deterministic disk check above; the LLM text is the alert body (truncated to
-# stay under Telegram's 4096-char limit).
+# deterministic checks — local disk, remote disk, and the monitor dead-man
+# switch below; the LLM text is the alert body (truncated to stay under
+# Telegram's 4096-char limit).
 echo "Disk check: max ${MAX_DISK_PCT}% on ${MAX_DISK_FS:-?} (threshold ${DISK_THRESHOLD}%)" >> "$LOG_FILE"
+echo "Remote disk check: max ${REMOTE_MAX_PCT}% on ${REMOTE_MAX_FS:-none} (threshold ${REMOTE_DISK_THRESHOLD}%)" >> "$LOG_FILE"
+
+# --- Dead-man switch for the task monitor ---
+# "A task that stopped firing has no failed run to notice" is the whole reason
+# cron/runs.py exists — and it is just as true of ClaudeTaskMonitor itself, the
+# task that would otherwise be the one to say so. Nothing watches the watchman,
+# so the healthcheck (the other daily job) checks the ledger for it.
+#
+# Silent by design where the task does not apply: the check no-ops when the
+# registry has it disabled, when its `platform:` does not match this host (it is
+# `windows`, so every Linux/macOS box is out), and on a lite install where no
+# ledger exists at all. A daily false alarm is how a real one stops being read.
+MONITOR_ALERT=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$BUNDLE_ROOT" 2>>"$LOG_FILE" <<'PYSCRIPT'
+import os, sys
+from pathlib import Path
+
+TASK = "ClaudeTaskMonitor"
+MAX_AGE_H = 30            # a daily task, plus grace: the healthcheck runs at
+                          # 09:00 and the monitor at 09:30, so the freshest
+                          # possible record is already ~23.5h old here. A flat
+                          # 24h would page on half an hour of jitter.
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "cron"))
+try:
+    from runs import read_latest_runs, latest_by_task, age_days
+except Exception:
+    sys.exit(0)                      # no ledger module — nothing to judge
+
+reg = root / "cron" / "registry.yaml"
+task = None
+try:
+    import yaml
+    for t in (yaml.safe_load(reg.read_text(encoding="utf-8")).get("tasks") or []):
+        if isinstance(t, dict) and t.get("name") == TASK:
+            task = t
+            break
+except Exception:
+    sys.exit(0)                      # no PyYAML / unreadable registry — stay quiet
+if task is None or task.get("enabled") is False:
+    sys.exit(0)
+platform = str(task.get("platform", "all")).lower()
+if (platform == "windows" and os.name != "nt") or (platform == "posix" and os.name == "nt"):
+    sys.exit(0)
+
+runs = read_latest_runs()
+if not runs:
+    sys.exit(0)                      # nothing is instrumented yet (fresh install)
+rec = latest_by_task(runs).get(TASK)
+if rec is None:
+    print(f"{TASK} has NEVER written a run record, while other tasks have — "
+          f"the monitor is not running, so a failed task would go unreported")
+    sys.exit(0)
+age = age_days(rec.get("ts", ""))
+if age is not None and age * 24 > MAX_AGE_H:
+    print(f"{TASK} last reported {age * 24:.0f}h ago (expected within "
+          f"{MAX_AGE_H}h) — nothing is watching the other tasks")
+PYSCRIPT
+)
+if [ -n "$MONITOR_ALERT" ]; then
+    echo "Dead-man switch: $MONITOR_ALERT" >> "$LOG_FILE"
+fi
+
+# Everything worth waking somebody for, in one message.
+ALERTS=""
+if [ "$MAX_DISK_PCT" -ge "$DISK_THRESHOLD" ]; then
+    ALERTS="disk ${MAX_DISK_PCT}% on ${MAX_DISK_FS} (threshold ${DISK_THRESHOLD}%)"
+fi
+if [ -n "$REMOTE_MAX_FS" ] && [ "$REMOTE_MAX_PCT" -ge "$REMOTE_DISK_THRESHOLD" ]; then
+    ALERTS="${ALERTS:+$ALERTS
+}remote disk ${REMOTE_MAX_PCT}% on ${REMOTE_MAX_FS} (threshold ${REMOTE_DISK_THRESHOLD}%)"
+fi
+if [ -n "$MONITOR_ALERT" ]; then
+    ALERTS="${ALERTS:+$ALERTS
+}$MONITOR_ALERT"
+fi
 
 DELIVERY="n/a"
-if [ "$MAX_DISK_PCT" -ge "$DISK_THRESHOLD" ]; then
-    ALERT_MSG="healthcheck ($DATE): disk ${MAX_DISK_PCT}% on ${MAX_DISK_FS} (threshold ${DISK_THRESHOLD}%)
+if [ -n "$ALERTS" ]; then
+    ALERT_MSG="healthcheck ($DATE): $ALERTS
 
 $ANALYSIS"
     "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "$ALERT_MSG" >>"$LOG_FILE" 2>&1
@@ -255,7 +369,7 @@ $ANALYSIS"
         DELIVERY="failed"
     fi
 else
-    echo "No alert: disk below threshold" >> "$LOG_FILE"
+    echo "No alert: disks below threshold, task monitor reporting" >> "$LOG_FILE"
 fi
 
 echo "" >> "$LOG_FILE"
@@ -269,7 +383,8 @@ RC=0
 [ "$LLM_FAILED" -eq 0 ] && [ "$DELIVERY" != "failed" ] || RC=1
 "$PYTHON" "$BUNDLE_ROOT/cron/runs.py" record \
     --task ClaudeHealthcheck --rc "$RC" --artifact "$LOG_FILE" \
-    --delivery "$DELIVERY" --note "disk ${MAX_DISK_PCT}% / threshold ${DISK_THRESHOLD}%" \
+    --delivery "$DELIVERY" \
+    --note "disk ${MAX_DISK_PCT}% / threshold ${DISK_THRESHOLD}%; remote ${REMOTE_MAX_PCT}% on ${REMOTE_MAX_FS:-none} / threshold ${REMOTE_DISK_THRESHOLD}%" \
     >>"$LOG_FILE" 2>&1 || true
 
 # The disk alert has fired (or not) on measured data by this point; only now

@@ -89,6 +89,11 @@ phase. Asks an LLM to extract:
 - Feedback the user gave you ("always X", "never Y") → `projects/<slug>/feedback-*.md`
 - Architectural decisions → `projects/<slug>/architecture-*.md`
 
+`wiki-build-index.py` additionally recognises a `_troubles-*` prefix as an
+incident page. No shipped script ever CREATES one — it is a tolerated **input**
+name, for a vault that was hand-written before this pipeline existed, so the
+index does not silently drop such pages. Do not adopt it for new work.
+
 The LLM returns JSON; the script normalizes wiki paths and deduplicates
 **by path**, against a processed-state store (`.processed.json`) that
 records which dailies are already compiled. It then writes pages whose

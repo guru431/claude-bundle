@@ -30,7 +30,11 @@ fail=0
 
 # Comment lines are stripped by git before the message is stored, so a token in
 # one is never published — and the commit template itself carries example text.
-body=$(grep -v '^#' "$msg_file" || true)
+#
+# Decode BEFORE stripping comments: an editor configured for UTF-16 (the default
+# of `>` and `Out-File` in Windows PowerShell 5.1) writes a message whose BOM and
+# NUL-interleaved bytes make every grep below see either binary or nothing.
+body=$(secret_scan_decode < "$msg_file" | grep -v '^#' || true)
 
 if ! hits=$(printf '%s\n' "$body" | secret_scan_text); then
   echo "BLOCKED: possible secret/token format in the commit message:"

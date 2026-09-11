@@ -39,6 +39,32 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# ── the ONE PowerShell .env parser ───────────────────────────────────────────
+# scripts/lib/dotenv.ps1 (see its header). It lives in the bundle CHECKOUT, and
+# this script also runs from a DEPLOYED tree that has no scripts/ — so the
+# dot-source is conditional and every consumer below keeps its previous
+# behaviour when the library is not next to us. What must never happen is a
+# second hand-rolled .env regex in this file.
+#   <bundle root> = two levels up (cron/admin -> cron -> root), the same walk
+#   $masterLauncher does below; the checkout's scripts/ is one level above that.
+$script:_bundleRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$script:_dotEnvLib = Join-Path (Split-Path -Parent $script:_bundleRoot) 'scripts\lib\dotenv.ps1'
+if (Test-Path $script:_dotEnvLib) { . $script:_dotEnvLib }
+
+# The interpreter a kind=python_local task will be registered with. Session 0
+# has no user PATH and no inherited process env, so the bare name `python.exe`
+# resolves to nothing there — the value that survives is PYTHON_EXE pinned in
+# <bundle>\.env, the same file bin/_run-hidden.vbs falls back to. Order:
+# process env > deployed .env > the old bare-name default.
+function Get-PythonExe {
+    if ($env:PYTHON_EXE) { return $env:PYTHON_EXE }
+    if (Get-Command Get-DotEnvValue -ErrorAction SilentlyContinue) {
+        $v = Get-DotEnvValue -Path (Join-Path $script:_bundleRoot '.env') -Name 'PYTHON_EXE'
+        if ($v) { return $v }
+    }
+    return 'python.exe'
+}
+
 # ── -ArgsFile: switches handed over by sync.cmd ───────────────────────────────
 # sync.cmd cannot splice user arguments onto the elevated command line without
 # letting cmd.exe re-parse them (a '&' would start a second command, running as
@@ -435,6 +461,14 @@ function Quote-Path([string]$p) { return '"' + ($p -replace '"', '""') + '"' }
 # kind=python_local     → python.exe <script.py> (for C:\ scripts independent of mapped drives)
 # kind=exec             → arbitrary execute + arguments (for service-style tasks).
 #                         yaml: `execute: <path>`, `script: <args>`.
+#
+# Every wscript invocation carries //B //nologo. `//B` is batch mode: WSH shows
+# no banner and, crucially, no MODAL DIALOG on a script error or a WScript.Echo.
+# A Password-mode task fires in session 0, where nobody can see — let alone
+# dismiss — such a dialog, so the task would sit there holding its slot until
+# the execution time limit killed it. //nologo suppresses the host banner for
+# the same reason a hidden window is used at all.
+$script:WSCRIPT_FLAGS = '//B //nologo'
 function Build-Action([hashtable]$task, [string]$launcher) {
     $kind = $task.kind
     $script = $task.script
@@ -452,13 +486,13 @@ function Build-Action([hashtable]$task, [string]$launcher) {
         return @{ execute=$task.execute; arguments=(($execArgs + $rest).TrimStart()); work_dir=$null }
     }
     if ($kind -eq 'vbs') {
-        return @{ execute='wscript.exe'; arguments=((Quote-Path $script) + $rest); work_dir=$null }
+        return @{ execute='wscript.exe'; arguments=($script:WSCRIPT_FLAGS + ' ' + (Quote-Path $script) + $rest); work_dir=$null }
     }
     if ($kind -eq 'python_local') {
-        $pythonExe = if ($env:PYTHON_EXE) { $env:PYTHON_EXE } else { 'python.exe' }
+        $pythonExe = Get-PythonExe
         return @{ execute=$pythonExe; arguments=((Quote-Path $script) + $rest); work_dir=$null }
     }
-    return @{ execute='wscript.exe'; arguments=((Quote-Path $launcher) + ' ' + $kind + ' ' + (Quote-Path $script) + $rest); work_dir=$null }
+    return @{ execute='wscript.exe'; arguments=($script:WSCRIPT_FLAGS + ' ' + (Quote-Path $launcher) + ' ' + $kind + ' ' + (Quote-Path $script) + $rest); work_dir=$null }
 }
 
 # ── compare current vs wanted ────────────────────────────────────────────────

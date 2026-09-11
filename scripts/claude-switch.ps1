@@ -36,6 +36,14 @@
 #                         # with what commands Claude Code may run unattended,
 #                         # and the block below allows Bash/PowerShell with no
 #                         # prompt. Existing permissions are never touched.
+#   -KeyHelper            # keep the key OUT of settings.local.json. Instead of
+#                         # the key's VALUE in `env`, write a top-level
+#                         # `apiKeyHelper` command that prints it on demand:
+#                         #   powershell -NoProfile -File <dir>\get-key.ps1 DEEPSEEK_KEY
+#                         # Claude Code runs it and uses stdout as the credential,
+#                         # so the secret stays in the one .env and never lands in
+#                         # a file inside the project working tree. No effect for
+#                         # `anthropic` / `ollama` (no provider key involved).
 #   -AllowInsecureHttp    # permit plaintext http:// to a NON-loopback ollama/ccr
 #                         # host. Off by default: loopback uses http://, any remote
 #                         # host uses https:// unless this switch is given (loud warn).
@@ -70,7 +78,10 @@ param(
 
     # Allow plaintext http:// to a NON-loopback backend. Off by default: a remote
     # host:port would otherwise send the Bearer key, prompts and code in the clear.
-    [switch]$AllowInsecureHttp
+    [switch]$AllowInsecureHttp,
+
+    # Write an `apiKeyHelper` command instead of the key itself. See the header.
+    [switch]$KeyHelper
 )
 
 $ErrorActionPreference = "Stop"
@@ -445,6 +456,43 @@ $SWITCHER_ENV_KEYS = @(
     "API_TIMEOUT_MS"
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# -KeyHelper: the key stays in .env, settings.local.json gets a command
+# ─────────────────────────────────────────────────────────────────────────────
+# Claude Code's `apiKeyHelper` setting names a command and uses its stdout as
+# the credential. With -KeyHelper the switcher writes that command plus the
+# VARIABLE NAME instead of the key, and drops ANTHROPIC_API_KEY /
+# ANTHROPIC_AUTH_TOKEN from `env` — so a plaintext third-party key never enters
+# a file that lives inside the user's working tree (which is also why
+# Assert-SettingsGitSafe exists: this removes the thing it guards).
+#
+# The switcher OWNS the top-level `apiKeyHelper` key the same way it owns
+# $SWITCHER_ENV_KEYS: WITHOUT -KeyHelper a helper left by an earlier run would
+# keep answering for a backend that is no longer selected, so it is removed.
+# Both objects are PSObjects and are mutated in place — the callers already hold
+# the references they pass in.
+function Set-KeyHelper($obj, $envObj, [string]$varName) {
+    if (-not $KeyHelper) {
+        if ($obj.PSObject.Properties.Match("apiKeyHelper").Count -gt 0) {
+            $obj.PSObject.Properties.Remove("apiKeyHelper")
+        }
+        return
+    }
+    foreach ($k in @("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")) {
+        if ($envObj.PSObject.Properties.Match($k).Count -gt 0) {
+            $envObj.PSObject.Properties.Remove($k)
+        }
+    }
+    $helper = Join-Path $PSScriptRoot "get-key.ps1"
+    if (-not (Test-Path $helper)) {
+        Write-Host "WARN: $helper does not exist — Claude Code will run the command and get no key." -ForegroundColor Yellow
+        Write-Host "      Copy scripts/get-key.ps1 next to this script, or switch without -KeyHelper." -ForegroundColor DarkYellow
+    }
+    $cmd = "powershell -NoProfile -File `"$helper`" $varName"
+    $obj | Add-Member -NotePropertyName "apiKeyHelper" -NotePropertyValue $cmd -Force
+    Write-Host "Key: apiKeyHelper -> $cmd (the key stays in .env)" -ForegroundColor DarkGray
+}
+
 function Set-Env($obj, $envObj) {
     # Merge, never replace: overwrite only the keys we own, drop the owned keys
     # this mode does not set (e.g. ANTHROPIC_API_KEY when switching to a Bearer
@@ -643,6 +691,7 @@ function Set-Minimax($obj, [string]$modelName) {
         API_TIMEOUT_MS                           = $apiTimeoutMs
     }
     Write-Host "Mode: MiniMax-direct → $modelName (api.minimax.io/anthropic, key loaded)" -ForegroundColor Green
+    Set-KeyHelper $obj $envObj "MINIMAX_API_KEY"
     return Set-Env $obj $envObj
 }
 
@@ -666,6 +715,7 @@ function Set-OpencodeDirect($obj, [string]$modelName) {
         API_TIMEOUT_MS                           = $apiTimeoutMs
     }
     Write-Host "Mode: OpenCode-direct → $modelName (opencode.ai/zen/go/v1, key loaded)" -ForegroundColor Green
+    Set-KeyHelper $obj $envObj "OPENCODE_GO_API_KEY"
     return Set-Env $obj $envObj
 }
 
@@ -692,6 +742,7 @@ function Set-DeepseekDirect($obj, [string]$modelName) {
         API_TIMEOUT_MS                           = $apiTimeoutMs
     }
     Write-Host "Mode: DeepSeek-direct → $modelName (api.deepseek.com/anthropic, key loaded)" -ForegroundColor Green
+    Set-KeyHelper $obj $envObj "DEEPSEEK_KEY"
     return Set-Env $obj $envObj
 }
 
@@ -775,6 +826,7 @@ function Set-CCR($obj, [string]$modelName) {
         API_TIMEOUT_MS                           = $apiTimeoutMs
     }
     Write-Host "Mode: ccr → $modelName ($ccrUrl, APIKEY set)" -ForegroundColor Green
+    Set-KeyHelper $obj $envObj "CCR_API_KEY"
     return Set-Env $obj $envObj
 }
 
@@ -979,6 +1031,18 @@ switch ($Mode) {
     "opencode"  { $cfg = Set-OpencodeDirect $cfg $Model }
     "ollama"    { $cfg = Set-Ollama $cfg $Model }
     "ccr"       { $cfg = Set-CCR $cfg $Model }
+}
+
+# `anthropic` and `ollama` involve no provider key, so neither calls
+# Set-KeyHelper — but the switcher still owns `apiKeyHelper`, and one left by an
+# earlier -KeyHelper switch would go on answering with another backend's key.
+if ($null -ne $cfg) {
+    if ($KeyHelper -and $Mode -in @("anthropic", "ollama")) {
+        Write-Host "NOTE: -KeyHelper has no effect for '$Mode' (no provider key involved)." -ForegroundColor DarkGray
+    }
+    if ($Mode -in @("anthropic", "ollama") -and $cfg.PSObject.Properties.Match("apiKeyHelper").Count -gt 0) {
+        $cfg.PSObject.Properties.Remove("apiKeyHelper")
+    }
 }
 
 # Set-CCR / Set-Ollama return $null when the backend is unreachable and can't be

@@ -143,12 +143,21 @@ fi
 # and the .githooks/ exclusion. Anything it flags is re-checked precisely in
 # step 4, which is the only step that can fail the push. So a false alarm here
 # costs seconds, never a wrong verdict — and a clean push exits right now.
+#
+# `tr -d '\000'` is what makes UTF-16 visible here. Step 4 transcodes properly
+# (secret_scan_text → secret_scan_decode → iconv), but it only ever runs when
+# THIS step raises a suspicion — and a UTF-16 blob reads as `s\0k\0-\0…`, which
+# matches nothing, so the precise pass was never reached and the push exited 0.
+# UTF-16 is the default of `>` and `Out-File` in Windows PowerShell 5.1, which is
+# the shell this bundle is written for. Deleting NUL bytes is crude — it can
+# glue two lines together and raise a false suspicion — and that is the right
+# trade here, because the cost of a false suspicion is one extra pass.
 suspect=0
-if [ -s "$blobs" ] && git cat-file --batch < "$blobs" 2>/dev/null | grep -qaE -e "$SECRET_SCAN_PATTERN"; then
+if [ -s "$blobs" ] && git cat-file --batch < "$blobs" 2>/dev/null | tr -d '\000' | grep -qaE -e "$SECRET_SCAN_PATTERN"; then
   suspect=1
 fi
 if [ "$suspect" -eq 0 ] && [ -s "$blobs" ] && [ -s "$pat" ]; then
-  if git cat-file --batch < "$blobs" 2>/dev/null | grep -qaiEf "$pat"; then
+  if git cat-file --batch < "$blobs" 2>/dev/null | tr -d '\000' | grep -qaiEf "$pat"; then
     suspect=1
   fi
 fi
@@ -183,7 +192,9 @@ while read -r sha; do
   fi
 
   if [ -s "$pat" ]; then
-    hits=$(git cat-file blob "$sha" 2>/dev/null | grep -inIEf "$pat" || true)
+    # Through the decoder for the same reason as the token scan: `grep -I` calls
+    # a UTF-16 blob binary and reports nothing at all.
+    hits=$(git cat-file blob "$sha" 2>/dev/null | secret_scan_decode | grep -inIEf "$pat" || true)
     if [ -n "$hits" ]; then
       echo "BLOCKED: personal data (matched .sanitize-patterns) in $path (blob $sha):"
       printf '%s\n' "$hits" | sed 's/^/  /'

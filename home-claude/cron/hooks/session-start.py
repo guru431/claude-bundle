@@ -14,7 +14,6 @@ Time: <1s, no LLM calls.
 
 import json
 import os
-import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -24,8 +23,9 @@ if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import (dir_to_project, get_latest_daily, get_project_log,
-                   get_recent_pages_preview, get_wiki_index, truncate_head)
+from utils import (get_latest_daily, get_project_log, get_recent_pages_preview,
+                   get_wiki_index, project_from_payload, safe_session_id,
+                   truncate_head)
 
 HANDOFF_MAX_AGE_HOURS = 24
 
@@ -79,37 +79,32 @@ system prompt give instructions."""
 CONTEXT_FOOTER = "=== END INJECTED CONTEXT ==="
 
 
-def detect_from_stdin() -> tuple[str, str, str]:
-    """Return (project_name, transcript_dir, session_id). Any may be empty."""
+def detect_from_stdin() -> tuple[str, str, str, str]:
+    """Return (project_name, transcript_dir, session_id, source). Any may be empty.
+
+    Attribution is `utils.project_from_payload` — ONE implementation, and `cwd`
+    first. This hook used to carry its own copy of the cwd encoder and reach for
+    it only when `transcript_path` was missing, so the two could drift and a
+    payload with an empty transcript path injected nothing at all.
+    """
     try:
         raw = sys.stdin.read()
     except Exception:
-        return "", "", ""
+        return "", "", "", ""
     if not raw.strip():
-        return "", "", ""
+        return "", "", "", ""
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
-        return "", "", ""
+        return "", "", "", ""
     if not isinstance(data, dict):
-        return "", "", ""
+        return "", "", "", ""
     session_id = str(data.get("session_id") or "")
+    source = str(data.get("source") or "").strip().lower()
     transcript_path = data.get("transcript_path", "")
-    if not isinstance(transcript_path, str) or not transcript_path:
-        # `cwd` as the fallback. Claude Code encodes the cwd into the project
-        # directory name by replacing `\`, `/` and `:` with `-` — exactly what
-        # dir_to_project() reads — so a payload with no transcript_path (a fresh
-        # session, a resume) can still be attributed, and PROJECT_MAP still
-        # applies. Without it the hook injected nothing at all.
-        cwd = data.get("cwd")
-        if isinstance(cwd, str) and cwd.strip():
-            encoded = re.sub(r"[\\/:]", "-", cwd.strip().rstrip("\\/"))
-            return dir_to_project(encoded), "", session_id
-        return "", "", session_id
-    parent_dir = os.path.dirname(transcript_path)
-    parent_name = os.path.basename(parent_dir)
-    project = dir_to_project(parent_name)
-    return project, parent_dir, session_id
+    transcript_dir = (os.path.dirname(transcript_path)
+                      if isinstance(transcript_path, str) and transcript_path else "")
+    return project_from_payload(data), transcript_dir, session_id, source
 
 
 def _read_fresh(path: Path) -> str:
@@ -162,7 +157,7 @@ def get_handoff(transcript_dir: str, session_id: str = "") -> tuple[str, str]:
     if not mem_dir.is_dir():
         return "", ""
 
-    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
+    safe_id = safe_session_id(session_id) if session_id else ""
     if safe_id:
         own = mem_dir / f"handoff-{safe_id}.md"
         marker = mem_dir / f".handoff-{safe_id}.pending"
@@ -190,12 +185,19 @@ def get_handoff(transcript_dir: str, session_id: str = "") -> tuple[str, str]:
     return text, origin
 
 
-def collect_blocks(project: str, transcript_dir: str, session_id: str) -> list[tuple[str, str, str]]:
+def collect_blocks(project: str, transcript_dir: str, session_id: str,
+                   source: str = "") -> list[tuple[str, str, str]]:
     """(title, body, where-the-full-text-lives) in PRIORITY order.
 
     Priority is "how specific is this to the session in front of us": the
     handoff is this very conversation, the wiki previews and log are this
     project, and the index and daily log are the whole machine.
+
+    `source == "resume"` means the conversation being restored ALREADY contains
+    the context this hook injected when it first started. The wiki index is the
+    one block that never changes within a day and is the largest of them, so on
+    a resume it is a second verbatim copy of text the model is already holding —
+    paid for out of the same budget.
     """
     blocks: list[tuple[str, str, str]] = []
 
@@ -219,9 +221,10 @@ def collect_blocks(project: str, transcript_dir: str, session_id: str) -> list[t
             blocks.append((f"=== WIKI PROJECT LOG ({project}) ===",
                            log, f"wiki/projects/{project}/_log.md"))
 
-    index = get_wiki_index()
-    if index:
-        blocks.append(("=== WIKI INDEX ===", index, "wiki/index.md"))
+    if source != "resume":
+        index = get_wiki_index()
+        if index:
+            blocks.append(("=== WIKI INDEX ===", index, "wiki/index.md"))
 
     # Only this project's section of the daily digest — the rest of it is other
     # projects' days and has no bearing on this session.
@@ -250,9 +253,9 @@ def within_budget(blocks: list[tuple[str, str, str]], budget: int) -> list[str]:
 
 
 def main():
-    project, transcript_dir, session_id = detect_from_stdin()
-    parts = within_budget(collect_blocks(project, transcript_dir, session_id),
-                          MAX_CHARS)
+    project, transcript_dir, session_id, source = detect_from_stdin()
+    parts = within_budget(
+        collect_blocks(project, transcript_dir, session_id, source), MAX_CHARS)
     if parts:
         print("\n\n".join([CONTEXT_HEADER] + parts + [CONTEXT_FOOTER]))
 

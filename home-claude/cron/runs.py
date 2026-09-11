@@ -22,17 +22,23 @@ journal that does not grow without bound.
 
 Instrumenting a task
 --------------------
-Python task (at the very end, after delivery)::
+Python task — wrap the run in `terminal_record`, do NOT call `record_run` from
+the end of main(). A call at the end is only reached by the exit paths the
+author thought of: an exception before it (an unwritable log directory, an
+undecodable file in somebody's project) leaves NO record, and a crashed task is
+then indistinguishable from one that was never instrumented::
 
-    from runs import record_run  # cron/ on sys.path
-    record_run(
-        task="ClaudeWikiCompileSessions",  # the name from registry.yaml
-        process_rc=0,
-        artifact_path=REPORT,              # the file produced (or None)
-        useful_items=n_items,              # what the validator judged useful
-        delivery="ok",                     # ok | failed | n/a
-        message_id=msg_id,                 # id of the delivered message (or None)
-    )
+    from runs import terminal_record     # cron/ on sys.path
+    with terminal_record("ClaudeWikiCompileSessions",  # name from registry.yaml
+                         delivery="n/a", artifact_path=REPORT) as rec:
+        ...
+        rec.update(process_rc=0,         # 0 unless the task itself failed
+                   useful_items=n_items,  # what the validator judged useful
+                   delivery="ok",         # ok | failed | n/a
+                   note="…")
+
+`record_run()` stays the primitive underneath (and the CLI below is the shell
+equivalent), but a task should have no reason to reach for it directly.
 
 Shell task (one line at the end)::
 

@@ -12,14 +12,15 @@ optional Python hooks.)
 
 **Full** (~30–60 minutes): on top of lite, add the Python hooks, a
 Karpathy-style wiki vault, and a registry-driven Windows Task Scheduler
-automation — 16 scheduled tasks (ten disabled by default) that flush
+automation — 17 scheduled tasks (eleven disabled by default) that flush
 Claude Code sessions into the wiki overnight. The installer also offers to
 wire two optional companion tools: an LLM provider switcher
 (`claude-switch.ps1`) and an `AGENTS.md` mirror for Codex CLI. Needs
-Python 3.10+, Git, and an LLM backend for the nightly jobs — either a
-provider key (DeepSeek / OpenCode Go) or `WIKI_LLM_PROVIDER=claude`,
-which reuses the `claude` CLI you're already signed in to and needs no
-key. (Tier 1 + Tier 2 below.)
+Python 3.10+, Git, and an LLM backend for the nightly jobs — a provider
+key (DeepSeek / OpenCode Go), or `WIKI_LLM_PROVIDER=local` pointed at
+your own OpenAI-compatible server so nothing leaves the machine, or
+`WIKI_LLM_PROVIDER=claude`, which reuses the `claude` CLI you're already
+signed in to and needs no key. (Tier 1 + Tier 2 below.)
 
 Both profiles were extracted from a real working setup, then sanitized
 of all private hosts, paths, tokens, and project names.
@@ -41,13 +42,14 @@ claude-bundle/
 ├── home-claude/                       ← copied into ~/.claude/
 │   ├── CLAUDE.md                       Karpathy rules + tool selection + encoding
 │   ├── settings.json                   permissions + plugins + language
-│   ├── settings.example-with-hooks.json reference with all five hooks wired in
+│   ├── settings.example-with-hooks.json reference wiring for every shipped hook
 │   ├── hooks/                          user-level hooks (all opt-in)
 │   │   ├── block-iptables-save-to-rules.py
 │   │   ├── bash-guard.py + bash-deny.yaml  declarative deny/ask rule table
 │   │   ├── md2pdf-on-edit.py
 │   │   ├── ps1-bom-guard.py            keep the BOM PS 5.1 needs
 │   │   ├── prompt-secret-warn.py       flag a credential pasted into a prompt
+│   │   ├── session-telegram.py         Telegram when a LONG session ends/waits
 │   │   └── README.md
 │   ├── skills/                         user-level skill templates
 │   │   ├── code-review-external/SKILL.md
@@ -65,7 +67,7 @@ claude-bundle/
 │   ├── bin/                            helper executables (full tier)
 │   │   ├── _run-hidden.vbs             hidden-window launcher for Task Scheduler
 │   │   └── md2pdf.py                   MD→PDF via headless Edge/Chrome
-│   └── cron/                           cron foundation + wiki pipeline + 16 tasks
+│   └── cron/                           cron foundation + wiki pipeline + 17 tasks
 │       ├── hooks/utils.py              shared LLM_call, JSONL parsing, wiki utils
 │       ├── lib/                         sourceable/importable shared code:
 │       │                                secret-scan.sh + secret_shapes.py (one
@@ -90,7 +92,7 @@ claude-bundle/
 │       ├── claude-healthcheck.sh       morning self-check
 │       ├── claude-warm-window.sh       ping the Claude 5h window (off by default)
 │       ├── memory-update.py            JSONL → memory MD
-│       ├── registry.yaml               16 tasks declared here
+│       ├── registry.yaml               17 tasks declared here
 │       └── admin/                      idempotent sync + DPAPI cred saver
 │           ├── sync.cmd, sync-tasks.ps1
 │           └── save-cred.cmd, save-cred.ps1
@@ -101,7 +103,8 @@ claude-bundle/
 │
 ├── scripts/
 │   ├── claude-switch.ps1              switch session backend (Claude/DS/MM/OCG/Ollama/CCR)
-│   ├── install.ps1                    guided full/lite installer (Windows)
+│   ├── get-key.ps1                   print one key from .env (for -KeyHelper)
+│   ├── install.ps1                    guided full/lite installer (Windows); -Diff previews an upgrade
 │   ├── uninstall.ps1                  remove what install.ps1 wrote (per manifest)
 │   ├── install-lite.sh               lite installer (macOS/Linux)
 │   ├── gen-scheduler.py              emit systemd/launchd units from registry.yaml
@@ -170,8 +173,8 @@ from your real Claude Code sessions:
   and refreshes the stats table in `wiki/index.md`
 - A lint script catches broken links, orphan pages, missing frontmatter
 
-A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 16
-scheduled jobs (ten disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
+A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 17
+scheduled jobs (eleven disabled by default). One UAC-elevated `sync.cmd` syncs your registry into
 real `Register-ScheduledTask` calls — idempotent, marked, hidden
 windows, Password-mode by default (runs before login → survives
 overnight reboots).
@@ -205,7 +208,10 @@ deployment.
 - **`scripts/claude-switch.ps1`** — interactive menu (and CLI mode) to
   switch the active Claude Code session between Anthropic, DeepSeek,
   MiniMax, OpenCode Go, local/LAN Ollama, and CCR (Claude Code Router).
-  Writes to `<project>/.claude/settings.local.json`.
+  Writes to `<project>/.claude/settings.local.json`. With `-KeyHelper` it
+  writes an `apiKeyHelper` command pointing at **`scripts/get-key.ps1`**
+  instead of the key itself, so the secret stays in `.env` and never lands
+  in a file inside the project working tree.
 - **`codex/AGENTS.md`** — drop into `~/.codex/AGENTS.md` so Codex CLI
   picks up the same universal rules as Claude Code (Claude-specific
   sections like slash commands and hooks are omitted from this mirror).
@@ -263,14 +269,28 @@ Reload the window. Done.
 
 ### If you want the full tier too
 
-See [`INSTALL.md`](INSTALL.md) — ~15 steps, includes:
-- Setting up `.env` with LLM provider keys (DeepSeek and/or OpenCode Go)
+See [`INSTALL.md`](INSTALL.md) — 16 steps, includes:
+- Setting up `.env` with an LLM backend — a provider key (DeepSeek and/or
+  OpenCode Go), or `WIKI_LLM_PROVIDER=local` against your own server
 - Copying `wiki/` and `cron/` into `~/.claude/`
+- Writing `bundle.local.yaml` — the machine-local project map and privacy
+  policy, including the `dry_run_until:` window that holds the first week to
+  previews
 - Running `cron/admin/save-cred.cmd` to DPAPI-stash your Windows password
 - Filling `registry.yaml` placeholders (`<bundle-install-path>`, `<user>`)
   — automatable via `scripts/bootstrap-registry.ps1`
-- Running `cron/admin/sync.cmd` to register all 16 tasks
+- Running `cron/admin/sync.cmd` to register all 17 tasks
+- Pointing the `claude` CLI at a backend with `scripts/claude-switch.ps1`
 - Adapting `codex/AGENTS.md` if you also run Codex CLI
+
+Before deciding it is worth the tokens, look at
+[`docs/examples/`](docs/examples/) — one synthetic daily log, the page compiled
+from it, and the index entry, so you can see the output rather than infer it.
+
+New to it, read [**The first week**](INSTALL.md#the-first-week) in `INSTALL.md`
+before the first night runs: what to expect when nothing appears, exactly what
+was sent to the provider, what it cost, where anything it gave up on is kept,
+and how to stop sending anything off the machine at all.
 
 Before deploying, run `powershell -File scripts/self-test.ps1` for a quick
 offline check (JSON/YAML validity, Python compiles, hooks, placeholder

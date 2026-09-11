@@ -133,6 +133,168 @@ def test_compile_rejects_path_escape(bundle: Path):
     assert rejected, f"no quarantine file under cron/logs/rejected/:\n{r.stdout}"
 
 
+def test_a_source_that_always_fails_is_quarantined_once(bundle: Path):
+    """The retry ceiling, end to end: three runs, then it stops — once.
+
+    The pieces were each unit-tested (the counter bumps, a finding dedupes) and
+    the BEHAVIOUR they exist for was not: a source the provider deterministically
+    refuses must stop being re-sent after WIKI_RETRY_LIMIT nights, leave its
+    payload where a human can read it, and file exactly ONE finding rather than
+    one per night. Getting this wrong is expensive in the direction that does not
+    announce itself — every night, forever, for the same rejected payload.
+    """
+    # Deterministically unusable: a prose refusal, not JSON. Retrying reproduces
+    # it exactly, which is what makes it count against the ceiling (a provider
+    # outage is `transient` and deliberately does not).
+    resp = bundle / "unusable_response.txt"
+    resp.write_text("I'm sorry, I can't help with that.\n", encoding="utf-8")
+    script = bundle / "cron" / "wiki" / "wiki-compile-sessions.py"
+
+    for _ in range(3):
+        r = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert "QUARANTINED after 3" in r.stdout, \
+        f"the ceiling did not stop the source on the third run:\n{r.stdout}"
+
+    rejected = list((bundle / "cron" / "logs" / "rejected").glob("*"))
+    assert rejected, f"the payload was not kept for inspection:\n{r.stdout}"
+
+    findings = bundle / "FINDINGS.md"
+    assert findings.is_file(), f"no finding was filed:\n{r.stdout}"
+    body = findings.read_text(encoding="utf-8")
+    entries = [ln for ln in body.splitlines() if ln.startswith("## ")]
+    assert len(entries) == 1, f"expected exactly one finding, got {entries}"
+
+    # A fourth run must not re-send the source: the ceiling is reached, so the
+    # night is a no-op rather than another call and another finding.
+    r4 = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    after = findings.read_text(encoding="utf-8")
+    assert after.count("\n## ") == body.count("\n## "), \
+        f"a second finding was filed for an already-quarantined source:\n{r4.stdout}"
+
+
+# A date safely in the past on any machine, so nothing here depends on the
+# clock (the bundle's own test policy, rule 3): flush clamps a session date to
+# today, and a fixture dated "tomorrow" would be green some days and red others.
+SESSION_DAY = "2020-05-04"
+
+
+def _seed_session_jsonl(path: Path, count: int, day: str, marker: str = "m",
+                        append: bool = False) -> None:
+    """A session transcript whose messages carry `day` as their timestamp."""
+    filler = "x" * 600
+    lines = []
+    for i in range(count):
+        for role in ("user", "assistant"):
+            lines.append(json.dumps({
+                "type": role, "timestamp": f"{day}T21:10:0{i % 10}.000Z",
+                "message": {"role": role,
+                            "content": f"{marker} {role} {i} {filler}"}}))
+    body = "\n".join(lines) + "\n"
+    with open(path, "a" if append else "w", encoding="utf-8") as f:
+        f.write(body)
+
+
+def test_flush_dates_the_daily_by_session_not_by_run(bundle: Path, tmp_path: Path):
+    """A session belongs in the daily of the day it HAPPENED.
+
+    Everything used to be written to the daily of the day the run happened, so
+    the 02:30 flush filed last night's evening session under this morning's
+    date, compile stamped its incidents "the morning after", and a backlog sweep
+    piled a month of sessions into one daily log.
+    """
+    home = tmp_path / "home_dated"
+    proj_dir = home / ".claude" / "projects" / "C--Users-test-projects-dated"
+    proj_dir.mkdir(parents=True)
+    _seed_session_jsonl(proj_dir / "s.jsonl", 12, SESSION_DAY)
+
+    resp = bundle / "dated_response.md"
+    resp.write_text("- A durable fact. [[index]]\n", encoding="utf-8")
+    r = _run(bundle / "cron" / "wiki" / "wiki-flush-sessions.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp),
+              "USERPROFILE": str(home), "HOME": str(home)}, cwd=bundle)
+    assert r.returncode == 0, f"flush failed:\n{r.stdout}\n{r.stderr}"
+
+    daily = bundle / "wiki" / "daily" / f"{SESSION_DAY}.md"
+    assert daily.is_file(), f"no daily for the session's own day:\n{r.stdout}"
+    assert "## dated" in daily.read_text(encoding="utf-8")
+    stray = [p.name for p in (bundle / "wiki" / "daily").glob("????-??-??.md")
+             if p.name != f"{SESSION_DAY}.md"
+             and "## dated" in p.read_text(encoding="utf-8")]
+    assert not stray, f"the session was also filed under the run date: {stray}"
+
+
+def test_flush_resends_only_the_tail_of_a_grown_session(bundle: Path, tmp_path: Path):
+    """A session that grew must cost only its DELTA.
+
+    The state key used to be the file's SIZE, which made a still-open session
+    look new: the whole transcript was re-read and re-sent every night — the
+    same conversation billed twice and appended to a second daily. The key is
+    now the offset the read stopped at.
+    """
+    home = tmp_path / "home_delta"
+    proj_dir = home / ".claude" / "projects" / "C--Users-test-projects-grown"
+    proj_dir.mkdir(parents=True)
+    jf = proj_dir / "s.jsonl"
+    _seed_session_jsonl(jf, 12, SESSION_DAY)
+
+    resp = bundle / "delta_response.md"
+    resp.write_text("- A durable fact. [[index]]\n", encoding="utf-8")
+    env = {"WIKI_LLM_MOCK_RESPONSE": str(resp),
+           "USERPROFILE": str(home), "HOME": str(home)}
+    flush = bundle / "cron" / "wiki" / "wiki-flush-sessions.py"
+
+    r = _run(flush, env, cwd=bundle)
+    assert r.returncode == 0, f"flush failed:\n{r.stdout}\n{r.stderr}"
+    state = json.loads((bundle / "wiki" / ".processed.json").read_text(encoding="utf-8"))
+    processed = state.get("flush", {}).get("processed_jsonls", [])
+    assert f"grown/s.jsonl@{jf.stat().st_size}" in processed, \
+        f"the read offset was not recorded: {processed}"
+
+    # The session continues: two more exchanges, ~2.5 KB, on the next day.
+    _seed_session_jsonl(jf, 2, "2020-05-05", marker="tail", append=True)
+
+    import os
+    env2 = os.environ.copy()
+    env2.update(env)
+    env2["WIKI_LLM_PROVIDER"] = "mock"
+    r2 = subprocess.run(
+        [sys.executable, str(flush), "--dry-run"], cwd=str(bundle), env=env2,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120)
+    assert r2.returncode == 0, f"flush --dry-run failed:\n{r2.stdout}\n{r2.stderr}"
+    sizes = [int(m) for m in re.findall(r"LLM call\(s\), (\d+) chars", r2.stdout)]
+    assert sizes, f"dry run reported no payload for the grown session:\n{r2.stdout}"
+    assert max(sizes) < jf.stat().st_size // 2, (
+        f"the whole transcript was re-collected ({max(sizes)} chars of a "
+        f"{jf.stat().st_size}-byte file):\n{r2.stdout}")
+
+
+def test_compile_honours_skip_projects(bundle: Path):
+    """The privacy policy is unified across the pipeline — compile included.
+
+    flush gates every SOURCE, but a project added to skip_projects AFTER its
+    daily was written still had that section sent to the provider, and a
+    wiki/projects/<it>/ folder created for it. A daily already on disk is not
+    consent.
+    """
+    pytest.importorskip("yaml")
+    (bundle / "bundle.local.yaml").write_text(
+        "skip_projects:\n  - myproject\n", encoding="utf-8")
+    resp = bundle / "denied_response.json"
+    resp.write_text(json.dumps(
+        [{"path": "projects/myproject/leak.md", "action": "create",
+          "content": "# Leak\n\nThis must never be written. [[index]]\n"}]),
+        encoding="utf-8")
+
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0, f"compile-sessions failed:\n{r.stdout}\n{r.stderr}"
+    assert "denied by policy" in r.stdout, \
+        f"the denied section was not reported:\n{r.stdout}"
+    assert not (bundle / "wiki" / "projects" / "myproject").exists(), \
+        "a denied project got a wiki namespace"
+
+
 def test_flush_dedup(bundle: Path, tmp_path: Path):
     """flush turns a JSONL session into a daily log and records it processed;
     a second run must NOT reprocess it (dedup via .processed.json)."""
@@ -530,7 +692,12 @@ def test_llm_call_latches_a_403(bundle: Path, monkeypatch):
     accepted) or a WAF rejected us. Neither clears mid-run, so it must latch the
     provider like 402 does. Falling through to the generic error handler left
     the circuit breaker open, and every remaining call of the batch paid another
-    round trip to a door already known to be shut."""
+    round trip to a door already known to be shut.
+
+    On the SECOND consecutive one. The latch now persists for six hours across
+    processes, so latching on a single 403 would let one bad minute at a proxy
+    take the provider out for the whole night and hand the payload to the next
+    one in the chain — a real bill for someone else's blip."""
     u = _load_utils(bundle, "utils_403")
     # Not token-shaped on purpose: the repo's own secret guard scans this diff.
     monkeypatch.setenv("DEEPSEEK_KEY", "unit-test-placeholder")
@@ -556,9 +723,17 @@ def test_llm_call_latches_a_403(bundle: Path, monkeypatch):
     res = u._llm_openai_compat("deepseek", "hi")
     assert res.text is None
     assert res.kind == "config", f"a 403 is not something waiting fixes: {res.kind}"
-    assert calls["n"] == 1, "a 403 was retried instead of latched"
+    assert calls["n"] == 1, "a 403 was retried instead of returned"
+    assert not u._is_depleted("deepseek"), \
+        "one 403 latched the provider for six hours — two in a row is the evidence"
+
+    res = u._llm_openai_compat("deepseek", "hi")
+    assert res.text is None
+    assert res.kind == "config"
+    assert calls["n"] == 2, "the second 403 was retried instead of latched"
     assert "deepseek" in u._DEPLETED_PROVIDERS
-    assert u._is_depleted("deepseek"), "the circuit breaker did not open on 403"
+    assert u._is_depleted("deepseek"), \
+        "the circuit breaker did not open on the second consecutive 403"
 
 
 def test_gen_scheduler_escapes_and_passes_script_args(tmp_path: Path):

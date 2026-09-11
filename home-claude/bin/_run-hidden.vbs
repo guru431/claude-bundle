@@ -5,7 +5,11 @@
 ' with window-style 0 (hidden).
 '
 ' Usage (from registry sync-tasks.ps1):
-'   wscript.exe _run-hidden.vbs <kind> <script> [arg1 arg2 ...]
+'   wscript.exe //B //nologo _run-hidden.vbs <kind> <script> [arg1 arg2 ...]
+'   //B   = batch mode: no banner and NO MODAL DIALOG on an error. A task fires
+'           in session 0, where a dialog nobody can dismiss holds the task open
+'           until its execution time limit. Host options are consumed by wscript
+'           itself, so WScript.Arguments still starts at <kind>.
 '   <kind>   = bash | python | cmd
 '   <script> = absolute path (UNC or local C:\) — never a mapped drive for
 '              Password-mode tasks
@@ -58,12 +62,14 @@ shell.Environment("PROCESS")("PYTHONIOENCODING") = "utf-8"
 ' bash.exe lives — so a bare "bash" can raise file-not-found and abort the task
 ' with no log. Use a sane default and allow an override via the BASH_EXE /
 ' PYTHON_EXE process env vars (the same vars the peer cron scripts honor).
-Dim env, bashExe, pythonExe
+Dim env, bashExe, pythonExe, bashIsDefault, pythonIsDefault, bashCand
 Set env = shell.Environment("Process")
 bashExe = env("BASH_EXE")
-If bashExe = "" Then bashExe = "C:\Program Files\Git\bin\bash.exe"
+bashIsDefault = (bashExe = "")
+If bashIsDefault Then bashExe = "C:\Program Files\Git\bin\bash.exe"
 pythonExe = env("PYTHON_EXE")
-If pythonExe = "" Then pythonExe = "python.exe"
+pythonIsDefault = (pythonExe = "")
+If pythonIsDefault Then pythonExe = "python.exe"
 
 ' Password-mode tasks fire in session 0, where the process env vars above may be
 ' empty (they aren't inherited from an interactive shell). Fall back to the
@@ -86,10 +92,12 @@ If fso.FileExists(envPath) Then
                 If Left(envVal, 1) = """" And Right(envVal, 1) = """" Then
                     envVal = Mid(envVal, 2, Len(envVal) - 2)
                 End If
-                If envKey = "BASH_EXE" And bashExe = "C:\Program Files\Git\bin\bash.exe" And envVal <> "" Then
+                If envKey = "BASH_EXE" And bashIsDefault And envVal <> "" Then
                     bashExe = envVal
-                ElseIf envKey = "PYTHON_EXE" And pythonExe = "python.exe" And envVal <> "" Then
+                    bashIsDefault = False
+                ElseIf envKey = "PYTHON_EXE" And pythonIsDefault And envVal <> "" Then
                     pythonExe = envVal
+                    pythonIsDefault = False
                 End If
             End If
         End If
@@ -97,6 +105,23 @@ If fso.FileExists(envPath) Then
     envFile.Close
 End If
 On Error Goto 0
+
+' Still on the hardcoded default: probe BOTH bash.exe locations a
+' Git-for-Windows install can have. Git\bin\bash.exe is the usual one, but the
+' MinGW/MSYS layout puts the real binary at Git\usr\bin\bash.exe and some
+' installs (and portable unpacks) ship only that. utils.py::find_bash,
+' cron/lib/runtime.sh and the tests all try both; this launcher tried one, so a
+' machine with the other layout failed every bash task with 9009 while every
+' other part of the bundle found bash fine. BASH_EXE (env or .env) still wins.
+If bashIsDefault Then
+    For Each bashCand In Array("C:\Program Files\Git\bin\bash.exe", _
+                               "C:\Program Files\Git\usr\bin\bash.exe")
+        If fso.FileExists(bashCand) Then
+            bashExe = bashCand
+            Exit For
+        End If
+    Next
+End If
 
 Select Case kind
     Case "bash"
@@ -114,6 +139,10 @@ End Select
 ' itself failed there was no trace at all. One line into cron/logs/launcher.log
 ' is the difference between "the pipeline is broken somewhere" and "BASH_EXE
 ' points at a file that does not exist".
+' Keep the MESSAGES passed in here ASCII-only: OpenTextFile writes in the system
+' ANSI codepage, so an em dash lands as mojibake in the one line whose whole job
+' is to be readable at 03:00. The comments in this file may use them; the log
+' text may not.
 Sub LogLaunchFailure(message)
     Dim logDir, logPath, logFile
     On Error Resume Next
@@ -135,7 +164,7 @@ If kind = "python" Then exePath = pythonExe
 If exePath <> "" And InStr(exePath, "\") > 0 Then
     If Not fso.FileExists(exePath) Then
         LogLaunchFailure "FATAL: " & kind & " interpreter not found: " & exePath & _
-            " (set BASH_EXE / PYTHON_EXE in <bundle>\.env) — script: " & script
+            " (set BASH_EXE / PYTHON_EXE in <bundle>\.env) - script: " & script
         WScript.Quit 9009
     End If
 End If
@@ -144,7 +173,7 @@ End If
 On Error Resume Next
 rc = shell.Run(cmd, 0, True)
 If Err.Number <> 0 Then
-    LogLaunchFailure "FATAL: could not launch [" & cmd & "] — " & _
+    LogLaunchFailure "FATAL: could not launch [" & cmd & "] - " & _
         Err.Number & " " & Err.Description
     Err.Clear
     On Error Goto 0

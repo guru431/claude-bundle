@@ -52,8 +52,8 @@ echo "TRACE: BUNDLE_ROOT=$BUNDLE_ROOT" >> "$LOG_FILE"
 # --- Collect task statuses via PowerShell ---
 echo "TRACE: stage=tasks $(date '+%H:%M:%S')" >> "$LOG_FILE"
 TASK_STATUS=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$CRON_DIR" 2>>"$LOG_FILE" <<'PYSCRIPT'
-import subprocess, sys, json, os
-from datetime import datetime
+import subprocess, sys, json, os, re
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # argv[1] is $CRON_DIR — that is where schtasks_status (the fallback collection
@@ -118,6 +118,62 @@ if collect is schtasks_status.collect:
 
 # Result 0 = success, 267009 = still running, 267011 = not yet run, 267014 = terminated by user
 OK_CODES = {0, 267009, 267011, 267014}
+RUNNING = 267009
+
+
+def registry_timeouts(cron_dir):
+    """task name -> timeout_hours, from cron/registry.yaml.
+
+    PyYAML when it is installed, else a line parser: this monitor must keep
+    working on a box that never had third-party packages.
+    """
+    reg = Path(cron_dir) / 'registry.yaml'
+    try:
+        text = reg.read_text(encoding='utf-8')
+    except OSError:
+        return {}
+    try:
+        import yaml
+        return {t['name']: t.get('timeout_hours')
+                for t in (yaml.safe_load(text).get('tasks') or [])
+                if isinstance(t, dict) and t.get('name')}
+    except Exception:
+        out, name = {}, None
+        for raw in text.splitlines():
+            m = re.match(r'^\s*-\s+name:\s*(.+?)\s*$', raw)
+            if m:
+                name = m.group(1).strip().strip('\'"')
+                out.setdefault(name, None)
+                continue
+            m = re.match(r'^\s*timeout_hours:\s*(\d+)\s*$', raw)
+            if m and name:
+                out[name] = int(m.group(1))
+        return out
+
+
+TIMEOUTS = registry_timeouts(sys.argv[1])
+
+
+def hung_since(task, now):
+    """When a RUNNING task passed its own timeout_hours — else None.
+
+    `267009 = still running` sat in OK_CODES unconditionally, so the one failure
+    this monitor cannot see any other way was the one it called healthy: in
+    session 0 there is no terminal, a blocked `git push` or ssh never returns,
+    Task Scheduler drops every later trigger (IgnoreNew), and the task reads
+    "running" for days. The ceiling the registry already declares is the
+    yardstick — a task past it should have been killed by the scheduler, so
+    finding it alive means neither the task nor the scheduler is doing its job.
+    Only registry-managed tasks have a ceiling; a foreign task keeps its silence.
+    """
+    hours = TIMEOUTS.get(task['Name'])
+    if not isinstance(hours, int) or hours <= 0:
+        return None
+    try:
+        started = datetime.strptime(task['LastRun'], '%Y-%m-%d %H:%M')
+    except (ValueError, TypeError, KeyError):
+        return None
+    return started if now - started > timedelta(hours=hours) else None
 
 # Tasks excluded from monitoring — from the environment, so a deployment can
 # suppress a noisy neighbour without editing a shipped script. Comma-separated.
@@ -136,6 +192,7 @@ except (OSError, ValueError):
 
 failures = []
 digest = []
+NOW = datetime.now()
 for t in tasks:
     code = t['LastResult']
     if t['Name'] in EXCLUDE_TASKS:
@@ -145,7 +202,10 @@ for t in tasks:
     # is noise about a decision that has already been made.
     if str(t.get('State', '')).lower() in ('disabled', '3'):
         continue
-    if code in OK_CODES or t['LastRun'] == 'never':
+    stuck = hung_since(t, NOW) if code == RUNNING else None
+    if stuck is not None:
+        t['_stuck_hours'] = TIMEOUTS[t['Name']]
+    elif code in OK_CODES or t['LastRun'] == 'never':
         continue
     if seen.get(t['Name']) == t['LastRun']:
         digest.append(t)          # already reported — weekly digest only
@@ -172,7 +232,13 @@ if failures:
         # candidate to add to registry.yaml, disable, or suppress on purpose).
         managed = 'managed-by-registry' in (f.get('Description') or '')
         tag = 'managed' if managed else 'ORPHAN'
-        lines.append(f"{f['Name']}: exit {f['LastResult']} (last run: {f['LastRun']}) [{tag}]")
+        if f.get('_stuck_hours'):
+            lines.append(f"{f['Name']}: running since {f['LastRun']}, past its "
+                         f"timeout_hours={f['_stuck_hours']} — Task Scheduler "
+                         f"should have killed it; every later trigger is being "
+                         f"dropped [{tag}]")
+        else:
+            lines.append(f"{f['Name']}: exit {f['LastResult']} (last run: {f['LastRun']}) [{tag}]")
     if any('[ORPHAN]' in ln for ln in lines):
         lines.append('  ORPHAN → add to cron/registry.yaml, disable it, or add to EXCLUDE_TASKS with a reason')
     print('\n'.join(NOTES + lines))
@@ -199,10 +265,11 @@ if [ -z "$TASK_STATUS" ] || printf '%s\n' "$TASK_STATUS" | head -1 | grep -q '^E
     ALERTS="task-monitor: task-status collection FAILED (${TASK_STATUS:-python produced no output}) — the monitor itself may be broken, check cron/logs/task-monitor_${DATE}.log"
     MONITOR_RC=1
 elif [ "$TASK_STATUS" != "OK" ]; then
-    # Count only real failure lines (`<name>: exit <code> ...`). The block can
-    # also carry the ORPHAN hint and the "collected via the schtasks fallback"
-    # note, and counting those would inflate the header's failed-task count.
-    TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | grep -c ': exit ')
+    # Count only real failure lines (`<name>: exit <code> …` and the hung
+    # `<name>: running since … past its timeout_hours=N`). The block can also
+    # carry the ORPHAN hint and the "collected via the schtasks fallback" note,
+    # and counting those would inflate the header's failed-task count.
+    TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | grep -cE ': exit |: running since ')
     ALERTS="$TASK_STATUS"
 fi
 
@@ -416,7 +483,12 @@ if [ -n "$ALERTS" ]; then
     # task whose name contains one would have had it executed right here.
     ALERT_MSG=$(printf '%s\n\n%s\n\nCheck logs: cron/logs/\n' "$HEADER" "$ALERTS")
 
-    bash "$CRON_DIR/telegram-send.sh" "$ALERT_MSG" >>"$LOG_FILE" 2>&1
+    # "$BASH_BIN", not a bare `bash`: in session 0 the PATH that exists is the
+    # system one, and C:\Windows\System32\bash.exe on it is the WSL launcher —
+    # it accepts the call, does nothing useful with a Windows path, and the
+    # alert is never sent. cron/lib/runtime.sh is sourced above precisely so
+    # every shell task has one answer to "which bash".
+    "$BASH_BIN" "$CRON_DIR/telegram-send.sh" "$ALERT_MSG" >>"$LOG_FILE" 2>&1
     TG_RC=$?
     if [ "$TG_RC" -eq 0 ]; then
         echo "Alert sent to Telegram" >> "$LOG_FILE"

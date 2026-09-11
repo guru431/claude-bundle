@@ -3,14 +3,21 @@
 #              (function-local import, so `python -m compileall` never catches a
 #              missing install — it surfaces only at runtime as a misleading
 #              "DeepSeek error: ..." → "all providers failed").
-#   PyYAML   — parses cron/registry.yaml (the syncer, self-test, and CI).
+#   PyYAML   — parses cron/registry.yaml (the syncer, self-test, and CI) AND
+#              hooks/bash-deny.yaml, the rule table of the Tier-1 bash-guard
+#              hook. That hook is fail-open by design, so without PyYAML it does
+#              not crash and does not warn — it simply allows everything, and the
+#              install looks successful with the guard switched off. This is why
+#              the line below says "config only" rather than "Tier 1".
 #   markdown-it-py — the Markdown parser bin/md2pdf.py renders with (used by the
 #              md2pdf-on-edit hook and the ClaudeMd2PdfSync task, both opt-in).
 #              Only needed if you use the md+pdf pairing feature; the converter
 #              also needs a Chromium-family browser for headless printing.
 #
 # Install:  pip install -r requirements.txt
-# Tier 1 (config only) needs none of this.
+# The LITE profile — config only, no hooks — needs none of this. Tier 1 with the
+# Python hooks enabled needs PyYAML for bash-guard.py; see the tier table in
+# home-claude/hooks/README.md, which is the authority on what each hook requires.
 requests
 PyYAML
 markdown-it-py

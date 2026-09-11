@@ -36,6 +36,7 @@ from utils import (  # noqa: E402
     give_up_after_repeated_failure,
     llm_call_ex,
     llm_pace,
+    masked,
     normalize_wiki_path,
     parse_llm_json_result,
     quarantine_raw,
@@ -157,7 +158,7 @@ def compile_article(article_path: Path,
 {fence("kind=existing-page-names", existing_list)}
 
 ## Article to process:
-{fence(f"kind=article file={article_rel_path}", article_text)}
+{fence(f"kind=article file={article_rel_path}", masked(article_text))}
 
 ---
 
@@ -230,12 +231,22 @@ def apply_changes(changes: list[dict], existing_pages: dict[str, str],
             # cannot have judged what a non-append action would overwrite. An
             # existing target therefore always appends — a stray action:create
             # on a live page used to be a silent full-body replace.
-            if content.strip() not in existing_body:
-                final_body = existing_body.rstrip() + "\n\n" + content
-                label = "appended" if action == "append" else "appended (forced)"
-            else:
+            #
+            # Through append_fragment (utils), the SAME implementation
+            # compile-sessions uses. This branch used to glue the raw answer onto
+            # the body with a bare `rstrip() + "\n\n"`, so a kb page got a second
+            # H1 and a second set of same-named sections — "two versions of
+            # itself", the thing the shared transformers exist to prevent. Its
+            # "already there?" test compared the RAW fragment against the body,
+            # while write_page stores a normalized one, so it never matched and
+            # every re-run appended another copy.
+            merged = append_fragment(existing_body, content, DATE)
+            if merged == existing_body:
                 final_body = existing_body
                 label = "skipped"
+            else:
+                final_body = merged
+                label = "appended" if action == "append" else "appended (forced)"
         else:
             final_body = content
             label = "created"

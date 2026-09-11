@@ -9,26 +9,32 @@ committed copy disagrees with the code (`--check-table`). The canonical
 descriptions live next to each variable in the `.env` template; this
 page is the index.
 
-The two OTHER kinds of configuration are not env vars and are not listed
-here: the per-machine manifest `bundle.local.yaml` (project map and
-privacy policy — see `config/bundle.local.example.yaml`) and the task
-declarations in `cron/registry.yaml`.
+The bundle has THREE kinds of configuration and they are easy to
+confuse, so all three are indexed here: environment variables, the
+per-machine manifest `bundle.local.yaml`, and the task declarations in
+`cron/registry.yaml`. One value even lives under two names —
+`.env::PROJECTS_ROOT` and `bundle.local.yaml::projects_root` — because
+the shell tasks cannot read YAML; neither is deprecated, and the
+installer generates the first from the second.
+
+## Environment variables
 
 | Variable | In the .env template | Read by |
 |---|---|---|
 | `AGENTS_SYNC_FIX_MODEL` | optional (commented) | `home-claude/cron/agents-md-sync-check.py` |
 | `ANTHROPIC_API_KEY` | declared | — |
-| `API_TIMEOUT_MS` | optional (commented) | — |
-| `BASH_BIN` | not in .env (internal) | `home-claude/cron/claude-healthcheck.sh`, `home-claude/cron/git-push-all.sh` |
-| `BASH_EXE` | declared | `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh` |
+| `API_TIMEOUT_MS` | optional (commented) | `scripts/claude-switch.ps1` |
+| `BASH_BIN` | not in .env (internal) | `home-claude/cron/claude-healthcheck.sh`, `home-claude/cron/claude-task-monitor.sh`, `home-claude/cron/git-push-all.sh` |
+| `BASH_EXE` | declared | `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh`, `home-claude/hooks/session-telegram.py` |
 | `CCR_API_KEY` | declared | — |
-| `CCR_HOST` | declared | — |
+| `CCR_HOST` | declared | `scripts/claude-switch.ps1` |
 | `CLAUDE_BASH_DENY` | not in .env (internal) | `home-claude/hooks/bash-guard.py` |
 | `CLAUDE_BIN` | declared | `home-claude/cron/claude-warm-window.sh`, `home-claude/cron/hooks/utils.py` |
 | `CLAUDE_BUNDLE_RUNS_DIR` | not in .env (internal) | `home-claude/cron/runs.py` |
-| `CLAUDE_HOME` | — | `home-claude/cron/hooks/utils.py` |
+| `CLAUDE_HOME` | — | `home-claude/cron/hooks/utils.py`, `home-claude/hooks/session-telegram.py` |
 | `CLAUDE_HOOK_PYTHON` | — | `home-claude/cron/md2pdf-sync.py`, `home-claude/hooks/md2pdf-on-edit.py` |
 | `CLAUDE_MD2PDF` | not in .env (internal) | `home-claude/hooks/md2pdf-on-edit.py` |
+| `CLAUDE_STOP_ALERT_MINUTES` | optional (commented) | `home-claude/hooks/session-telegram.py` |
 | `DEEPINFRA_BASE_URL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `DEEPINFRA_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `DEEPINFRA_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
@@ -41,6 +47,7 @@ declarations in `cron/registry.yaml`.
 | `HANDOFF_WAIT_SECONDS` | optional (commented) | `home-claude/cron/hooks/session-start.py` |
 | `HEALTHCHECK_DISK_EXCLUDE` | optional (commented) | — |
 | `HEALTHCHECK_DISK_PCT` | optional (commented) | `home-claude/cron/claude-healthcheck.sh` |
+| `HEALTHCHECK_REMOTE_DISK_PCT` | optional (commented) | `home-claude/cron/claude-healthcheck.sh` |
 | `KB_SOURCE_DIR` | optional (commented) | `home-claude/cron/wiki/wiki-compile-kb.py`, `home-claude/cron/wiki/wiki-lint.py` |
 | `LOCAL_LLM_ALLOWED_HOSTS` | optional (commented) | `home-claude/cron/hooks/utils.py` |
 | `LOCAL_LLM_BASE_URL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
@@ -50,7 +57,7 @@ declarations in `cron/registry.yaml`.
 | `MEMORY_CROSS_NOTES` | optional (commented) | `home-claude/cron/memory-update.py` |
 | `MINIMAX_API_KEY` | declared | — |
 | `MONITOR_EXCLUDE_TASKS` | optional (commented) | — |
-| `OLLAMA_HOST` | declared | — |
+| `OLLAMA_HOST` | declared | `scripts/claude-switch.ps1` |
 | `OPENCODE_GO_API_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `OPENCODE_GO_KEY` | — | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `OPENCODE_GO_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
@@ -80,9 +87,60 @@ declarations in `cron/registry.yaml`.
 | `WIKI_LLM_MOCK_RESPONSE` | — | `home-claude/cron/hooks/utils.py` |
 | `WIKI_LLM_PROVIDER` | declared | `home-claude/cron/hooks/utils.py` |
 | `WIKI_LOG_RETENTION_DAYS` | optional (commented) | — |
+| `WIKI_MASK_SECRETS` | optional (commented) | — |
 | `WIKI_OFFBOX_FALLBACK` | optional (commented) | — |
 | `WIKI_REJECTED_RETENTION_DAYS` | optional (commented) | — |
 | `WIKI_RETRY_LIMIT` | optional (commented) | — |
 | `WIN_REMOTE_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 
-_68 variables._
+_71 variables._
+
+## `bundle.local.yaml` keys
+
+The machine-local manifest: which projects the pipeline may read, and
+what it may do with them. It is never committed and a reinstall never
+overwrites it. An existing manifest that does not parse **denies every
+project** rather than falling back to the permissive default — so a
+typo costs you a quiet night, not a leak. Descriptions live in
+`config/bundle.local.example.yaml`.
+
+| Key |
+|---|
+| `allow_projects` |
+| `collect_plans` |
+| `dry_run_until` |
+| `known_projects` |
+| `project_map` |
+| `projects_root` |
+| `skip_dirs` |
+| `skip_jsonl_projects` |
+| `skip_projects` |
+
+## `cron/registry.yaml` task fields
+
+The declaration of a scheduled task. `scripts/check-registry.py` is the
+grammar: a field not in this list is a typo, and both the Windows
+syncer and the POSIX unit generator would ignore it in silence.
+
+| Field | Required |
+|---|---|
+| `description` | no |
+| `enabled` | no |
+| `execute` | no |
+| `hidden` | no |
+| `kind` | no |
+| `logon_type` | no |
+| `name` | yes |
+| `platform` | no |
+| `project` | no |
+| `repeat_every` | no |
+| `repeat_for` | no |
+| `restart_count` | no |
+| `restart_interval` | no |
+| `runlevel` | no |
+| `script` | yes |
+| `script_args` | no |
+| `startup_delay` | no |
+| `timeout_hours` | no |
+| `trigger` | yes |
+| `user` | no |

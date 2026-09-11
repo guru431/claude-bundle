@@ -210,7 +210,8 @@ def emit_launchd(task: dict, install_path: str, out: Path) -> str | None:
     if argv is None:
         return f"skip {name}: kind={task.get('kind')} has no POSIX equivalent"
     label = f"com.claude-bundle.{name}"
-    rep = iso_seconds(task.get("repeat_every", ""))
+    rep_raw = str(task.get("repeat_every", "") or "")
+    rep = iso_seconds(rep_raw)
     trig = str(task.get("trigger", ""))
     # Built as a dict and serialized by plistlib: hand-written plist XML did not
     # escape values, so a path containing '&' or '<' produced invalid XML.
@@ -226,6 +227,20 @@ def emit_launchd(task: dict, install_path: str, out: Path) -> str | None:
                 "/bin/sh", "-c",
                 f"sleep {delay}; exec " + " ".join(shlex.quote(a) for a in argv),
             ]
+        # AtStartup + repeat_every. This used to fall through the `elif rep`
+        # below and lose the repetition in SILENCE — the systemd side at least
+        # returns a skip line. RunAtLoad covers the boot run and StartInterval
+        # the repeat, which is exact here: an AtStartup task has no wall-clock
+        # time to stay aligned to, so nothing is approximated.
+        if rep:
+            plist["StartInterval"] = rep
+            if delay:
+                print(f"  ! {name}: startup_delay={task['startup_delay']} is a sleep "
+                      f"inside the command, so each StartInterval={rep}s repeat "
+                      f"waits it out again")
+        elif rep_raw:
+            return (f"skip {name}: repeat_every={rep_raw} is not a duration "
+                    f"launchd can express as StartInterval")
     elif rep:
         cal = _plist_calendar(task)
         # A registry "Daily 01:00 every PT4H" is an ALIGNED schedule. StartInterval

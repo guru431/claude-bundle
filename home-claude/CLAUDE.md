@@ -103,8 +103,12 @@ into project incident logs. Findings are deferred observations for review.
 - NEVER use `cd` — always use absolute paths
 
 ### Bash Sandbox Limitations (VS Code extension):
+- **Observed, not universal.** This was reproduced on the Claude Code VS Code
+  extension on Windows (Git Bash), 2026-08. It is a property of one sandbox at
+  one point in time, not a fact about bash — if these commands work for you,
+  they work, and this section is stale. Check before you plan around it.
 - `echo`, `printf`, `ls`, `pwd`, `whoami`, `dir` may silently fail (exit 1/2)
-- This is NORMAL in the VS Code sandbox — do NOT retry these commands
+- Where that happens it is NORMAL — do NOT retry these commands
 - To check if a file exists: `test -f "$path"` (works reliably)
 - To check if a dir exists: `test -d "$path"` (works reliably)
 - To list files: use **Glob** tool instead of `ls`
@@ -209,10 +213,13 @@ prevent one of those; `pytest.ini` in this repo is the reference implementation.
    time zones only through injection or a fake. A test that depends on the
    calendar is green some days and red others — one suite quietly went red on
    even ISO weeks, another exactly 60 days after its fixture was written.
-4. **Cron runs them, not a person.** With no CI, `ClaudeTestSweep` (daily, off
-   by default) runs the fast suite across every project under `projects_root`;
-   red earns a Telegram alert and an entry in that project's `FINDINGS.md`.
-   `ClaudeTestSweepFull` does the same weekly, including `integration`.
+4. **Something other than a person runs them.** CI where a project has it;
+   otherwise the bundle's own sweep: `ClaudeTestSweep` (daily, off by default)
+   runs the fast suite across every project under `projects_root`, red earns a
+   Telegram alert and an entry in that project's `FINDINGS.md`, and
+   `ClaudeTestSweepFull` does the same weekly including `integration`. The rule
+   is the first sentence — a suite only a human remembers to run is a suite that
+   goes red for two days unnoticed, which is what prompted this policy.
 5. **"Why does this test exist."** Write one for: (a) a reproduced bug or
    incident, (b) a contract between modules or services, (c) an irreversible
    operation — deletion, deploy, migration, writing to an archive. Do not write

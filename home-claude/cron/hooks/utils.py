@@ -511,7 +511,7 @@ def masked(text: str) -> str:
     return _mask_secrets(text)
 
 
-def atomic_write_text(path: Path, text: str) -> None:
+def atomic_write_text(path: Path, text: str, newline: str = "\n") -> None:
     """Write a text file via temp-file + os.replace, creating parents.
 
     The daily log, the vault indexes, AGENTS.md and FINDINGS.md were all written
@@ -520,10 +520,18 @@ def atomic_write_text(path: Path, text: str) -> None:
     processed, so the next night appends a full second copy under the stump.
     `write_page`/`save_state` already did this; now there is one helper and no
     reason for a caller to hand-roll it.
+
+    `newline` defaults to LF rather than the platform default. These tasks edit
+    files in OTHER people's repositories — `FINDINGS.md`, `AGENTS.md` — and
+    `ClaudeGitPushAll` commits whatever they leave behind, so rewriting a file
+    wholesale in CRLF because the sweep happened to run on Windows would land
+    as a diff touching every line, unattended, at 03:00. Pass the file's own
+    detected style when preserving it matters more (see
+    `agents-md-sync-check.py::detect_newline`).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text, encoding="utf-8", errors="replace")
+    tmp.write_text(text, encoding="utf-8", errors="replace", newline=newline)
     tmp.replace(path)
 
 
@@ -1165,6 +1173,61 @@ def is_subagent_jsonl(jsonl_path: str) -> bool:
     return False
 
 
+def _jsonl_message(line: str) -> dict | None:
+    """One JSONL line → {'role', 'text', 'ts'}, or None if it carries no message.
+
+    Split out of parse_jsonl_messages so the whole-file reader and the
+    resume-from-offset reader cannot drift apart on what counts as a message.
+
+    `ts` is the line's raw ISO timestamp, or "". It is here because the flush
+    needs the day a session was WRITTEN — a transcript's own date, not the date
+    of the run that read it — and without it that phase had to re-scan the raw
+    bytes with a regex for something this parser had already read and dropped.
+    """
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None  # see is_subagent_jsonl: a line need not be an object
+
+    obj_type = obj.get("type", "")
+    if obj_type not in ("user", "assistant"):
+        return None
+
+    msg = obj.get("message", obj)
+    if not isinstance(msg, dict):
+        return None
+    role = msg.get("role", obj_type)
+    if role not in ("user", "assistant"):
+        return None
+
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        text_parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                text_parts.append(block)
+        text = "\n".join(text_parts)
+    elif isinstance(content, str):
+        text = content
+    else:
+        return None
+
+    text = text.strip()
+    if not text:
+        return None
+    stamp = obj.get("timestamp")
+    return {"role": role, "text": text,
+            "ts": stamp if isinstance(stamp, str) else ""}
+
+
 def parse_jsonl_messages(jsonl_path: str, last_n: int = 30) -> list[dict]:
     """Extract the last N user/assistant messages from a Claude Code JSONL.
 
@@ -1174,51 +1237,84 @@ def parse_jsonl_messages(jsonl_path: str, last_n: int = 30) -> list[dict]:
     try:
         with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
-                    continue  # see is_subagent_jsonl: a line need not be an object
-
-                obj_type = obj.get("type", "")
-                if obj_type not in ("user", "assistant"):
-                    continue
-
-                msg = obj.get("message", obj)
-                if not isinstance(msg, dict):
-                    continue
-                role = msg.get("role", obj_type)
-                if role not in ("user", "assistant"):
-                    continue
-
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    text_parts = []
-                    for block in content:
-                        if isinstance(block, dict):
-                            if block.get("type") == "text":
-                                text_parts.append(block.get("text", ""))
-                        elif isinstance(block, str):
-                            text_parts.append(block)
-                    text = "\n".join(text_parts)
-                elif isinstance(content, str):
-                    text = content
-                else:
-                    continue
-
-                text = text.strip()
-                if not text:
-                    continue
-
-                messages.append({"role": role, "text": text})
+                msg = _jsonl_message(line)
+                if msg is not None:
+                    messages.append(msg)
     except (OSError, UnicodeDecodeError):
         return []
 
     return messages[-last_n:] if last_n else messages
+
+
+def parse_jsonl_delta(jsonl_path: str, start_offset: int = 0) -> tuple[list[dict], int]:
+    """Messages added since `start_offset`, plus the offset to resume from.
+
+    A session that is still being written grows between nights. Keyed only by
+    size, the whole file was re-read and re-sent every time it changed — the
+    same conversation billed twice and digested twice, which is also how a
+    project ends up with two pages saying the same thing. Reading from the last
+    offset sends only what is new.
+
+    A file SHORTER than the stored offset was truncated or replaced, so the
+    offset means nothing: fall back to reading it whole. The returned offset is
+    where this read actually stopped, not the file's size at some later moment,
+    so a line written during the read is picked up next time rather than lost.
+    """
+    messages: list[dict] = []
+    try:
+        size = os.path.getsize(jsonl_path)
+        if start_offset < 0 or start_offset > size:
+            start_offset = 0
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            f.seek(start_offset)
+            # readline(), not `for line in f`: iterating a text file disables
+            # tell() ("telling position disabled by next() call"), and the
+            # offset is the whole point of this function.
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                msg = _jsonl_message(line)
+                if msg is not None:
+                    messages.append(msg)
+            end_offset = f.tell()
+    except (OSError, UnicodeDecodeError, ValueError):
+        return [], start_offset
+    return messages, end_offset
+
+
+def encode_cwd(cwd: str) -> str:
+    """Encode a project cwd the way Claude Code names its projects directory.
+
+    `C:\\Users\\me\\projects\\myapp` → `C--Users-me-projects-myapp`, which is the
+    key PROJECT_MAP and dir_to_project are written against.
+    """
+    if not isinstance(cwd, str) or not cwd.strip():
+        return ""
+    return re.sub(r"[\\/:]", "-", cwd.strip().rstrip("\\/"))
+
+
+def project_from_payload(data: dict) -> str:
+    """Project name for a hook payload: `cwd` first, transcript_path second.
+
+    The transcript's parent directory IS the encoded cwd, so the two agree
+    whenever both exist — but `transcript_path` can be absent or empty (a fresh
+    session, a resumed one), and the collectors that keyed off it alone then
+    silently attributed nothing. `cwd` is present in every Claude Code hook
+    payload, so it is the better primary and the other is the fallback.
+
+    One implementation: session-start.py carried its own copy of the same
+    regex, which is exactly how two encoders drift.
+    """
+    if not isinstance(data, dict):
+        return DEFAULT_PROJECT
+    encoded = encode_cwd(data.get("cwd", ""))
+    if encoded:
+        return dir_to_project(encoded)
+    transcript_path = data.get("transcript_path", "")
+    if isinstance(transcript_path, str) and transcript_path:
+        return dir_to_project(os.path.basename(os.path.dirname(transcript_path)))
+    return DEFAULT_PROJECT
 
 
 def save_to_pending(session_id: str, messages: list[dict], project: str = "unknown"):
@@ -1262,8 +1358,7 @@ def save_session_tail(data: dict, last_n: int = 30) -> tuple[str, str] | None:
         return None
     if not os.path.exists(transcript_path):
         return None
-    parent_dir = os.path.basename(os.path.dirname(transcript_path))
-    project = dir_to_project(parent_dir)
+    project = project_from_payload(data)
     if not project_allowed(project):
         return None
     messages = parse_jsonl_messages(transcript_path, last_n=last_n)
@@ -1540,6 +1635,15 @@ _CONFIG_NOTES.append(("PROJECTS_ROOT", str(PROJECTS_ROOT or "not set"),
 #
 # `key_env` is a list: the first non-empty env var wins (supports aliases, e.g.
 # OPENCODE_GO_API_KEY / OPENCODE_GO_KEY).
+#
+# `max_input_chars` is the payload ceiling for THIS provider, applied by
+# _llm_openai_compat before the request goes out. An oversized prompt is a
+# DETERMINISTIC failure — the provider rejects it with 400 (or a content filter
+# trips) and every retry reproduces it exactly, so the same payload was sent
+# three nights running before the source was quarantined. Cutting it here, with
+# truncate_head's visible marker in the text, turns that whole class into one
+# slightly shorter answer. Roughly four characters per token, well under each
+# provider's context window to leave room for the completion.
 PROVIDERS: dict[str, dict] = {
     "deepseek": {  # primary: DeepSeek V4-Flash, OpenAI-compatible, cheapest
         "label": "DeepSeek",
@@ -1553,6 +1657,7 @@ PROVIDERS: dict[str, dict] = {
         "max_retries": 3,
         "backoff_base": 30,   # seconds, multiplied by the attempt number
         "retry_sleep": 15,    # seconds, after a transport exception
+        "max_input_chars": 240000,  # DeepSeek V4-Flash: 64k context
         "offbox": True,
     },
     "opencode": {  # fallback: OpenCode Go gateway (mimo-v2.5-pro)
@@ -1567,6 +1672,7 @@ PROVIDERS: dict[str, dict] = {
         "max_retries": 5,
         "backoff_base": 60,
         "retry_sleep": 30,
+        "max_input_chars": 480000,  # gateway model carries 128k
         "offbox": True,
     },
     "deepinfra": {  # last fallback: DeepInfra, OpenAI-compatible, pay-as-you-go
@@ -1581,6 +1687,7 @@ PROVIDERS: dict[str, dict] = {
         "max_retries": 3,
         "backoff_base": 30,
         "retry_sleep": 15,
+        "max_input_chars": 240000,  # same class as DeepSeek
         "offbox": True,
     },
     "local": {  # local-only: any OpenAI-compatible server on this machine
@@ -1595,6 +1702,7 @@ PROVIDERS: dict[str, dict] = {
         "max_retries": 2,
         "backoff_base": 5,
         "retry_sleep": 5,
+        "max_input_chars": 120000,  # local servers are usually the smallest
         "offbox": False,      # never leaves this machine
         "key_optional": True,  # most local servers accept any/no bearer token
     },
@@ -1623,6 +1731,19 @@ DEFAULT_CHAIN = ["deepseek", "opencode", "deepinfra"]
 # write it, silently meant "yes, send everything". For a switch whose entire
 # purpose is keeping data on this machine, an unparseable value fails closed.
 OFFBOX_FALLBACK = _env_bool("WIKI_OFFBOX_FALLBACK", True, on_invalid=False)
+
+# DEPRECATED, and redundant since WIKI_LLM_PROVIDER stopped conflating "the
+# chain" with "its first member". `WIKI_OFFBOX_FALLBACK=0` means exactly
+# "use DEFAULT_CHAIN[0] and nothing else", which is now spelled
+# `WIKI_LLM_PROVIDER=deepseek` — one variable saying one thing, instead of two
+# that only make sense read together. Still honoured, with one warning per
+# process, for the release that carries the rename; the value is not ignored.
+if not OFFBOX_FALLBACK:
+    print(f"WARNING: WIKI_OFFBOX_FALLBACK=0 is DEPRECATED and will be removed. "
+          f"It now means the same as WIKI_LLM_PROVIDER={DEFAULT_CHAIN[0]} "
+          f"(one provider, no fallback) — set that instead.", file=sys.stderr)
+    _CONFIG_NOTES.append(("WIKI_OFFBOX_FALLBACK", "0",
+                          f"DEPRECATED — use WIKI_LLM_PROVIDER={DEFAULT_CHAIN[0]}"))
 
 # WIKI_ALLOW_OFFBOX=0 — the real thing people believed they were buying above:
 # a gate applied to EVERY call, refusing any provider whose registry row says
@@ -1778,6 +1899,12 @@ _DEPLETED_KIND = {"402": "config", "403": "config",
                   "500": "transient", "502": "transient",
                   "503": "transient", "504": "transient"}
 _DEPLETED_PATH = BUNDLE_ROOT / "cron" / "state" / "depleted.json"
+
+# Consecutive 403s per provider, this process only. A shut door answers 403
+# every time, so the second one arrives within seconds; a proxy having a bad
+# minute answers it once. Only the former should latch — see the 403 branch in
+# _llm_openai_compat. Any successful call clears the count.
+_FORBIDDEN_STREAK: dict[str, int] = {}
 _DEPLETED_PROVIDERS: dict[str, str] = {}   # provider → why (402/403/429)
 _DEPLETED_SKIPS: dict[str, int] = {}       # calls skipped because of depletion
 _depleted_loaded = False
@@ -1938,6 +2065,21 @@ def config_report() -> list[str]:
         lines.append(f"{name:<17} = {value}  ({source})")
     lines.append(f"{'dry_run_until':<17} = {DRY_RUN_UNTIL or 'not set'}  "
                  f"(bundle.local.yaml)")
+    # The interpreters, RESOLVED. These two are not read through _env_bool/
+    # _env_int, so they carried no note — and they are exactly the pair that
+    # decides whether a Task Scheduler night runs at all: session 0 has neither
+    # a user PATH nor a shell, so a value that points at nothing produces an
+    # empty night and no error anywhere. Say what was found, and from where.
+    for name, resolver in (("PYTHON_EXE", find_python), ("BASH_EXE", find_bash)):
+        raw = (os.environ.get(name) or "").strip()
+        resolved = resolver() or ""
+        if raw and not os.path.isfile(raw):
+            source = f"env/.env — BUT {raw!r} IS NOT A FILE, fell back"
+        elif raw:
+            source = "env/.env"
+        else:
+            source = "resolved from PATH"
+        lines.append(f"{name:<17} = {resolved or 'NOT FOUND'}  ({source})")
     lines.append(f"{'privacy':<17} = {policy_summary()}")
     if _CONFIG_ERRORS:
         lines.append("ERRORS:")
@@ -1961,14 +2103,26 @@ def _dry_run_until() -> date | None:
     if raw is None:
         return None
     try:
-        # PyYAML resolves `2026-09-05 10:00` to a datetime, and `datetime` IS a
-        # `date` subclass — so the isinstance check below let it through and the
-        # `date.today() < DRY_RUN_UNTIL` comparison raised TypeError inside
-        # load_state(), i.e. in every phase. Take the date part.
+        # A value carrying a time arrives as EITHER type, depending on how the
+        # user spelled it, and both used to be wrong:
+        #
+        #   dry_run_until: 2026-09-05 10:00:00  → PyYAML gives a datetime, and
+        #     datetime IS a date subclass, so it passed the isinstance check and
+        #     `date.today() < DRY_RUN_UNTIL` raised TypeError inside load_state()
+        #     — that is, in every phase.
+        #   dry_run_until: 2026-09-05 10:00     → not a valid YAML timestamp
+        #     (no seconds), so it stays a STRING, date.fromisoformat rejects it,
+        #     and the brake was ignored with a warning nobody reads in session 0.
+        #
+        # The second is the worse one: this field exists to keep a first night
+        # from shipping the archive off-box before anyone has read a preview, so
+        # "ignored" means the data went out. Take the date part in both cases.
         if isinstance(raw, datetime):
             return raw.date()
-        return raw if isinstance(raw, date) else date.fromisoformat(str(raw).strip())
-    except (TypeError, ValueError):
+        if isinstance(raw, date):
+            return raw
+        return date.fromisoformat(str(raw).strip().split()[0])
+    except (TypeError, ValueError, IndexError):   # IndexError: an empty value
         print(f"ERROR: bundle.local.yaml 'dry_run_until' must be a YYYY-MM-DD "
               f"date, got {raw!r} — ignored, the pipeline runs normally.",
               file=sys.stderr)
@@ -3378,6 +3532,14 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    # Cut an oversized prompt HERE rather than letting the provider reject it.
+    # A 400 on a too-large body is deterministic: the retry loop below cannot
+    # help, the caller counts it against WIKI_RETRY_LIMIT, and after three
+    # nights the source is quarantined — for a payload that would have been
+    # answered fine one paragraph shorter. truncate_head leaves a visible
+    # "… truncated (N chars total)" marker, so the model is told it was cut.
+    prompt = truncate_head(prompt, cfg.get("max_input_chars", 0),
+                           hint="the daily log on this machine")
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -3412,8 +3574,19 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
                 # latch it: without this the 403 fell through to the generic
                 # "API error" below and every remaining call of the batch paid
                 # another round trip to a door that is known to be shut.
-                print(f"  {label} 403 forbidden: {resp.text[:200]}", file=sys.stderr)
-                mark_depleted(provider, "403")
+                #
+                # On the SECOND consecutive one, though. The latch now persists
+                # across processes for six hours, so a single 403 from a proxy
+                # having a bad minute would take the provider out for the rest
+                # of the night and hand the payload to the next one in the
+                # chain — a real bill for someone else's blip. Two in a row is
+                # a shut door; one is not yet evidence.
+                streak = _FORBIDDEN_STREAK.get(provider, 0) + 1
+                _FORBIDDEN_STREAK[provider] = streak
+                print(f"  {label} 403 forbidden ({streak} in a row): "
+                      f"{resp.text[:200]}", file=sys.stderr)
+                if streak >= 2:
+                    mark_depleted(provider, "403")
                 return LLMResult(None, "config", f"{label} 403 forbidden")
             # 5xx joins 429/529 in the backoff. A 502 from a gateway used to fall
             # into the generic branch below and immediately cost a fallback to the
@@ -3448,6 +3621,7 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
             if not content:
                 print(f"  {label} empty content (reasoning_only?)", file=sys.stderr)
                 return LLMResult(None, "deterministic", f"{label} empty content")
+            _FORBIDDEN_STREAK.pop(provider, None)   # the door opened
             return LLMResult(content, "ok")
         except Exception as e:
             _audit_attempt(provider, model, f"exception:{type(e).__name__}", None, fallback_from)

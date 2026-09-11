@@ -1,0 +1,22 @@
+# The vault is its own git repository, and ClaudeGitPushAll commits and pushes
+# it every night. Two things that live here must never be part of that commit:
+#
+#   daily/.pending/   raw session tails dropped by the session-* hooks, waiting
+#                     for a flush that has not run yet. They are UNPROCESSED
+#                     transcript text — the input to the pipeline, not its
+#                     output — so pushing them publishes verbatim session
+#                     content (and, on a repo with a remote, publishes it
+#                     off-box) hours before anything decided what belongs in the
+#                     wiki at all.
+#   .processed.json   the pipeline's state ledger, plus its lock and temp files.
+#                     Machine-local bookkeeping: committing it means every clone
+#                     of the vault claims to have already processed transcripts
+#                     it has never seen, and two machines fight over the file on
+#                     every pull.
+#
+# The .gitkeep exception keeps the empty directory in the tree, which is what
+# makes the skeleton deployable.
+daily/.pending/*
+!daily/.pending/.gitkeep
+.processed.json
+.processed.json.*

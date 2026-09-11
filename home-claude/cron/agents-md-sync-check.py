@@ -49,10 +49,16 @@ if sys.platform == "win32":
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+# ONE writer for FINDINGS.md (utils). This file used to carry its own
+# has_open_drift_finding / append_to_findings pair, and the two copies had
+# already drifted from each other over where an entry goes when the file's
+# header is non-standard.
 from utils import (  # noqa: E402
     BUNDLE_ROOT,
     PROJECTS_ROOT,
-    findings_header,
+    append_finding as file_finding,
+    atomic_write_text,
+    finding_is_open,
     is_dry_run,
     llm_call,
     manifest_broken,
@@ -65,7 +71,7 @@ from utils import (  # noqa: E402
 from untrusted import fence  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runs import record_run  # noqa: E402
+from runs import terminal_record  # noqa: E402
 
 LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 
@@ -202,17 +208,6 @@ def read_file(path: Path) -> str | None:
     except OSError as e:
         print(f"  ERROR reading {path}: {e}", file=sys.stderr)
         return None
-
-
-def _atomic_write(path: Path, text: str, newline: str = "\n") -> None:
-    """Temp file + replace. This job edits files in OTHER people's repositories.
-
-    A bare `write_text` there means a crash mid-write truncates somebody's
-    AGENTS.md or FINDINGS.md — and the nightly push then commits the stump.
-    """
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text, encoding="utf-8", errors="replace", newline=newline)
-    tmp.replace(path)
 
 
 def detect_newline(path: Path) -> str:
@@ -389,10 +384,15 @@ def apply_edits(agents_md: str, edits: list[dict],
 def autofix(project: str, claude_md: str, agents_md: str, report: str,
             agents_path: Path, public: bool) -> tuple[list[str], list[str]]:
     """Resolve the drift by editing AGENTS.md. Returns (applied, unfixed)."""
+    # masked(), like every other sink: a rules file routinely quotes the key or
+    # token it tells an agent to use, and this job ships TWO of them per project
+    # to a provider. The masking only affects the copy that is sent — the edits
+    # come back as old/new snippets and are applied to the real text, so a snippet
+    # anchored inside a masked region simply fails to match and becomes a finding.
     prompt = FIX_PROMPT_TEMPLATE.format(
         project=project,
-        claude_md=fence(f"kind=claude-md project={project}", claude_md),
-        agents_md=fence(f"kind=agents-md project={project}", agents_md),
+        claude_md=fence(f"kind=claude-md project={project}", masked(claude_md)),
+        agents_md=fence(f"kind=agents-md project={project}", masked(agents_md)),
         report=report,
     )
     raw = llm_call(prompt, timeout=300, model=FIX_MODEL)
@@ -428,8 +428,16 @@ def autofix(project: str, claude_md: str, agents_md: str, report: str,
         pass
     print(diff, file=sys.stderr)
 
-    _atomic_write(agents_path, new_text, detect_newline(agents_path))
+    # The file's OWN line endings, not this machine's: rewriting somebody's
+    # CRLF AGENTS.md as LF turns a two-line fix into a whole-file diff, and
+    # ClaudeGitPushAll commits it unattended.
+    atomic_write_text(agents_path, new_text, detect_newline(agents_path))
     return applied, failed
+
+
+def finding_title(project: str) -> str:
+    """The title utils keys this check's entry on — one per project."""
+    return f"CLAUDE.md/AGENTS.md sync drift — {project}"
 
 
 def has_open_drift_finding(findings_path: Path, project: str) -> bool:
@@ -437,46 +445,25 @@ def has_open_drift_finding(findings_path: Path, project: str) -> bool:
 
     Without it the same unfixable drift is re-filed every week.
     """
-    if not findings_path.exists():
-        return False
-    try:
-        text = findings_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    marker = f"· CLAUDE.md/AGENTS.md sync drift — {project} [P3]"
-    return any(
-        marker in block.split("\n", 1)[0] and "**Status:** open" in block
-        for block in text.split("\n## ")
-    )
+    return finding_is_open(findings_path, finding_title(project))
 
 
-def append_to_findings(findings_path: Path, project: str, report: str):
-    """Insert an entry at the top, below the header."""
-    entry = f"""## {date.today().isoformat()} · CLAUDE.md/AGENTS.md sync drift — {project} [P3]
-**Context:** weekly sync-check (`cron/agents-md-sync-check.py`)
-**What:** drift between CLAUDE.md and AGENTS.md that could **not** be resolved
-automatically (the rest has already been applied to AGENTS.md).
-**Proposal:** reconcile by hand, or accept the difference as intentional.
-**Status:** open
+def append_to_findings(findings_path: Path, project: str, report: str) -> bool:
+    """File ONE finding about drift this run could not fix. True if written.
 
-<details>
-<summary>LLM diagnosis</summary>
-
-{masked(report)}
-</details>
-
-"""
-    if not findings_path.exists():
-        _atomic_write(findings_path, findings_header(project) + entry)
-        return
-
-    existing = findings_path.read_text(encoding="utf-8", errors="replace")
-    lines = existing.split("\n")
-    insert_at = next((i for i, l in enumerate(lines) if l.startswith("## ")), len(lines))
-    _atomic_write(
+    The LLM's diagnosis rides along in the Proposal, inside a `<details>` block
+    so a long report does not bury the entries under it. utils.append_finding
+    masks every field — the report quotes two whole rules files.
+    """
+    return file_finding(
         findings_path,
-        "\n".join(lines[:insert_at]) + "\n" + entry + "\n".join(lines[insert_at:]),
-        detect_newline(findings_path))
+        finding_title(project),
+        "weekly sync-check (`cron/agents-md-sync-check.py`)",
+        "drift between CLAUDE.md and AGENTS.md that could **not** be resolved "
+        "automatically (the rest has already been applied to AGENTS.md).",
+        "reconcile by hand, or accept the difference as intentional.\n\n"
+        f"<details>\n<summary>LLM diagnosis</summary>\n\n{report}\n</details>",
+        priority="P3", project=project)
 
 
 def check_pair(project: str, claude_path: Path, agents_path: Path,
@@ -513,14 +500,16 @@ def check_pair(project: str, claude_path: Path, agents_path: Path,
             f"tokens; AGENTS.md would NOT be edited", log_path)
         return False, 0, True
 
-    # Both files go in FENCED. They are ordinary project documentation, but the
-    # answer decides what gets written into somebody's repository, so the
-    # instruction has to be able to say "everything inside is data".
+    # Both files go in FENCED and MASKED. They are ordinary project
+    # documentation, but the answer decides what gets written into somebody's
+    # repository, so the instruction has to be able to say "everything inside is
+    # data" — and a rules file is one of the likeliest places on disk for a key
+    # to be quoted, so key-shaped tokens do not leave the box (WIKI_MASK_SECRETS).
     response = llm_call(
         PROMPT_TEMPLATE.format(
             project=project,
-            claude_md=fence(f"kind=claude-md project={project}", claude_md),
-            agents_md=fence(f"kind=agents-md project={project}", agents_md)),
+            claude_md=fence(f"kind=claude-md project={project}", masked(claude_md)),
+            agents_md=fence(f"kind=agents-md project={project}", masked(agents_md))),
         timeout=300,
     )
     if response is None:
@@ -584,22 +573,31 @@ def main() -> int:
     if args.dry_run:
         sys.argv.append("--dry-run")   # so utils.is_dry_run() agrees
 
+    # ONE terminal ledger record per run, the crash included (cron/runs.py). The
+    # job that EDITS files in other people's repositories must not be able to
+    # die quietly: an exception before done() used to leave the ledger with no
+    # record, so a crashed run and an uninstrumented task looked the same.
+    with terminal_record("ClaudeAgentsMdSyncCheck", delivery="n/a") as rec:
+        return _check_projects(args, rec)
+
+
+def _check_projects(args, rec: dict) -> int:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"agents-md-sync-check_{date.today().isoformat()}.log"
     log("=== AGENTS.md sync check START ===", log_path)
     log(f"privacy policy: {policy_summary()}", log_path)
 
+    rec["artifact_path"] = log_path
+
     def done(rc: int, useful, note: str) -> int:
-        """One terminal ledger record per run, on EVERY exit path.
+        """Fill in the run's terminal record (written by terminal_record).
 
         The contract in cron/runs.py is "every LLM task writes ONE terminal
         record"; this, the sixth LLM task, wrote none, so the job that EDITS
         files in other people's repositories was the one job absent from
         bundle-status' artifact health.
         """
-        record_run(task="ClaudeAgentsMdSyncCheck", process_rc=rc,
-                   artifact_path=log_path, useful_items=useful,
-                   delivery="n/a", note=note)
+        rec.update(process_rc=rc, useful_items=useful, note=note)
         return rc
 
     if manifest_broken():
@@ -654,14 +652,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # An exception anywhere above used to skip `done()` entirely: the ledger got
-    # no record at all, so a crashed run and an uninstrumented task were the same
-    # thing to bundle-status. A cp1251-encoded FINDINGS.md in one project was
-    # enough to do it, taking every remaining project with it.
-    try:
-        sys.exit(main())
-    except Exception as exc:  # noqa: BLE001 — a terminal record is the point
-        print(f"FATAL: {type(exc).__name__}: {exc}", file=sys.stderr)
-        record_run(task="ClaudeAgentsMdSyncCheck", process_rc=1, useful_items=0,
-                   delivery="n/a", note=f"crashed: {type(exc).__name__}: {exc}"[:300])
-        raise
+    # An exception anywhere inside main() used to skip `done()` entirely: the
+    # ledger got no record at all, so a crashed run and an uninstrumented task
+    # were the same thing to bundle-status. A cp1251-encoded FINDINGS.md in one
+    # project was enough to do it, taking every remaining project with it.
+    # runs.terminal_record now guarantees the record — including on a crash —
+    # so this no longer needs a hand-written except branch of its own.
+    sys.exit(main())

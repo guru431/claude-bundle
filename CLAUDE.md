@@ -50,7 +50,9 @@ preserve that discipline.
 │   ├── CLAUDE.md                       global rules ← edit here for tier-1 rule changes
 │   ├── settings.json                   permissions + plugins
 │   ├── settings.example-with-hooks.json  same permissions, hooks wired in
-│   ├── hooks/                          2 sanitized PreToolUse/PostToolUse hooks
+│   ├── hooks/                          6 opt-in hooks: iptables + bash deny-list,
+│   │                                   md2pdf, .ps1 BOM, prompt secret warning,
+│   │                                   Telegram on a long session's Stop
 │   ├── skills/                         3 skill templates (placeholders)
 │   ├── commands/                       1 slash-command wrapper
 │   ├── wiki/                           empty Karpathy vault skeleton
@@ -67,7 +69,7 @@ preserve that discipline.
 │       ├── prompts/                     the LLM prompts those phases send
 │       ├── tests/                       shell tests for the push guards
 │       ├── admin/                       sync-tasks, save-cred (+ .cmd wrappers)
-│       ├── registry.yaml                the 16 scheduled tasks — source of truth
+│       ├── registry.yaml                the 17 scheduled tasks — source of truth
 │       ├── runs.py                      Semantic Artifact SLO ledger
 │       ├── bundle-status.py             read-only health snapshot
 │       ├── schtasks_status.py           Task Scheduler status parser
@@ -80,6 +82,7 @@ preserve that discipline.
 │   └── AGENTS-per-project.template.md
 ├── scripts/
 │   ├── claude-switch.ps1               env-driven provider switcher
+│   ├── get-key.ps1                     reads one key from .env for apiKeyHelper
 │   ├── install.ps1                     guided full/lite installer (Windows)
 │   ├── install-lite.sh                 lite installer (macOS/Linux)
 │   ├── uninstall.ps1                   remove a deployment + its tasks
@@ -108,7 +111,11 @@ preserve that discipline.
 │   ├── llm-routing.md
 │   ├── mcp-servers.md
 │   ├── decisions.md                    ADRs — why the bundle does NOT do X
-│   └── config-reference.md             generated index of every env var
+│   ├── examples/                       synthetic daily → page → index sample
+│   │                                   (mock-generated; the vault ships empty)
+│   └── config-reference.md             generated index of all three kinds of
+│                                       config: env vars, bundle.local.yaml
+│                                       keys, registry.yaml task fields
 ├── AGENTS.md                           per-project pointer for Codex CLI
 └── CLAUDE.md                           ← you are here
 ```
@@ -134,7 +141,7 @@ locking, quarantine and per-source attempt counters; wiki page I/O
 (frontmatter parse/dump, `source_hash` dedup, project-name slugging,
 reserved-name checks); and the LLM layer — the `PROVIDERS` table,
 `llm_call()` with its cross-process queue and fallback chain. A change
-here reaches all 16 tasks at once; that is the reason `tests/` mostly
+here reaches all 17 tasks at once; that is the reason `tests/` mostly
 exercises this file.
 
 **Fail-closed is the design, not an accident.** A manifest that won't
@@ -183,7 +190,7 @@ second copy of a rule, generate it or source it; do not paste it.
 
 | Change | Also update |
 |---|---|
-| New rule in `home-claude/CLAUDE.md` | If universal (file-ops, encoding, error recovery, findings, secrets, Task Scheduler) — also mirror into `codex/AGENTS.md`. Claude-specific rules (slash commands, hooks, skills, plugin workflow) stay in `home-claude/CLAUDE.md` only. |
+| New rule in `home-claude/CLAUDE.md` | If universal — also mirror into `codex/AGENTS.md`. The universal set is not prose here: it is `REQUIRED` in [`scripts/check-agents-sync.py`](scripts/check-agents-sync.py) (Findings, File Operations, Tool Selection Rules, Coding Discipline, Test policy, Secrets, Windows Task Scheduler, Error Recovery, File Encoding), and `COMPARED` in the same file is the subset whose wording must match rather than merely exist. This table used to name six of the nine, which is how two sections stayed unchecked in both directions. Claude-specific rules (slash commands, hooks, skills, plugin workflow) stay in `home-claude/CLAUDE.md` only. |
 | New skill in `home-claude/skills/` | Update `home-claude/skills/README.md`. If the skill ships a slash command, also add it to `home-claude/commands/`. |
 | New hook in `home-claude/hooks/` | Update `home-claude/hooks/README.md`. Update `home-claude/settings.example-with-hooks.json` to show how to wire it. Do NOT add it to the default `home-claude/settings.json` — hooks are opt-in. |
 | New cron task in `home-claude/cron/registry.yaml` | The script itself goes under `home-claude/cron/<name>.{sh,py}`. Document the task briefly in `README.md` and `docs/cron-architecture.md` (the table of shipped tasks — keep its count in sync). |

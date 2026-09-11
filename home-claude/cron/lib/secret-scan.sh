@@ -11,12 +11,16 @@
 #   SENSITIVE_PATH_PATTERN     — repository paths that must never be committed
 #   SENSITIVE_PATH_ALLOW       — `.env.example` and friends, which may be
 #   SECRET_SCAN_ALLOW          — inline marker that exempts a single line
+#   secret_scan_decode         — copy stdin to stdout, transcoding UTF-16 to
+#                                UTF-8 first when the input carries a UTF-16 BOM.
+#                                The one place that knows about UTF-16, so every
+#                                caller that greps raw bytes can go through it.
 #   secret_scan_diff           — scan the ADDED lines of a unified diff for
 #                                token-shaped strings. Reads diff text from stdin
 #                                if given, otherwise falls back to
-#                                `git diff --cached`. Prints offending matches
-#                                and returns non-zero on any hit; returns 0
-#                                (silent) when clean.
+#                                `git diff --cached`. Prints offending matches as
+#                                `path: +line` and returns non-zero on any hit;
+#                                returns 0 (silent) when clean.
 #   secret_scan_text           — same, but for RAW file/blob content on stdin (no
 #                                diff markers). Used by .githooks/pre-push, which
 #                                reads whole blobs out of the object store.
@@ -81,8 +85,16 @@ secret_scan_diff() {
     fi
     # Added lines only: a commit that REMOVES a leaked token must not be blocked,
     # or the leak could never be remediated. '+++' is a file header, not content.
-    _ssd_hits=$(printf '%s\n' "$_ssd_diff" | grep -E '^\+' | grep -vE '^\+\+\+' \
-        | grep -nE -e "$SECRET_SCAN_PATTERN" | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
+    #
+    # awk carries the current file's path onto every added line BEFORE grep runs,
+    # so a hit names the file. `grep -n` used to number the already-filtered
+    # stream, which printed an ordinal matching nothing the author could open.
+    # The secret regex is still grep's job — awk only moves text around, so no
+    # ERE interval support is assumed of it.
+    _ssd_hits=$(printf '%s\n' "$_ssd_diff" | awk '
+        /^\+\+\+ /  { path = substr($0, 5); sub(/^b\//, "", path); next }
+        /^\+/       { print path ": " $0 }' \
+        | grep -E -e "$SECRET_SCAN_PATTERN" | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
     if [ -n "$_ssd_hits" ]; then
         printf '%s\n' "$_ssd_hits"
         return 1
@@ -105,23 +117,34 @@ _secret_scan_bom() {
     unset _ssb
 }
 
-secret_scan_text() {
-    # Raw content on stdin — no '^+' filtering, every line is "added" here.
+secret_scan_decode() {
+    # stdin → stdout, transcoded when the input is UTF-16. Callers that grep raw
+    # bytes (the commit-message hook, the pre-push denylist pass) pipe through
+    # this so they see the same text a human editor shows.
     # No `trap` here on purpose: this is a sourced library function, and a trap
     # set inside it would replace whatever the calling hook had installed.
-    # Every return path below removes the temp files itself.
-    _sst_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-scan.$$")
-    cat > "$_sst_tmp"
-    _sst_read="$_sst_tmp"
-    _sst_enc=$(_secret_scan_bom "$_sst_tmp")
-    if [ -n "$_sst_enc" ] && iconv -f "$_sst_enc" -t UTF-8 < "$_sst_tmp" > "$_sst_tmp.u8" 2>/dev/null; then
-        _sst_read="$_sst_tmp.u8"
+    _ssdec_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-decode.$$")
+    cat > "$_ssdec_tmp"
+    _ssdec_enc=$(_secret_scan_bom "$_ssdec_tmp")
+    if [ -n "$_ssdec_enc" ] && iconv -f "$_ssdec_enc" -t UTF-8 < "$_ssdec_tmp" > "$_ssdec_tmp.u8" 2>/dev/null; then
+        cat "$_ssdec_tmp.u8"
+    else
+        cat "$_ssdec_tmp"
     fi
+    rm -f "$_ssdec_tmp" "$_ssdec_tmp.u8"
+    unset _ssdec_tmp _ssdec_enc
+}
+
+secret_scan_text() {
+    # Raw content on stdin — no '^+' filtering, every line is "added" here.
+    # Same no-trap rule as above; every return path removes its temp files.
+    _sst_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-scan.$$")
+    secret_scan_decode > "$_sst_tmp"
     # -I: binary input yields no matches, so a blob can be piped in as-is.
-    _sst_hits=$(grep -nIE -e "$SECRET_SCAN_PATTERN" "$_sst_read" \
+    _sst_hits=$(grep -nIE -e "$SECRET_SCAN_PATTERN" "$_sst_tmp" \
         | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
-    rm -f "$_sst_tmp" "$_sst_tmp.u8"
-    unset _sst_tmp _sst_read _sst_enc
+    rm -f "$_sst_tmp"
+    unset _sst_tmp
     if [ -n "$_sst_hits" ]; then
         printf '%s\n' "$_sst_hits"
         return 1

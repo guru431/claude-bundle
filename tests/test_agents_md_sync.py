@@ -19,11 +19,28 @@ CRON = ROOT / "home-claude" / "cron"
 
 
 @pytest.fixture(scope="module")
-def sync():
-    """Import the script by path — its filename is not a valid module name."""
-    sys.path.insert(0, str(CRON / "hooks"))
+def sync(tmp_path_factory):
+    """Import the script by path — its filename is not a valid module name.
+
+    From a COPY of `cron/`, never the repo's own tree. Every path in these
+    scripts is derived from `__file__`, so importing the real one pointed
+    LOG_DIR at `home-claude/cron/logs/` — and `test_a_run_that_examined_nothing`
+    calls `main()`, which duly created `agents-md-sync-check_<date>.log` inside
+    the working tree of the repository under test. The same import also read
+    whatever `home-claude/.env` and `bundle.local.yaml` happened to exist on the
+    developer's machine, both gitignored, which is the coincidence
+    `tests/conftest.py` was written to end.
+    """
+    import shutil
+
+    root = tmp_path_factory.mktemp("bundle")
+    shutil.copytree(CRON, root / "cron")
+    cron = root / "cron"
+
+    sys.path.insert(0, str(cron / "hooks"))
+    sys.modules.pop("utils", None)          # rooted at the copy, not the repo
     spec = importlib.util.spec_from_file_location(
-        "agents_md_sync_check", CRON / "agents-md-sync-check.py")
+        "agents_md_sync_check", cron / "agents-md-sync-check.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules["agents_md_sync_check"] = mod
     spec.loader.exec_module(mod)
@@ -204,8 +221,13 @@ def test_findings_entry_creates_the_file_with_the_canonical_header(sync, tmp_pat
 
 
 def test_findings_entry_goes_above_existing_entries(sync, tmp_path):
+    # The header comes from utils — the one source every generator shares. The
+    # script no longer imports it: since the FINDINGS.md writer itself moved to
+    # utils, the header is that writer's business, not this script's.
+    from utils import findings_header
+
     findings = tmp_path / "FINDINGS.md"
-    findings.write_text(sync.findings_header("myproject") +
+    findings.write_text(findings_header("myproject") +
                         "## 2020-01-01 · An older finding [P2]\n**Status:** open\n",
                         encoding="utf-8")
     sync.append_to_findings(findings, "myproject", "### CONTRADICTIONS\n- something")
@@ -265,6 +287,7 @@ def test_a_run_that_examined_nothing_exits_nonzero(sync, tmp_path, monkeypatch):
     (project / "AGENTS.md").write_text("# Project\n", encoding="utf-8")
     monkeypatch.setattr(sync, "PROJECTS_ROOT", tmp_path)
     monkeypatch.setattr(sync, "llm_call", lambda *a, **k: None)
-    monkeypatch.setattr(sync, "record_run", lambda **kw: kw)
+    # The ledger record is written by runs.terminal_record now, into the tmp
+    # CLAUDE_BUNDLE_RUNS_DIR the sandbox fixture points it at — nothing to stub.
 
     assert sync.main() == 1

@@ -60,11 +60,17 @@ STATE_DIR = CRON_DIR / "state"
 TELEGRAM_SH = CRON_DIR / "telegram-send.sh"
 
 sys.path.insert(0, str(CRON_DIR / "hooks"))
-from utils import (PROJECTS_ROOT, find_bash, findings_header,  # noqa: E402
-                   mask_secrets)
+# ONE writer for FINDINGS.md (utils). This file used to carry its own
+# has_open_finding / append_finding / atomic_write_text trio, and it had already
+# drifted from the other two copies over where an entry goes when the file's
+# header is non-standard. The helpers below only build the TEXT of a finding;
+# the file handling is utils'.
+from utils import (PROJECTS_ROOT, append_finding as file_finding,  # noqa: E402
+                   atomic_write_text, close_finding as drop_finding,
+                   find_bash, finding_is_open, mask_secrets)
 
 sys.path.insert(0, str(CRON_DIR))
-from runs import record_run  # noqa: E402
+from runs import terminal_record  # noqa: E402
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
@@ -112,19 +118,21 @@ RECOVERED = {"ok"}
 
 
 def log(msg: str) -> None:
+    """Print AND append to the day's log — best effort, like log-retention's.
+
+    Writing was unguarded, so an unreadable or read-only LOG_DIR raised inside
+    the very first log() call — before a single suite had run and, crucially,
+    before anything was written to the ledger. The task then looked exactly like
+    one that was never instrumented: silent, with nothing reporting it wrong.
+    """
     line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
     print(line, flush=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    with (LOG_DIR / f"test-sweep_{DATE}.log").open("a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
-
-
-def atomic_write_text(path: Path, text: str) -> None:
-    """Temp file in the same directory + replace: a crash mid-write must not
-    truncate an existing FINDINGS.md or state file."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8", newline="\n")
-    os.replace(tmp, path)
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with (LOG_DIR / f"test-sweep_{DATE}.log").open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError as exc:
+        print(f"  (log not written: {exc})", file=sys.stderr)
 
 
 def has_pytest_config(d: Path) -> bool:
@@ -530,47 +538,31 @@ def summary_line(text: str) -> str:
 
 
 def finding_marker(suite: str) -> str:
-    """The signature this sweep stamps into every finding it files.
+    """The signature this sweep stamps into the Context of every finding it files.
 
-    It is what makes an entry recognisably OURS later — for the duplicate check
-    before filing and for closing the entry once the suite goes green.
+    The TITLE is what utils dedupes and closes on; this line stays so a reader
+    can see which job wrote the entry and about which suite.
     """
     return f"auto-cron `ClaudeTestSweep`, `{suite}`,"
 
 
-def _split_entries(text: str) -> tuple[str, list[str]]:
-    """(header, [entry blocks]) for a FINDINGS.md. Each block starts with '## '."""
-    m = re.search(r"(?m)^## ", text)
-    if not m:
-        return text, []
-    return text[:m.start()], [
-        p for p in re.split(r"(?m)^(?=## )", text[m.start():]) if p.strip()
-    ]
+def finding_title(suite: str) -> str:
+    """The title utils.append_finding / close_finding key this sweep's entry on.
+
+    One title per suite, so a transition between two red statuses (failed →
+    timeout → failed) cannot pile up a second entry about the same broken suite,
+    and a recovery closes exactly the entry the sweep filed.
+    """
+    return f"Tests are failing: {suite}"
 
 
 def has_open_finding(project_dir: Path, suite: str) -> bool:
-    """True when this sweep already has an OPEN entry for this suite.
-
-    Without it every transition between two red statuses (failed → timeout →
-    failed) passed the change filter and appended one more entry about the same
-    broken suite — a flaky test earned a dozen duplicates in somebody else's
-    FINDINGS.md over a month. Mirrors agents-md-sync-check's
-    has_open_drift_finding.
-    """
-    f = project_dir / "FINDINGS.md"
-    if not f.exists():
-        return False
-    try:
-        text = f.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    marker = finding_marker(suite)
-    _, entries = _split_entries(text)
-    return any(marker in e and "**Status:** open" in e for e in entries)
+    """True when this sweep already has an open entry for this suite."""
+    return finding_is_open(project_dir / "FINDINGS.md", finding_title(suite))
 
 
 def close_finding(project_dir: Path, suite: str) -> bool:
-    """Delete this sweep's open entry for a suite that has gone green again.
+    """Delete this sweep's entry for a suite that has gone green again.
 
     FINDINGS.md holds `open` entries and nothing else (CLAUDE.md § Findings),
     and a machine-filed entry has to be closed by the same machine: nobody goes
@@ -578,43 +570,20 @@ def close_finding(project_dir: Path, suite: str) -> bool:
     a permanent record of problems that no longer exist. Deleting is the
     documented close for a DONE finding — the trail stays in git log.
     """
-    f = project_dir / "FINDINGS.md"
-    if not f.exists():
-        return False
-    try:
-        text = f.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    marker = finding_marker(suite)
-    head, entries = _split_entries(text)
-    kept = [e for e in entries if not (marker in e and "**Status:** open" in e)]
-    if len(kept) == len(entries):
-        return False
-    atomic_write_text(f, head.rstrip("\n") + "\n\n" + "".join(
-        e.rstrip("\n") + "\n\n" for e in kept))
-    return True
+    return drop_finding(project_dir / "FINDINGS.md", finding_title(suite))
 
 
-def append_finding(project_dir: Path, project: str, suite: str, res: dict) -> None:
-    f = project_dir / "FINDINGS.md"
+def append_finding(project_dir: Path, project: str, suite: str, res: dict) -> bool:
+    """File ONE finding about a broken suite. True if it was written."""
     detail = summary_line(res["tail"]) or res["status"]
-    entry = (
-        f"## {DATE} · Tests are failing: {suite} [P2]\n"
-        f"**Context:** {finding_marker(suite)} status `{res['status']}`, "
-        f"{res['seconds']}s\n"
-        f"**What:** the run returned: {detail}\n"
-        f"**Proposal:** reproduce with `pytest -q` in that directory and fix it, or mark "
-        f"the test `integration`/`manual` if it needs an external environment\n"
-        f"**Status:** open\n\n"
-    )
-    existing = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
-    if existing.lstrip().startswith("# Findings"):
-        idx = existing.find("\n## ")
-        head, body = (existing[:idx + 1], existing[idx + 1:]) if idx >= 0 else (existing, "")
-        head = head.rstrip("\n") + "\n\n"
-    else:
-        head, body = findings_header(project), existing
-    atomic_write_text(f, head + entry + body)
+    return file_finding(
+        project_dir / "FINDINGS.md",
+        finding_title(suite),
+        f"{finding_marker(suite)} status `{res['status']}`, {res['seconds']}s",
+        f"the run returned: {detail}",
+        "reproduce with `pytest -q` in that directory and fix it, or mark the "
+        "test `integration`/`manual` if it needs an external environment",
+        priority="P2", project=project)
 
 
 def send_telegram(text: str) -> None:
@@ -648,16 +617,26 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     task = "ClaudeTestSweepFull" if args.full else "ClaudeTestSweep"
 
+    # ONE terminal ledger record per run, the crash included (cron/runs.py).
+    # `done()` used to be called on each return path, which covers every path the
+    # author thought of and none of the others: a raise anywhere above it —
+    # log() on an unwritable directory, an unreadable project tree — left the
+    # ledger with no record at all, and a crashed sweep then looked exactly like
+    # an uninstrumented one.
+    with terminal_record(task, delivery="n/a",
+                         artifact_path=LOG_DIR / f"test-sweep_{DATE}.log") as rec:
+        return _sweep(args, rec)
+
+
+def _sweep(args, rec: dict) -> int:
     def done(rc: int, useful, note: str) -> int:
-        """One terminal ledger record per run (cron/runs.py).
+        """Fill in the run's terminal record (written by terminal_record).
 
         The contract was written for the LLM tasks, but "ran and did nothing
         useful" is just as invisible here: a sweep that finds no suite at all
         exits 0 and looks exactly like a sweep where everything passed.
         """
-        record_run(task=task, process_rc=rc,
-                   artifact_path=LOG_DIR / f"test-sweep_{DATE}.log",
-                   useful_items=useful, delivery="n/a", note=note)
+        rec.update(process_rc=rc, useful_items=useful, note=note)
         return rc
 
     if PROJECTS_ROOT is None:
@@ -680,6 +659,20 @@ def main(argv=None) -> int:
             log(f"reaped an abandoned pytest ({entry})")
 
     state, results, changed, recovered = load_state(), {}, [], []
+
+    def carry_fast(key: str, res: dict) -> dict:
+        """`fast_seconds` for this suite's state entry.
+
+        The 60s budget is the FAST suite's, so only a fast run may measure it —
+        but the weekly full run is where the digest is sent, and rewriting the
+        entry would erase the measurement it is about to report. So a full run
+        carries the last fast reading forward instead of dropping it.
+        """
+        if not args.full and res["status"] == "ok":
+            return {"fast_seconds": res["seconds"]}
+        prev = (state.get(key) or {}).get("fast_seconds")
+        return {"fast_seconds": prev} if prev is not None else {}
+
     # A GLOBAL deadline, not just a per-suite timeout. 12 suites × TIMEOUT_FULL
     # is longer than the task's own `timeout_hours` in registry.yaml, and Task
     # Scheduler then killed the process before it ever wrote its state — so a
@@ -732,7 +725,14 @@ def main(argv=None) -> int:
                     if has_open_finding(root, key):
                         log(f"     finding already open for {key} — not filing a duplicate")
                     else:
-                        append_finding(root, name, key, res)
+                        # The alert goes out even when the entry could not be
+                        # written (utils reports that by returning False rather
+                        # than raising): the finding is the record, the alert is
+                        # the notification, and losing both to an unwritable
+                        # share is how a red suite stays unnoticed.
+                        if not append_finding(root, name, key, res):
+                            log(f"     finding NOT written to {name}/FINDINGS.md "
+                                f"— alerting anyway")
                         changed.append((key, res))
                 except OSError as exc:
                     log(f"     finding not written to {name}/FINDINGS.md: {exc}")
@@ -756,9 +756,11 @@ def main(argv=None) -> int:
                 log(f"     {res['status']} — the suite cannot run, so the earlier "
                     f"'{previous}' stands; the finding stays open")
                 state[key] = {"status": previous, "seconds": res["seconds"],
-                              "date": DATE, "blocked_by": res["status"]}
+                              "date": DATE, "blocked_by": res["status"],
+                              **carry_fast(key, res)}
                 continue
-            state[key] = {"status": res["status"], "seconds": res["seconds"], "date": DATE}
+            state[key] = {"status": res["status"], "seconds": res["seconds"],
+                          "date": DATE, **carry_fast(key, res)}
 
     if args.dry_run:
         return 0
@@ -771,20 +773,37 @@ def main(argv=None) -> int:
 
     red = [k for k, r in results.items() if r["status"] in ALERTING]
     env = [k for k, r in results.items() if r["status"] == "env"]
-    slow = [(k, r["seconds"]) for k, r in results.items()
-            if r["status"] == "ok" and r["seconds"] > 60 and not args.full]
+    # A fast run measures the budget; the weekly full run reports what the fast
+    # runs measured (see carry_fast), because `--full` deliberately runs tests
+    # the 60s budget does not apply to.
+    if args.full:
+        slow = [(k, (state.get(k) or {}).get("fast_seconds") or 0.0)
+                for k in results
+                if ((state.get(k) or {}).get("fast_seconds") or 0.0) > 60]
+    else:
+        slow = [(k, r["seconds"]) for k, r in results.items()
+                if r["status"] == "ok" and r["seconds"] > 60]
+    slow.sort(key=lambda x: -x[1])
     log(f"result: {len(results)} suite(s), red {len(red)}, "
         f"broken environment {len(env)}, over the 60s budget {len(slow)}")
     if skipped_for_time:
         log(f"run budget of {RUN_BUDGET_SECONDS}s reached — {len(skipped_for_time)} "
             f"suite(s) not run this time: {', '.join(skipped_for_time[:8])}"
             + (" …" if len(skipped_for_time) > 8 else ""))
+    slow_names = ", ".join(f"{k} {s:.0f}s" for k, s in slow[:10])
     if slow:
         # The test policy says "mark integration BY MEASUREMENT". A measurement
-        # nobody is shown is not one, so the slow suites are named here and go
-        # into the ledger note.
-        log("over the 60s fast-suite budget (candidates for `integration`): "
-            + ", ".join(f"{k} {s:.0f}s" for k, s in sorted(slow, key=lambda x: -x[1])[:10]))
+        # nobody is shown is not one, so the slow suites are named here, in the
+        # ledger note, and — once a week — in Telegram.
+        log(f"over the 60s fast-suite budget (candidates for `integration`): {slow_names}")
+    if slow and args.full:
+        # Weekly only. The same list every morning is how a measurement turns
+        # into wallpaper; the daily sweep keeps it in its log and its ledger
+        # note, and the weekly run is the one that asks for a decision.
+        send_telegram(f"Slow suites ({DATE}, over the 60s fast-suite budget — "
+                      f"candidates for `integration`):\n"
+                      + "\n".join(f"• {k}: {s:.0f}s" for k, s in slow[:15])
+                      + "\nMeasured by the daily fast sweep (CLAUDE.md § Test policy).")
     if changed:
         lines = [f"Tests broke ({DATE}):"]
         lines += [f"• {k}: {r['status']} — {summary_line(r['tail'])}" for k, r in changed]
@@ -812,7 +831,8 @@ def main(argv=None) -> int:
     # problem wearing a green exit code.
     return done(1 if red or env else 0, len(results),
                 f"{len(results)} suite(s), {len(red)} red, {len(env)} env, "
-                f"{len(recovered)} recovered")
+                f"{len(recovered)} recovered"
+                + (f"; over the 60s budget: {slow_names}" if slow else ""))
 
 
 if __name__ == "__main__":

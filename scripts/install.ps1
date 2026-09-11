@@ -17,6 +17,12 @@
 #   powershell -File scripts/install.ps1 -Profile full -NonInteractive
 #   powershell -File scripts/install.ps1 -Force                # overwrite existing ~/.claude config
 #   powershell -File scripts/install.ps1 -Profile full -DryRun # print the plan, change nothing
+#   powershell -File scripts/install.ps1 -Diff                 # per-FILE preview of an upgrade
+#
+# -DryRun and -Diff answer different questions. -DryRun narrates the STAGES an
+# install would run; -Diff compares this bundle against the deployment file by
+# file (new / modified / unchanged / removed-from-bundle) using the sha256s in
+# .bundle-manifest.json, and takes its tier from that manifest. Neither writes.
 #
 # Two roots, because they are two different things:
 #   -ClaudeHome   (default ~/.claude) — CLAUDE.md, settings.json, skills/,
@@ -44,12 +50,23 @@ param(
     [string]$PipelineRoot,
     [switch]$NonInteractive,
     [switch]$Force,
-    [switch]$DryRun
+    [switch]$DryRun,
+    # Preview only: compare the deployment against this bundle and print which
+    # files would be new / modified / unchanged, plus files a previous install
+    # wrote that the bundle no longer ships. Writes nothing, installs nothing.
+    [switch]$Diff
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $srcHome = Join-Path $root 'home-claude'
+
+# The ONE PowerShell .env parser (scripts/lib/dotenv.ps1). Degrades softly: with
+# no library next to us the preflight below simply falls back to the process env
+# and PATH, as it always did. What it must not do is grow a second .env regex.
+$script:dotEnvLib = Join-Path $PSScriptRoot 'lib\dotenv.ps1'
+$script:haveDotEnv = Test-Path $script:dotEnvLib
+if ($script:haveDotEnv) { . $script:dotEnvLib }
 
 # PipelineRoot follows ClaudeHome unless asked otherwise, so the one-root case
 # (including a sandbox -InstallPath) behaves exactly as it always did.
@@ -270,7 +287,20 @@ function Preflight-Full {
     if ($env:PYTHON_EXE -and (Test-Path $env:PYTHON_EXE)) {
         $pySource = $env:PYTHON_EXE
         Info "using PYTHON_EXE from the environment: $pySource"
-    } else {
+    }
+    # On a RE-install the interpreter the tasks actually use is the PYTHON_EXE
+    # already pinned in the deployment's .env (step 3b-2 wrote it, and session 0
+    # reads nothing else) — checking whatever `python` this interactive shell
+    # resolves to answered a different question. Read through scripts/lib/
+    # dotenv.ps1, the one PowerShell .env parser.
+    if (-not $pySource -and $script:haveDotEnv) {
+        $envPinned = Get-DotEnvValue -Path (Join-Path $PipelineRoot '.env') -Name 'PYTHON_EXE'
+        if ($envPinned -and (Test-Path $envPinned)) {
+            $pySource = $envPinned
+            Info "using PYTHON_EXE pinned in $PipelineRoot\.env: $pySource"
+        }
+    }
+    if (-not $pySource) {
         $pyCmd = Get-Command python -ErrorAction SilentlyContinue
         if ($pyCmd) { $pySource = $pyCmd.Source }
     }
@@ -337,10 +367,128 @@ function Preflight-Full {
     }
 }
 
+# ── .bundle-manifest.json, read back ─────────────────────────────────────────
+# Write-Manifest has always WRITTEN this file, and only uninstall.ps1 ever read
+# it. -Diff reads it for the two questions the source tree alone cannot answer:
+# which tier is deployed, and which files a PREVIOUS install wrote that this
+# bundle no longer ships.
+$script:_manifest = $null
+$script:_manifestRead = $false
+function Read-InstallManifest {
+    if ($script:_manifestRead) { return $script:_manifest }
+    $script:_manifestRead = $true
+    $p = Join-Path $ClaudeHome '.bundle-manifest.json'
+    if (Test-Path $p) {
+        try { $script:_manifest = Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json }
+        catch { Warn "could not parse $p ($($_.Exception.Message)) — diffing against the source only" }
+    }
+    return $script:_manifest
+}
+
+# Every file under $srcDir, as one planned destination entry each. Mirrors what
+# `Copy-Item -Recurse -Force` actually writes (and skips __pycache__ for the
+# same reason Add-Written does), so the preview and the install cannot disagree
+# about WHICH files are involved.
+function Add-PlannedTree($plan, $srcDir, $relPrefix, $rootName) {
+    if (-not (Test-Path $srcDir)) { return }
+    $base = (Get-Item $srcDir).FullName
+    foreach ($f in (Get-ChildItem $srcDir -Recurse -File)) {
+        if ($f.FullName -match '[\\/]__pycache__[\\/]') { continue }
+        $rel = $f.FullName.Substring($base.Length).TrimStart('\', '/').Replace('\', '/')
+        $plan.Add(@{ root = $rootName; path = "$relPrefix/$rel"; src = $f.FullName })
+    }
+}
+
+# What an install of $Profile would place — the same sets steps 1, 2 and the
+# full-tier block copy.
+function Get-PlannedFiles {
+    $plan = New-Object System.Collections.Generic.List[object]
+    foreach ($f in @('CLAUDE.md', 'settings.json')) {
+        $s = Join-Path $srcHome $f
+        if (Test-Path $s) { $plan.Add(@{ root = 'claude_home'; path = $f; src = $s }) }
+    }
+    foreach ($d in @('skills', 'commands')) {
+        Add-PlannedTree $plan (Join-Path $srcHome $d) $d 'claude_home'
+    }
+    if ($Profile -eq 'full') {
+        Add-PlannedTree $plan (Join-Path $srcHome 'hooks') 'hooks' 'claude_home'
+        foreach ($d in @('wiki', 'bin', 'cron')) {
+            Add-PlannedTree $plan (Join-Path $srcHome $d) $d 'pipeline_root'
+        }
+    }
+    $v = Join-Path $root 'VERSION'
+    if (Test-Path $v) { $plan.Add(@{ root = 'pipeline_root'; path = '.bundle-version'; src = $v }) }
+    return $plan
+}
+
+# ── -Diff: what an install would change, without changing it ─────────────────
+function Invoke-BundleDiff {
+    $mf = Read-InstallManifest
+    Info ""
+    Info "=== claude-bundle install diff (nothing will be written) ==="
+    Info "Profile:      $Profile"
+    Info "ClaudeHome:   $ClaudeHome"
+    Info "PipelineRoot: $PipelineRoot"
+    Info "Source:       $srcHome"
+    if ($mf) {
+        Info "Manifest:     $(Join-Path $ClaudeHome '.bundle-manifest.json') — tier $($mf.tier), $(@($mf.written).Count) file(s), installed $($mf.installed_at)"
+    } else {
+        Warn "no readable .bundle-manifest.json under $ClaudeHome — every file reads as a fresh install"
+    }
+    Info ""
+
+    $counts = [ordered]@{ new = 0; modified = 0; unchanged = 0; 'removed-from-bundle' = 0 }
+    $planned = @{}
+    foreach ($e in (Get-PlannedFiles)) {
+        $key = "$($e.root)|$($e.path)"
+        if ($planned.ContainsKey($key)) { continue }
+        $planned[$key] = $true
+        $base = if ($e.root -eq 'claude_home') { $ClaudeHome } else { $PipelineRoot }
+        $dst = Join-Path $base $e.path
+        if (-not (Test-Path $dst -PathType Leaf)) { $status = 'new' }
+        elseif ((Get-FileHash $dst -Algorithm SHA256).Hash -eq
+                (Get-FileHash $e.src -Algorithm SHA256).Hash) { $status = 'unchanged' }
+        else { $status = 'modified' }
+        $counts[$status]++
+        if ($status -ne 'unchanged') {
+            Write-Host ("  {0,-20} {1}" -f $status, $dst) -ForegroundColor $(
+                if ($status -eq 'new') { 'Green' } else { 'Yellow' })
+        }
+    }
+    # Only the manifest knows these: files an older bundle installed and this one
+    # no longer ships. They are left on disk by an upgrade, so an install that
+    # "succeeded" can still leave a script nothing calls any more.
+    if ($mf) {
+        foreach ($e in @($mf.written)) {
+            $key = "$($e.root)|$($e.path)"
+            if ($planned.ContainsKey($key)) { continue }
+            $base = if ($e.root -eq 'claude_home') { $ClaudeHome } else { $PipelineRoot }
+            $counts['removed-from-bundle']++
+            Write-Host ("  {0,-20} {1}" -f 'removed-from-bundle', (Join-Path $base $e.path)) -ForegroundColor DarkYellow
+        }
+    }
+
+    Info ""
+    foreach ($k in $counts.Keys) { Info ("  {0,-20} {1}" -f $k, $counts[$k]) }
+    Info ""
+    Info "Caveats, so the list is not read as a plain overwrite plan:"
+    Info "  settings.json is MERGED (your keys win; only missing template keys are added)."
+    Info "  A bootstrapped cron/registry.yaml and wiki/index.md are preserved, not replaced."
+    Info "  Anything 'modified' is backed up to .bundle-backup-<stamp>\ by a real install."
+    Info "Nothing was written. Drop -Diff to install."
+}
+
+# -Diff describes the deployment you HAVE, so it takes its tier from the
+# manifest instead of prompting for one.
+if ($Diff -and -not $Profile) {
+    $mfTier = [string](Read-InstallManifest).tier
+    $Profile = if ($mfTier -in @('lite', 'full')) { $mfTier } else { 'lite' }
+}
 if (-not $Profile) { $Profile = Ask 'Profile (lite/full)' 'lite' }
 if ($Profile -notin @('lite', 'full')) {
     Write-Host "ERROR: profile must be 'lite' or 'full'" -ForegroundColor Red; exit 1
 }
+if ($Diff) { Invoke-BundleDiff; exit 0 }
 
 Info ""
 Info "=== claude-bundle installer ==="
@@ -637,9 +785,14 @@ if ($DryRun) {
     # transcripts do not leave the machine before anyone has read the logs. It
     # expires by itself — see docs/cron-architecture.md § First run.
     $until = (Get-Date).AddDays(7).ToString('yyyy-MM-dd')
-    (Get-Content $manifestDst -Raw -Encoding UTF8) `
-        -replace '(?m)^dry_run_until:\s*$', "dry_run_until: $until" |
-        Set-Content $manifestDst -Encoding UTF8 -NoNewline
+    # WITHOUT a BOM, via WriteAllText — exactly as Write-Manifest,
+    # Merge-SettingsJson, Set-EnvValueIfEmpty and bootstrap-registry.ps1 write
+    # their files. `Set-Content -Encoding UTF8` means UTF-8 *with* BOM under PS
+    # 5.1, and this is the one file the Python side parses as YAML: the BOM
+    # lands on the first key. One rule, one implementation.
+    $manifestTxt = (Get-Content $manifestDst -Raw -Encoding UTF8) `
+        -replace '(?m)^dry_run_until:\s*$', "dry_run_until: $until"
+    [System.IO.File]::WriteAllText($manifestDst, $manifestTxt, (New-Object System.Text.UTF8Encoding($false)))
     Good "created bundle.local.yaml from template (project map + privacy policy — reinstall-safe)"
     Info "  dry_run_until: $until — every phase previews only until then; read cron/logs/, then delete the key (it expires on its own)"
 }

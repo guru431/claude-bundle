@@ -29,7 +29,7 @@ agent instructions.
 | Prerequisite | Required? | Notes |
 |---|---|---|
 | Python 3.10+, Git for Windows | **yes** | the pipeline and the syncer are Python + Bash |
-| An LLM backend | **yes** — but a key is not the only option | a **key** for DeepSeek or OpenCode Go, **or** `WIKI_LLM_PROVIDER=claude`, which shells out to the `claude` CLI you already signed in to in step 1 — no key, but it spends your Claude subscription |
+| An LLM backend | **yes** — but a key is not the only option | a **key** for DeepSeek or OpenCode Go; **or** `WIKI_LLM_PROVIDER=local` against your own OpenAI-compatible server (Ollama, llama.cpp, LM Studio, vLLM) — no key, no cost, and nothing leaves the machine; **or** `WIKI_LLM_PROVIDER=claude`, which shells out to the `claude` CLI you already signed in to in step 1 — no key, but it spends your Claude subscription |
 | Windows password (DPAPI, step 10) | only for Password-mode tasks | switch every task to `logon_type: interactive` to skip it (they then run only while you're logged in) |
 | Telegram bot + chat_id | **no** | alerts only; without it failures just land in `cron/logs/` |
 | `claude-switch.ps1`, Codex `AGENTS.md` mirror | **no** | optional companions (steps 15–16) |
@@ -63,6 +63,14 @@ below: copy config, stamp `.bundle-version`, create `.env`, bootstrap the
 registry, optionally `save-cred` + `sync`, then self-test.
 `-NonInteractive` skips the elevation steps. **macOS/Linux lite:** `scripts/install-lite.sh`. The
 manual steps below stay as the reference.
+
+**Before an upgrade:** `powershell -File scripts/install.ps1 -Diff` prints,
+file by file, what a re-install would change — `new` / `modified` /
+`unchanged`, plus anything a previous install wrote that this bundle no
+longer ships (`removed-from-bundle`). It compares against the sha256s in
+`.bundle-manifest.json`, takes its tier from that same manifest, and writes
+nothing. (`-DryRun` narrates the install *stages*; `-Diff` lists the
+*files*.)
 
 ---
 
@@ -477,7 +485,7 @@ placeholders you just filled in in step 11.
 ```
 
 This auto-elevates to UAC once for the whole batch, then idempotently
-registers (or updates) all 16 tasks from `registry.yaml`. Output goes
+registers (or updates) all 17 tasks from `registry.yaml`. Output goes
 to `%TEMP%\sync-tasks_<timestamp>.log`.
 
 ### 14. Verify
@@ -520,6 +528,21 @@ itself, then from `~/.claude/.env` (the one created in step 9). It
 writes to `<current-folder>/.claude/settings.local.json` by default —
 pass `-ProjectPath <path>` to target a specific project.
 
+Add `-KeyHelper` to keep the key out of that file. The switcher then writes
+a top-level `apiKeyHelper` command instead of the key's value:
+
+```powershell
+& "<path-to-bundle>\scripts\claude-switch.ps1" deepseek flash -KeyHelper
+# settings.local.json gets:
+#   "apiKeyHelper": "powershell -NoProfile -File <bundle>\scripts\get-key.ps1 DEEPSEEK_KEY"
+```
+
+Claude Code runs that command and uses its stdout as the credential, so the
+secret stays in the one `.env` and never lands in a file inside the project
+working tree. `scripts/get-key.ps1` prints one value and nothing else,
+reading it through the same parser and the same order (env, then `.env`);
+it must sit next to `scripts/lib/dotenv.ps1`.
+
 ### 16. (Optional) Codex CLI mirror
 
 If you also use Codex CLI:
@@ -540,6 +563,11 @@ For each of your projects you also want Codex to recognize, copy
 The existing Troubleshooting section below covers failures during INSTALL. These
 are the questions the first week of actually running it produces, and none of
 them is a failure.
+
+**"What is this supposed to produce?"** [`docs/examples/`](docs/examples/) is a
+worked sample — a synthetic daily log, the page compiled from it, and the index
+entry. It is generated with the offline `mock` provider, so it costs nothing and
+shows the real shapes: the frontmatter, the naming, the wikilinks.
 
 **"It ran overnight and the wiki is still empty."** Three normal causes, in the
 order to check them:

@@ -45,13 +45,14 @@ from utils import (  # noqa: E402
     find_bash,
     is_dry_run,
     is_subagent_jsonl,
-    llm_call,
+    llm_call_ex,
     masked,
     parse_jsonl_messages,
     policy_summary,
     project_allowed,
     state_add,
     state_get,
+    worst_kind,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -90,8 +91,15 @@ CONTEXT_FILE_CAP = 40000
 def log(msg: str) -> None:
     line = f"{datetime.now():%H:%M:%S} {msg}"
     print(line)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    # Best-effort: an unwritable LOG_DIR (a full disk, a share that dropped)
+    # used to raise out of here and kill the task BEFORE it could record a
+    # terminal row in the ledger — so the one failure that most deserves to be
+    # visible was the one that left no trace at all.
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 def context_window(text: str, cap: int = CONTEXT_FILE_CAP) -> str:
@@ -315,16 +323,24 @@ def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) ->
     return summary
 
 
-def update_user_md(proj_messages: dict[str, str]) -> int | None:
+def update_user_md(proj_messages: dict[str, str]) -> tuple[int | None, str]:
     """Append newly-learned facts to USER.md.
 
-    Returns the number of characters appended (0 = the LLM answered but had
-    nothing new), or None when the LLM was never reached at all (providers
-    depleted / unparseable answer) — the caller turns that into a non-zero exit.
+    Returns (chars appended, kind). 0 = the LLM answered but had nothing new;
+    None = the LLM was never reached at all, and the caller turns that into a
+    non-zero exit.
+
+    `kind` is the LLMResult taxonomy (ok / transient / deterministic / config).
+    This task used to log a bare "llm_call returned empty" for all four, so an
+    unreachable provider and a misconfigured key — one of which clears on its
+    own and one of which never will — produced the same line and the same
+    alert. It does NOT take a retry ceiling: unlike the wiki phases there is no
+    per-source marker to count against, and the payload is a different day's
+    messages every night, so a counter here would never reach its limit.
     """
     if not proj_messages:
         log("USER.md: no user messages in the last 24h — skipping")
-        return 0
+        return 0, "ok"
 
     user_md = USER_MD.read_text(encoding="utf-8") if USER_MD.exists() else ""
     summary = build_summary(proj_messages)
@@ -351,37 +367,48 @@ What counts as "new important information":
 Do NOT duplicate anything already in USER.md. If nothing new — return {{"add": ""}}.
 JSON only, no markdown wrapper, no commentary."""
 
-    out = llm_call(prompt, timeout=600)
-    if not out:
-        log("USER.md: llm_call returned empty")
-        return None
+    res = llm_call_ex(prompt, timeout=600)
+    if not res.text:
+        log(f"USER.md: no answer ({res.kind}: {res.detail or 'no detail'})")
+        return None, res.kind
 
-    obj = extract_first_json_object(out)
+    obj = extract_first_json_object(res.text)
     if not obj:
         # An unparseable answer is a failed run, not an empty one — same
-        # signal as a depleted provider so the monitor/alert path fires.
-        log(f"USER.md: JSON not found in response ({out[:200]!r})")
-        return None
+        # signal as a depleted provider so the monitor/alert path fires. It is
+        # deterministic: the same prompt reproduces it.
+        log(f"USER.md: JSON not found in response ({res.text[:200]!r})")
+        return None, "deterministic"
     try:
         data = json.loads(obj)
     except json.JSONDecodeError as e:
         log(f"USER.md: parse error: {e}")
-        return None
+        return None, "deterministic"
 
     raw_add = data.get("add")
     add = raw_add.strip() if isinstance(raw_add, str) else ""
     if not add:
         log("USER.md: nothing new extracted")
-        return 0
+        return 0, "ok"
 
+    # Masked on the way IN as well as on the way out. USER.md is fed back into
+    # every subsequent night's prompt in full, so a credential the model echoed
+    # out of a transcript would be re-sent off-box every night from here on —
+    # and this file is the one the user reads as "what Claude knows about me".
+    add = masked(add)
     USER_MD.parent.mkdir(parents=True, exist_ok=True)
     with open(USER_MD, "a", encoding="utf-8") as f:
         f.write(f"\n\n## Auto-extracted {DATE}\n{add}\n")
     log(f"USER.md: appended {len(add)} chars")
-    return len(add)
+    return len(add), "ok"
 
 
-def update_cross_notes(proj_messages: dict[str, str]) -> None:
+def update_cross_notes(proj_messages: dict[str, str]) -> str:
+    """Append newly-found cross-project links. Returns an LLMResult `kind`.
+
+    "ok" also covers the disabled and the too-few-projects cases: not running
+    is not a provider failure, and the caller must not alert on it.
+    """
     # OPT-IN: set MEMORY_CROSS_NOTES=1 to enable. The extraction is built from
     # the raw user messages, so no scan file is actually consumed — the legacy
     # cron/scan-results/scan_<date>.json sentinel is still honored as a
@@ -391,10 +418,10 @@ def update_cross_notes(proj_messages: dict[str, str]) -> None:
     if not enabled and not scan_file.exists():
         log("cross-notes: disabled — skipping "
             "(opt-in: set MEMORY_CROSS_NOTES=1)")
-        return
+        return "ok"
     if len(proj_messages) < 2:
         log("cross-notes: fewer than 2 active projects — skipping")
-        return
+        return "ok"
 
     cross = CROSS_NOTES.read_text(encoding="utf-8") if CROSS_NOTES.exists() else ""
     summary = build_summary(proj_messages, cap=25000)
@@ -419,36 +446,38 @@ Connections can be:
 Do NOT duplicate existing entries. If nothing new — return {{"links": []}}.
 JSON only, no markdown wrapper."""
 
-    out = llm_call(prompt, timeout=600)
-    if not out:
-        log("cross-notes: llm_call returned empty")
-        return
+    res = llm_call_ex(prompt, timeout=600)
+    if not res.text:
+        log(f"cross-notes: no answer ({res.kind}: {res.detail or 'no detail'})")
+        return res.kind
 
-    obj = extract_first_json_object(out)
+    obj = extract_first_json_object(res.text)
     if not obj:
-        log(f"cross-notes: JSON not found ({out[:200]!r})")
-        return
+        log(f"cross-notes: JSON not found ({res.text[:200]!r})")
+        return "deterministic"
     try:
         data = json.loads(obj)
     except json.JSONDecodeError as e:
         log(f"cross-notes: parse error: {e}")
-        return
+        return "deterministic"
 
     links = data.get("links") or []
     # A bare string would be written out one character per bullet — reject it.
     if not isinstance(links, list):
         log(f"cross-notes: 'links' is {type(links).__name__}, not a list — skipping")
-        return
+        return "deterministic"
     if not links:
         log("cross-notes: no new links")
-        return
+        return "ok"
 
     CROSS_NOTES.parent.mkdir(parents=True, exist_ok=True)
     with open(CROSS_NOTES, "a", encoding="utf-8") as f:
         f.write(f"\n\n## {DATE}\n")
         for link in links:
-            f.write(f"- {link}\n")
+            # Same reason as USER.md: this file is fed back into later prompts.
+            f.write(f"- {masked(str(link))}\n")
     log(f"cross-notes: appended {len(links)} links")
+    return "ok"
 
 
 def run_incident_extract() -> None:
@@ -499,8 +528,8 @@ def main() -> int:
             f"({total} chars across {len(msgs)} project(s)); no memory files written.")
         return 0
 
-    appended = update_user_md(msgs)
-    update_cross_notes(msgs)
+    appended, user_kind = update_user_md(msgs)
+    cross_kind = update_cross_notes(msgs)
     log("=== End Memory Update ===")
     run_incident_extract()
 
@@ -508,6 +537,16 @@ def main() -> int:
     # (all providers depleted/failed), the night is silently empty — make
     # it visible to the exit-code-based monitor instead of returning 0.
     failed = bool(msgs) and appended is None
+    # WHY it failed, in the LLMResult taxonomy. All four causes used to print
+    # the same "llm_call returned empty" and raise the same alert, so "the
+    # gateway is down tonight" and "your key is wrong and every night from now
+    # on is empty" were indistinguishable to the person being paged.
+    kind = worst_kind([user_kind, cross_kind])
+    reason = {
+        "config": "CONFIGURATION — this will not fix itself (key, gate or provider name)",
+        "deterministic": "the provider answered, but not with anything usable",
+        "transient": "providers depleted or unreachable — expected to clear",
+    }.get(kind, kind)
     # Terminal ledger record (cron/runs.py). useful_items is the appended size,
     # or None when the LLM answered with nothing new — that is a normal night,
     # not the empty-artifact false-green the SLO looks for.
@@ -517,11 +556,12 @@ def main() -> int:
         artifact_path=USER_MD if appended else None,
         useful_items=appended or None,
         delivery="n/a",
-        note=f"{len(msgs)} project(s) with messages",
+        note=f"{len(msgs)} project(s) with messages"
+             + (f"; {kind}" if failed else ""),
     )
     if failed:
-        log("ERROR: LLM providers depleted/failed — no memory extraction this run.")
-        send_telegram("memory-update: LLM providers depleted/failed — no memory extraction tonight.")
+        log(f"ERROR: no memory extraction this run — {reason}.")
+        send_telegram(f"memory-update: no extraction tonight — {reason}.")
         return 1
     return 0
 

@@ -122,11 +122,21 @@ OS_ENV = {
     "HOSTNAME", "OS", "EDITOR", "PYTHONPATH", "PYTHONIOENCODING",
 }
 
-# Where direction 3 looks. .ps1/.vbs/.cmd are deliberately out of scope: the
-# Windows admin scripts read OS-provided variables (%LOCALAPPDATA%, %TEMP%,
-# %USERNAME%) that have nothing to do with the pipeline's .env.
 CODE_ROOT = ROOT / "home-claude"
 CODE_SUFFIXES = (".py", ".sh")
+
+# PowerShell is scanned too, but only through the bundle's OWN `.env` readers.
+# A blanket `$env:` sweep would be nothing but noise — the Windows admin scripts
+# touch %LOCALAPPDATA%, %TEMP%, %USERNAME% and a dozen more that have nothing to
+# do with the pipeline's `.env`. These two helpers, by contrast, mean exactly
+# "read this name out of the .env", so every hit is a variable the user is
+# expected to be able to set. Without this, `API_TIMEOUT_MS` — read only by
+# claude-switch.ps1 — was invisible to the guard and reached the template only
+# because somebody noticed by hand.
+PS_ROOTS = (ROOT / "scripts", ROOT / "home-claude")
+PS_ENV_RE = re.compile(
+    r"(?:Get-EnvVar|Get-DotEnvValue\s+-Path\s+\S+\s+-Name|Read-DotEnvValue\s+\S+)"
+    r"\s+[\"']([A-Z][A-Z0-9_]*)[\"']")
 
 PY_ENV_RE = re.compile(
     r"os\.(?:environ\.get|getenv)\(\s*[\"']([A-Z][A-Z0-9_]*)[\"']"
@@ -197,6 +207,14 @@ def code_env_vars() -> dict[str, set[str]]:
                     names.add(name)
         for name in names:
             out.setdefault(name, set()).add(rel)
+    for root in PS_ROOTS:
+        for path in sorted(root.rglob("*.ps1")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(ROOT).as_posix()
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for m in PS_ENV_RE.finditer(text):
+                out.setdefault(m.group(1), set()).add(rel)
     return out
 
 
@@ -294,6 +312,48 @@ def check() -> int:
     return 0
 
 
+def _assigned_names(path: Path, target: str) -> list[str]:
+    """The string literals assigned to `target` in a Python file, via ast.
+
+    Read from the source rather than imported: utils.py runs a manifest load and
+    a dotenv load at import time, and check-registry.py is not an importable
+    module name. Parsing keeps this generator side-effect free.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if target not in names:
+            continue
+        if not isinstance(node.value, (ast.Set, ast.List, ast.Tuple)):
+            continue
+        return sorted({e.value for e in node.value.elts
+                       if isinstance(e, ast.Constant) and isinstance(e.value, str)})
+    return []
+
+
+def manifest_keys() -> list[str]:
+    """Every key bundle.local.yaml may carry (utils.py::_MANIFEST_KNOWN_KEYS)."""
+    return _assigned_names(ROOT / "home-claude" / "cron" / "hooks" / "utils.py",
+                           "_MANIFEST_KNOWN_KEYS")
+
+
+def registry_fields() -> list[str]:
+    """Every field a registry task may carry (check-registry.py::KNOWN_KEYS)."""
+    return _assigned_names(ROOT / "scripts" / "check-registry.py", "KNOWN_KEYS")
+
+
+def registry_required() -> list[str]:
+    """The registry fields that are mandatory (check-registry.py::REQUIRED)."""
+    return _assigned_names(ROOT / "scripts" / "check-registry.py", "REQUIRED")
+
+
 def emit_table() -> str:
     """The generated body of docs/config-reference.md.
 
@@ -338,16 +398,45 @@ def emit_table() -> str:
         "descriptions live next to each variable in the `.env` template; this",
         "page is the index.",
         "",
-        "The two OTHER kinds of configuration are not env vars and are not listed",
-        "here: the per-machine manifest `bundle.local.yaml` (project map and",
-        "privacy policy — see `config/bundle.local.example.yaml`) and the task",
-        "declarations in `cron/registry.yaml`.",
+        "The bundle has THREE kinds of configuration and they are easy to",
+        "confuse, so all three are indexed here: environment variables, the",
+        "per-machine manifest `bundle.local.yaml`, and the task declarations in",
+        "`cron/registry.yaml`. One value even lives under two names —",
+        "`.env::PROJECTS_ROOT` and `bundle.local.yaml::projects_root` — because",
+        "the shell tasks cannot read YAML; neither is deprecated, and the",
+        "installer generates the first from the second.",
+        "",
+        "## Environment variables",
         "",
         "| Variable | In the .env template | Read by |",
         "|---|---|---|",
         *rows,
         "",
         f"_{len(rows)} variables._",
+        "",
+        "## `bundle.local.yaml` keys",
+        "",
+        "The machine-local manifest: which projects the pipeline may read, and",
+        "what it may do with them. It is never committed and a reinstall never",
+        "overwrites it. An existing manifest that does not parse **denies every",
+        "project** rather than falling back to the permissive default — so a",
+        "typo costs you a quiet night, not a leak. Descriptions live in",
+        "`config/bundle.local.example.yaml`.",
+        "",
+        "| Key |",
+        "|---|",
+        *[f"| `{k}` |" for k in manifest_keys()],
+        "",
+        "## `cron/registry.yaml` task fields",
+        "",
+        "The declaration of a scheduled task. `scripts/check-registry.py` is the",
+        "grammar: a field not in this list is a typo, and both the Windows",
+        "syncer and the POSIX unit generator would ignore it in silence.",
+        "",
+        "| Field | Required |",
+        "|---|---|",
+        *[f"| `{k}` | {'yes' if k in registry_required() else 'no'} |"
+          for k in registry_fields()],
         "",
     ])
 

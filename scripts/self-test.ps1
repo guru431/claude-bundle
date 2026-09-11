@@ -17,6 +17,11 @@
 #  12. Env reference      — .env template agrees with the docs and the code
 #  13. Privacy matrix     — docs table agrees with each task's declared I/O
 #  14. MCP wrappers (WARN)— no `npx -y` / `uv run` resolver wrappers declared
+#  15. Encodings          — BOM on .ps1 with non-ASCII, none on .sh, LF in .sh
+#  17. Shellcheck         — CI parity over every .sh + .githooks/* (WARN if the
+#                           binary is not installed)
+#  18. Effective config   — with -InstallPath, print utils.py::config_report()
+#  19. bash-deny.yaml     — every rule compiles (the hook itself fails OPEN)
 #
 # Exit code: 0 if all checks pass, 1 if any FAIL. Placeholder/skip = WARN (not a
 # failure) so a freshly-cloned template still self-tests green.
@@ -49,6 +54,14 @@ $configRoot = if ($ClaudeHome) { $ClaudeHome.TrimEnd('\', '/') } else { $home_cl
 # silently validate a different tree than the one the installer wrote to. With
 # no -InstallPath the only deployment that can exist is the documented default.
 $deployRoot = if ($deployed) { $home_claude } else { Join-Path $env:USERPROFILE '.claude' }
+
+# The ONE PowerShell .env parser (scripts/lib/dotenv.ps1). It is always next to
+# this script in a checkout; the guard exists so a partial copy of the bundle
+# still self-tests (with a WARN) instead of throwing — and so this file never
+# grows a second .env regex of its own, which is what §16a used to be.
+$script:dotEnvLib = Join-Path $PSScriptRoot 'lib\dotenv.ps1'
+$script:haveDotEnv = Test-Path $script:dotEnvLib
+if ($script:haveDotEnv) { . $script:dotEnvLib }
 
 $script:pass = 0
 $script:fail = 0
@@ -295,10 +308,16 @@ if (Test-Path $st) {
             $out2 = Invoke-Checked { & $st -DryRun -RegistryPath (Join-Path $tmpRoot 'cron/registry.yaml') } -AllStreams
             $rc2 = $script:lastRc
             $regTasks = ([regex]::Matches($txt, '(?m)^\s+-\s+name:')).Count
-            $seen = ([regex]::Matches($out2, '(?m)^\[(create|update|unchang|skipped|would)')).Count
+            # EVERY task must be accounted for, not merely "at least one line".
+            # sync-tasks prints exactly one `[created|updated|unchanged|skipped…]`
+            # line per task it processed, so the count is the sum the summary
+            # reports — and `-lt 1` waved through a registry from which half the
+            # tasks had silently dropped out of the parser. `would` is excluded
+            # on purpose: `[would update launcher]` is not a task line.
+            $seen = ([regex]::Matches($out2, '(?m)^\[(created|updated|unchanged|skipped)')).Count
             if ($rc2 -notin @(0, 3)) { Bad "sync-tasks parser run on a bootstrapped copy exited ${rc2}:`n$out2" }
             elseif ($out2 -match 'placeholder') { Bad "bootstrapped copy still tripped the placeholder guard:`n$out2" }
-            elseif ($seen -lt 1) { Bad "sync-tasks produced no per-task lines for $regTasks task(s) — the parser saw nothing:`n$out2" }
+            elseif ($seen -ne $regTasks) { Bad "sync-tasks reported $seen per-task line(s) for $regTasks registry task(s) — the parser dropped some:`n$out2" }
             else { Ok "sync-tasks parser + Build-Action ran over $regTasks registry task(s) ($seen reported)" }
         } catch {
             Warn "bootstrapped sync-tasks probe could not run: $($_.Exception.Message)"
@@ -321,8 +340,14 @@ if (Test-Path $reg) {
 # Python, but the overnight LLM jobs need `requests` (function-local import,
 # so compileall never catches it) and `registry.yaml` parsing needs PyYAML.
 if ($py) {
-    $ver = (& $py -c "import sys;print('%d.%d' % sys.version_info[:2])" 2>&1).Trim()
-    if ($ver -match '^(\d+)\.(\d+)$') {
+    # Through Invoke-Checked like every other native call here: a bare `2>&1`
+    # under $ErrorActionPreference='Stop' makes a python that prints ANYTHING on
+    # stderr at startup (a deprecation warning, a sitecustomize notice) a
+    # TERMINATING NativeCommandError — killing the whole self-test at the step
+    # whose job is to diagnose that interpreter. The version now has to be
+    # matched as a LINE, since a warning shares the captured output with it.
+    $ver = Invoke-Checked { & $py -c "import sys;print('%d.%d' % sys.version_info[:2])" }
+    if ($ver -match '(?m)^(\d+)\.(\d+)\s*$') {
         if ([int]$Matches[1] -lt 3 -or ([int]$Matches[1] -eq 3 -and [int]$Matches[2] -lt 10)) {
             Warn "Python $ver < 3.10 — the cron pipeline targets 3.10+"
         } else { Ok "Python version $ver (>= 3.10)" }
@@ -481,7 +506,7 @@ if ((-not $deployed) -and (Test-Path $hook) -and (Test-Path (Join-Path $root '.g
     else { Warn "secret-guard hook not active — run scripts/enable-guard.ps1 (git config core.hooksPath .githooks)" }
 }
 
-# ── 15. Encoding rules (BOM on .ps1 with non-ASCII, none on .sh) ─────────────
+# ── 15. Encoding rules (BOM on .ps1 with non-ASCII, none on .sh, LF in .sh) ──
 # home-claude/CLAUDE.md § File Encoding states both rules and nothing enforced
 # either. They matter: PS 5.1 reads a BOM-less file in the system ANSI codepage,
 # so Cyrillic in a .ps1 turns into smart quotes that break string parsing — and
@@ -493,6 +518,19 @@ foreach ($f in (Get-ChildItem $root -Recurse -Include *.ps1, *.sh -File -ErrorAc
     $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
     if ($f.Extension -eq '.sh') {
         if ($hasBom) { $encBad += "$($f.Name): .sh must NOT have a BOM (it breaks the shebang)" }
+        # LINE ENDINGS, checked on the bytes for the same reason as the BOM: a
+        # working-tree copy left over from before .gitattributes is still CRLF
+        # even though the index is LF, and the `\r` at the end of `#!/bin/bash`
+        # becomes part of the interpreter path. shellcheck reports SC1017 on
+        # every line, so step 17 below goes red for the whole file at once and
+        # says nothing about why. (CLAUDE.md § Local verification.)
+        $crlf = $false
+        for ($bi = 1; $bi -lt $bytes.Length; $bi++) {
+            if ($bytes[$bi] -eq 0x0A -and $bytes[$bi - 1] -eq 0x0D) { $crlf = $true; break }
+        }
+        if ($crlf) {
+            $encBad += "$($f.Name): .sh must use LF, not CRLF — fix the working copy: rm `"$($f.FullName)`" && git checkout -- `"$($f.FullName)`""
+        }
     } else {
         $nonAscii = $false
         foreach ($b in $bytes) { if ($b -gt 0x7F) { $nonAscii = $true; break } }
@@ -501,8 +539,60 @@ foreach ($f in (Get-ChildItem $root -Recurse -Include *.ps1, *.sh -File -ErrorAc
         }
     }
 }
-if ($encBad.Count -eq 0) { Ok "file encodings follow the BOM rules (.ps1 with BOM, .sh without)" }
+if ($encBad.Count -eq 0) { Ok "file encodings follow the BOM rules (.ps1 with BOM, .sh without, LF in .sh)" }
 else { foreach ($e in $encBad) { Bad "encoding: $e" } }
+
+# ── 17. Shellcheck (CI parity; source tree only) ─────────────────────────────
+# CI gates every tracked shell script on `--severity=warning`, and CLAUDE.md
+# tells you to run the same command locally — but the self-test, the thing that
+# exists so "one command" answers "is this bundle sound", did not, even though
+# requirements-dev.txt already ships shellcheck-py. So a shell warning was only
+# ever found by pushing.
+#
+# `-f gcc` is NOT optional: shellcheck's default output carries em-dashes a
+# CP-1251 console cannot encode, which fails the write with `commitBuffer:
+# invalid argument` rather than printing the finding.
+# WARN, not FAIL, when the binary is absent: a stock Python has no shellcheck,
+# and the offline contract must still pass on one.
+function Find-Shellcheck {
+    $cmd = Get-Command shellcheck -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    if ($py) {
+        # shellcheck-py ships the real binary inside the package and a console
+        # script next to the interpreter; try both, the package first (it is
+        # there even when Scripts\ is not on PATH).
+        $probe = "import os,sys" +
+                 "`nimport importlib.util as u" +
+                 "`ns = u.find_spec('shellcheck_py')" +
+                 "`np = os.path.join(os.path.dirname(s.origin), 'resources', 'shellcheck.exe') if s and s.origin else ''" +
+                 "`nsys.stdout.write(p if p and os.path.exists(p) else '')"
+        $found = Invoke-Checked { & $py -c $probe }
+        if ($script:lastRc -eq 0 -and $found -and (Test-Path $found)) { return $found }
+        $scripts = Join-Path (Split-Path -Parent $py) 'Scripts\shellcheck.exe'
+        if (Test-Path $scripts) { return $scripts }
+    }
+    return $null
+}
+if (-not $deployed) {
+    $sc = Find-Shellcheck
+    if (-not $sc) {
+        Warn "shellcheck not found — skipped the shell lint CI runs (pip install -r requirements-dev.txt, or install shellcheck)"
+    } else {
+        $shFiles = @(Get-ChildItem $root -Recurse -Filter *.sh -File -ErrorAction SilentlyContinue |
+                     Where-Object { $_.FullName -notmatch '\\(\.git|__pycache__|node_modules)\\' } |
+                     ForEach-Object { $_.FullName })
+        $hooksDir = Join-Path $root '.githooks'
+        if (Test-Path $hooksDir) {
+            $shFiles += @(Get-ChildItem $hooksDir -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        }
+        if ($shFiles.Count -eq 0) { Warn "no shell scripts found under $root — shellcheck skipped" }
+        else {
+            $out = Invoke-Checked { & $sc --severity=warning -e SC1091 -f gcc @shFiles }
+            if ($script:lastRc -eq 0) { Ok "shellcheck clean over $($shFiles.Count) shell script(s) (severity=warning)" }
+            else { Bad "shellcheck findings (same gate as CI):`n$out" }
+        }
+    }
+}
 
 # ── 16. Deployment reality checks (only meaningful with -InstallPath) ────────
 # What actually breaks a night on a real deployment, none of which the offline
@@ -512,17 +602,22 @@ if ($deployed) {
     # 16a. The interpreters the tasks will really use, from the deployed .env —
     # not whatever happens to be on THIS shell's PATH.
     $envFile = Join-Path $deployRoot '.env'
-    if (Test-Path $envFile) {
+    if (-not (Test-Path $envFile)) {
+        Warn ".env not found at $envFile — provider keys and interpreter paths are unset"
+    } elseif (-not $script:haveDotEnv) {
+        Warn "scripts/lib/dotenv.ps1 not found next to this script — skipped the .env interpreter check"
+    } else {
+        # Through the shared parser, not a private regex. The local one handled
+        # `export `, quoting, a BOM and CRLF differently from the bash, Python
+        # and VBScript twins — so a .env the LAUNCHER reads fine could be
+        # reported here as empty, and vice versa.
         foreach ($k in @('PYTHON_EXE', 'BASH_EXE')) {
-            $line = (Get-Content $envFile -Encoding UTF8 |
-                     Where-Object { $_ -match "^\s*$k\s*=\s*(\S.*)$" } | Select-Object -First 1)
-            if (-not $line) { Warn "$k is empty in .env — session 0 has no user PATH; the tasks will guess"; continue }
-            $null = $line -match "^\s*$k\s*=\s*(\S.*?)\s*$"
-            $val = $Matches[1].Trim('"', "'")
+            $val = Get-DotEnvValue -Path $envFile -Name $k
+            if (-not $val) { Warn "$k is empty in .env — session 0 has no user PATH; the tasks will guess"; continue }
             if (Test-Path -LiteralPath $val) { Ok "$k resolves: $val" }
             else { Bad "$k=$val does not exist — every task of that kind will fail in session 0" }
         }
-    } else { Warn ".env not found at $envFile — provider keys and interpreter paths are unset" }
+    }
 
     # 16b. The DPAPI credential file that LogonType=Password tasks need. Without
     # it sync-tasks cannot register them, and a task registered before the file
@@ -549,6 +644,88 @@ if ($deployed) {
         if ($rc -eq 0) { Ok "sync-tasks -Verify: every registered task is healthy" }
         elseif ($rc -eq 3) { Warn "sync-tasks -Verify reported problems:`n$out" }
         else { Warn "sync-tasks -Verify exited ${rc}:`n$out" }
+    }
+
+    # ── 18. The EFFECTIVE configuration, as the pipeline resolves it ─────────
+    # cron/hooks/utils.py::config_report() is the single place that answers
+    # "what is this deployment actually configured to do" — provider and chain,
+    # every value that came from bundle.local.yaml or .env with its source, the
+    # dry-run window, and the two interpreters RESOLVED. bundle-status.py has
+    # printed it all along; the self-test did not, so a deployment could pass
+    # every check above while pointing at a manifest nobody meant to enable.
+    # Printed, never judged: which provider you route to is not ours to fail.
+    # WARN on any problem — a lite deployment has no cron/ at all.
+    $utilsDir = Join-Path $deployRoot 'cron/hooks'
+    if (-not $py) {
+        # already warned once at the top
+    } elseif (-not (Test-Path (Join-Path $utilsDir 'utils.py'))) {
+        Warn "cron/hooks/utils.py not found under $deployRoot — skipped the effective-configuration report"
+    } else {
+        $ccode = "import sys; sys.path.insert(0, sys.argv[1]); from utils import config_report; print('\n'.join(config_report()))"
+        $out = Invoke-Checked { & $py -c $ccode $utilsDir }
+        if ($script:lastRc -ne 0) { Warn "could not read the effective configuration:`n$out" }
+        else {
+            Ok "effective configuration (cron/hooks/utils.py::config_report)"
+            foreach ($l in ($out -split "`r?`n")) {
+                if ($l.Trim()) { Write-Host "       $l" -ForegroundColor DarkGray }
+            }
+        }
+    }
+}
+
+# ── 19. bash-deny.yaml: every rule must actually compile ─────────────────────
+# hooks/bash-guard.py is fail-OPEN: a pattern that does not compile, or a YAML
+# file that does not parse, means the guard allows everything and says nothing.
+# That is the right behaviour for a hook (never break the session over a bad
+# rule) and exactly why the rules need checking somewhere else — here.
+$denyFile = Join-Path $home_claude 'hooks/bash-deny.yaml'
+if ($py -and (Test-Path $denyFile)) {
+    $dcode = @'
+import re, sys
+try:
+    import yaml
+except ImportError:
+    print("SKIP PyYAML not installed - bash-guard.py is inert without it")
+    sys.exit(2)
+data = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+# Same shape bash-guard.py::load_rules reads: a mapping with a `rules:` list.
+rules = data.get("rules") if isinstance(data, dict) else None
+if not isinstance(rules, list) or not rules:
+    print("FAIL bash-deny.yaml has no `rules:` list — the guard allows everything")
+    sys.exit(1)
+bad = []
+for i, rule in enumerate(rules, 1):
+    if not isinstance(rule, dict):
+        bad.append(f"rule {i}: not a mapping")
+        continue
+    pat = rule.get("pattern")
+    if not isinstance(pat, str) or not pat:
+        bad.append(f"rule {i}: no pattern")
+        continue
+    try:
+        re.compile(pat)
+    except re.error as exc:
+        bad.append(f"rule {i} ({rule.get('reason', '?')}): {exc}")
+    sev = rule.get("severity", "deny")
+    if sev not in ("deny", "ask"):
+        bad.append(f"rule {i}: severity {sev!r} is neither deny nor ask")
+if bad:
+    print("FAIL " + "; ".join(bad))
+    sys.exit(1)
+print(f"OK {len(rules)} rule(s) compile")
+'@
+    # Via a temp FILE, not `-c`: PS 5.1 hands a native process its arguments
+    # through its own quoting pass, which eats the embedded double quotes and
+    # turns this script into a SyntaxError that looks like a failing check.
+    $dtmp = Join-Path $env:TEMP "claude-bundle-denycheck-$PID.py"
+    [System.IO.File]::WriteAllText($dtmp, $dcode, (New-Object System.Text.UTF8Encoding($false)))
+    try {
+        $out = Invoke-Checked { & $py $dtmp $denyFile }
+        if ($script:lastRc -eq 2) { Warn ($out -replace '^SKIP ', '') }
+        elseif ($script:lastRc -ne 0) { Bad "bash-deny.yaml: $($out -replace '^FAIL ', '')" }
+        else { Ok "bash-deny.yaml: $($out -replace '^OK ', '')" }
+    } finally {
+        Remove-Item -LiteralPath $dtmp -ErrorAction SilentlyContinue
     }
 }
 

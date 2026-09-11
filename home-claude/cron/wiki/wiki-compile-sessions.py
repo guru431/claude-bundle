@@ -38,10 +38,12 @@ from utils import (  # noqa: E402
     iter_md_lines,
     llm_call_ex,
     llm_pace,
+    masked,
     normalize_body,
     normalize_project_name,
     normalize_wiki_path,
     parse_llm_json_result,
+    project_allowed,
     quarantine_raw,
     read_page,
     rewrite_is_sane,
@@ -86,22 +88,33 @@ MAX_PART_SIZE = 80000
 
 
 def daily_fingerprint(text: str) -> str:
-    """Short content fingerprint of a daily log, as READ by this run.
+    """Short content fingerprint of the text a marker is pinned to.
 
-    Both markers below carry it, which is what makes the compile phase safe to
+    Both markers below carry one, which is what makes the compile phase safe to
     overlap with a still-running flush. Without it the sequence "compile reads
     the daily → flush appends a delta → compile marks the daily compiled"
     finalized a section this process never saw, and the delta was lost for good.
     Pinning the marker to the content means an append simply doesn't match any
     marker any more, so the next run recompiles (apply_changes dedups, so the
     overlap is a no-op).
+
+    The daily-level marker fingerprints the WHOLE file; the pair marker
+    fingerprints only its own project SECTION — see pair_marker.
     """
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
 
 
-def pair_marker(daily_stem: str, project: str, fingerprint: str) -> str:
-    """State key for a granular (daily, project) pair marker."""
-    return f"{daily_stem}#{project}@{fingerprint}"
+def pair_marker(daily_stem: str, project: str, section_text: str) -> str:
+    """State key for a granular (daily, project) pair marker.
+
+    Pinned to the fingerprint of THIS PROJECT'S SECTION, not of the whole daily.
+    With the whole-file hash, any append to the daily — and flush writes several
+    dailies per run now, appending to each — changed every project's marker at
+    once, so every already-compiled section of that day was sent to the provider
+    again. The marker exists to say "this text is compiled"; the text it means is
+    the section.
+    """
+    return f"{daily_stem}#{project}@{daily_fingerprint(section_text)}"
 
 
 def get_compiled_dailies() -> set[str]:
@@ -292,6 +305,10 @@ def compile_project_data(project: str, data: str,
     for part_idx, part in enumerate(parts):
         existing_list, existing_content, part_withheld = render_existing()
         part_label = f" (part {part_idx+1}/{len(parts)})" if len(parts) > 1 else ""
+        # masked() on the daily text below: WIKI_MASK_SECRETS is a promise about
+        # what LEAVES the machine, and it was honored only on the way to disk.
+        # The daily is a digest of chat transcripts, so a key pasted into a
+        # session reached the provider verbatim.
         full_prompt = f"""{prompt}
 
 ---
@@ -304,7 +321,7 @@ def compile_project_data(project: str, data: str,
 {fence(f"kind=existing-page-bodies project={project}", existing_content) if existing_content else ""}
 
 ## New data from the daily log:
-{fence(f"kind=daily-log project={project}", part)}
+{fence(f"kind=daily-log project={project}", masked(part))}
 
 ---
 
@@ -744,10 +761,20 @@ def main():
 
         failed = 0
         for project, data in by_project.items():
+            # The privacy policy is unified across the pipeline, and this phase
+            # was the hole in it: flush gates every SOURCE, but a project added
+            # to skip_projects AFTER its daily was written still had that
+            # section sent to the provider and a wiki/projects/<it>/ folder
+            # created for it. The daily on disk is not consent.
+            if not project_allowed(project):
+                log(f"  [{project}] denied by policy — section not sent, "
+                    f"pair left unmarked")
+                continue
+
             # Granular dedup: this (daily, project) pair already compiled —
             # skip it, so one big failing project no longer drags its
             # already-succeeded neighbours through the LLM on every retry.
-            marker = pair_marker(daily_path.stem, project, daily_fp)
+            marker = pair_marker(daily_path.stem, project, data)
             if marker in compiled_pairs:
                 log(f"  [{project}] already compiled (pair marker) — skip")
                 continue

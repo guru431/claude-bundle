@@ -110,6 +110,49 @@ into project incident logs. Findings are deferred observations for review.
   `D="/c/path/to/project"` then `"$D/file"`
 - NEVER use `cd` — always use absolute paths
 
+### Python on Windows:
+- Resolve the path once: `where python` or `python --version`
+- In Git Bash the path is usually `"/c/Program Files/Python<ver>/python"`
+  or just `python` — the `/c/...` form, per the path rule above
+- Use Python for data processing when shell pipes fail
+
+## Declaring MCP servers — never wrap them in `npx -y` or `uv run`
+
+Use a **direct path to the interpreter**, or an **HTTP url** when the project
+publishes a hosted endpoint. A resolver wrapper costs you three times over:
+
+- **It stays alive.** `npx` does not replace itself with the server — it parents
+  it and keeps sitting there. Measured on a real setup: an idle `npx` wrapper
+  held **95 MB** of commit, roughly twice the server it had launched.
+- **It re-resolves on every session start.** Measured: `npx -y <server>
+  --version` took **6.4 s**, of which 4.0 s was a round-trip to the npm
+  registry. Multiply by servers × open sessions — that is the pause you feel
+  when a new editor window opens, and it makes your tooling depend on the
+  network being up.
+- **On Windows each wrapper drags a shell and a console host with it**, so one
+  server can cost six processes instead of one.
+
+```jsonc
+// bad — extra process, re-resolve, network access on every start
+{ "command": "npx", "args": ["-y", "some-mcp-server"] }
+
+// good — hosted endpoint, zero local processes
+{ "type": "http", "url": "https://mcp.example.com/mcp" }
+
+// good — local server, direct interpreter path
+{ "command": "/path/to/.venv/bin/python", "args": ["/path/to/server.py"] }
+```
+
+Two traps when a local stdio server misbehaves:
+
+- **stdout belongs to the protocol.** Any stray line there breaks JSON-RPC —
+  banners and diagnostics must go to stderr. `dotenv` v17, for example, prints
+  `injected env … from .env` to *stdout*; silence it with
+  `DOTENV_CONFIG_QUIET=true`.
+- **`bin` is not always the working entry point.** A package can ship a broken
+  CLI while its `main` module starts fine. Check what actually runs before
+  blaming your config — and remember `npx` always launches `bin`.
+
 ## Coding Discipline (Karpathy rules)
 
 ### 1. Think Before Coding
@@ -162,10 +205,13 @@ prevent one of those; `pytest.ini` in this repo is the reference implementation.
    time zones only through injection or a fake. A test that depends on the
    calendar is green some days and red others — one suite quietly went red on
    even ISO weeks, another exactly 60 days after its fixture was written.
-4. **Cron runs them, not a person.** With no CI, `ClaudeTestSweep` (daily, off
-   by default) runs the fast suite across every project under `projects_root`;
-   red earns a Telegram alert and an entry in that project's `FINDINGS.md`.
-   `ClaudeTestSweepFull` does the same weekly, including `integration`.
+4. **Something other than a person runs them.** CI where a project has it;
+   otherwise the bundle's own sweep: `ClaudeTestSweep` (daily, off by default)
+   runs the fast suite across every project under `projects_root`, red earns a
+   Telegram alert and an entry in that project's `FINDINGS.md`, and
+   `ClaudeTestSweepFull` does the same weekly including `integration`. The rule
+   is the first sentence — a suite only a human remembers to run is a suite that
+   goes red for two days unnoticed, which is what prompted this policy.
 5. **"Why does this test exist."** Write one for: (a) a reproduced bug or
    incident, (b) a contract between modules or services, (c) an irreversible
    operation — deletion, deploy, migration, writing to an archive. Do not write

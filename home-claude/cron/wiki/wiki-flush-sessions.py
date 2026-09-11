@@ -8,7 +8,8 @@ Sources:
   D. history.jsonl (activity metadata)
   E. incidents.md and sessions.md per project
 
-Result: wiki/daily/YYYY-MM-DD.md, grouped by project.
+Result: wiki/daily/YYYY-MM-DD.md, grouped by project — one file per day the
+material was WRITTEN (see session_day), so a run can produce several.
 
 Schedule: daily at 02:30.
 """
@@ -38,13 +39,14 @@ for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
     os.environ.pop(env_key, None)
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-from utils import (dir_to_project, parse_jsonl_messages, is_subagent_jsonl,
+from utils import (dir_to_project, parse_jsonl_delta, is_subagent_jsonl,
                    llm_call_ex, worst_kind, llm_pace, atomic_write_text,
                    normalize_project_name, KNOWN_PROJECTS, mark_phase_success,
                    state_get, state_add, state_remove, is_dry_run, SKIP_DIRS,
                    project_allowed, slug_collisions, COLLECT_PLANS,
                    manifest_broken, policy_summary, sub_outside_fences,
                    config_report, give_up_after_repeated_failure, masked,
+                   RETRY_LIMIT,
                    attempt_reset, DEFAULT_PROJECT as UTILS_DEFAULT_PROJECT,
                    BUNDLE_ROOT, CLAUDE_HOME, WIKI_ROOT, DAILY_DIR, PENDING_DIR, LOG_MD, PROJECTS_BASE)
 from untrusted import fence
@@ -123,42 +125,109 @@ def _read_text_safe(path: Path) -> str | None:
 def get_processed_sessions() -> set[str]:
     """Return the set of already-processed JSONL keys from .processed.json.
 
-    Keys are "project/name.jsonl@size" (current), "project/name.jsonl" or bare
-    "name.jsonl" (legacy / migrated). Callers go through is_processed().
+    Keys are "project/name.jsonl@offset" (current), "project/name.jsonl" or bare
+    "name.jsonl" (legacy / migrated). Callers go through resume_offset().
     """
     return state_get("flush", "processed_jsonls")
 
 
-def is_processed(processed: set[str], project: str, name: str, size: int) -> bool:
-    """True if this JSONL was already flushed AT ITS CURRENT SIZE.
+def resume_offset(processed: set[str], project: str, name: str, size: int,
+                  legacy_project: str = "") -> int | None:
+    """Byte offset to resume this JSONL from, or None when nothing is new.
 
-    A session file is appended to while the session is still open, so a key of
-    just project/name would skip every line written after the first flush — the
-    tail of a live session would never reach the wiki. Pinning the key to the
-    byte size makes a grown file look new again (the whole file is re-read; the
-    daily-log append and compile dedup absorb the overlap).
+    The number in the key is HOW FAR INTO THE FILE this phase has already read.
+    It used to be the file's SIZE, which looks identical for a finished session
+    and is wrong for an open one: a session that grew between nights simply
+    looked new, so the WHOLE transcript was re-read and re-sent — the same
+    conversation billed twice, digested twice, and appended to a second daily.
+    An offset makes the re-read a delta (see utils.parse_jsonl_delta).
 
-    Legacy size-less keys still count as processed, so upgrading the bundle
-    doesn't re-flush the entire archive at once.
+    Returns 0 for a file never seen (read it whole), None when the recorded
+    offset already covers it, and the offset otherwise. A file SHORTER than the
+    recorded offset was truncated or rotated, so the offset means nothing and it
+    is read whole — the same fallback parse_jsonl_delta makes.
+
+    This is also why the old `@size` keys need no migration: a size IS the
+    offset of a fully-read file, so an existing state skips exactly what it used
+    to skip and re-reads a grown file only from where it stopped.
+
+    `legacy_project` is the pre-normalization bucket name (see
+    find_recent_jsonls): without it, the first run after project names started
+    being normalized would re-send every session of a project whose name is not
+    already a slug.
     """
-    return (f"{project}/{name}@{size}" in processed
-            or f"{project}/{name}" in processed
-            or name in processed)
+    names = [project]
+    if legacy_project and legacy_project != project:
+        names.append(legacy_project)
+    if name in processed:  # legacy bare-name key: finished
+        return None
+    done = -1
+    for n in names:
+        if f"{n}/{name}" in processed:  # legacy size-less key: finished
+            return None
+        prefix = f"{n}/{name}@"
+        for key in processed:
+            if key.startswith(prefix):
+                tail = key[len(prefix):]
+                if tail.isdigit():
+                    done = max(done, int(tail))
+    if done < 0:
+        return 0
+    if done > size:
+        return 0      # truncated or replaced — the recorded offset is meaningless
+    if done == size:
+        return None   # nothing written since the last run
+    return done
 
 
-def processed_key(project: str, jf: Path, size: int | None = None) -> str:
-    """Build the state key for a flushed JSONL — see is_processed().
+def processed_key(project: str, jf: Path, offset: int | None = None) -> str:
+    """Build the state key for a flushed JSONL — see resume_offset().
 
-    `size` must be the size the file had WHEN IT WAS READ: a session that grows
-    during the run would otherwise get the new size marked while only the old
-    content was extracted, dropping the lines in between.
+    `offset` must be where the read actually STOPPED, not the file's size at
+    some later moment: a session that grows during the run would otherwise get
+    the new end marked while only the earlier content was extracted, dropping
+    the lines in between.
     """
-    if size is None:
+    if offset is None:
         try:
-            size = jf.stat().st_size
+            offset = jf.stat().st_size
         except OSError:
-            size = 0
-    return f"{project}/{jf.name}@{size}"
+            offset = 0
+    return f"{project}/{jf.name}@{offset}"
+
+
+def session_day(jf: Path, messages: list[dict]) -> str:
+    """The DAY this slice of a session was written — the daily log it belongs in.
+
+    Everything used to land in the daily of the day the RUN happened, so the
+    02:30 flush filed last night's evening session under this morning's date:
+    compile then stamped its incidents "the morning after", and a backlog sweep
+    piled a month of sessions into one daily. The timestamp in the transcript is
+    the material's own date and the only honest one, and the LAST message is
+    what dates the slice.
+
+    Falls back to the file's mtime, then to the run date. Clamped to today —
+    a clock-skewed timestamp must not mint a daily log in the future, which is
+    the same rule compile-sessions' _enforce_source_date applies.
+
+    Note the timestamps are UTC while `DATE` is local, so a session written
+    within a few hours of midnight can land in the neighbouring day's daily.
+    That is a cosmetic misfiling of one session; converting would need the
+    machine's offset at the time of writing, which the transcript does not
+    carry.
+    """
+    day = ""
+    for msg in reversed(messages):
+        stamp = msg.get("ts") or ""
+        if len(stamp) >= 10 and stamp[4] == "-" and stamp[7] == "-":
+            day = stamp[:10]
+            break
+    if not day:
+        try:
+            day = datetime.fromtimestamp(jf.stat().st_mtime).strftime("%Y-%m-%d")
+        except OSError:
+            day = DATE
+    return min(day, DATE)
 
 
 def get_seen_unprocessed() -> set[str]:
@@ -179,14 +248,28 @@ def get_seen_unprocessed() -> set[str]:
 
 
 def find_recent_jsonls(processed: set[str], max_age_hours: int = 48,
-                       seen_unprocessed: set[str] | None = None) -> dict[str, list[Path]]:
+                       seen_unprocessed: set[str] | None = None,
+                       start_offsets: dict[Path, int] | None = None) -> dict[str, list[Path]]:
     """Find fresh JSONL files, grouped by project.
 
     "Fresh" means within max_age_hours OR previously collected and still
     unprocessed — see get_seen_unprocessed().
+
+    `start_offsets` is filled with the byte offset each selected file must be
+    read from (see resume_offset); it is an out-parameter so the offset is
+    decided once, by the code that also has the pre-normalization project name
+    in hand.
+
+    The project name is NORMALIZED here. It was not, and the daily heading was
+    then written from the raw one: `## vLLM`, which compile-sessions re-slugged
+    to `vllm`, so the daily section and the project the state keys and the retry
+    counters spoke about were two different names. collect_pending and
+    _retarget_subproject_headers already normalized; this is the one path that
+    did not.
     """
     cutoff = time.time() - max_age_hours * 3600
     seen_unprocessed = seen_unprocessed or set()
+    offsets = start_offsets if start_offsets is not None else {}
     by_project: dict[str, list[Path]] = {}
 
     if not PROJECTS_BASE.exists():
@@ -195,7 +278,8 @@ def find_recent_jsonls(processed: set[str], max_age_hours: int = 48,
     for proj_dir in PROJECTS_BASE.iterdir():
         if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
             continue
-        project = dir_to_project(proj_dir.name)
+        raw_project = dir_to_project(proj_dir.name)
+        project = normalize_project_name(raw_project)
         if not project_allowed(project):
             continue
         for jsonl in proj_dir.glob("*.jsonl"):
@@ -203,20 +287,24 @@ def find_recent_jsonls(processed: set[str], max_age_hours: int = 48,
                 st = jsonl.stat()
             except OSError:
                 continue
-            if is_processed(processed, project, jsonl.name, st.st_size):
+            start = resume_offset(processed, project, jsonl.name, st.st_size,
+                                  legacy_project=raw_project)
+            if start is None:
                 continue
             if st.st_size < 10240:  # < 10KB — too short
                 continue
             unfinished = f"{project}/{jsonl.name}" in seen_unprocessed
             if st.st_mtime < cutoff and not unfinished:
                 continue
+            offsets[jsonl] = start
             by_project.setdefault(project, []).append(jsonl)
 
     return by_project
 
 
 def find_backlog_jsonls(processed: set[str], max_files: int = 20,
-                        exclude: set[Path] | None = None) -> dict[str, list[Path]]:
+                        exclude: set[Path] | None = None,
+                        start_offsets: dict[Path, int] | None = None) -> dict[str, list[Path]]:
     """Find unprocessed older JSONL files (backlog) — one slice per night.
 
     Each night we process the max_files freshest unprocessed entries.
@@ -228,6 +316,7 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20,
     by_project: dict[str, list[Path]] = {}
     all_candidates = []
     exclude = exclude or set()
+    offsets = start_offsets if start_offsets is not None else {}
 
     # WIKI_BACKLOG_MAX=0 (the shipped default) disables the sweep, and the slice
     # below would return nothing anyway — but only after stat()ing every JSONL
@@ -242,7 +331,8 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20,
     for proj_dir in PROJECTS_BASE.iterdir():
         if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
             continue
-        project = dir_to_project(proj_dir.name)
+        raw_project = dir_to_project(proj_dir.name)
+        project = normalize_project_name(raw_project)
         if not project_allowed(project):
             continue
         for jsonl in proj_dir.glob("*.jsonl"):
@@ -252,16 +342,19 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20,
                 st = jsonl.stat()
             except OSError:
                 continue
-            if is_processed(processed, project, jsonl.name, st.st_size):
+            start = resume_offset(processed, project, jsonl.name, st.st_size,
+                                  legacy_project=raw_project)
+            if start is None:
                 continue
             if st.st_size < 10240:
                 continue
-            all_candidates.append((st.st_mtime, project, jsonl))
+            all_candidates.append((st.st_mtime, project, jsonl, start))
 
     # Secondary key (filename) breaks mtime ties deterministically, so the same
     # files land in the nightly slice across runs instead of in glob() order.
     all_candidates.sort(key=lambda x: (-x[0], x[2].name))
-    for _, project, jsonl in all_candidates[:max_files]:
+    for _, project, jsonl, start in all_candidates[:max_files]:
+        offsets[jsonl] = start
         by_project.setdefault(project, []).append(jsonl)
 
     return by_project
@@ -440,6 +533,10 @@ def flush_project_data(project: str, data_chunks: list[str]) -> tuple[str | None
     """
     prompt = PROMPT_PATH.read_text(encoding="utf-8", errors="replace")
     parts = split_payload(data_chunks, MAX_PART_SIZE)
+    # masked() on each part below: WIKI_MASK_SECRETS is a promise about what
+    # LEAVES the machine, and it was applied only on the way to disk (pending
+    # drafts, wiki pages). The payload here is verbatim transcript text, so a key
+    # pasted into a chat reached the provider unredacted.
 
     all_results = []
     complete = True
@@ -452,7 +549,7 @@ def flush_project_data(project: str, data_chunks: list[str]) -> tuple[str | None
 
 ## Project data: {project}{part_label}
 
-{fence(f"kind=session-data project={project}", part)}
+{fence(f"kind=session-data project={project}", masked(part))}
 
 ---
 
@@ -551,7 +648,16 @@ def _retarget_subproject_headers(extracted: str, session_project: str) -> str:
         explicit = norm != DEFAULT_PROJECT or low == DEFAULT_PROJECT \
             or low.startswith(DEFAULT_PROJECT + " ") or low.startswith(DEFAULT_PROJECT + "-") \
             or low.startswith(DEFAULT_PROJECT + "(") or low.startswith(DEFAULT_PROJECT + "—")
-        if explicit and norm != session_project and (norm in KNOWN_PROJECTS or named_project):
+        # project_allowed(norm): promoting mints a real `## <project>` section,
+        # which compile-sessions turns into a wiki/projects/<norm>/ folder. The
+        # privacy gates all sit on the SOURCES, so a project the policy denies
+        # could still get a namespace of its own the moment another project's
+        # session happened to mention it. A denied name is demoted like any
+        # other heading — the facts stay anchored under the session that
+        # produced them and no folder is created for it.
+        if (explicit and norm != session_project
+                and (norm in KNOWN_PROJECTS or named_project)
+                and project_allowed(norm)):
             # `norm` and never the raw label: the daily's `## …` headings are the
             # compiler's project keys, so an un-normalized one here made flush and
             # compile-sessions disagree about which project a section belonged to.
@@ -562,6 +668,39 @@ def _retarget_subproject_headers(extracted: str, session_project: str) -> str:
     # markdown example the session was discussing — demoting it there silently
     # edits the user's own code sample into the daily log.
     return sub_outside_fences(_LLM_H2_RE, repl, extracted)
+
+
+def write_daily(day: str, lines: list[str], log) -> Path:
+    """Write (or append to) one day's daily log. Returns its path.
+
+    One run now produces SEVERAL of these — one per day the material was
+    written — so create-or-append is a function rather than a branch in main().
+
+    An append is the case that needs care: it adds sections to a daily whose
+    other sections may already be compiled. compile-sessions skips a whole daily
+    via `compiled_dailies`, so that marker has to go; it skips an individual
+    project via a pair marker fingerprinted over THAT PROJECT'S SECTION, which
+    an append to another project's section does not change — so the pair markers
+    are deliberately left alone. Clearing them (as this did while the pair marker
+    was fingerprinted over the whole file) re-sent every already-compiled section
+    of the day to the provider.
+    """
+    path = DAILY_DIR / f"{day}.md"
+    if path.exists():
+        existing = path.read_text(encoding="utf-8", errors="replace").rstrip()
+        new_sections = "\n".join(lines[2:]).strip()
+        atomic_write_text(path, existing + "\n\n" + new_sections + "\n")
+        log(f"Daily log: {path} (appended to existing)")
+        stale_dailies = [d for d in state_get("compile_sessions", "compiled_dailies")
+                         if d == day or d.startswith(f"{day}@")]
+        if stale_dailies:
+            state_remove("compile_sessions", "compiled_dailies", stale_dailies)
+            log(f"{day}.md was marked compiled — cleared {len(stale_dailies)} "
+                f"daily marker(s) so the appended sections are compiled too.")
+    else:
+        atomic_write_text(path, "\n".join(lines))
+        log(f"Daily log: {path}")
+    return path
 
 
 def main():
@@ -608,9 +747,14 @@ def main():
         + (f"; {len(seen_unprocessed)} collected-but-unfinished carried over"
            if seen_unprocessed else ""))
 
+    # Where each selected JSONL must be read from — filled by the collectors,
+    # consumed by the delta read below. 0 = a file never seen.
+    start_offsets: dict[Path, int] = {}
+
     # Source A: fresh JSONL (last 48h) plus anything collected before and never
     # finished — see get_seen_unprocessed().
-    jsonls = find_recent_jsonls(processed, seen_unprocessed=seen_unprocessed)
+    jsonls = find_recent_jsonls(processed, seen_unprocessed=seen_unprocessed,
+                                start_offsets=start_offsets)
     total_jsonls = sum(len(v) for v in jsonls.values())
     log(f"Source A (JSONL 48h + carried over): {total_jsonls} files across {len(jsonls)} projects")
 
@@ -618,7 +762,8 @@ def main():
     # (excluding files Source A already picked, to avoid double processing).
     # WIKI_BACKLOG_MAX=0 disables the historical sweep.
     already_picked = {p for files in jsonls.values() for p in files}
-    backlog = find_backlog_jsonls(processed, max_files=BACKLOG_MAX, exclude=already_picked)
+    backlog = find_backlog_jsonls(processed, max_files=BACKLOG_MAX, exclude=already_picked,
+                                  start_offsets=start_offsets)
     backlog_count = sum(len(v) for v in backlog.values())
     log(f"Source A+ (backlog): {backlog_count} files")
     for project, files in backlog.items():
@@ -636,38 +781,53 @@ def main():
     incidents = collect_incidents_sessions()
     log(f"Source E (incidents/sessions): {sum(len(v) for v in incidents.values())} files")
 
-    all_projects: dict[str, list[str]] = {}
+    # Material is bucketed by (DAY, project) — the day the material was WRITTEN,
+    # not the day this run happens — and one daily log is written per day. See
+    # session_day().
+    buckets: dict[tuple[str, str], list[str]] = {}
+    # Which bucket each JSONL fed, so a failed bucket keeps exactly its own
+    # sources unprocessed instead of its whole project's.
+    file_bucket: dict[Path, tuple[str, str]] = {}
 
-    # JSONL → parse messages (skip subagent and trivial sessions).
-    # Filtered-out files are marked processed right away — otherwise they keep
-    # occupying backlog-quota slots every night, starving the real backlog.
+    # JSONL → parse the messages added since the recorded offset (skip subagent
+    # and trivial sessions). Filtered-out files are marked processed right away
+    # — otherwise they keep occupying backlog-quota slots every night, starving
+    # the real backlog.
     filtered_out: list[tuple[str, Path]] = []
-    read_sizes: dict[Path, int] = {}
+    read_offsets: dict[Path, int] = {}
     for project, files in jsonls.items():
         kept: list[Path] = []
         for jf in files:
+            start = start_offsets.get(jf, 0)
             try:
-                read_sizes[jf] = jf.stat().st_size
+                size = jf.stat().st_size
             except OSError:
-                read_sizes[jf] = 0
+                size = 0
             if is_subagent_jsonl(str(jf)):
+                read_offsets[jf] = size
                 filtered_out.append((project, jf))
                 continue
-            messages = parse_jsonl_messages(str(jf), last_n=0)
+            messages, end = parse_jsonl_delta(str(jf), start)
+            read_offsets[jf] = end
             if not messages:
                 filtered_out.append((project, jf))
                 continue
-            user_count = sum(1 for m in messages if m["role"] == "user")
-            if user_count < 3:
+            # The "at least 3 user messages" floor judges a SESSION, so it is
+            # applied only to a first read. On a delta it would throw away every
+            # night's growth of a long-running session one or two messages at a
+            # time — and mark it processed while doing so.
+            if start == 0 and sum(1 for m in messages if m["role"] == "user") < 3:
                 filtered_out.append((project, jf))
                 continue
             text = "\n".join(f"**{m['role']}**: {m['text']}" for m in messages)
-            all_projects.setdefault(project, []).append(f"### JSONL: {jf.name}\n{text}")
+            day = session_day(jf, messages)
+            buckets.setdefault((day, project), []).append(f"### JSONL: {jf.name}\n{text}")
+            file_bucket[jf] = (day, project)
             kept.append(jf)
         jsonls[project] = kept  # filtered-out files must not be marked again below
 
     if filtered_out and not is_dry_run():
-        filtered_keys = [processed_key(project, jf, read_sizes.get(jf))
+        filtered_keys = [processed_key(project, jf, read_offsets.get(jf))
                          for project, jf in filtered_out]
         state_add("flush", "processed_jsonls", filtered_keys)
         with open(LOG_MD, "a", encoding="utf-8") as f:
@@ -716,25 +876,31 @@ def main():
             f"{', '.join(sorted(denied))} — "
             f"{'would be dropped (dry run)' if is_dry_run() else 'dropped unread'}")
 
+    # Sources B/C/E and the hook drafts carry no reliable session timestamp of
+    # their own (a draft is a tail, a feedback file is edited whenever), so they
+    # stay on the run's own date — the material they hold is what the last day
+    # or two produced.
     for project, texts in pending.items():
         if project in denied:
             continue
-        all_projects.setdefault(project, []).extend(texts)
+        buckets.setdefault((DATE, project), []).extend(texts)
 
     for project, texts in feedbacks.items():
-        all_projects.setdefault(project, []).extend(texts)
+        buckets.setdefault((DATE, project), []).extend(texts)
 
     # Plans have no project of their own — they bucket under DEFAULT_PROJECT, so
     # honor the policy for that bucket too (an allowlist excluding "main" drops
     # them). collect_plans (checked in collect_plans()) is the real gate: the
     # bucket is a placement decision, not an attribution.
     if plans and project_allowed(DEFAULT_PROJECT):
-        all_projects.setdefault(DEFAULT_PROJECT, []).extend(plans)
+        buckets.setdefault((DATE, DEFAULT_PROJECT), []).extend(plans)
 
     for project, texts in incidents.items():
-        all_projects.setdefault(project, []).extend(texts)
+        buckets.setdefault((DATE, project), []).extend(texts)
 
-    if not all_projects:
+    all_projects = {p for _day, p in buckets}
+
+    if not buckets:
         # A healthy night with no new sessions IS a successful run — without the
         # heartbeat here the monitor would report the phase as stale.
         log("Nothing to process. Exiting.")
@@ -752,15 +918,14 @@ def main():
         # A COST preview, not just a count. The whole point of the dry-run window
         # is reading what would leave the machine before it does, and "3 chunk(s)"
         # says nothing about the size of the payload or the bill.
-        log("DRY RUN — what WOULD be sent, per project (no LLM, no writes):")
+        log("DRY RUN — what WOULD be sent, per daily/project (no LLM, no writes):")
         grand_chars = grand_parts = 0
-        for project in sorted(all_projects):
-            chunks = all_projects[project]
+        for (day, project), chunks in sorted(buckets.items()):
             parts = split_payload(chunks, MAX_PART_SIZE)
             chars = sum(len(p) for p in parts)
             grand_chars += chars
             grand_parts += len(parts)
-            log(f"  {project}: {len(chunks)} chunk(s) → {len(parts)} LLM call(s), "
+            log(f"  {day} {project}: {len(chunks)} chunk(s) → {len(parts)} LLM call(s), "
                 f"{chars} chars (~{chars // 4} tokens)")
         log(f"  TOTAL: {grand_parts} LLM call(s), {grand_chars} chars "
             f"(~{grand_chars // 4} tokens)")
@@ -774,14 +939,16 @@ def main():
     if collected_keys:
         state_add("flush", "seen_unprocessed", collected_keys)
 
-    daily_path = DAILY_DIR / f"{DATE}.md"
-    daily_lines = [f"# {DATE}", ""]
-    failed_projects: set[str] = set()
+    # One list of daily lines per DAY — a backlog sweep or a late-evening session
+    # writes several dailies in one run.
+    daily_lines: dict[str, list[str]] = {}
+    failed_buckets: set[tuple[str, str]] = set()
+    ok_projects: set[str] = set()
     failure_kind: dict[str, str] = {}
     ok_sections = 0
 
-    for i, (project, chunks) in enumerate(sorted(all_projects.items())):
-        log(f"[{i+1}/{len(all_projects)}] Flush: {project} ({len(chunks)} chunks)")
+    for i, ((day, project), chunks) in enumerate(sorted(buckets.items())):
+        log(f"[{i+1}/{len(buckets)}] Flush: {project} → {day}.md ({len(chunks)} chunks)")
         extracted, complete, kind = flush_project_data(project, chunks)
         if extracted and complete:
             # The LLM may inject ##-headings inside the extracted text →
@@ -790,11 +957,12 @@ def main():
             # namespace; the rest are demoted to ### (stay anchored under the
             # session). Guards against namespace contamination.
             extracted = _retarget_subproject_headers(extracted, project)
-            daily_lines.append(f"## {project}")
-            daily_lines.append(extracted)
-            daily_lines.append("")
+            lines = daily_lines.setdefault(day, [f"# {day}", ""])
+            lines.append(f"## {project}")
+            lines.append(extracted)
+            lines.append("")
             ok_sections += 1
-            attempt_reset("flush", f"project:{project}")
+            ok_projects.add(project)
             log(f"  → OK")
         else:
             # Do NOT write a placeholder section to the daily log: its JSONLs
@@ -806,51 +974,26 @@ def main():
             # way: writing the surviving text while the sources are kept for a
             # retry would duplicate it in a later daily, and finalizing the
             # sources on a partial result would silently drop the failed parts.
-            failed_projects.add(project)
-            failure_kind[project] = kind
+            failed_buckets.add((day, project))
+            failure_kind[project] = worst_kind([failure_kind.get(project, ""), kind])
             log((f"  → ERROR ({kind})" if not extracted
                  else f"  → ERROR ({kind}, partial — some parts failed, whole project retried)"))
 
-        if i < len(all_projects) - 1:
+        if i < len(buckets) - 1:
             llm_pace()
 
+    failed_projects: set[str] = {p for _day, p in failed_buckets}
+    # The retry counter is per PROJECT (the ceiling asks "does this project's
+    # material fail the same way every night"), so it is reset only for a
+    # project that had no failing bucket at all.
+    for project in sorted(ok_projects - failed_projects):
+        attempt_reset("flush", f"project:{project}")
+
+    written_dailies: list[Path] = []
     if ok_sections == 0:
         log("No project extracted successfully — daily log not written.")
-    elif daily_path.exists():
-        # Second run the same day (manual retry after a partial failure):
-        # APPEND the new sections — overwriting would lose the first run's
-        # content, whose JSONLs are already marked processed.
-        existing = daily_path.read_text(encoding="utf-8", errors="replace").rstrip()
-        new_sections = "\n".join(daily_lines[2:]).strip()
-        atomic_write_text(daily_path, existing + "\n\n" + new_sections + "\n")
-        log(f"Daily log: {daily_path} (appended to existing)")
-        # A same-day append adds delta for projects that may already be compiled.
-        # compile-sessions skips a daily via compiled_dailies AND skips a project
-        # via its DATE#project pair marker — clearing must cover BOTH. Crucially the
-        # pair markers can exist even when the daily is NOT in compiled_dailies (a
-        # PARTIAL compile: project A succeeded and got pair-marked while sibling B
-        # failed, so the daily itself stays uncompiled). So clear this date's
-        # DATE# pair markers unconditionally on any append — otherwise A's appended
-        # delta is skipped forever — and drop DATE from compiled_dailies if present.
-        # Markers carry the fingerprint of the daily the compiler actually read
-        # (`DATE@fp`, `DATE#project@fp`), so an append already invalidates them
-        # on its own. Clearing here is still done for the legacy unhashed form
-        # and to keep the state file small.
-        stale_dailies = [d for d in state_get("compile_sessions", "compiled_dailies")
-                         if d == DATE or d.startswith(f"{DATE}@")]
-        if stale_dailies:
-            state_remove("compile_sessions", "compiled_dailies", stale_dailies)
-        stale_pairs = [p for p in state_get("compile_sessions", "compiled_pairs")
-                       if p.startswith(f"{DATE}#")]
-        if stale_pairs:
-            state_remove("compile_sessions", "compiled_pairs", stale_pairs)
-        if stale_dailies or stale_pairs:
-            log(f"{DATE}.md had prior compile state — cleared "
-                f"{len(stale_dailies)} daily and {len(stale_pairs)} pair marker(s) "
-                f"so compile-sessions reprocesses the appended sections.")
-    else:
-        atomic_write_text(daily_path, "\n".join(daily_lines))
-        log(f"Daily log: {daily_path}")
+    for day in sorted(daily_lines):
+        written_dailies.append(write_daily(day, daily_lines[day], log))
 
     # A project that fails the SAME way every night never leaves the queue: its
     # JSONLs stay unprocessed, are re-collected, and fail again. Usually the
@@ -871,9 +1014,13 @@ def main():
     for project in sorted(failed_projects):
         marker = f"project:{project}"
         kind = failure_kind.get(project, "transient")
+        payload = "\n\n---\n\n".join(
+            chunk for (day, proj), chunks in sorted(buckets.items())
+            if proj == project and (day, proj) in failed_buckets
+            for chunk in chunks)
         if give_up_after_repeated_failure(
                 section="flush", marker=marker, label=project, kind=kind,
-                payload="\n\n---\n\n".join(all_projects.get(project, [])),
+                payload=payload,
                 finding_title=f"flush gave up on project {project}",
                 finding_context="`cron/wiki/wiki-flush-sessions.py` (retry ceiling, WIKI_RETRY_LIMIT)",
                 finding_what=(f"Extraction for `{project}` failed the same, "
@@ -890,13 +1037,15 @@ def main():
         elif kind in ("transient", "config"):
             log(f"  [{project}] {kind} failure — not counted against "
                 f"WIKI_RETRY_LIMIT, sources kept for the next run")
+    failed_buckets -= {(day, p) for (day, p) in failed_buckets if p in gave_up}
     failed_projects -= gave_up
 
     # Pending files are deleted only now that the daily log is safely written,
     # and only for projects whose extraction succeeded — a transient LLM /
     # network failure must not permanently drop a project's session content.
+    # Drafts feed the run-date bucket, so that is the bucket that decides.
     for pf, project in pending_files:
-        if project in failed_projects:
+        if (DATE, project) in failed_buckets:
             continue
         try:
             pf.unlink()
@@ -904,27 +1053,33 @@ def main():
             pass
 
 
-    # JSONLs are recorded as processed only for projects that extracted OK, so a
-    # failed project's sessions are re-collected (not skipped) on the next run.
+    # JSONLs are recorded as processed only for buckets that extracted OK, so a
+    # failed one's sessions are re-collected (not skipped) on the next run. The
+    # bucket, not the project: a project can contribute to two dailies in one run
+    # and finalizing a succeeded day's sources because ANOTHER day failed would
+    # both re-send that day's text and duplicate it in a later daily.
+    #
+    # The offset recorded is where the read STOPPED (see processed_key), so the
+    # next run continues from there instead of re-reading the file.
     # State (.processed.json) is the source of truth for dedup; log.md is kept
     # as a human-readable journal only. Key by project/name (not bare name) so
     # identically-named JSONLs in different project dirs are tracked separately.
-    keys = [processed_key(project, jf, read_sizes.get(jf))
-            for project, files in jsonls.items() if project not in failed_projects
-            for jf in files]
+    done_files = [(project, jf) for jf, (day, project) in file_bucket.items()
+                  if (day, project) not in failed_buckets]
+    keys = [processed_key(project, jf, read_offsets.get(jf))
+            for project, jf in done_files]
     state_add("flush", "processed_jsonls", keys)
     # …and drop them from the carry-over set: they are finished, so they should
     # go back to being selected by age like any other file.
-    done_carry = [f"{project}/{jf.name}"
-                  for project, files in jsonls.items() if project not in failed_projects
-                  for jf in files]
+    done_carry = [f"{project}/{jf.name}" for project, jf in done_files]
     if done_carry:
         state_remove("flush", "seen_unprocessed", done_carry)
     with open(LOG_MD, "a", encoding="utf-8") as f:
         for key in keys:
             project = key.split("/", 1)[0]
             f.write(f"- [flush] processed: {key} (project: {project})\n")
-        f.write(f"- [flush] daily log: {DATE}.md ({len(all_projects)} projects)\n")
+        for path in written_dailies:
+            f.write(f"- [flush] daily log: {path.name}\n")
 
     if failed_projects:
         log(f"Kept pending/JSONLs for {len(failed_projects)} failed project(s): "
@@ -934,17 +1089,19 @@ def main():
     if activity:
         log(f"Source D (history): activity recorded for {len(activity)} projects")
 
-    log(f"=== Flush complete: {len(all_projects)} projects ===")
+    log(f"=== Flush complete: {len(all_projects)} projects, "
+        f"{len(written_dailies)} daily log(s) ===")
     # Terminal ledger record (cron/runs.py): useful_items = project sections
     # actually written to the daily, so a run that reached the LLM and produced
     # no section is recorded as empty-artifact rather than passing for healthy.
     record_run(
         task="ClaudeWikiFlush",
         process_rc=1 if failed_projects else 0,
-        artifact_path=daily_path if ok_sections else None,
+        artifact_path=written_dailies[0] if written_dailies else None,
         useful_items=ok_sections,
         delivery="n/a",
-        note=f"{len(all_projects)} project(s), {len(failed_projects)} failed",
+        note=f"{len(all_projects)} project(s), {len(written_dailies)} daily log(s), "
+             f"{len(failed_projects)} failed",
     )
     # The heartbeat means "the phase ran through", so a project that failed must
     # not leave a green status behind: the scheduler's exit code is the only

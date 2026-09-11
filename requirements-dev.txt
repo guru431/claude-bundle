@@ -17,3 +17,10 @@ PyYAML
 # developer machine. It used to require a system install nobody had, so the
 # lint gate was CI-only and every shell finding was discovered after the push.
 shellcheck-py>=0.9
+# psutil — `tests/test_test_sweep.py::test_timeout_kills_grandchildren` checks that
+# a suite timeout reaps the whole process TREE, not just the direct child: the
+# regression it guards left pytest's grandchildren alive holding the project's
+# files until the next day. It asks for psutil via `importorskip`, so an
+# unlisted dependency turned that check into a skip — and conftest, correctly,
+# fails such a skip on CI, because the check did NOT run.
+psutil

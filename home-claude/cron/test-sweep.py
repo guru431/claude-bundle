@@ -225,7 +225,14 @@ def rmtree_force(path: Path) -> None:
         os.chmod(target, stat.S_IWRITE)
         func(target)
 
-    shutil.rmtree(path, onexc=clear_readonly)
+    # `onexc` — только с 3.12, а бандл заявляет и проверяет 3.10 (матрица CI).
+    # На 3.10 вызов падал с TypeError, то есть вся эта защита от read-only
+    # артефактов там просто не работала. `onerror` в 3.12+ помечен deprecated,
+    # но сигнатура коллбэка у обоих одна, так что различается только имя.
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=clear_readonly)
+    else:
+        shutil.rmtree(path, onerror=clear_readonly)
 
 
 def basetemp_for(key: str) -> Path:

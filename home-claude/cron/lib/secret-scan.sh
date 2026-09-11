@@ -183,7 +183,8 @@ secret_scan_range() {
     mkdir -p "$_ssr_dir"
 
     # 1) Commit messages.
-    # shellcheck disable=SC2086 — $_ssr_range is a rev LIST and must word-split.
+    # $_ssr_range is a rev LIST and must word-split.
+    # shellcheck disable=SC2086
     _ssr_msgs=$(git log --format='%H%n%B%n' $_ssr_range 2>/dev/null \
         | grep -nE -e "$SECRET_SCAN_PATTERN" | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
     if [ -n "$_ssr_msgs" ]; then
@@ -192,7 +193,8 @@ secret_scan_range() {
     fi
 
     # 2) Blobs. `awk NF>1` keeps only objects that carry a path.
-    # shellcheck disable=SC2086 — same reason as above.
+    # Same reason as above.
+    # shellcheck disable=SC2086
     git rev-list --objects $_ssr_range 2>/dev/null | awk 'NF>1' > "$_ssr_dir/objects" || true
     awk '{print $1}' "$_ssr_dir/objects" \
         | git cat-file --batch-check='%(objectname) %(objecttype) %(objectsize)' 2>/dev/null \

@@ -152,7 +152,8 @@ if [ -n "$REMOTE_SSH_HOST" ]; then
     # running task as healthy.
     SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=15"
     SSH_OPTS="$SSH_OPTS -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
-    # shellcheck disable=SC2086 — SSH_OPTS is a list of flags and must split.
+    # SSH_OPTS is a list of flags and must split.
+    # shellcheck disable=SC2086
     REMOTE_DATA=$(ssh -T $SSH_OPTS "$REMOTE_SSH_HOST" bash -s <<'REMOTE_SCRIPT' 2>&1
 echo "=== Remote Linux host ==="
 echo "--- uptime ---"

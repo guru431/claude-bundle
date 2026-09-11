@@ -44,24 +44,30 @@ fi
 # silent truncation dropped exactly the tail — where the newest entries are.
 # Each part is numbered so a reader can tell a long message from a lost one.
 #
-# Reading is done with errors="replace": callers pipe LLM output through here,
+# Reading is done with errors="replace": callers hand LLM output to this script,
 # and `head -c` upstream cut a multi-byte character in half often enough that a
 # UnicodeDecodeError here — an empty body, HTTP 400, no alert — was the normal
 # outcome for a Cyrillic disk-space warning.
+#
+# The message goes to the splitter as a FILE, not on stdin. `python -` takes its
+# program from stdin, so the heredoc holding that program IS stdin: a
+# `printf "$MSG" |` pipe in front of it was silently overridden, the splitter
+# read an empty string, and every alert went out as an empty text — HTTP 400
+# from the Bot API, i.e. the whole alert channel dead (shellcheck SC2259).
 PARTS_DIR=$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/tg.$$")
 mkdir -p "$PARTS_DIR"
 trap 'rm -rf "$PARTS_DIR"' EXIT INT TERM
+printf '%s' "$MSG" > "$PARTS_DIR/message.txt"
 
-printf '%s' "$MSG" | PYTHONIOENCODING=utf-8 PARTS_DIR="$PARTS_DIR" \
+PYTHONIOENCODING=utf-8 PARTS_DIR="$PARTS_DIR" \
   TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID" "$PYTHON" - <<'PY'
-import json, os, sys
+import json, os
 
-if hasattr(sys.stdin, "reconfigure"):
-    sys.stdin.reconfigure(encoding="utf-8", errors="replace")
-text = sys.stdin.read().strip()
+out = os.environ["PARTS_DIR"]
+with open(os.path.join(out, "message.txt"), encoding="utf-8", errors="replace") as fh:
+    text = fh.read().strip()
 limit = 4000
 chunks = [text[i:i + limit] for i in range(0, len(text), limit)] or [""]
-out = os.environ["PARTS_DIR"]
 for n, chunk in enumerate(chunks, 1):
     if len(chunks) > 1:
         chunk = f"({n}/{len(chunks)})\n{chunk}"

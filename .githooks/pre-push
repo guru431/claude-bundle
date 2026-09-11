@@ -111,7 +111,8 @@ fi
 # is published exactly as written and `git log` shows it forever. .githooks/
 # commit-msg catches new ones, but this hook also publishes commits made before
 # the guard was enabled or with --no-verify.
-# shellcheck disable=SC2086 — both vars must word-split.
+# Both vars must word-split.
+# shellcheck disable=SC2086
 if [ -n "$excludes" ]; then
   msgs=$(git log --format='%H%n%B%n' $shas --not $excludes 2>/dev/null || true)
 else

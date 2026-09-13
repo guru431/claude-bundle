@@ -127,6 +127,7 @@ syncer and the POSIX unit generator would ignore it in silence.
 | `description` | no |
 | `enabled` | no |
 | `execute` | no |
+| `health_port` | no |
 | `hidden` | no |
 | `kind` | no |
 | `logon_type` | no |

@@ -29,6 +29,42 @@ quietly falls through to the next provider and somebody pays for it.
 - Regression test asserts the header is present, identical across calls, and
   absent for providers that declare none.
 
+### A dead provider chain had no voice
+
+When every provider in `DEFAULT_CHAIN` fails, each task logs its own bad night
+and carries on; nothing says "this machine has no LLM at all". Upstream that
+state lasted two full nights before anyone noticed.
+
+- `record_chain_dead()` writes the fact to `cron/state/chain-dead.json` —
+  deliberately WITHOUT alerting. A night is a dozen processes and a hundred
+  calls meeting the same shut door, so notifying from the library would mean a
+  hundred messages; worse, it would give the library an outbound channel of its
+  own, and every task calling it would have to widen its `bundle-io:` line. The
+  matrix in `docs/cron-architecture.md` exists so a reader can tell, per task,
+  what leaves the machine.
+- `claude-healthcheck.sh` — the daily job that already owns the Telegram
+  channel — reports it, alongside the existing dead-man switch, and only while
+  the failure is fresh (last one within a day), so a chain that recovered on its
+  own stops paging. The recorded start of the outage survives later failures:
+  what a reader needs is how long it has been down.
+
+### A crashed boot service read as healthy forever
+
+For a task triggered `AtStartup`/`AtLogOn` the scheduler's own answer carries no
+information: `LastRun` is the moment the machine booted and the result stays 0
+for as long as the task counts as "running". A daemon that started and then died
+therefore looked healthy indefinitely, and the monitor's freshness rules — there
+to stop it crying about old runs — buried it further.
+
+- New optional registry field `health_port`, validated by
+  `scripts/check-registry.py` and documented in the registry header. No
+  scheduler acts on it; the monitor probes loopback and reports a closed port as
+  a failure whatever the exit status says.
+- Tasks that do not declare it are never probed — an ordinary scheduled job has
+  a real exit status, and a probe would only invent failures.
+- The no-PyYAML fallback parser learned the field too. A check that is silently
+  absent on some machines is the failure mode the field exists to remove.
+
 ### "Nothing to compile" covered a lost night as well as an idle one
 
 `wiki-compile-sessions` exited 0 whenever there was no new daily log. There are

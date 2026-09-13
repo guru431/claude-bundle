@@ -94,3 +94,65 @@ def test_launchd_reports_only_the_bundles_own_failing_agents(monkeypatch):
 
     assert err is None
     assert [name for name, _ in found] == ["ClaudeOnPosix"]
+
+
+def test_a_declared_port_that_nobody_listens_on_is_a_failure():
+    """The one task shape where the scheduler's answer carries no information.
+
+    An AtStartup unit counts as "running" while its process exists and its last
+    exit status stays 0, so a daemon that crashed after boot reads as healthy
+    forever — and the monitor's own freshness rules, built to stop it crying
+    about old runs, bury it further. The port is the only honest question.
+    """
+    # Port 1 on loopback: privileged, nothing binds it in a test environment.
+    down = monitor.check_health_ports([
+        {"name": "ClaudeDaemon", "health_port": 1, "trigger": "AtStartup"}])
+    assert [n for n, _ in down] == ["ClaudeDaemon"]
+    assert "port 1" in down[0][1]
+
+
+def test_tasks_without_a_declared_port_are_not_probed():
+    """Silence where the field is absent, malformed or out of range.
+
+    A monitor that invents failures for ordinary scheduled tasks would be turned
+    off within a week.
+    """
+    assert monitor.check_health_ports([
+        {"name": "Plain", "trigger": "Daily 09:00"},
+        {"name": "Stringly", "health_port": "8765"},
+        {"name": "OutOfRange", "health_port": 70000},
+        {"name": "Zero", "health_port": 0},
+    ]) == []
+
+
+def test_a_listening_port_is_healthy():
+    import socket as _s
+    srv = _s.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    try:
+        port = srv.getsockname()[1]
+        assert monitor.check_health_ports(
+            [{"name": "ClaudeDaemon", "health_port": port}]) == []
+    finally:
+        srv.close()
+
+
+def test_the_fallback_registry_parser_also_sees_health_port(tmp_path, monkeypatch):
+    """No PyYAML must not mean no probe.
+
+    registry_tasks() falls back to a line parser on a box without PyYAML. A field
+    it does not know is silently dropped, and the probe would then never run
+    there — a check that is quietly absent is the failure mode this whole task
+    exists to remove.
+    """
+    reg = tmp_path / "registry.yaml"
+    reg.write_text("version: 1\ntasks:\n"
+                   "  - name: ClaudeDaemon\n"
+                   "    trigger: AtStartup\n"
+                   "    health_port: 8765\n", encoding="utf-8")
+    monkeypatch.setattr(monitor, "REGISTRY", reg)
+    monkeypatch.setitem(sys.modules, "yaml", None)   # force the fallback parser
+
+    tasks = monitor.registry_tasks()
+    assert tasks and tasks[0].get("health_port") == 8765

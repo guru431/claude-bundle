@@ -1970,6 +1970,58 @@ def mark_depleted(provider: str, reason: str) -> None:
         pass   # best-effort: the in-process set still works
 
 
+CHAIN_DEAD_PATH = BUNDLE_ROOT / "cron" / "state" / "chain-dead.json"
+
+
+def record_chain_dead(kinds: list[str]) -> None:
+    """Record that EVERY provider in the chain failed — a file, not an alert.
+
+    Deliberately silent here. A dead chain is not one event: a night is a dozen
+    processes and a hundred calls, every one of them meeting the same shut door,
+    so notifying from this library would mean a hundred messages. Worse, it would
+    give the library an outbound channel of its own, and every task that calls
+    it would have to widen its `bundle-io:` declaration accordingly — the matrix
+    in docs/cron-architecture.md exists so a reader can tell, per task, what
+    leaves the machine.
+
+    So the fact is written down and the one job that already owns the alert
+    channel — claude-healthcheck.sh, daily — reports it. Upstream this state went
+    unnoticed for two full nights: every task logged its own bad night, nothing
+    said "this machine has no LLM at all".
+
+    `first_iso` is kept across calls: what matters to a reader is how long the
+    chain has been down, not that it was down a second ago.
+    """
+    now = datetime.now()
+    try:
+        state = json.loads(CHAIN_DEAD_PATH.read_text(encoding="utf-8", errors="replace"))
+        if not isinstance(state, dict):
+            state = {}
+    except (OSError, ValueError):
+        state = {}
+    # A previous entry older than a day belongs to an outage that has since
+    # ended; start counting again rather than reporting a stale start date.
+    first = state.get("first_iso")
+    try:
+        stale = first and (now - datetime.fromisoformat(first)).total_seconds() > 86400
+    except (TypeError, ValueError):
+        stale = True
+    state = {
+        "first_iso": now.isoformat(timespec="seconds") if (not first or stale) else first,
+        "last_iso": now.isoformat(timespec="seconds"),
+        "fails": 1 if (not first or stale) else int(state.get("fails", 0)) + 1,
+        "kinds": sorted(set(kinds)),
+        "depleted": {p: r for p, r in sorted(_DEPLETED_PROVIDERS.items())},
+    }
+    try:
+        CHAIN_DEAD_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CHAIN_DEAD_PATH.with_name(f"{CHAIN_DEAD_PATH.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp.replace(CHAIN_DEAD_PATH)
+    except OSError:
+        pass       # best-effort: losing the note must never fail the caller
+
+
 def _is_depleted(provider: str) -> bool:
     """True if the provider is out of service (and count the skip)."""
     _load_depleted()
@@ -3484,6 +3536,7 @@ def _llm_call_unlocked(prompt: str, timeout: int = 600,
         previous = provider
     print(f"  {PROVIDERS[previous]['label']} also failed → returning None "
           "(claude fallback disabled)", file=sys.stderr)
+    record_chain_dead(kinds)
     return LLMResult(None, worst_kind(kinds), "whole chain failed")
 
 

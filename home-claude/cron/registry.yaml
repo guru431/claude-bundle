@@ -11,6 +11,18 @@
 #   Interactive — only sensible for AtLogOn triggers, where the logon event
 #   IS the trigger. Set explicitly via `logon_type: interactive`.
 #
+# ── health_port: for services, not for scheduled jobs ──────────────────────
+#   No scheduler acts on this field — the task monitors read it. For a task
+#   triggered AtStartup or AtLogOn the scheduler's own answer carries no
+#   information: LastRun is the moment the machine booted, and the result stays
+#   0 for as long as the task counts as "running". A service that started and
+#   then died therefore reads as healthy forever, and the monitor's freshness
+#   rules (there to stop it crying about old runs) bury it further.
+#
+#   Name the port such a service listens on and the monitor probes loopback
+#   instead of believing the scheduler. Leave it out for ordinary scheduled
+#   tasks: they have a real exit status, and a probe would only invent failures.
+#
 # ── Script path policy (CRITICAL for Password tasks) ───────────────────────
 #   For logon_type: password → ALWAYS use a UNC path (\\server\share\...)
 #   or a LOCAL drive (C:\...). NEVER use a mapped drive (S:\, M:\, etc.).

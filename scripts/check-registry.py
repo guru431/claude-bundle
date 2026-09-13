@@ -51,13 +51,21 @@ KNOWN_KEYS = {
     "kind", "trigger", "user", "logon_type", "runlevel", "hidden",
     "timeout_hours", "enabled", "platform", "repeat_every", "repeat_for",
     "startup_delay", "restart_count", "restart_interval",
+    # Not acted on by the syncers — read by the task monitors. For a task
+    # triggered AtStartup/AtLogOn the scheduler's own answer carries no
+    # information: LastRun is the moment the machine booted and LastResult stays
+    # 0 for as long as the task counts as "running", so a daemon that started
+    # and then died reads as healthy forever. `health_port` names the port such
+    # a service listens on, and the monitor probes it instead of believing the
+    # scheduler.
+    "health_port",
 }
 
 # Fields whose TYPE matters. A quoted "false" is truthy in PowerShell, and a
 # string where an int is expected reaches [int] casts that throw at sync time —
 # both used to pass this guard and fail on the machine instead.
 BOOLS = ("enabled", "hidden")
-INTS = ("timeout_hours", "restart_count")
+INTS = ("timeout_hours", "restart_count", "health_port")
 
 ENUMS = {
     "kind": KINDS,

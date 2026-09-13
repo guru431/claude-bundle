@@ -337,6 +337,45 @@ if age is not None and age * 24 > MAX_AGE_H:
           f"{MAX_AGE_H}h) — nothing is watching the other tasks")
 PYSCRIPT
 )
+
+# Second dead-man switch: the LLM chain itself.
+#
+# When every provider fails, each task logs its own bad night and carries on;
+# nothing says "this machine has no LLM at all". Upstream that state lasted two
+# full nights unnoticed. utils.record_chain_dead() writes the fact to
+# cron/state/chain-dead.json — deliberately without alerting, since a night is
+# a hundred calls meeting the same shut door — and this job, which already owns
+# the Telegram channel, is what reports it.
+#
+# Only while it is FRESH (last failure within a day): a chain that recovered on
+# its own must not keep paging, and the file is left in place as a record.
+CHAIN_ALERT=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$BUNDLE_ROOT" 2>>"$LOG_FILE" <<'PYSCRIPT'
+import json, sys
+from datetime import datetime
+from pathlib import Path
+
+path = Path(sys.argv[1]) / "cron" / "state" / "chain-dead.json"
+try:
+    st = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    last = datetime.fromisoformat(st["last_iso"])
+    first = datetime.fromisoformat(st.get("first_iso", st["last_iso"]))
+except Exception:
+    sys.exit(0)                      # no file / unreadable — nothing to report
+
+hours_since = (datetime.now() - last).total_seconds() / 3600
+if hours_since > 24:
+    sys.exit(0)                      # stale: the outage is over
+down_h = (last - first).total_seconds() / 3600
+why = ", ".join(f"{p}: {r}" for p, r in (st.get("depleted") or {}).items()) or "no provider answered"
+print(f"LLM chain is DOWN ({why}); {st.get('fails', '?')} failed call(s) over "
+      f"{down_h:.0f}h, last {hours_since:.0f}h ago — wiki flush/compile and "
+      f"memory-update are doing no work")
+PYSCRIPT
+)
+
+if [ -n "$CHAIN_ALERT" ]; then
+    echo "LLM chain: $CHAIN_ALERT" >> "$LOG_FILE"
+fi
 if [ -n "$MONITOR_ALERT" ]; then
     echo "Dead-man switch: $MONITOR_ALERT" >> "$LOG_FILE"
 fi
@@ -353,6 +392,10 @@ fi
 if [ -n "$MONITOR_ALERT" ]; then
     ALERTS="${ALERTS:+$ALERTS
 }$MONITOR_ALERT"
+fi
+if [ -n "$CHAIN_ALERT" ]; then
+    ALERTS="${ALERTS:+$ALERTS
+}$CHAIN_ALERT"
 fi
 
 DELIVERY="n/a"

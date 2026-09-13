@@ -736,6 +736,39 @@ def test_llm_call_latches_a_403(bundle: Path, monkeypatch):
         "the circuit breaker did not open on the second consecutive 403"
 
 
+def test_a_dead_chain_is_written_down_for_the_healthcheck(bundle: Path, monkeypatch):
+    """Every provider failing must leave a trace — silently, but a trace.
+
+    A dead chain is not one event: a night is a hundred calls meeting the same
+    shut door, so this library must not alert (and must not acquire an outbound
+    channel of its own — see record_chain_dead). It writes the fact; the daily
+    healthcheck, which already owns the Telegram channel, reports it. Without
+    that note each task logs its own bad night and nothing says the machine has
+    no LLM at all — upstream that lasted two nights.
+    """
+    u = _load_utils(bundle, "utils_chain_dead")
+    monkeypatch.setattr(u, "LLM_PROVIDER", u.PROVIDER_CHAIN_NAME)
+    monkeypatch.setattr(u, "OFFBOX_FALLBACK", True)
+    monkeypatch.setattr(u, "_llm_openai_compat",
+                        lambda *a, **kw: u.LLMResult(None, "transient", "stub"))
+
+    res = u._llm_call_unlocked("hi")
+    assert res.text is None
+
+    state = json.loads((bundle / "cron" / "state" / "chain-dead.json")
+                       .read_text(encoding="utf-8"))
+    assert state["fails"] == 1
+    assert state["first_iso"] and state["last_iso"]
+
+    # A second failure counts up but keeps the START of the outage: what a
+    # reader needs is how long it has been down, not that it failed a second ago.
+    first = state["first_iso"]
+    u._llm_call_unlocked("hi again")
+    state = json.loads((bundle / "cron" / "state" / "chain-dead.json")
+                       .read_text(encoding="utf-8"))
+    assert state["fails"] == 2 and state["first_iso"] == first
+
+
 def test_nothing_to_compile_is_a_failure_when_pending_is_not_empty(bundle: Path):
     """An idle night and a lost night must not report the same way.
 

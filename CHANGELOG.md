@@ -29,6 +29,38 @@ quietly falls through to the next provider and somebody pays for it.
 - Regression test asserts the header is present, identical across calls, and
   absent for providers that declare none.
 
+### A failed print destroyed the PDF it was refreshing
+
+`md2pdf` printed straight into the target file, so a browser that failed halfway
+left its wreckage where the document had been. Downstream on 2026-09-13: with an
+interactive Edge running, the headless print was intercepted and a 10-page trip
+itinerary became a one-page PDF reading `ERR_FILE_NOT_FOUND · Microsoft Edge`.
+The caller logged the error and carried on, so the broken file stayed in place as
+the current one — and the `.md` it was built from is no backup, because the whole
+point of the pair is the PDF someone carries offline.
+
+- The print now goes into a sibling temp DIRECTORY and `os.replace`s the target
+  only once the result is a plausible PDF (exists, over 1 KiB). Any failure
+  leaves the previous document exactly as it was; the error message says so.
+  A directory, not just a temp file: an Edge that hands the job to a running
+  instance returns 0 long before that instance writes, and the late file then
+  lands under a name nothing cleans up (a full 10-page PDF was found sitting in
+  a project root that way). Browsers do not create missing directories, so
+  removing this one closes the door on the straggler. Sibling rather than $TMP,
+  so the swap stays a rename inside one filesystem.
+- `browser_candidates()` replaces the single `find_browser()` at the print site:
+  every installed browser is tried in turn. "Installed" is not "will print" — on
+  the machine that hit this, Edge returns 0 and prints nothing whether or not the
+  private profile is used, while the Chrome beside it prints the same HTML. The
+  override still short-circuits to one candidate, and `find_browser()` remains as
+  the "which browser would run" answer `self-test.ps1` asks for.
+- The mtime guard is gone: it existed to catch "returned 0, printed nothing",
+  which is now the ordinary "the temp file never appeared" case.
+- `tests/test_md2pdf.py` drives the real logic with the browser stubbed, pinning
+  what matters: a failed print keeps the old bytes, a truncated one too, the
+  browser is never pointed at the target itself, and the second browser gets its
+  turn when the first prints nothing.
+
 ### A dead provider chain had no voice
 
 When every provider in `DEFAULT_CHAIN` fails, each task logs its own bad night

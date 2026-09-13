@@ -88,24 +88,38 @@ BROWSER_COMMANDS = [
 ]
 
 
-def find_browser() -> str:
-    # The override is resolved here, not at the call site, so anything asking
-    # "is a browser available" (scripts/self-test.ps1) gets the same answer the
-    # actual print will use.
+def browser_candidates() -> list[str]:
+    """Every installed browser, in the order they should be tried.
+
+    More than one, because "installed" is not "will print": an Edge that refuses
+    the private profile, or one that swallowed the job into a running instance,
+    returns 0 and prints nothing, while the Chrome next to it works. The override
+    is resolved here, not at the call site, so anything asking "is a browser
+    available" (scripts/self-test.ps1) gets the answer the actual print will use.
+    """
     override = os.environ.get("MD2PDF_BROWSER")
     if override:
-        return override
-    for p in BROWSER_PATHS:
-        if Path(p).is_file():
-            return p
-    for c in BROWSER_COMMANDS:
-        found = shutil.which(c)
-        if found:
-            return found
-    raise RuntimeError(
-        "no Chromium-family browser found (Edge/Chrome/Chromium) — install one "
-        "or set MD2PDF_BROWSER to its executable"
-    )
+        return [override]
+    found = [p for p in BROWSER_PATHS if Path(p).is_file()]
+    found += [w for w in (shutil.which(c) for c in BROWSER_COMMANDS) if w]
+    out: list[str] = []
+    seen: set[str] = set()
+    for f in found:  # the same browser is often both a known path and on PATH
+        key = str(Path(f)).casefold()
+        if key not in seen:
+            seen.add(key)
+            out.append(f)
+    if not out:
+        raise RuntimeError(
+            "no Chromium-family browser found (Edge/Chrome/Chromium) — install one "
+            "or set MD2PDF_BROWSER to its executable"
+        )
+    return out
+
+
+def find_browser() -> str:
+    """The browser a print would start with."""
+    return browser_candidates()[0]
 
 
 def md_to_html(md_path: Path) -> str:
@@ -173,20 +187,17 @@ def md_to_html(md_path: Path) -> str:
     )
 
 
-def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
-    browser = find_browser()
-    # absolute: otherwise headless Chrome/Edge writes the PDF relative to ITS
-    # own cwd (access denied / file not where you looked) and still returns 0
-    pdf_path = pdf_path.resolve()
-    before_mtime = pdf_path.stat().st_mtime if pdf_path.is_file() else None
-    # Path.as_uri(), not a hand-built "file:///" + path. On POSIX the manual
-    # form produced `file:////home/...` (four slashes) because the path already
-    # begins with one, and it never percent-encoded a space or a `#`.
-    url = html_path.resolve().as_uri()
+# A print that produced fewer bytes than this produced nothing usable: a real
+# one-page PDF of text runs to several kilobytes before its font subset counts.
+MIN_PDF_BYTES = 1024
+
+
+def _print_once(browser: str, url: str, target: Path) -> None:
+    """One browser, one attempt. Raises unless `target` ends up a printed PDF."""
     # A PRIVATE profile directory. Without it headless attaches to an already
-    # running Edge/Chrome, which returns 0 and prints nothing — the failure the
-    # mtime guard below had to be invented to catch. With it there is nothing to
-    # attach to.
+    # running Edge/Chrome, which then prints from a context where the temp HTML
+    # is not visible — that is how a trip itinerary turned into a PDF reading
+    # "ERR_FILE_NOT_FOUND". With it there is nothing to attach to.
     profile_dir = tempfile.mkdtemp(prefix="md2pdf-profile-")
     cmd = [
         browser,
@@ -198,7 +209,7 @@ def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
         "--no-pdf-header-footer",
         "--export-tagged-pdf",
         "--generate-pdf-document-outline",
-        f"--print-to-pdf={pdf_path}",
+        f"--print-to-pdf={target}",
         url,
     ]
     try:
@@ -206,16 +217,57 @@ def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
     finally:
         shutil.rmtree(profile_dir, ignore_errors=True)
     stderr = result.stderr.decode(errors="replace")[:500]
-    if result.returncode != 0 or not pdf_path.is_file():
-        raise RuntimeError(f"browser failed (rc={result.returncode}): {stderr}")
-    # guard: headless returns 0 even when the print never happened (e.g. it
-    # attached to an already-running Edge instance) — catch it by the unchanged
-    # mtime rather than reporting a stale PDF as freshly generated
-    if before_mtime is not None and pdf_path.stat().st_mtime == before_mtime:
-        raise RuntimeError(
-            "PDF not updated (mtime unchanged) — a running Edge/Chrome probably "
-            f"intercepted the headless print. Close the browser and retry. stderr: {stderr}"
-        )
+    name = Path(browser).name
+    if result.returncode != 0:
+        raise RuntimeError(f"{name}: rc={result.returncode} {stderr}".strip())
+    # headless returns 0 even when the print never happened
+    if not target.is_file():
+        raise RuntimeError(f"{name}: returned 0 but printed nothing {stderr}".strip())
+    size = target.stat().st_size
+    if size < MIN_PDF_BYTES:
+        raise RuntimeError(f"{name}: printed only {size} bytes {stderr}".strip())
+
+
+def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
+    # absolute: otherwise headless Chrome/Edge writes the PDF relative to ITS
+    # own cwd (access denied / file not where you looked) and still returns 0
+    pdf_path = pdf_path.resolve()
+    # Path.as_uri(), not a hand-built "file:///" + path. On POSIX the manual
+    # form produced `file:////home/...` (four slashes) because the path already
+    # begins with one, and it never percent-encoded a space or a `#`.
+    url = html_path.resolve().as_uri()
+    # Print into a sibling temp DIRECTORY, swap the result in only once it IS a
+    # PDF. Printing straight into the target made every failure destructive: the
+    # document being refreshed was gone, replaced by whatever the browser wrote
+    # (2026-09-13: a 10-page itinerary became a one-page browser error page, and
+    # the caller logged the error and carried on with the wreckage in place).
+    # A directory rather than a temp file, because an Edge that hands the job to
+    # a running instance returns 0 long before that instance writes: the late
+    # file then lands under a name nothing will ever clean up. Browsers do not
+    # create missing directories, so removing this one closes that door. Sibling,
+    # not $TMP, so the swap below is a rename within one filesystem.
+    tmp_dir = Path(tempfile.mkdtemp(dir=pdf_path.parent, prefix=".md2pdf-"))
+    tmp = tmp_dir / "out.pdf"
+    failures: list[str] = []
+    try:
+        # Every installed browser, not just the first: "installed" is not "will
+        # print" — an Edge that refuses the private profile returns 0 in silence
+        # while the Chrome beside it prints the same HTML.
+        for browser in browser_candidates():
+            try:
+                _print_once(browser, url, tmp)
+            except RuntimeError as e:
+                failures.append(str(e))
+                tmp.unlink(missing_ok=True)
+                continue
+            os.replace(tmp, pdf_path)
+            return
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    raise RuntimeError(
+        "no browser printed the PDF; the previous file is untouched — "
+        + "; ".join(failures)
+    )
 
 
 def convert(md_path: Path, pdf_path: Path) -> None:

@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -1636,6 +1637,10 @@ _CONFIG_NOTES.append(("PROJECTS_ROOT", str(PROJECTS_ROOT or "not set"),
 # `key_env` is a list: the first non-empty env var wins (supports aliases, e.g.
 # OPENCODE_GO_API_KEY / OPENCODE_GO_KEY).
 #
+# `session_header`, when present, names a header the gateway requires to carry a
+# conversation id. See _SESSION_ID below for why one per process is the right
+# grain.
+#
 # `max_input_chars` is the payload ceiling for THIS provider, applied by
 # _llm_openai_compat before the request goes out. An oversized prompt is a
 # DETERMINISTIC failure — the provider rejects it with 400 (or a content filter
@@ -1674,6 +1679,11 @@ PROVIDERS: dict[str, dict] = {
         "retry_sleep": 30,
         "max_input_chars": 480000,  # gateway model carries 128k
         "offbox": True,
+        # Required since 2026-09-12. Without it the gateway answers HTTP 400
+        # MissingSessionID ("Request is missing x-opencode-session and cannot be
+        # routed efficiently") to EVERY call, so the provider is dead regardless
+        # of key or quota. https://opencode.ai/docs/go/#where-can-i-use-it
+        "session_header": "x-opencode-session",
     },
     "deepinfra": {  # last fallback: DeepInfra, OpenAI-compatible, pay-as-you-go
         "label": "DeepInfra",
@@ -1709,6 +1719,18 @@ PROVIDERS: dict[str, dict] = {
     # "claude" has no entry: it shells out to the `claude` CLI (manual/opt-in
     # mode only) and needs no key/url/model here.
 }
+
+# One conversation id per PROCESS, for providers that declare `session_header`.
+#
+# The grain is deliberate. A nightly script's run IS the conversation: it makes
+# dozens of calls that share a system prefix, and a gateway that is handed a
+# stable id can cache that prefix across them. One id per CALL would throw that
+# away; one id for all time would lump unrelated runs together.
+#
+# The script name is left readable on purpose — it shows where a request came
+# from when reading gateway-side logs, and it is not a secret. The random tail
+# keeps two concurrent runs of the same script apart.
+_SESSION_ID = f"bundle-{Path(sys.argv[0]).stem or 'llm'}-{uuid.uuid4().hex[:12]}"
 
 # Fallback order used when WIKI_LLM_PROVIDER is left at the default. Data, not
 # code: adding a gateway is a row in PROVIDERS plus a name here. Any OTHER
@@ -3532,6 +3554,8 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    if cfg.get("session_header"):
+        headers[cfg["session_header"]] = _SESSION_ID
     # Cut an oversized prompt HERE rather than letting the provider reject it.
     # A 400 on a too-large body is deterministic: the retry loop below cannot
     # help, the caller counts it against WIKI_RETRY_LIMIT, and after three

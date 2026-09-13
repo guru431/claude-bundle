@@ -58,6 +58,7 @@ from utils import (  # noqa: E402
     BUNDLE_ROOT,
     WIKI_ROOT,
     DAILY_DIR,
+    PENDING_DIR,
     LOG_MD,
 )
 from untrusted import fence  # noqa: E402
@@ -719,6 +720,21 @@ def main():
     log(f"New daily logs: {len(dailies)}")
 
     if not dailies:
+        # "Nothing to compile" has two shapes and they used to look identical.
+        # The honest one: flush ran, there is simply no new daily. The false one:
+        # flush FAILED (no provider, an exception) and built no daily at all,
+        # while the raw material still sits in .pending — there is nothing to
+        # compile precisely because the night was lost. Reporting rc=0 for that
+        # tells every health check the pipeline is fine while it is stalled.
+        stuck = len(list(PENDING_DIR.glob("*.md"))) if PENDING_DIR.is_dir() else 0
+        if stuck:
+            note = (f"flush produced no daily: {stuck} file(s) still in .pending "
+                    f"(raw material is there, nothing to compile)")
+            log(f"FAILED: {note}")
+            record_run(task="ClaudeWikiCompileSessions", process_rc=1,
+                       useful_items=0, delivery="n/a", note=note)
+            sys.exit(1)
+
         log("Nothing to compile. Exiting.")
         # Terminal ledger record for the idle run too (see cron/runs.py): the
         # contract is one record per run, and this branch used to return before

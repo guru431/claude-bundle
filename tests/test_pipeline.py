@@ -736,6 +736,79 @@ def test_llm_call_latches_a_403(bundle: Path, monkeypatch):
         "the circuit breaker did not open on the second consecutive 403"
 
 
+def test_nothing_to_compile_is_a_failure_when_pending_is_not_empty(bundle: Path):
+    """An idle night and a lost night must not report the same way.
+
+    "No uncompiled dailies" is healthy when flush ran and found nothing. It is a
+    FAILURE when flush died (no provider, an exception) and wrote no daily while
+    the raw material still sits in .pending: there is nothing to compile because
+    the night was lost. Both used to exit 0, so a stalled pipeline read as green
+    to every health check watching the return code.
+    """
+    wiki = bundle / "wiki"
+    (wiki / "daily" / "2026-01-01.md").unlink()      # no daily for either case
+
+    # Case 1: nothing pending either — an honest idle run.
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py", {}, cwd=bundle)
+    assert r.returncode == 0, f"an idle run must stay green:\n{r.stdout}\n{r.stderr}"
+
+    # Case 2: raw material stuck in .pending — flush never turned it into a daily.
+    pending = wiki / "daily" / ".pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    (pending / "session-abc.md").write_text("## myproject\nraw notes\n",
+                                            encoding="utf-8")
+
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py", {}, cwd=bundle)
+    assert r.returncode != 0, \
+        f"a lost night reported green:\n{r.stdout}\n{r.stderr}"
+    assert ".pending" in r.stdout, \
+        f"the reason must name .pending, or nobody can act on it:\n{r.stdout}"
+
+
+def test_provider_sends_its_required_session_header(bundle: Path, monkeypatch):
+    """A gateway that demands a conversation id must actually be handed one.
+
+    OpenCode Go started requiring `x-opencode-session` on 2026-09-12 and answers
+    HTTP 400 MissingSessionID without it — to every call, whatever the key or
+    the quota says. A provider dead for that reason looks exactly like a provider
+    dead for any other, so the header is declared in the PROVIDERS table and
+    asserted here rather than trusted to stay in place.
+
+    The id is per PROCESS, not per call: a run's calls share a system prefix the
+    gateway can cache only if the id is stable across them.
+    """
+    u = _load_utils(bundle, "utils_session_header")
+    monkeypatch.setenv("OPENCODE_GO_KEY", "unit-test-placeholder")
+    seen = []
+
+    class Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def fake_post(*a, **kw):
+        seen.append(kw.get("headers", {}))
+        return Resp()
+
+    fake_requests = types.ModuleType("requests")
+    fake_requests.post = fake_post
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    assert u._llm_openai_compat("opencode", "hi").text == "ok"
+    assert u._llm_openai_compat("opencode", "hi again").text == "ok"
+
+    header = u.PROVIDERS["opencode"]["session_header"]
+    assert all(header in h for h in seen), \
+        f"{header} missing — the gateway answers 400 MissingSessionID to every call"
+    assert seen[0][header] == seen[1][header], \
+        "a fresh id per call throws away the prompt caching the header exists for"
+
+    # A provider that declares no such header must not grow one.
+    assert "session_header" not in u.PROVIDERS["deepseek"]
+
+
 def test_gen_scheduler_escapes_and_passes_script_args(tmp_path: Path):
     """An install path with a space or '&' must not corrupt the emitted units,
     and registry `script_args` must reach the command line: the launchd plist

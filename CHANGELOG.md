@@ -3,6 +3,47 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
+## [Unreleased] — two silent failures carried back from the meta-repo
+
+Both were found upstream and neither could be seen from inside this repo: one is
+a gateway contract that changed after 0.17.0 shipped, the other only shows up on
+a machine where the pipeline has been running unattended for a while.
+
+### OpenCode Go rejects every call without a session header
+
+Since 2026-09-12 the gateway answers `HTTP 400 MissingSessionID` ("Request is
+missing x-opencode-session and cannot be routed efficiently") to any request that
+does not carry a conversation id. That is the whole provider dead — key, quota
+and model are irrelevant — and it reads like an ordinary outage, so the chain
+quietly falls through to the next provider and somebody pays for it.
+
+- `PROVIDERS` grew an optional `session_header` field, declared for `opencode`.
+  It is data like the rest of the table, so a future gateway with the same
+  requirement is one line, not a code path.
+- The id is generated once per PROCESS (`_SESSION_ID`). That grain is the point:
+  a nightly script's run *is* a conversation — dozens of calls sharing a system
+  prefix the gateway can cache only if the id stays stable across them. A fresh
+  id per call throws the caching away; a constant one would lump unrelated runs
+  together. The script name is left readable in the id (useful in gateway-side
+  logs, not a secret) with a random tail so two concurrent runs stay distinct.
+- Regression test asserts the header is present, identical across calls, and
+  absent for providers that declare none.
+
+### "Nothing to compile" covered a lost night as well as an idle one
+
+`wiki-compile-sessions` exited 0 whenever there was no new daily log. There are
+two ways to get there and they are opposites: flush ran and found nothing (fine),
+or flush FAILED and wrote no daily while the raw material still sits in
+`.pending` — nothing to compile *because the night was lost*. Upstream stood two
+days without an LLM provider while this task reported `rc=0` both nights and
+every health check watching the return code called the pipeline healthy.
+
+- The branch now counts `.pending/*.md` first. Non-empty means failure: it logs
+  the count, records the run with `process_rc=1` and exits non-zero. An idle run
+  with an empty `.pending` stays green exactly as before.
+- Regression test covers both shapes, and asserts the message names `.pending` —
+  a failure nobody can act on is barely better than a silent one.
+
 ## [0.17.0] - 2026-09-11
 
 Clears FINDINGS.md and IDEAS.md again: the 0.16.0 release closed most of that

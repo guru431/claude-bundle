@@ -925,6 +925,25 @@ if ($DryRun) {
 }
 
 # ── 5c. Install manifest (full; written last so it covers steps 4–5b too) ────
+# A BOOTSTRAPPED registry is the user's file, not ours: it carries the install
+# path, the account and the password mode they chose, so once its placeholders
+# are gone it is `preserved`, never `written`. That used to be decided in step 6
+# — AFTER the manifest below was already on disk. A first install therefore
+# recorded the bootstrapped registry as `written`, with its post-bootstrap hash
+# matching the file, and uninstall.ps1 deleted it: the opposite of what its
+# header promises. Only a re-install got it right, via the copy step's restore.
+$regDeployed = Join-Path $PipelineRoot 'cron/registry.yaml'
+if ((Test-Path $regDeployed) -and
+    -not (Select-String -Path $regDeployed -Pattern '<(bundle-install-path|user)>' -Quiet)) {
+    $keep = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $script:written) {
+        if ("$($e.path)" -notlike '*registry.yaml') { $keep.Add($e) }
+    }
+    $script:written = $keep
+    if (-not ($script:preserved -contains 'cron/registry.yaml')) {
+        $script:preserved.Add('cron/registry.yaml')
+    }
+}
 Write-Manifest 'full'
 
 # ── 6. Open items (full; read-only summary of what still needs attention) ────
@@ -946,27 +965,11 @@ if (Test-Path $manifest) {
 } else {
     Warn "bundle.local.yaml not created — project map + privacy policy fall back to defaults (all projects, auto-slugs)"
 }
-$regDeployed = Join-Path $PipelineRoot 'cron/registry.yaml'
 if (Test-Path $regDeployed) {
     $rtxt = Get-Content $regDeployed -Raw
     if ($rtxt -match '<(bundle-install-path|user)>') { Warn "registry.yaml still has <...> placeholders — run bootstrap-registry.ps1" }
     $taskCount = ([regex]::Matches($rtxt, '(?m)^\s+-\s+name:')).Count
     Info "registry.yaml task count: $taskCount"
-    # A BOOTSTRAPPED registry is the user's file, not ours: it carries the
-    # install path, the account and the password mode they chose. The manifest
-    # listed it as `written`, so the uninstaller deleted it — and the header of
-    # uninstall.ps1 promises the opposite. Once the placeholders are gone it is
-    # preserved.
-    if ($rtxt -notmatch '<(bundle-install-path|user)>') {
-        $keep = New-Object System.Collections.Generic.List[object]
-        foreach ($e in $script:written) {
-            if ("$($e.path)" -notlike '*registry.yaml') { $keep.Add($e) }
-        }
-        $script:written = $keep
-        if (-not ($script:preserved -contains 'cron/registry.yaml')) {
-            $script:preserved.Add('cron/registry.yaml')
-        }
-    }
 }
 if ($customPath) {
     Warn "ClaudeHome is not $defaultHome — Claude Code reads CLAUDE.md / settings.json from $ClaudeHome only if CLAUDE_CONFIG_DIR is exported to it (the cron/wiki files do run from where they were placed)"

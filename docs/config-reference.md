@@ -55,6 +55,7 @@ installer generates the first from the second.
 | `LOCAL_LLM_KEY` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `LOCAL_LLM_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `MD2PDF_BROWSER` | optional (commented) | `home-claude/bin/md2pdf.py` |
+| `MD2PDF_TIMEOUT` | optional (commented) | `home-claude/hooks/md2pdf-on-edit.py` |
 | `MEMORY_CROSS_NOTES` | optional (commented) | `home-claude/cron/memory-update.py` |
 | `MINIMAX_API_KEY` | declared | — |
 | `MONITOR_EXCLUDE_TASKS` | optional (commented) | — |
@@ -92,7 +93,7 @@ installer generates the first from the second.
 | `WIKI_RETRY_LIMIT` | optional (commented) | — |
 | `WIN_REMOTE_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 
-_70 variables._
+_71 variables._
 
 ## `bundle.local.yaml` keys
 

@@ -41,7 +41,7 @@
           {
             "type": "command",
             "command": "\"<python-exe>\" \"<claude-home>/hooks/md2pdf-on-edit.py\"",
-            "timeout": 130
+            "timeout": 180
           },
           {
             "type": "command",

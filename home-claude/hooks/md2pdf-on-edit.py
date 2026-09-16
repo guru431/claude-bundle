@@ -8,8 +8,9 @@ Triggers on Write|Edit|MultiEdit. Rule:
 
 This enforces a global rule: "if a PDF lives next to an MD, that PDF must
 follow MD edits without the user having to remember." Failure to regenerate
-is reported back to the model via systemMessage (visible in the UI) so the
-issue is not silently swallowed.
+is reported twice so the issue is not silently swallowed: systemMessage is
+shown to the user, additionalContext reaches the model (systemMessage alone
+never did — the model went on believing the PDF was current).
 
 Requires bin/md2pdf.py (a small wrapper around any MD->PDF converter —
 pandoc, weasyprint, mdpdf, etc.). If you don't use the md+pdf pairing
@@ -51,16 +52,43 @@ def _find_md2pdf() -> Path:
 
 MD2PDF = _find_md2pdf()
 
+# The converter's own TOTAL budget across every browser it tries. Keep the
+# default in step with bin/md2pdf.py, which reads the same variable.
+DEFAULT_MD2PDF_TIMEOUT = 120
+# Head start for the converter's own cleanup, on top of that budget.
+CLEANUP_MARGIN = 30
+
+
+def converter_timeout() -> int:
+    """How long to let bin/md2pdf.py run: MD2PDF_TIMEOUT plus a margin.
+
+    md2pdf.py removes its temp directory in a `finally`. This hook used to kill it
+    at a flat 120 seconds — exactly what a hung browser reaches — so the kill came
+    before the `finally`, and a `.md2pdf-XXXX/` directory was left behind in the
+    project. With the margin the converter gives up on its own budget first and
+    cleans up. If you raise MD2PDF_TIMEOUT, raise this hook's `timeout` in
+    settings.json above the sum too, or Claude Code kills the hook itself first.
+    """
+    try:
+        budget = int(os.environ.get("MD2PDF_TIMEOUT") or DEFAULT_MD2PDF_TIMEOUT)
+    except ValueError:
+        budget = DEFAULT_MD2PDF_TIMEOUT
+    if budget <= 0:
+        budget = DEFAULT_MD2PDF_TIMEOUT
+    return budget + CLEANUP_MARGIN
+
 
 def emit(msg: str | None = None, suppress: bool = True) -> None:
     """Print hook JSON output and exit 0.
 
-    suppress=True hides the raw stdout from the transcript; systemMessage
-    still surfaces in the UI when provided.
+    systemMessage is shown to the user; the same text goes to the model as
+    additionalContext, because systemMessage never reaches it.
     """
     out: dict = {"suppressOutput": suppress}
     if msg:
         out["systemMessage"] = msg
+        out["hookSpecificOutput"] = {"hookEventName": "PostToolUse",
+                                     "additionalContext": msg}
     print(json.dumps(out))
     sys.exit(0)
 
@@ -107,7 +135,7 @@ def main() -> None:
         result = subprocess.run(
             [PYTHON, str(MD2PDF), "--pair", str(md_path)],
             capture_output=True,
-            timeout=120,
+            timeout=converter_timeout(),
             text=True,
         )
     except subprocess.TimeoutExpired:

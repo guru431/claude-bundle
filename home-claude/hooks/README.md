@@ -93,7 +93,17 @@ below), the hook skips the file and says so via `systemMessage`
 the PDF, but it doesn't fail silently either.
 
 Timeouts and converter failures are surfaced the same way, so a stale PDF
-doesn't slip through unnoticed.
+doesn't slip through unnoticed — to you as `systemMessage`, and to the model as
+`additionalContext`, which is the only one of the two it reads.
+
+The converter gets `MD2PDF_TIMEOUT` seconds in total (default 120, across every
+browser it tries) and the hook waits 30 seconds longer than that, so a hung
+browser is abandoned by the converter itself, which then removes its temp
+directory. The hook used to kill it at 120 seconds flat, before that cleanup ran,
+leaving a `.md2pdf-XXXX/` directory in the project. The example gives the hook a
+`timeout` of 180; if you raise `MD2PDF_TIMEOUT` (export it for the Claude Code
+client — this hook does not load `.env`), keep that `timeout` above
+`MD2PDF_TIMEOUT` + 30, or Claude Code kills the hook first.
 
 ## bash-guard.py
 

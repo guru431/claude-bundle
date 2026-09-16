@@ -14,6 +14,8 @@ would otherwise launch Edge.
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -27,11 +29,15 @@ NEW_PDF = b"%PDF-1.7\n% freshly printed document\n" + b"y" * 4096
 
 
 @pytest.fixture()
-def md2pdf():
+def md2pdf(tmp_path_factory, monkeypatch):
     spec = importlib.util.spec_from_file_location("md2pdf_under_test", MD2PDF)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    # Browser profiles — and the sweep of stale ones — go to a temp dir of the
+    # test's own, never the machine's.
+    systemp = str(tmp_path_factory.mktemp("systemp"))
+    monkeypatch.setattr(module.tempfile, "gettempdir", lambda: systemp)
     yield module
     sys.modules.pop(spec.name, None)
 
@@ -207,3 +213,104 @@ def test_first_print_creates_a_missing_target(md2pdf, tmp_path, monkeypatch):
 def test_browser_candidates_honours_the_override(md2pdf, monkeypatch):
     monkeypatch.setenv("MD2PDF_BROWSER", "/opt/my-browser")
     assert md2pdf.browser_candidates() == ["/opt/my-browser"]
+
+
+# ── one time budget for the whole run ───────────────────────────────────────
+#
+# The limit was 120 s PER BROWSER, while md2pdf-on-edit killed this process at
+# 120 s and md2pdf-sync at 180 s. With the first of two browsers hanging, the
+# caller killed md2pdf.py before its `finally`: `.md2pdf-*` stayed inside the
+# project (and the nightly `git add --all` took it), the profile stayed in the
+# temp dir, and the browser kept running.
+
+class FakeClock:
+    """time.monotonic() for browsers that take exactly as long as they are allowed."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _hang(clock: FakeClock):
+    def run(cmd, timeout=None, **kwargs):
+        clock.now += timeout
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    return run
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("", 120), ("45", 45), (" 60 ", 60), ("10m", 120), ("0", 120), ("-5", 120)])
+def test_the_budget_comes_from_md2pdf_timeout(md2pdf, monkeypatch, raw, expected):
+    monkeypatch.setenv("MD2PDF_TIMEOUT", raw)
+    assert md2pdf.timeout_budget() == expected
+
+
+def test_a_hanging_browser_leaves_the_next_one_its_share(md2pdf, paths, monkeypatch):
+    html, pdf = paths
+    clock = FakeClock()
+    monkeypatch.setattr(md2pdf.time, "monotonic", clock)
+    monkeypatch.setenv("MD2PDF_TIMEOUT", "100")
+    given: list[float] = []
+    hang = _hang(clock)
+
+    def run(cmd, timeout=None, **kwargs):
+        given.append(timeout)
+        if cmd[0] == "/fake/edge":
+            return hang(cmd, timeout=timeout)
+        return FakeBrowser(writes=NEW_PDF)(cmd, **kwargs)
+
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: ["/fake/edge", "/fake/chrome"])
+    monkeypatch.setattr(md2pdf.subprocess, "run", run)
+
+    md2pdf.html_to_pdf(html, pdf)
+
+    assert pdf.read_bytes() == NEW_PDF, "the second browser never got its chance"
+    assert given[0] <= 50, "the first browser was given more than its share"
+    assert sum(given) <= 100 + 1e-6, "the run was allowed to outlive its budget"
+
+
+def test_a_run_whose_every_browser_hangs_ends_within_its_budget(md2pdf, paths, monkeypatch):
+    html, pdf = paths
+    clock = FakeClock()
+    started = clock.now
+    monkeypatch.setattr(md2pdf.time, "monotonic", clock)
+    monkeypatch.setenv("MD2PDF_TIMEOUT", "30")
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: ["/a", "/b", "/c"])
+    monkeypatch.setattr(md2pdf.subprocess, "run", _hang(clock))
+
+    with pytest.raises(RuntimeError, match="no result within"):
+        md2pdf.html_to_pdf(html, pdf)
+
+    assert clock.now - started <= 30 + 1e-6
+    assert pdf.read_bytes() == OLD_PDF
+    assert sorted(p.name for p in pdf.parent.iterdir()) == ["doc.html", "doc.pdf"]
+
+
+def test_temp_dirs_of_a_killed_run_are_swept_and_live_ones_kept(md2pdf, paths, monkeypatch):
+    """A killed converter never reaches its cleanup; the next run does it.
+
+    Only by age: a directory a concurrent run is still printing into is young.
+    """
+    html, pdf = paths
+    now = 2_000_000_000.0
+    monkeypatch.setattr(md2pdf.time, "time", lambda: now)
+    systemp = Path(md2pdf.tempfile.gettempdir())
+    killed = [pdf.parent / ".md2pdf-killed", systemp / "md2pdf-profile-killed"]
+    running = [pdf.parent / ".md2pdf-running", systemp / "md2pdf-profile-running"]
+    unrelated = pdf.parent / "md2pdf-notes"          # a name, not the temp prefix
+    for d in killed + running + [unrelated]:
+        d.mkdir()
+    for d in killed + [unrelated]:
+        os.utime(d, (now - 2 * 86400, now - 2 * 86400))
+    for d in running:
+        os.utime(d, (now - 60, now - 60))
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: ["/fake/edge"])
+    monkeypatch.setattr(md2pdf.subprocess, "run", FakeBrowser(writes=NEW_PDF))
+
+    md2pdf.html_to_pdf(html, pdf)
+
+    assert not any(d.exists() for d in killed), "a killed run's leftovers survived"
+    assert all(d.is_dir() for d in running), "a live run's directory was swept"
+    assert unrelated.is_dir()

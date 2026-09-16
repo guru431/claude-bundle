@@ -59,7 +59,7 @@ BUNDLE_ROOT = Path(__file__).resolve().parents[1]
 # A Task Scheduler Password task starts in session 0 with no user env, so the
 # bundle .env must be loaded before any os.environ.get() below is evaluated.
 sys.path.insert(0, str(Path(__file__).parent / "hooks"))
-from utils import _load_dotenv, find_bash  # noqa: E402
+from utils import _env_int, _load_dotenv, find_bash  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runs import terminal_record  # noqa: E402
@@ -84,6 +84,13 @@ if not MD2PDF.is_file():
         MD2PDF = _legacy
 PYTHON = os.environ.get("CLAUDE_HOOK_PYTHON") or os.environ.get("PYTHON_EXE") or sys.executable
 THRESHOLD = 5 * 60  # sec: md must be newer than pdf by more than 5 minutes
+
+# md2pdf.py's TOTAL budget for one conversion, across every browser it tries.
+# Resolved here and handed to the child explicitly, so the two cannot read a
+# malformed value differently; the child gets 30 s on top for its own start-up
+# and cleanup. The fixed 180 s this replaces was shorter than two browsers at
+# 120 s each, and a converter killed early left its temp directory in the project.
+MD2PDF_TIMEOUT = _env_int("MD2PDF_TIMEOUT", 120, minimum=1)
 
 EXCLUDE_DIRS = {
     ".git", "node_modules", ".venv", "venv", "__pycache__",
@@ -195,7 +202,8 @@ def _sync(rec: dict) -> int:
         try:
             r = subprocess.run(
                 [PYTHON, str(MD2PDF), "--pair", str(md)],
-                capture_output=True, timeout=180, check=False,
+                capture_output=True, timeout=MD2PDF_TIMEOUT + 30, check=False,
+                env={**os.environ, "MD2PDF_TIMEOUT": str(MD2PDF_TIMEOUT)},
             )
             err = r.stderr.decode(errors="replace").strip()
             if r.returncode != 0:

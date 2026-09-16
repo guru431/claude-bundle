@@ -25,6 +25,10 @@ Dependencies:
   * a Chromium-family browser (Edge, Chrome, Chromium) for headless printing.
     Override the auto-detected path with MD2PDF_BROWSER.
 
+MD2PDF_TIMEOUT is the TOTAL time one run may take, in seconds, across every
+browser it tries (default 120). A caller must give this process that budget
+plus 30 s before killing it.
+
 No LaTeX, no pandoc: md -> HTML -> headless `--print-to-pdf`.
 """
 from __future__ import annotations
@@ -35,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 CSS = """
@@ -191,14 +196,74 @@ def md_to_html(md_path: Path) -> str:
 # one-page PDF of text runs to several kilobytes before its font subset counts.
 MIN_PDF_BYTES = 1024
 
+# The whole run's time budget when MD2PDF_TIMEOUT does not set one.
+DEFAULT_TIMEOUT_SECONDS = 120
 
-def _print_once(browser: str, url: str, target: Path) -> None:
+# Prefixes of the two temp directories a run creates: one next to the target,
+# one browser profile under the system temp dir.
+TEMP_DIR_PREFIX = ".md2pdf-"
+PROFILE_DIR_PREFIX = "md2pdf-profile-"
+
+# A temp directory younger than this is never swept, whatever the budget: a
+# run holds its directories for at most its own budget, and a concurrent run may
+# have been given a longer one.
+STALE_TEMP_MIN_SECONDS = 3600
+
+
+def timeout_budget() -> int:
+    """MD2PDF_TIMEOUT as a positive number of seconds, or the default.
+
+    The limit used to be 120 s PER BROWSER, while md2pdf-on-edit killed this
+    process at 120 s and md2pdf-sync at 180 s. With two browsers installed and
+    the first one hanging, the caller killed md2pdf.py before its cleanup ran:
+    the temp directory stayed inside the project — where the nightly
+    `git add --all` picked it up — the profile stayed in the temp dir, and the
+    browser kept running.
+    """
+    raw = (os.environ.get("MD2PDF_TIMEOUT") or "").strip()
+    if not raw:
+        return DEFAULT_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        print(f"md2pdf: MD2PDF_TIMEOUT={raw!r} is not a positive number of seconds "
+              f"— using {DEFAULT_TIMEOUT_SECONDS}", file=sys.stderr)
+        return DEFAULT_TIMEOUT_SECONDS
+    return value
+
+
+def sweep_stale_temp(target_dir: Path, budget: int) -> None:
+    """Remove the temp directories of earlier runs that were killed mid-print.
+
+    A run deletes its own directories in a `finally`, which a killed process
+    never reaches. Only directories older than twice the budget (and never
+    younger than STALE_TEMP_MIN_SECONDS) go: those cannot belong to a run that
+    is still printing.
+    """
+    cutoff = time.time() - max(STALE_TEMP_MIN_SECONDS, 2 * budget)
+    for parent, prefix in ((target_dir, TEMP_DIR_PREFIX),
+                           (Path(tempfile.gettempdir()), PROFILE_DIR_PREFIX)):
+        try:
+            leftovers = [p for p in parent.glob(f"{prefix}*") if p.is_dir()]
+        except OSError:
+            continue
+        for path in leftovers:
+            try:
+                if path.stat().st_mtime < cutoff:
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                continue
+
+
+def _print_once(browser: str, url: str, target: Path, timeout: float) -> None:
     """One browser, one attempt. Raises unless `target` ends up a printed PDF."""
     # A PRIVATE profile directory. Without it headless attaches to an already
     # running Edge/Chrome, which then prints from a context where the temp HTML
     # is not visible — that is how a trip itinerary turned into a PDF reading
     # "ERR_FILE_NOT_FOUND". With it there is nothing to attach to.
-    profile_dir = tempfile.mkdtemp(prefix="md2pdf-profile-")
+    profile_dir = tempfile.mkdtemp(prefix=PROFILE_DIR_PREFIX)
     cmd = [
         browser,
         "--headless",
@@ -212,12 +277,18 @@ def _print_once(browser: str, url: str, target: Path) -> None:
         f"--print-to-pdf={target}",
         url,
     ]
+    name = Path(browser).name
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        # A timeout is this browser's failure, not the run's: the next one gets
+        # what is left. Killing the browser also ends its children (measured with
+        # Edge and Chrome on Windows: none outlived it, and the post-kill read of
+        # the pipes returned at once), so the timeout is a real bound.
+        result = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{name}: no result within {timeout:.0f}s") from None
     finally:
         shutil.rmtree(profile_dir, ignore_errors=True)
     stderr = result.stderr.decode(errors="replace")[:500]
-    name = Path(browser).name
     if result.returncode != 0:
         raise RuntimeError(f"{name}: rc={result.returncode} {stderr}".strip())
     # headless returns 0 even when the print never happened
@@ -246,16 +317,28 @@ def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
     # file then lands under a name nothing will ever clean up. Browsers do not
     # create missing directories, so removing this one closes that door. Sibling,
     # not $TMP, so the swap below is a rename within one filesystem.
-    tmp_dir = Path(tempfile.mkdtemp(dir=pdf_path.parent, prefix=".md2pdf-"))
+    budget = timeout_budget()
+    deadline = time.monotonic() + budget
+    sweep_stale_temp(pdf_path.parent, budget)
+    tmp_dir = Path(tempfile.mkdtemp(dir=pdf_path.parent, prefix=TEMP_DIR_PREFIX))
     tmp = tmp_dir / "out.pdf"
     failures: list[str] = []
     try:
         # Every installed browser, not just the first: "installed" is not "will
         # print" — an Edge that refuses the private profile returns 0 in silence
         # while the Chrome beside it prints the same HTML.
-        for browser in browser_candidates():
+        candidates = browser_candidates()
+        for tried, browser in enumerate(candidates):
+            # A fair share of what is LEFT of the one budget: a browser that
+            # fails in two seconds hands its unused time on, and one that hangs
+            # cannot take the next one's chance with it.
+            share = (deadline - time.monotonic()) / (len(candidates) - tried)
+            if share < 1:
+                failures.append(f"{Path(browser).name}: not tried, the {budget}s "
+                                f"budget (MD2PDF_TIMEOUT) is spent")
+                continue
             try:
-                _print_once(browser, url, tmp)
+                _print_once(browser, url, tmp, share)
             except RuntimeError as e:
                 failures.append(str(e))
                 tmp.unlink(missing_ok=True)

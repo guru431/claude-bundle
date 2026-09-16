@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI wrapper around cron/hooks/utils.llm_call().
+"""CLI wrapper around cron/hooks/utils.llm_call_ex().
 
 Reads the prompt from stdin, dispatches to the configured LLM provider
 (see WIKI_LLM_PROVIDER), prints the answer to stdout. Used by .sh scripts
@@ -9,10 +9,13 @@ Usage:
   echo "prompt" | python llm-call.py [timeout_seconds]
   cat prompt.md | python llm-call.py 600
 
-Exit codes:
+Exit codes — the LLMResult kind, so a shell task can tell "no LLM tonight" from
+"your key is wrong" without parsing stderr, where the reason is printed:
   0 — success (answer printed to stdout)
-  1 — empty answer or LLM error
-  2 — empty stdin
+  1 — deterministic: an empty or unusable answer, or a 400/413/422
+  2 — usage: empty stdin, or a timeout that is not a positive whole number
+  3 — transient: network, 429, 5xx — waiting fixes it
+  4 — config: no key or model, a refusal, 401/402/403/404 — it will not fix itself
 """
 import sys
 from pathlib import Path
@@ -23,20 +26,27 @@ if sys.platform == "win32":
     sys.stdin.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
-from utils import llm_call  # noqa: E402
+from utils import llm_call_ex  # noqa: E402
 
-timeout = int(sys.argv[1]) if len(sys.argv) > 1 else 600
+try:
+    timeout = int(sys.argv[1]) if len(sys.argv) > 1 else 600
+except ValueError:
+    timeout = 0
+if timeout <= 0:
+    print(f"ERROR: timeout must be a positive number of seconds, got {sys.argv[1]!r}",
+          file=sys.stderr)
+    sys.exit(2)
 prompt = sys.stdin.read()
 
 if not prompt.strip():
     print("ERROR: empty stdin", file=sys.stderr)
     sys.exit(2)
 
-out = llm_call(prompt, timeout=timeout)
-if out is None:
-    print("ERROR: llm_call returned None (see stderr)", file=sys.stderr)
-    sys.exit(1)
+res = llm_call_ex(prompt, timeout=timeout)
+if not res.ok:
+    print(f"ERROR: no answer — {res.kind}: {res.detail or 'no detail'}", file=sys.stderr)
+    sys.exit({"transient": 3, "config": 4}.get(res.kind, 1))
 
-sys.stdout.write(out)
-if not out.endswith("\n"):
+sys.stdout.write(res.text)
+if not res.text.endswith("\n"):
     sys.stdout.write("\n")

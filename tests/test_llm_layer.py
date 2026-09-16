@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import socket
+import subprocess
 import sys
 import time
 import types
@@ -301,3 +303,46 @@ def test_config_report_says_why_each_provider_cannot_answer(cron_copy: Path, mon
     assert "down since 2026-01-01T02:10:00" in by_name["last dead chain"]
     assert "unit-test-placeholder-value" not in "\n".join(lines), \
         "a key VALUE reached the report"
+
+
+# ── llm-call.py tells a shell task WHY there is no answer ────────────────────
+
+@pytest.mark.parametrize("case,expected_rc", [
+    ("ok", 0), ("empty-answer", 1), ("empty-stdin", 2), ("bad-timeout", 2),
+    ("transient", 3), ("config", 4),
+])
+def test_llm_call_cli_exit_code_says_why(cron_copy: Path, tmp_path: Path,
+                                         case: str, expected_rc: int):
+    """It exited 1 for everything, so claude-healthcheck.sh could not tell "the
+    gateway is down tonight" from "the key is wrong and every morning from now
+    on is empty". The code is now the LLMResult kind."""
+    env = os.environ.copy()
+    env["WIKI_LLM_PROVIDER"] = "mock"
+    answer = tmp_path / "answer.txt"
+    answer.write_text("" if case == "empty-answer" else "the answer", encoding="utf-8")
+    env["WIKI_LLM_MOCK_RESPONSE"] = str(answer)
+    argv = [sys.executable, str(cron_copy / "cron" / "llm-call.py")]
+    stdin = "prompt"
+    if case == "empty-stdin":
+        stdin = "  \n"
+    elif case == "bad-timeout":
+        argv.append("ten")
+    elif case == "config":
+        env["WIKI_LLM_PROVIDER"] = "lokal"
+    elif case == "transient":
+        # A provider the breaker already has out for a 503: no request is made.
+        # The unreachable base URL is belt and braces — should the latch ever
+        # fail to short-circuit, nothing leaves this machine.
+        env.update(WIKI_LLM_PROVIDER="deepinfra", DEEPINFRA_KEY="unit-test-placeholder",
+                   DEEPINFRA_BASE_URL="http://127.0.0.1:9/v1")
+        state = cron_copy / "cron" / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "depleted.json").write_text(json.dumps(
+            {"deepinfra": {"ts": time.time(), "reason": "503"}}), encoding="utf-8")
+
+    r = subprocess.run(argv, input=stdin, capture_output=True, text=True, env=env,
+                       timeout=60, encoding="utf-8", errors="replace")
+
+    assert r.returncode == expected_rc, r.stdout + r.stderr
+    if case == "ok":
+        assert r.stdout == "the answer\n"

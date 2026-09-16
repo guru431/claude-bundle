@@ -145,6 +145,15 @@ subscription gate; your own routing policy may legitimately invert or
 replace it by setting `WIKI_LLM_PROVIDER` and editing the `PROVIDERS`
 table below.
 
+### From a shell script
+
+`cron/llm-call.py` is the same call for the `.sh` tasks: the prompt on stdin,
+the answer on stdout. Its exit code is the kind of failure, so a script can
+tell a bad night from a broken setup without parsing stderr, where the reason
+is printed: `0` an answer, `1` deterministic (an empty or unusable answer),
+`2` usage (empty stdin, a timeout that is not a positive number), `3`
+transient, `4` configuration.
+
 ### Provider registry — the single source of truth (cron side)
 
 All cron-side provider config lives in **one** table,

@@ -50,6 +50,7 @@ from utils import (  # noqa: E402
     rewrite_is_sane,
     state_add,
     state_get,
+    state_remove,
     strip_leading_frontmatter,
     worst_kind,
     is_dry_run,
@@ -767,38 +768,43 @@ def _replay_target(argv: list[str]) -> str | None:
     return None
 
 
+def replay_markers(target: str) -> dict[str, list[str]]:
+    """The compile markers `--replay DATE[#project]` clears → {state key: markers}.
+
+    Markers carry a fingerprint (`DATE@fp`, `DATE#project@fp`), so a prefix match
+    is what identifies them — up to and INCLUDING the `@`: the bare `DATE#demo`
+    also matched `DATE#demo-app@…`, so replaying one project quietly recompiled,
+    and re-billed, another.
+    """
+    date_part, _, project = target.partition("#")
+    date_part = date_part.strip()
+    dailies = [d for d in state_get("compile_sessions", "compiled_dailies")
+               if d == date_part or d.startswith(f"{date_part}@")]
+    prefix = (f"{date_part}#{normalize_project_name(project)}@" if project.strip()
+              else f"{date_part}#")
+    return {
+        "compiled_dailies": dailies,
+        "compiled_pairs": [p for p in state_get("compile_sessions", "compiled_pairs")
+                           if p.startswith(prefix)],
+        "quarantined": [q for q in state_get("compile_sessions", "quarantined")
+                        if q.startswith(prefix)],
+    }
+
+
 def clear_markers(target: str) -> int:
     """Drop every compile marker for `DATE` or `DATE#project`. Returns how many.
 
-    Markers carry a fingerprint (`DATE@fp`, `DATE#project@fp`), so a prefix match
-    is what identifies them; `attempts` and the quarantine list are cleared too,
-    or a replay of a quarantined pair would be skipped on the marker it was given
-    when it was given up on.
+    `attempts` and the quarantine list are cleared too, or a replay of a
+    quarantined pair would be skipped on the marker it was given when it was
+    given up on.
     """
-    date_part = target.split("#", 1)[0]
-    cleared = 0
-
-    dailies = [d for d in state_get("compile_sessions", "compiled_dailies")
-               if d == date_part or d.startswith(f"{date_part}@")]
-    if dailies:
-        state_remove("compile_sessions", "compiled_dailies", dailies)
-        cleared += len(dailies)
-
-    prefix = target if "#" in target else f"{date_part}#"
-    pairs = [p for p in state_get("compile_sessions", "compiled_pairs")
-             if p.startswith(prefix)]
-    if pairs:
-        state_remove("compile_sessions", "compiled_pairs", pairs)
-        cleared += len(pairs)
-
-    quar = [q for q in state_get("compile_sessions", "quarantined")
-            if q.startswith(prefix)]
-    if quar:
-        state_remove("compile_sessions", "quarantined", quar)
-        cleared += len(quar)
-    for q in pairs + quar:
+    found = replay_markers(target)
+    for key, items in found.items():
+        if items:
+            state_remove("compile_sessions", key, items)
+    for q in found["compiled_pairs"] + found["quarantined"]:
         attempt_reset("compile_sessions", q)
-    return cleared
+    return sum(len(items) for items in found.values())
 
 
 def main():
@@ -822,12 +828,20 @@ def main():
     # `.processed.json` under its lock, which is the sort of instruction nobody
     # should be given.
     replay = _replay_target(sys.argv[1:])
-    if replay:
+    replayed: dict[str, list[str]] = {}
+    if replay and is_dry_run():
+        # A preview changes no state. This cleared the markers and reset the
+        # retry counters first and printed "no state changes" afterwards; now
+        # the markers are only left out of what this run reads.
+        replayed = replay_markers(replay)
+        log(f"REPLAY {replay} (dry run): {sum(len(v) for v in replayed.values())} "
+            f"marker(s) WOULD be cleared — previewing as if they were")
+    elif replay:
         cleared = clear_markers(replay)
         log(f"REPLAY {replay}: cleared {cleared} marker(s) — recompiling")
 
-    compiled = get_compiled_dailies()
-    compiled_pairs = get_compiled_pairs()
+    compiled = get_compiled_dailies() - set(replayed.get("compiled_dailies", []))
+    compiled_pairs = get_compiled_pairs() - set(replayed.get("compiled_pairs", []))
     log(f"Already compiled: {len(compiled)} daily logs, {len(compiled_pairs)} (daily, project) pairs")
 
     dailies = find_uncompiled_dailies(compiled)

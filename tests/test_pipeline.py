@@ -242,6 +242,51 @@ def test_compile_kb_survives_a_source_that_is_not_utf8(bundle: Path):
     assert "ClaudeWikiCompileKB" in ledger, "the crashed run left no ledger record"
 
 
+def test_replay_is_scoped_to_its_project_and_previews_without_changes(bundle: Path):
+    """`--replay DATE#demo --dry-run` cleared markers and retry counters, then
+    printed "no state changes"; and `DATE#demo` also cleared `DATE#demo-app`."""
+    (bundle / "wiki" / "daily" / "2026-01-01.md").unlink()   # nothing to recompile
+    state_path = bundle / "wiki" / ".processed.json"
+    state_path.write_text(json.dumps({"compile_sessions": {
+        "compiled_dailies": ["2020-01-02@aaaaaaaaaaaa", "2020-01-03@bbbbbbbbbbbb"],
+        "compiled_pairs": ["2020-01-02#demo@111111111111",
+                           "2020-01-02#demo-app@222222222222",
+                           "2020-01-03#demo@333333333333"],
+        "quarantined": ["2020-01-02#demo@111111111111"],
+        "attempts": {"2020-01-02#demo-app@222222222222": 2}}}, indent=2),
+        encoding="utf-8")
+    before = state_path.read_text(encoding="utf-8")
+    script = bundle / "cron" / "wiki" / "wiki-compile-sessions.py"
+
+    r = _run(script, {}, cwd=bundle, args=["--replay", "2020-01-02#demo", "--dry-run"])
+    assert r.returncode == 0, f"dry-run replay failed:\n{r.stdout}\n{r.stderr}"
+    assert state_path.read_text(encoding="utf-8") == before, "a dry run changed the state"
+
+    r = _run(script, {}, cwd=bundle, args=["--replay", "2020-01-02#demo"])
+    assert r.returncode == 0, f"replay failed:\n{r.stdout}\n{r.stderr}"
+    after = json.loads(state_path.read_text(encoding="utf-8"))["compile_sessions"]
+    assert "2020-01-02#demo@111111111111" not in after["compiled_pairs"]
+    assert "2020-01-02#demo@111111111111" not in after["quarantined"]
+    assert "2020-01-02#demo-app@222222222222" in after["compiled_pairs"], \
+        "replaying `demo` cleared `demo-app` too"
+    assert after["attempts"] == {"2020-01-02#demo-app@222222222222": 2}
+    assert "2020-01-03#demo@333333333333" in after["compiled_pairs"]
+
+
+def test_compile_kb_records_the_directory_it_read(bundle: Path):
+    """Provenance said `kb_news/…` for every page, whatever directory was read."""
+    _kb_article(bundle, "gears.md", b"Gears mesh with other gears.\n")
+    resp = bundle / "kb_gear.json"
+    resp.write_text(json.dumps([{"path": "kb/concepts/Gear.md", "action": "create",
+                                 "content": "# Gear\n\nA toothed wheel. [[index]]\n"}]),
+                    encoding="utf-8")
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-kb.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0, f"compile-kb failed:\n{r.stdout}\n{r.stderr}"
+    page = (bundle / "wiki" / "kb" / "concepts" / "Gear.md").read_text(encoding="utf-8")
+    assert "kb_sources/articles/gears.md" in page and "kb_news" not in page, page
+
+
 # A date safely in the past on any machine, so nothing here depends on the
 # clock (the bundle's own test policy, rule 3): flush clamps a session date to
 # today, and a fixture dated "tomorrow" would be green some days and red others.

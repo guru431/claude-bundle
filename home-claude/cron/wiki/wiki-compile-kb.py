@@ -374,7 +374,11 @@ def main():
             update_log(rel, ["(no entities)"])
             log("  → 0 entities extracted (valid empty result) — marked processed")
         elif changes:
-            applied, rejected = apply_changes(changes, existing_pages, f"kb_news/{rel}")
+            # The directory actually read. A hardcoded `kb_news/` stamped every
+            # page's provenance with the private pipeline's name that
+            # _kb_source_dir exists to stop requiring — whatever was read.
+            applied, rejected = apply_changes(changes, existing_pages,
+                                              f"{KBNEWS_DIR.name}/{rel}")
             # Save the dropped payload for inspection BEFORE we mark it processed
             # (deterministic rejection is still recorded so it won't loop forever).
             if not applied:

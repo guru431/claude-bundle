@@ -77,8 +77,9 @@ def test_the_transcript_directory_outranks_the_cwd(bundle: Path, monkeypatch):
     """The transcript's parent IS the directory flush reads; `cwd` is only the
     current directory, and need not be the one the session was filed under."""
     utils = _utils(bundle, monkeypatch)
-    payload = {"cwd": r"C:\work\widgets\src",
-               "transcript_path": r"C:\Users\me\.claude\projects\C--work-widgets\s.jsonl"}
+    # A native path: Claude Code hands the hook this platform's separators.
+    transcript = os.path.join("home", "me", ".claude", "projects", "C--work-widgets", "s.jsonl")
+    payload = {"cwd": r"C:\work\widgets\src", "transcript_path": transcript}
     assert utils.project_dir_from_payload(payload) == "C--work-widgets"
     assert utils.project_from_payload(payload) == "widgets"
     # No transcript path — the encoder is the fallback, and now it agrees.

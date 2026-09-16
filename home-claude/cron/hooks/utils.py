@@ -2656,20 +2656,6 @@ def config_errors() -> list[str]:
     return list(_CONFIG_ERRORS)
 
 
-class _UntilConfirmed(date):
-    """`dry_run_until: confirm` — a window that does not close by itself.
-
-    A date (the last one there is), so every `date.today() < DRY_RUN_UNTIL`
-    keeps working, that prints as what the user wrote.
-    """
-
-    def __str__(self) -> str:
-        return "confirm"
-
-
-DRY_RUN_CONFIRM = _UntilConfirmed(9999, 12, 31)
-
-
 def _dry_run_until() -> date | None:
     """`dry_run_until:` from bundle.local.yaml, or None.
 
@@ -2714,6 +2700,18 @@ def _dry_run_until() -> date | None:
         return None
 
 
+class _UntilConfirmed(date):
+    """`dry_run_until: confirm` — a window that does not close by itself.
+
+    A date (the last one there is), so every `date.today() < DRY_RUN_UNTIL`
+    keeps working, that prints as what the user wrote.
+    """
+
+    def __str__(self) -> str:
+        return "confirm"
+
+
+DRY_RUN_CONFIRM = _UntilConfirmed(9999, 12, 31)
 DRY_RUN_UNTIL: date | None = _dry_run_until()
 _dry_run_banner_shown = False
 

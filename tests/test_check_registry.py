@@ -99,6 +99,14 @@ def test_a_byte_order_mark_is_not_an_unreadable_line():
     assert check_registry.check_subset("\ufeff# header\n" + HEAD) == []
 
 
+def test_s4u_is_a_logon_type():
+    task = {"name": "T", "script": "C:\\b\\x.py", "trigger": "Daily 02:00",
+            "timeout_hours": 1, "logon_type": "s4u", "platform": "windows"}
+    assert not [p for p in check_registry.check_task(task) if "logon_type" in p]
+    task["logon_type"] = "s4y"
+    assert [p for p in check_registry.check_task(task) if "logon_type" in p]
+
+
 def test_check_reports_a_block_scalar_in_a_registry_file(tmp_path: Path, capsys):
     pytest.importorskip("yaml")
     reg = tmp_path / "registry.yaml"

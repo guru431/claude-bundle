@@ -61,6 +61,53 @@ foreach ($kind in @('bash', 'python', 'cmd', 'vbs', 'python_local', 'exec')) {
         assert lines[kind] == "", lines
 
 
+def test_s4u_is_refused_a_share_and_password_is_not(tmp_path: Path):
+    """I15: an S4U task has no network credentials, so a UNC path is as dead to
+    it as a mapped drive is to any session-0 task — and the advice must not
+    send an S4U user to the UNC path it cannot use."""
+    code = define_functions(SYNC, ["Get-SessionZeroProblem", "Get-TaskRunPaths",
+                                   "Test-PathOnMappedDrive"]) + r"""
+function Test-DriveLetterMapped([string]$letter) { return ($letter.ToUpper() -eq 'M') }
+$local  = @{ name = 'T'; kind = 'python'; script = 'C:\bundle\cron\job.py' }
+$share  = @{ name = 'T'; kind = 'python'; script = '\\host\share\cron\job.py' }
+$cases = [ordered]@{
+    's4u-share'         = @($share, 'C:\bundle\bin\_run-hidden.vbs', 'S4U')
+    'password-share'    = @($share, 'C:\bundle\bin\_run-hidden.vbs', 'Password')
+    's4u-local'         = @($local, 'C:\bundle\bin\_run-hidden.vbs', 'S4U')
+    's4u-mapped'        = @($local, 'M:\bundle\bin\_run-hidden.vbs', 'S4U')
+    'password-mapped'   = @($local, 'M:\bundle\bin\_run-hidden.vbs', 'Password')
+    'interactive-mapped'= @($local, 'M:\bundle\bin\_run-hidden.vbs', 'Interactive')
+}
+foreach ($k in $cases.Keys) {
+    $c = $cases[$k]
+    Write-Output ("{0}|{1}" -f $k, (Get-SessionZeroProblem $c[0] $c[1] 'wscript.exe' $c[2]))
+}
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    got = dict(line.split("|", 1) for line in r.stdout.splitlines() if "|" in line)
+    assert got["s4u-share"].startswith("[skipped: network path + S4U]"), got
+    assert got["password-share"] == "", got
+    assert got["s4u-local"] == "", got
+    assert got["s4u-mapped"].startswith("[skipped: mapped drive + S4U]"), got
+    assert "UNC" not in got["s4u-mapped"], got
+    assert got["password-mapped"].startswith("[skipped: mapped drive + Password]"), got
+    assert got["interactive-mapped"] == "", got
+
+
+def test_task_xml_carries_the_logon_type(tmp_path: Path):
+    code = define_functions(SYNC, ["Build-TaskXml"]) + r"""
+$task = @{ name = 'T'; user = 'someone'; hidden = $true; enabled = $true; runlevel = 'limited'; timeout_hours = 1 }
+foreach ($lt in @('Password', 'S4U', 'Interactive')) {
+    $xml = [xml](Build-TaskXml $task 'wscript.exe' 'args' 'desc' $lt '<BootTrigger><Enabled>true</Enabled></BootTrigger>')
+    Write-Output ("{0}={1}" -f $lt, $xml.Task.Principals.Principal.LogonType)
+}
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.split() == ["Password=Password", "S4U=S4U", "Interactive=InteractiveToken"]
+
+
 @windows_only
 @pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
 def test_verify_leaves_no_transcript_behind(tmp_path: Path):

@@ -20,6 +20,16 @@
 #   Interactive — only sensible for AtLogOn triggers, where the logon event
 #   IS the trigger. Set explicitly via `logon_type: interactive`.
 #
+#   S4U (opt-in, `logon_type: s4u`) — fires before logon like Password, but
+#   Windows stores NO password: no save-cred, and changing your Windows password
+#   cannot silently stop the task. The price, in Microsoft's words: "no access to
+#   either the network or encrypted files". So no share (sync-tasks refuses a
+#   UNC path for it), nothing that authenticates as you — Credential Manager and
+#   therefore Git Credential Manager, WinRM, a Windows-authenticated proxy — and
+#   with a domain account the logon itself can fail (0x8007052E). Choose it per
+#   task, only for a bundle on a local disk, and watch one run before relying
+#   on it.
+#
 # ── health_port: for services, not for scheduled jobs ──────────────────────
 #   No scheduler acts on this field — the task monitors read it. For a task
 #   triggered AtStartup or AtLogOn the scheduler's own answer carries no
@@ -42,6 +52,9 @@
 #
 #   Mapped-drive paths are only acceptable for logon_type: interactive +
 #   trigger: AtLogOn (the drive is mapped by the time the task fires).
+#
+#   For logon_type: s4u → a LOCAL drive only: no mapped drive, and no UNC path
+#   either, because an S4U task has no credentials to open the share with.
 #
 # ── BUNDLE_ROOT in scripts ─────────────────────────────────────────────────
 #   Every script that derives BUNDLE_ROOT via `cd "$(dirname "$0")/.."` must

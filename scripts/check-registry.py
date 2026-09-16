@@ -73,7 +73,7 @@ INTS = ("timeout_hours", "restart_count", "health_port")
 
 ENUMS = {
     "kind": KINDS,
-    "logon_type": ("password", "interactive"),
+    "logon_type": ("password", "interactive", "s4u"),
     "runlevel": ("limited", "highest"),
     "platform": ("windows", "posix", "all"),
 }

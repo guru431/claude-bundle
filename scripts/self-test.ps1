@@ -622,11 +622,19 @@ if ($deployed) {
     # 16b. The DPAPI credential file that LogonType=Password tasks need. Without
     # it sync-tasks cannot register them, and a task registered before the file
     # was removed simply stops firing.
+    #
+    # Which tasks those are is asked of the syncer's own parser: a task that
+    # names no logon_type is a Password task by default, which no text search
+    # sees, and one `logon_type: s4u` line used to make a registry that stores
+    # no password at all FAIL for the missing file.
     $regDeployed = Join-Path $deployRoot 'cron/registry.yaml'
-    if (Test-Path $regDeployed) {
-        $regTxt = Get-Content $regDeployed -Raw -Encoding UTF8
-        $needsCred = ($regTxt -notmatch '(?m)^\s*logon_type:\s*interactive\s*$') -or
-                     ($regTxt -match '(?m)^\s*logon_type:\s*password\s*$')
+    $regParser = Join-Path $root 'home-claude/cron/admin/lib/registry-parse.ps1'
+    if ((Test-Path $regDeployed) -and (Test-Path $regParser)) {
+        . $regParser
+        $needsCred = @((Parse-RegistryYaml $regDeployed).tasks | Where-Object {
+            "$($_.platform)".ToLower() -ne 'posix' -and
+            @('interactive', 's4u') -notcontains "$($_.logon_type)"
+        }).Count -gt 0
         if ($needsCred) {
             $credFile = Join-Path $env:LOCALAPPDATA 'claude-bundle-cred.dat'
             if (Test-Path $credFile) { Ok "DPAPI credential present ($credFile)" }

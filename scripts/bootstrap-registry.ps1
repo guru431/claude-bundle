@@ -50,10 +50,21 @@ Write-Host ""
 # UNC (\\host\share) or local C:\ are safe for Password-mode tasks. A mapped
 # network drive (e.g. S:\) is NOT — it is absent in session 0.
 $reg = Get-Content $RegistryPath -Raw -Encoding UTF8
-$usesPassword = ($reg -match '(?m)^\s*logon_type:\s*password') -or ($reg -notmatch '(?m)^\s*logon_type:\s*interactive')
+# Through the syncer's own parser: a task that names no logon_type is a Password
+# task by default, which a text search cannot see. Password and S4U tasks both
+# fire in session 0, where no mapped drive exists; only Password needs save-cred.
+. (Join-Path $root 'home-claude\cron\admin\lib\registry-parse.ps1')
+$regTasks = @((Parse-RegistryYaml $RegistryPath).tasks)
+$usesPassword = @($regTasks | Where-Object { @('interactive', 's4u') -notcontains "$($_.logon_type)" }).Count -gt 0
+$usesS4U = @($regTasks | Where-Object { "$($_.logon_type)" -eq 's4u' }).Count -gt 0
+$usesSessionZero = $usesPassword -or $usesS4U
 
 if ($InstallPath -match '^\\\\') {
     Write-Host "[ok]   InstallPath is UNC — safe for Password-mode tasks." -ForegroundColor Green
+    if ($usesS4U) {
+        Write-Host "[warn] ...but not for logon_type: s4u tasks: they have no network credentials to open the share," -ForegroundColor Yellow
+        Write-Host "       and sync-tasks will skip them. Use logon_type: password for a bundle on a share." -ForegroundColor Yellow
+    }
 } elseif ($InstallPath -match '^([A-Za-z]):\\') {
     # Query the ACTUAL drive type (mirrors sync-tasks.ps1 / install.ps1). Don't
     # infer "mapped" from "not C:".
@@ -75,16 +86,25 @@ if ($InstallPath -match '^\\\\') {
     } catch { $driveType = $null }
     if ($driveType -eq 4) {
         Write-Host "[warn] InstallPath is on drive ${drive}:\ — a MAPPED NETWORK drive." -ForegroundColor Yellow
-        if ($usesPassword) {
-            Write-Host "       Password-mode tasks will silently fail in session 0 (exit 127, no log)." -ForegroundColor Yellow
-            Write-Host "       Use a UNC path (\\host\share\...) or a local C:\ path instead." -ForegroundColor Yellow
+        if ($usesSessionZero) {
+            Write-Host "       Password- and S4U-mode tasks will silently fail in session 0 (exit 127, no log)." -ForegroundColor Yellow
+            Write-Host "       Use a UNC path (\\host\share\...; password only) or a local C:\ path instead." -ForegroundColor Yellow
         }
     } elseif ($driveType -eq 3) {
         Write-Host "[ok]   InstallPath is a local fixed drive (${drive}:\) — safe for Password-mode tasks." -ForegroundColor Green
+        # The one layout where S4U is a real option, so this is where to say so.
+        # A suggestion, not a rewrite: whether a task can live without network
+        # credentials is a per-task call (see docs/cron-architecture.md).
+        if ($usesPassword) {
+            Write-Host "[hint] Everything is local, so logon_type: s4u is open to you: a task still runs before logon," -ForegroundColor Cyan
+            Write-Host "       but Windows stores NO password — no save-cred, and changing your Windows password cannot" -ForegroundColor Cyan
+            Write-Host "       silently stop it. It gets no network credentials either (shares, Credential Manager, WinRM)," -ForegroundColor Cyan
+            Write-Host "       so decide per task: docs/cron-architecture.md, LogonType policy." -ForegroundColor Cyan
+        }
     } else {
         Write-Host "[warn] InstallPath drive ${drive}:\ type could not be determined." -ForegroundColor Yellow
-        if ($usesPassword) {
-            Write-Host "       If it is a MAPPED network drive, Password-mode tasks fail in session 0 (exit 127, no log)." -ForegroundColor Yellow
+        if ($usesSessionZero) {
+            Write-Host "       If it is a MAPPED network drive, Password- and S4U-mode tasks fail in session 0 (exit 127, no log)." -ForegroundColor Yellow
             Write-Host "       Prefer a UNC path (\\host\share\...) or a local C:\ path." -ForegroundColor Yellow
         }
     }

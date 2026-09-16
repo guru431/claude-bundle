@@ -17,7 +17,7 @@ directly — it drifts from registry and nobody remembers why a task exists.
 
 ## LogonType policy
 
-Each task declares `logon_type: password | interactive`:
+Each task declares `logon_type: password | interactive | s4u`:
 
 - **`password`** (default) — the task runs **before** the user logs in.
   Critical for nightly jobs: if the machine reboots overnight, you don't
@@ -26,6 +26,33 @@ Each task declares `logon_type: password | interactive`:
 - **`interactive`** — only for tasks where the logon event itself is the
   trigger (`AtLogOn`), or for tasks that genuinely need an interactive
   desktop session.
+- **`s4u`** (opt-in) — runs before logon like `password`, but Windows stores
+  **no** password for it (a "Service for User" logon): nothing for
+  `save-cred.cmd` to stash, and nothing to go stale when the Windows password
+  changes. Microsoft states the cost in one line — "no access to either the
+  network or encrypted files" — and for this bundle that means:
+  - **a local install only.** A bundle on a share is out of reach, so
+    `sync-tasks.ps1` refuses to register an `s4u` task whose script, launcher
+    or interpreter sits on a UNC path or a mapped drive.
+  - **nothing that signs in as you.** Windows Credential Manager (and so a
+    `git push` through Git Credential Manager in `ClaudeGitPushAll`), WinRM
+    (`WIN_REMOTE_HOST` in `ClaudeHealthcheck`), a proxy that wants your
+    Windows login, EFS-encrypted files.
+  - **a domain account may not log on at all** this way; Task Scheduler then
+    records `0x8007052E` as the last result.
+
+  So it is chosen per task and is not the default. Whether a task's plain
+  outbound HTTPS call — an LLM provider, Telegram — gets through depends on how
+  the machine reaches the internet, which the documentation does not promise:
+  after switching a task, run it once (`schtasks /run /tn <name>`) and read its
+  log before trusting a night to it. `bootstrap-registry.ps1` suggests `s4u`
+  when the install path is a local disk.
+
+**When the Windows password changes**, every `password` task keeps the old
+one and stops starting — `ClaudeTaskMonitor` and `ClaudeHealthcheck` with the
+rest, so the alert that would say so never fires. Nothing inside the bundle can
+notice a task that does not start; INSTALL.md § Troubleshooting has the
+two-command fix (`save-cred.cmd`, then `sync.cmd -Force`).
 
 All tasks also get `StartWhenAvailable=True` — if the trigger was missed
 (machine asleep), Task Scheduler catches up at the next opportunity
@@ -42,7 +69,9 @@ task fires in session 0 (before any user logs in) — the mapped drive
 no diagnostics. Hours of debugging guaranteed.
 
 UNC works in both session 0 and user sessions. Local `C:\` works
-everywhere. Mapped drives only work in interactive sessions.
+everywhere. Mapped drives only work in interactive sessions. An `s4u` task
+is the exception to the UNC rule: it has no credentials to open a share
+with, so it needs local paths throughout.
 
 The bundle ships an example `registry.yaml` with placeholders
 (`<bundle-install-path>`). When you adapt it, use UNC or `C:\` —

@@ -647,11 +647,40 @@ Quick reference for the failures people hit first. Running
 | Cron log: `DEEPSEEK_KEY env var not set` / 402 | `.env` missing or unfunded key | step 9 — copy the template, fill a working key |
 | `self-test.ps1`: "Python not found", checks skipped | Python not on PATH | install Python 3.10+ or set `$env:CLAUDE_HOOK_PYTHON` |
 | Password-mode task: `Last Result` 127, no log | `script:` on a mapped drive (no session 0) | use UNC `\\host\share\...` or local `C:\...`; bootstrap warns about this |
+| Every Password-mode task stopped at once, `Last Result` `0x8007052E` | your Windows password changed; the tasks still hold the old one | `save-cred.cmd`, then `sync.cmd -Force` — see below |
 | Wiki pages all land in `projects/main` | headings that yield no ASCII slug (e.g. all-Cyrillic) fall back to `main` — an empty `known_projects` alone won't do it | populate `known_projects:` in `~/.claude/bundle.local.yaml` (step 12); `wiki-lint` flags it as "project-collapse" |
 
 ### "Login required" when running cron tasks
 You skipped step 10 (`save-cred.cmd`). Password-mode tasks need the
 DPAPI-encrypted password.
+
+### Every Password-mode task stopped at once — did your Windows password change?
+A `logon_type: password` task keeps the password it was registered with.
+Change your Windows password, or let a domain policy expire it, and every one
+of those tasks stops starting — typically `Last Result` `0x8007052E` ("the user
+name or password is incorrect") and a logon failure in the Task Scheduler
+history. `ClaudeTaskMonitor` and `ClaudeHealthcheck` stop with the rest, so the
+alert that would have told you never comes. Nothing reports a task that does
+not start; this section is the whole diagnosis.
+
+1. Stash the new password — non-elevated, and answer `yes` to overwrite:
+   `<PipelineRoot>\cron\admin\save-cred.cmd`
+2. Re-register every task with it. **`-Force` is required**: nothing in
+   `registry.yaml` changed, so a plain sync reports every task `unchanged` and
+   hands Task Scheduler nothing new:
+   `<PipelineRoot>\cron\admin\sync.cmd -Force`
+3. Confirm: `powershell -File <path-to-bundle>\scripts\self-test.ps1 -InstallPath <PipelineRoot>`
+   — its `sync-tasks -Verify` step prints each task's last result. A task's
+   own log appears under `cron\logs\` after its next run.
+
+On a domain the stale password can also lock the account out: every trigger
+is one more failed logon. Re-register before you unlock, or the next trigger
+locks you out again.
+
+On a local install you can stop depending on the stored password altogether:
+`logon_type: s4u` runs a task before logon with no password kept anywhere, at
+the price of network credentials — decide per task, see
+[`docs/cron-architecture.md` § LogonType policy](docs/cron-architecture.md#logontype-policy).
 
 ### Cron task fires but writes no log
 Check `Last Result` in `schtasks /query /tn <name> /fo list /v`. If

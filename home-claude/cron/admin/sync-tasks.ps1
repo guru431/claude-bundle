@@ -297,7 +297,9 @@ function Build-TaskXml([hashtable]$task, [string]$wantedExec, [string]$wantedArg
     $hidden  = if ($task.hidden)  { 'true' } else { 'false' }
     $enabled = if ($task.enabled) { 'true' } else { 'false' }
     $runlevel = if ($task.runlevel -eq 'highest') { 'HighestAvailable' } else { 'LeastPrivilege' }
-    $xmlLogonType = if ($logonType -eq 'Password') { 'Password' } else { 'InteractiveToken' }
+    $xmlLogonType = if ($logonType -eq 'Password') { 'Password' }
+        elseif ($logonType -eq 'S4U') { 'S4U' }
+        else { 'InteractiveToken' }
     $escDesc = [System.Security.SecurityElement]::Escape($description)
     $escArgs = [System.Security.SecurityElement]::Escape($wantedArgs)
     $escExec = [System.Security.SecurityElement]::Escape($wantedExec)
@@ -502,6 +504,30 @@ function Get-TaskRunPaths([hashtable]$task, [string]$launcher, [string]$wantedEx
     return @($paths | Where-Object { $_ })
 }
 
+# Why a task cannot reach its own files when it fires, or $null. Password and
+# S4U tasks both fire in session 0, where no mapped drive exists. An S4U task has
+# one more gap: it carries no password, so it has no network credentials either
+# (Microsoft: "no access to either the network or encrypted files"), and a share
+# is as unreachable to it as a mapped drive is. Registering such a task succeeds;
+# every run then fails without a log — and the monitor that would report it runs
+# from the same tree. So this is where the task is refused.
+function Get-SessionZeroProblem([hashtable]$task, [string]$launcher, [string]$wantedExec, [string]$logonType) {
+    if ($logonType -eq 'Interactive') { return $null }
+    $paths = Get-TaskRunPaths $task $launcher $wantedExec
+    $mapped = $paths | Where-Object { Test-PathOnMappedDrive $_ } | Select-Object -First 1
+    if ($mapped) {
+        $fix = if ($logonType -eq 'S4U') { 'Use a local C:\ path.' } else { 'Use a local C:\ path or a UNC \\host\share path.' }
+        return "[skipped: mapped drive + $logonType] $($task.name) — '$mapped' is on a mapped network drive (absent in session 0). $fix"
+    }
+    if ($logonType -eq 'S4U') {
+        $share = $paths | Where-Object { $_ -match '^\\\\' } | Select-Object -First 1
+        if ($share) {
+            return "[skipped: network path + S4U] $($task.name) — '$share' is on a network share, and an S4U task has no network credentials. Use a local C:\ path, or logon_type: password."
+        }
+    }
+    return $null
+}
+
 # ── main ─────────────────────────────────────────────────────────────────────
 $reg = Parse-RegistryYaml $RegistryPath
 $launcher = $reg.launcher
@@ -686,18 +712,17 @@ foreach ($task in $reg.tasks) {
         $summary.skipped++
         continue
     }
-    $logonType = if ($task.logon_type -eq 'interactive') { 'Interactive' } else { 'Password' }
+    $logonType = if ($task.logon_type -eq 'interactive') { 'Interactive' }
+        elseif ($task.logon_type -eq 's4u') { 'S4U' }
+        else { 'Password' }
 
-    # Fail-loud on the mapped-drive + Password footgun (see Test-PathOnMappedDrive).
+    # Fail-loud on the mapped-drive + session-0 footgun (see Get-SessionZeroProblem).
     # claude-task-monitor.sh is only a daily backstop; this is primary enforcement.
-    if ($logonType -eq 'Password') {
-        $badPath = Get-TaskRunPaths $task $launcher $wantedExec |
-            Where-Object { Test-PathOnMappedDrive $_ } | Select-Object -First 1
-        if ($badPath) {
-            Write-Host ("[skipped: mapped drive + Password] " + $task.name + " — '" + $badPath + "' is on a mapped network drive (absent in session 0). Use a local C:\ path or a UNC \\host\share path.") -ForegroundColor DarkYellow
-            $summary.skipped++
-            continue
-        }
+    $sessionZeroProblem = Get-SessionZeroProblem $task $launcher $wantedExec $logonType
+    if ($sessionZeroProblem) {
+        Write-Host $sessionZeroProblem -ForegroundColor DarkYellow
+        $summary.skipped++
+        continue
     }
 
     # The target must exist. Registering a task whose script/executable is not
@@ -870,6 +895,9 @@ foreach ($task in $reg.tasks) {
             Force       = $true
             ErrorAction = 'Stop'
         }
+        # Only Password registers with the stored secret. S4U needs none — that is
+        # the point of it — and InteractiveToken borrows a live session, so for
+        # both the principal in the XML is the whole registration.
         if ($logonType -eq 'Password') {
             $xmlParams.User     = $task.user
             $xmlParams.Password = (Get-StoredPassword)

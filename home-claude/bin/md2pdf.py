@@ -130,6 +130,23 @@ def find_browser() -> str:
     return browser_candidates()[0]
 
 
+# What the printed page may load. The Markdown may carry raw HTML and the page is
+# a file:// document, so `<iframe src="../.env">` rendered that file's text into
+# the PDF — measured with Chrome 152 and Edge 153, and just as well through
+# <embed>, <object>, an absolute file:/// URL or a path relative to the temp
+# HTML. md2pdf-sync regenerates the PDF of any cloned repository whose .md is
+# newer, and ClaudeGitPushAll commits it. Narrowing fix_src would not have
+# helped: the browser resolves the last two forms itself. A policy is enforced by
+# the browser whatever the URL looks like.
+#
+# Still allowed: images from disk, data: and the web (what documents actually
+# embed), inline <style> and style="" (md2pdf's own CSS, Markdown tables). Blocked:
+# frames, objects, embeds, scripts, fonts and external stylesheets — nothing a
+# printed Markdown document needs.
+CONTENT_POLICY = ("default-src 'none'; img-src file: data: http: https:; "
+                  "style-src 'unsafe-inline'")
+
+
 def md_to_html(md_path: Path) -> str:
     import re
 
@@ -190,7 +207,9 @@ def md_to_html(md_path: Path) -> str:
     title = _html.escape(md_path.stem.replace("_", " ").replace("-", " "))
     return (
         f"<!DOCTYPE html><html><head>"
-        f'<meta charset="utf-8"><title>{title}</title>'
+        f'<meta charset="utf-8">'
+        f'<meta http-equiv="Content-Security-Policy" content="{CONTENT_POLICY}">'
+        f"<title>{title}</title>"
         f"<style>{CSS}</style></head><body>{body}</body></html>"
     )
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -304,6 +305,67 @@ def test_a_pdf_whose_title_cannot_be_read_is_not_called_wrong(md2pdf):
     """No trailer, no Info, another producer: "cannot tell" must not refuse a print."""
     assert md2pdf.pdf_title(NEW_PDF) is None
     assert md2pdf.pdf_title(b"%PDF-1.5\n1 0 obj\n<</Type /ObjStm>>\nendobj\n") is None
+
+
+# ── what the printed page may pull in ───────────────────────────────────────
+#
+# The Markdown may carry raw HTML and the page is a file:// document, so
+# `<iframe src="../.env">` printed that file into the PDF (Chrome 152, Edge 153)
+# — and md2pdf-sync regenerates the PDF of any cloned repository.
+
+def test_the_page_is_printed_under_a_policy_that_loads_no_frames(md2pdf, tmp_path):
+    md = tmp_path / "doc.md"
+    md.write_text('# Doc\n\n<iframe src="notes.txt"></iframe>\n\n| a | b |\n|---|---|\n| 1<br>2 | 3 |\n',
+                  encoding="utf-8")
+
+    page = md2pdf.md_to_html(md)
+
+    head, _, body = page.partition("<body>")
+    assert f'http-equiv="Content-Security-Policy" content="{md2pdf.CONTENT_POLICY}"' in head
+    policy = md2pdf.CONTENT_POLICY
+    assert policy.startswith("default-src 'none'")
+    for widening in ("frame-src", "child-src", "object-src", "script-src", "font-src"):
+        assert widening not in policy, f"{widening} would reopen what default-src closed"
+    assert "<br>" in body, "raw HTML still renders — the policy, not the parser, closes the hole"
+
+
+def _font_families(pdf: bytes) -> set[str]:
+    return {name.split(b"+", 1)[-1].decode("latin-1")
+            for name in re.findall(rb"/BaseFont\s*/([^\s/<>\[\]()]+)", pdf)}
+
+
+@pytest.mark.integration
+def test_a_local_file_in_an_iframe_does_not_reach_the_pdf(md2pdf, tmp_path):
+    """Measured through the fonts, which needs no PDF text extractor.
+
+    A plain-text file rendered in a frame is set in the browser's monospace font;
+    the document itself uses none. So the frame's content shows up as one extra
+    font family — and must not.
+    """
+    try:
+        md2pdf.browser_candidates()
+    except RuntimeError:
+        pytest.skip("no Chromium-family browser on this machine")
+    (tmp_path / "secret.txt").write_text("canary line that must stay on this machine\n",
+                                         encoding="utf-8")
+    (tmp_path / "dot.png").write_bytes(bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d"
+        "4944415478da63f8cfc0f01f0005000201a5f1d3960000000049454e44ae426082"))
+    body = "# Probe\n\nA paragraph and an image: ![dot](dot.png)\n\n"
+    probe, control = tmp_path / "probe.md", tmp_path / "control.md"
+    probe.write_text(body + '<iframe src="secret.txt" width="400" height="60"></iframe>\n',
+                     encoding="utf-8")
+    control.write_text(body, encoding="utf-8")
+    try:
+        md2pdf.convert(probe, tmp_path / "probe.pdf")
+        md2pdf.convert(control, tmp_path / "control.pdf")
+    except RuntimeError as exc:
+        pytest.skip(f"this environment cannot print at all: {exc}")
+
+    printed = (tmp_path / "probe.pdf").read_bytes()
+    assert _font_families(printed) == _font_families((tmp_path / "control.pdf").read_bytes()), \
+        "the framed file was rendered into the PDF"
+    assert b"/Subtype /Image" in printed, "local images must still print"
 
 
 @pytest.mark.integration

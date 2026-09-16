@@ -1,0 +1,3 @@
+# The parity fixture's BOM, CRLF lines and missing final newline ARE the test.
+# The root `* text=auto eol=lf` would normalize them away on commit.
+dotenv-parity.env -text

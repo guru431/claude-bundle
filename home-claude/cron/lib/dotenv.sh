@@ -1,6 +1,8 @@
 # shellcheck shell=bash
 # Shared .env loader — single source of truth for how the shell tasks read the
-# bundle's .env, mirroring cron/hooks/utils.py::_load_dotenv.
+# bundle's .env, mirroring cron/hooks/utils.py::_load_dotenv. What every one of
+# the bundle's four .env parsers must read out of a file is pinned, line by line,
+# by tests/fixtures/dotenv-parity.env and tests/test_dotenv_parity.py.
 #
 # Sourceable bash fragment (no shebang, no `set -e`): it only defines a
 # function, it does not run anything on its own.
@@ -39,9 +41,21 @@ dotenv_load() {
             _dl_line="${_dl_line#$'\xef\xbb\xbf'}"
             _dl_first=0
         fi
+        # Leading whitespace goes BEFORE the comment and `export` checks. An
+        # indented `  export KEY=v` used to become the key "export KEY", fail the
+        # identifier check and vanish — while utils.py::_load_dotenv, which
+        # strips the line first, loaded it.
+        _dl_line="${_dl_line#"${_dl_line%%[![:space:]]*}"}"
         case "$_dl_line" in
             ''|\#*) continue ;;
             export\ *) _dl_line="${_dl_line#export }" ;;
+        esac
+        # No '=' means no assignment. `${_dl_line%%=*}` and `${_dl_line#*=}` both
+        # return the WHOLE line when there is none, so a stray `FOO` line was
+        # exported as FOO=FOO; the Python, PowerShell and VBScript parsers skip it.
+        case "$_dl_line" in
+            *=*) ;;
+            *) continue ;;
         esac
         _dl_key="${_dl_line%%=*}"
         # Trim surrounding whitespace: `KEY = value` is a shape people write, and
@@ -66,15 +80,20 @@ dotenv_load() {
             continue
         fi
         _dl_val="${_dl_line#*=}"
-        # Whitespace on BOTH sides is stripped before unquoting — matching
-        # utils.py::_load_dotenv, which does `value.strip().strip('"')`. The
-        # leading side matters for `KEY = value`, the trailing side for
-        # `KEY="x"   `; keeping either produced a value the Python half of the
-        # pipeline read differently from the shell half.
+        # Whitespace on BOTH sides is stripped before unquoting, as
+        # utils.py::_load_dotenv does. The leading side matters for
+        # `KEY = value`, the trailing side for `KEY="x"   `; keeping either
+        # produced a value the Python half of the pipeline read differently from
+        # the shell half.
         _dl_val="${_dl_val#"${_dl_val%%[![:space:]]*}"}"
         _dl_val="${_dl_val%"${_dl_val##*[![:space:]]}"}"
-        _dl_val="${_dl_val%\"}"; _dl_val="${_dl_val#\"}"
-        _dl_val="${_dl_val%\'}"; _dl_val="${_dl_val#\'}"
+        # ONE surrounding pair of MATCHING quotes is removed, and nothing else —
+        # the contract tests/fixtures/dotenv-parity.env pins for every parser.
+        # Each end used to be stripped on its own, so `say "hi"` lost its closing
+        # quote and an unmatched `"open` lost its opening one.
+        case "$_dl_val" in
+            \"*\"|\'*\') _dl_val="${_dl_val#?}"; _dl_val="${_dl_val%?}" ;;
+        esac
         export "${_dl_key}=${_dl_val}"
     done < "$_dl_file"
     unset _dl_file _dl_raw _dl_line _dl_key _dl_val _dl_first

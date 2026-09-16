@@ -409,67 +409,8 @@ def test_shell_dotenv_does_not_override_the_environment(tmp_path: Path):
     assert out == "from-environment|from-dotenv"
 
 
-# ONE fixture, parsed by BOTH implementations, asserted to agree. Four parsers
-# of this file exist (bash, Python, VBScript, PowerShell) and they had drifted
-# on every one of these lines: `export `, a BOM on the first key, `KEY = value`,
-# a trailing space after a quoted value, and a key with a leading digit — which
-# in bash is not merely skipped but an ERROR that, under `set -e`, ended the
-# load and silently dropped every variable BELOW it.
-_DOTENV_FIXTURE = (
-    "﻿FIRST_KEY=first\n"          # BOM: the first key used to be lost
-    "# a comment\n"
-    "\n"
-    "export EXPORTED=yes\n"            # bash took it, Python did not
-    "SPACED = padded\n"                # Python trimmed, bash dropped the line
-    'QUOTED="in quotes"   \n'          # trailing space after the closing quote
-    "SINGLE='single'\n"
-    "1BADKEY=nope\n"                   # a leading digit: fatal in bash under set -e
-    "AFTER_BAD=reached\n"              # …so THIS line was the real casualty
-    "EMPTY=\n"
-)
-_DOTENV_EXPECTED = {
-    "FIRST_KEY": "first",
-    "EXPORTED": "yes",
-    "SPACED": "padded",
-    "QUOTED": "in quotes",
-    "SINGLE": "single",
-    "AFTER_BAD": "reached",
-    "EMPTY": "",
-}
-
-
-@pytest.mark.skipif(_bash() is None, reason="bash not available")
-def test_both_dotenv_parsers_read_the_same_fixture(tmp_path: Path, bundle_tree: Path,
-                                                   monkeypatch):
-    """The bash and Python parsers must agree, key for key, on one file."""
-    env_file = tmp_path / ".env"
-    env_file.write_text(_DOTENV_FIXTURE, encoding="utf-8")
-
-    names = " ".join(_DOTENV_EXPECTED)
-    script = tmp_path / "probe.sh"
-    lib = (CRON / "lib" / "dotenv.sh").as_posix()
-    script.write_text(
-        "set -eu\n"
-        f". '{lib}'\n"
-        f"dotenv_load '{env_file.as_posix()}'\n"
-        f'for k in {names}; do printf "%s=%s\\n" "$k" "${{!k-<unset>}}"; done\n',
-        encoding="utf-8", newline="\n")
-    # A CLEAN environment: an inherited value would mask a key the parser failed
-    # to set, which is exactly the bug being tested for.
-    env = {k: v for k, v in os.environ.items() if k not in _DOTENV_EXPECTED}
-    res = subprocess.run([_bash(), str(script)], capture_output=True, text=True,
-                         env=env, timeout=60)
-    assert res.returncode == 0, f"the bash parser aborted:\n{res.stderr}"
-    from_bash = dict(line.split("=", 1) for line in res.stdout.strip().splitlines())
-    assert from_bash == _DOTENV_EXPECTED, "bash parser disagrees with the fixture"
-
-    # …and the Python one, on the same bytes.
-    (bundle_tree / ".env").write_text(_DOTENV_FIXTURE, encoding="utf-8")
-    for name in _DOTENV_EXPECTED:
-        monkeypatch.delenv(name, raising=False)
-    _import_utils(monkeypatch, bundle_tree)   # loading it runs _load_dotenv()
-    from_python = {k: os.environ.get(k, "<unset>") for k in _DOTENV_EXPECTED}
-    assert from_python == _DOTENV_EXPECTED, "Python parser disagrees with the fixture"
+# The parser-parity test that lived here moved to tests/test_dotenv_parity.py,
+# which runs ONE shared fixture through all four .env parsers.
 
 
 def test_python_dotenv_does_not_override_the_environment(bundle_tree: Path, monkeypatch):

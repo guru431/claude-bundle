@@ -77,8 +77,8 @@ pat="$tmpdir/patterns"
 # TARGET remote already has. A brand-new target has nothing, so this is the
 # whole history — correct, and what a first push actually publishes.
 # `awk NF>1` keeps only objects that carry a name: blobs and trees (their path)
-# and annotated tags (the tag name); commits print bare.
-# shellcheck disable=SC2086 — both vars must word-split.
+# and annotated tags (the tag name); commits print bare. Both vars must
+# word-split, hence the SC2086 directives.
 if [ -n "$excludes" ]; then
   # shellcheck disable=SC2086
   git rev-list --objects $shas --not $excludes 2>/dev/null | awk 'NF>1' > "$objects" || true

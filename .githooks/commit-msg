@@ -52,10 +52,14 @@ if ! secret_scan_denylist "$repo_root/.sanitize-patterns" "$pat"; then
   echo "BLOCKED: .sanitize-patterns cannot be used (see above) — the personal denylist"
   echo "  would be OFF for this message. Fix the pattern, or move the file aside."
   fail=1
-elif [ -s "$pat" ] && ! hits=$(printf '%s\n' "$body" | secret_scan_denylist_text "$pat"); then
-  echo "BLOCKED: personal data (matched .sanitize-patterns) in the commit message:"
-  printf '%s\n' "$hits" | sed 's/^/  /'
-  fail=1
+elif [ -s "$pat" ]; then
+  # The body is already decoded text, so a plain grep is the whole check.
+  hits=$(printf '%s\n' "$body" | grep -naiEf "$pat" || true)
+  if [ -n "$hits" ]; then
+    echo "BLOCKED: personal data (matched .sanitize-patterns) in the commit message:"
+    printf '%s\n' "$hits" | sed 's/^/  /'
+    fail=1
+  fi
 fi
 rm -f "$pat"
 

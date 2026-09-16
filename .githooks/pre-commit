@@ -97,10 +97,16 @@ if [ -n "$u16_hits" ]; then
 fi
 
 # 3) Personal denylist — concrete values from untracked .sanitize-patterns
-if [ -s "$pat" ] && ! hits=$(printf '%s\n' "$added_content" | secret_scan_denylist_text "$pat"); then
-  echo "BLOCKED: personal data (matched .sanitize-patterns) in staged changes:"
-  printf '%s\n' "$hits" | sed 's/^/  /'
-  fail=1
+# A plain grep: diff lines are text by construction (UTF-16 and binary files
+# never get `+` lines — step 2b reads those), so the decoding scanner would only
+# add process spawns to every commit. -a for the reason secret_scan_diff gives.
+if [ -s "$pat" ]; then
+  hits=$(printf '%s\n' "$added_content" | grep -naiEf "$pat" || true)
+  if [ -n "$hits" ]; then
+    echo "BLOCKED: personal data (matched .sanitize-patterns) in staged changes:"
+    printf '%s\n' "$hits" | sed 's/^/  /'
+    fail=1
+  fi
 fi
 rm -f "$pat"
 

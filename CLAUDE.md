@@ -90,7 +90,7 @@ preserve that discipline.
 │   ├── bootstrap-registry.ps1          fill registry.yaml placeholders
 │   ├── self-test.ps1                   offline sanity check (one command)
 │   ├── mcp-probe.py                    MCP handshake + `--check-wrappers` audit
-│   ├── enable-guard.{sh,ps1}           activate the pre-commit secret-guard
+│   ├── enable-guard.{sh,ps1}           activate the four .githooks/ secret guards
 │   └── check-*.py                      CI guards: doc-counts, registry, env-ref,
 │                                       agents-sync, io-matrix
 ├── config/

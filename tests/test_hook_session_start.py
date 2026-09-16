@@ -1,10 +1,14 @@
-"""session-start.py: the handoff wait and the resume branch.
+"""session-start.py: the handoff wait, the resume branch, the scheduler heartbeat.
 
 The wait on a compaction's handoff trusted a marker for 300 seconds after it was
 written, whether or not its writer was still alive — a killed writer cost the next
 session start its whole 45-second wait. The marker now carries the writer's
 deadline. The wait also skipped itself whenever an older handoff of the same
 session existed, so a second compaction handed over the FIRST one's state.
+
+The heartbeat is the one alarm that does not depend on the scheduler: when the
+scheduled tasks stop (a changed Windows password stops every Password-logon task,
+the watchdogs included), nothing nightly can report it.
 
 Time is faked throughout: no test here sleeps or reads the calendar.
 """
@@ -139,3 +143,85 @@ def test_a_resume_does_not_inject_the_wiki_index_again(start, bundle):
     titles = lambda source: [t for t, _, _ in start.collect_blocks("", "", "", source)]
     assert "=== WIKI INDEX ===" in titles("startup")
     assert "=== WIKI INDEX ===" not in titles("resume")
+
+
+# ── the scheduler heartbeat ──────────────────────────────────────────────────
+
+NOW = datetime(2026, 9, 17, 9, 0, 0)
+
+
+def _ledger(path: Path, *records, torn_head: bool = False) -> Path:
+    lines = [json.dumps(r) for r in records]
+    if torn_head:
+        lines.insert(0, '"useful_items": 3, "verdict": "green"}')
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_no_ledger_no_warning(start):
+    assert start.scheduler_silence(None, NOW) == ""
+
+
+def test_a_recent_run_is_silent(start, tmp_path):
+    ledger = _ledger(tmp_path / "runs-2026.jsonl",
+                     {"ts": "2026-09-10T02:30:00", "task": "ClaudeOld"},
+                     {"ts": "2026-09-16T02:30:00", "task": "ClaudeWikiPipeline"})
+    assert start.scheduler_silence(ledger, NOW) == ""
+
+
+def test_a_silent_scheduler_is_reported(start, tmp_path):
+    ledger = _ledger(tmp_path / "runs-2026.jsonl",
+                     {"ts": "2026-09-13T02:30:00", "task": "ClaudeTaskMonitor"},
+                     "not json at all", torn_head=True)
+    warning = start.scheduler_silence(ledger, NOW)
+    assert "4 days" in warning and "ClaudeTaskMonitor" in warning
+    assert "\n" not in warning
+
+
+def test_only_the_tail_of_a_large_ledger_is_read(start, tmp_path, monkeypatch):
+    """A megabyte of history ahead of the last record: answered from the end alone."""
+    ledger = tmp_path / "runs-2026.jsonl"
+    with open(ledger, "w", encoding="utf-8") as fh:
+        for i in range(12000):
+            fh.write(json.dumps({"ts": "2026-01-01T00:00:00", "task": f"T{i}", "pad": "x" * 60}) + "\n")
+        fh.write(json.dumps({"ts": "2026-09-16T23:00:00", "task": "ClaudeLatest"}) + "\n")
+    assert ledger.stat().st_size > 1_000_000
+    read = []
+
+    def counting_open(*args, **kwargs):
+        fh = open(*args, **kwargs)
+        real_read = fh.read
+        fh.read = lambda *a: read.append(len(chunk := real_read(*a))) or chunk
+        return fh
+
+    monkeypatch.setattr(start, "open", counting_open, raising=False)
+    assert start.scheduler_silence(ledger, NOW) == ""
+    assert 0 < sum(read) <= 65536
+
+
+def test_newest_ledger_is_the_one_runs_py_writes(start, tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_BUNDLE_RUNS_DIR", str(tmp_path))
+    assert start.newest_ledger() is None
+    (tmp_path / "runs.jsonl").write_text("", encoding="utf-8")         # legacy
+    (tmp_path / "runs-2025.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "runs-2026.jsonl").write_text("", encoding="utf-8")
+    sys.modules.pop("runs", None)
+    assert start.newest_ledger() == tmp_path / "runs-2026.jsonl"
+
+
+def _run_start(bundle: Path, payload: dict, runs_dir: Path) -> str:
+    env = dict(os.environ, CLAUDE_BUNDLE_RUNS_DIR=str(runs_dir))
+    r = subprocess.run([sys.executable, str(bundle / "cron" / "hooks" / "session-start.py")],
+                       input=json.dumps(payload), capture_output=True, text=True,
+                       encoding="utf-8", env=env, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def test_the_warning_reaches_the_session_but_not_a_resume(bundle: Path, tmp_path: Path):
+    runs = tmp_path / "runs"
+    assert _run_start(bundle, {"source": "startup"}, runs) == ""       # lite: no ledger
+    runs.mkdir()
+    _ledger(runs / "runs-2000.jsonl", {"ts": "2000-01-01T02:30:00", "task": "ClaudeHealthcheck"})
+    assert "WARNING (claude-bundle)" in _run_start(bundle, {"source": "startup"}, runs)
+    assert _run_start(bundle, {"source": "resume"}, runs) == ""

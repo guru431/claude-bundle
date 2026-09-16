@@ -9,6 +9,8 @@ SESSION_START_MAX_CHARS budget — see below):
   3. wiki/projects/<current-project>/_log.md — recent updates for this project
   4. wiki/index.md — global knowledge map
   5. this project's section of the latest wiki/daily/YYYY-MM-DD.md
+Ahead of all of them, outside that budget: one warning line when the scheduled
+tasks have stopped recording runs (see scheduler_silence).
 Time: <1s, no LLM calls.
 """
 
@@ -65,6 +67,12 @@ except ValueError:
 # without one (written before markers carried it) falls back to its age: older
 # than this, it belongs to a writer that died without clearing it.
 HANDOFF_MARKER_MAX_AGE = 300
+
+# The scheduled tasks record every run in cron/logs/runs-<year>.jsonl. When the
+# newest record is older than this, nothing on this machine is running them —
+# and no nightly watchdog can say so, because the watchdogs are scheduled tasks
+# too. A Windows password change does exactly that to every Password-logon task.
+SCHEDULER_SILENCE_DAYS = 2
 
 # Everything below is written by the unattended nightly pipeline out of session
 # transcripts and external articles, i.e. it is untrusted-derived. Without this
@@ -259,6 +267,59 @@ def collect_blocks(project: str, transcript_dir: str, session_id: str,
     return blocks
 
 
+def newest_ledger() -> Path | None:
+    """The newest slice of the run ledger, or None when there is none.
+
+    Located by cron/runs.py itself, so this and the ledger's writers cannot
+    disagree about where it lives.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from runs import runs_logs
+        slices = runs_logs()
+    except Exception:
+        return None
+    return slices[-1] if slices else None
+
+
+def scheduler_silence(ledger: Path | None, now: datetime) -> str:
+    """One warning line when the scheduled tasks have stopped running, else "".
+
+    An EXTERNAL heartbeat. ClaudeTaskMonitor and ClaudeHealthcheck are scheduled
+    tasks themselves, so whatever stops the fleet — a changed Windows password
+    stops every Password-logon task at once — silences the two watchdogs with it,
+    and nothing reports anything. A session start is the one thing that still
+    runs.
+
+    Silent without a ledger: a lite install has no tasks and never writes one.
+    Reads only the tail of the newest slice — this runs at every session start,
+    and a year's ledger is thousands of lines.
+    """
+    if ledger is None:
+        return ""
+    try:
+        with open(ledger, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 65536))
+            tail = fh.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(tail):
+        try:
+            record = json.loads(line)
+            age = (now - datetime.fromisoformat(record["ts"])).total_seconds() / 86400
+        except (ValueError, TypeError, KeyError):
+            continue                     # a torn first line, or not a record
+        if age <= SCHEDULER_SILENCE_DAYS:
+            return ""
+        return (f"WARNING (claude-bundle): no scheduled task has recorded a run for "
+                f"{age:.0f} days (last: {record.get('task', '?')} at {record['ts']}), "
+                f"so its watchdogs are silent too. On Windows a changed password "
+                f"stops every Password-logon task — re-run cron/admin/save-cred.cmd. "
+                f"Worth telling the user.")
+    return ""
+
+
 def within_budget(blocks: list[tuple[str, str, str]], budget: int) -> list[str]:
     """Render blocks until the budget runs out, truncating the one that straddles it."""
     parts: list[str] = []
@@ -280,8 +341,18 @@ def main():
     project, transcript_dir, session_id, source = detect_from_stdin()
     parts = within_budget(
         collect_blocks(project, transcript_dir, session_id, source), MAX_CHARS)
+    out = []
+    # Outside the injected-context frame: it is a fact measured on this machine,
+    # not text derived from transcripts. Skipped on a resume for the same reason
+    # as the wiki index — the restored conversation already carries it.
+    if source != "resume":
+        warning = scheduler_silence(newest_ledger(), datetime.now())
+        if warning:
+            out.append(warning)
     if parts:
-        print("\n\n".join([CONTEXT_HEADER] + parts + [CONTEXT_FOOTER]))
+        out.append("\n\n".join([CONTEXT_HEADER] + parts + [CONTEXT_FOOTER]))
+    if out:
+        print("\n\n".join(out))
 
 
 if __name__ == "__main__":

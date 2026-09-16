@@ -40,7 +40,7 @@ for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (dir_to_project, parse_jsonl_delta, is_subagent_jsonl,
-                   llm_call_ex, worst_kind, llm_pace, atomic_write_text,
+                   messages_day, llm_call_ex, worst_kind, llm_pace, atomic_write_text,
                    normalize_project_name, KNOWN_PROJECTS, mark_phase_success,
                    state_get, state_add, state_remove, is_dry_run, SKIP_DIRS,
                    project_allowed, slug_collisions, COLLECT_PLANS,
@@ -216,12 +216,7 @@ def session_day(jf: Path, messages: list[dict]) -> str:
     machine's offset at the time of writing, which the transcript does not
     carry.
     """
-    day = ""
-    for msg in reversed(messages):
-        stamp = msg.get("ts") or ""
-        if len(stamp) >= 10 and stamp[4] == "-" and stamp[7] == "-":
-            day = stamp[:10]
-            break
+    day = messages_day(messages)
     if not day:
         try:
             day = datetime.fromtimestamp(jf.stat().st_mtime).strftime("%Y-%m-%d")
@@ -360,15 +355,68 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20,
     return by_project
 
 
-def collect_pending(covered_ids: set[str] | None = None) -> tuple[dict[str, list[str]], list[tuple[Path, str]], int]:
+_PENDING_HEADER_RE = re.compile(r"(?m)^(Project|Dir|Day):[ \t]*(.*?)[ \t]*$")
+
+
+def pending_draft_bucket(text: str) -> tuple[str, str, str]:
+    """(day, project, denial reason or "") for one pending draft. A draft refused
+    by skip_dirs names its directory in place of the project.
+
+    Only the HEADER is read — the lines before the first blank one. The body is
+    a transcript, and a `Dir: …` line inside it must not decide where the draft
+    goes.
+
+    `Dir:` is the ~/.claude/projects directory the hook cut the draft from: the
+    project is re-derived from it with the map this run uses, and skip_dirs is
+    applied, exactly as for a JSONL. `Project:` was the only attribution before,
+    a slug computed by a hook whose cwd encoder disagreed with the real directory
+    name — so a denied project could be written under an allowed-looking slug.
+    `Day:` is the day of the draft's newest message; a draft without one (written
+    before the hooks stamped it) keeps the run's date, as before.
+    """
+    header = text.split("\n\n", 1)[0]
+    fields = {k: v for k, v in _PENDING_HEADER_RE.findall(header)}
+    dir_name = fields.get("Dir", "")
+    if dir_name:
+        if dir_name in SKIP_DIRS:
+            return DATE, dir_name, "skip_dirs"
+        project = normalize_project_name(dir_to_project(dir_name))
+    elif fields.get("Project"):
+        # Normalized with the SAME function the compiler uses. A raw label went
+        # into the daily as `## My App` and compile-sessions then normalized it
+        # to a different slug than flush had used for the JSONL of the same
+        # session, so one session produced two project buckets.
+        project = normalize_project_name(fields["Project"])
+    else:
+        project = DEFAULT_PROJECT
+    if not project_allowed(project):
+        return DATE, project, "policy"
+    day = DATE
+    stamp = fields.get("Day", "")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", stamp):
+        try:
+            datetime.strptime(stamp, "%Y-%m-%d")
+            day = min(stamp, DATE)   # clamped, like session_day
+        except ValueError:
+            pass
+    return day, project, ""
+
+
+def collect_pending(covered_ids: set[str] | None = None):
     """Collect data from .pending/ (left by PreCompact/SessionEnd hooks).
 
-    Returns (data_by_project, consumed_files, skipped). Each consumed entry is a
-    (path, project) pair so the caller can keep files belonging to a project
-    whose extraction failed. Files are NOT deleted here — the caller deletes
-    them only after the daily log is written and only for projects that
-    extracted successfully, so a crash or LLM failure mid-run can't lose
-    pending data (it's reprocessed next run).
+    Returns (data_by_bucket, consumed_files, skipped, denied):
+
+      data_by_bucket  {(day, project): [draft text]} — see pending_draft_bucket
+      consumed_files  [(path, (day, project))], so the caller can keep the files
+                      of a bucket whose extraction failed
+      skipped         drafts covered by a JSONL fed this run (see below)
+      denied          [(path, project, reason)] refused by skip_dirs or the
+                      policy — never read into a bucket
+
+    Files are NOT deleted here — the caller deletes them only after the daily
+    log is written and only for buckets that extracted successfully, so a crash
+    or LLM failure mid-run can't lose pending data (it's reprocessed next run).
 
     A pending draft is named `<session-id>.md` (save_to_pending keys by
     session_id) and is only the *tail* of a session whose full transcript is
@@ -384,31 +432,30 @@ def collect_pending(covered_ids: set[str] | None = None) -> tuple[dict[str, list
     but the draft that covered them was already gone — and the JSONL itself could
     fall out of the 48-hour window before the retry ever happened.
     """
-    by_project: dict[str, list[str]] = {}
-    consumed: list[tuple[Path, str]] = []
+    by_bucket: dict[tuple[str, str], list[str]] = {}
+    consumed: list[tuple[Path, tuple[str, str]]] = []
+    denied: list[tuple[Path, str, str]] = []
     covered_ids = covered_ids or set()
     skipped = 0
     if not PENDING_DIR.exists():
-        return by_project, consumed, skipped
+        return by_bucket, consumed, skipped, denied
 
     for f in PENDING_DIR.glob("*.md"):
         text = _read_text_safe(f)
         if text is None:
             continue
-        match = re.search(r'^Project:\s*(.+)$', text, re.MULTILINE)
-        # Normalized with the SAME function the compiler uses. A raw label went
-        # into the daily as `## My App` and compile-sessions then normalized it
-        # to a different slug than flush had used for the JSONL of the same
-        # session, so one session produced two project buckets.
-        project = normalize_project_name(match.group(1)) if match else DEFAULT_PROJECT
+        day, project, reason = pending_draft_bucket(text)
+        if reason:
+            denied.append((f, project, reason))
+            continue
         if f.stem in covered_ids:
             skipped += 1
-            consumed.append((f, project))
+            consumed.append((f, (day, project)))
             continue
-        by_project.setdefault(project, []).append(text)
-        consumed.append((f, project))
+        by_bucket.setdefault((day, project), []).append(text)
+        consumed.append((f, (day, project)))
 
-    return by_project, consumed, skipped
+    return by_bucket, consumed, skipped, denied
 
 
 def collect_feedback_files() -> dict[str, list[str]]:
@@ -840,23 +887,23 @@ def main():
 
     # Hook-provided pending — collected AFTER the JSONL filter so we know which
     # sessions are already fed this run. A draft whose <session-id>.jsonl is in
-    # the kept set is a strict subset and is skipped (dedup). Dry-run passes no
-    # covered ids so it neither skips nor deletes anything.
+    # the kept set is a strict subset and is skipped (dedup). Nothing is deleted
+    # during collection, so a dry run passes the same covered ids as a real
+    # one: it used to pass none, and its cost preview counted every covered
+    # draft a second time on top of the JSONL it was cut from.
     #
     # FILTERED-OUT files count as covering too. A trivial or subagent session is
     # marked processed and never read again, so its `.pending` tail was NOT
     # considered covered and went to the LLM on its own — the one copy of a
     # session the phase had just decided was not worth processing.
-    covered_ids = set() if is_dry_run() else (
-        {jf.stem for files in jsonls.values() for jf in files}
-        | {jf.stem for _project, jf in filtered_out})
-    pending, pending_files, skipped_pending = collect_pending(covered_ids)
+    covered_ids = ({jf.stem for files in jsonls.values() for jf in files}
+                   | {jf.stem for _project, jf in filtered_out})
+    pending, pending_files, skipped_pending, denied_pending = collect_pending(covered_ids)
     log(f"Pending (hooks): {sum(len(v) for v in pending.values())} files"
         + (f" ({skipped_pending} skipped as already covered by JSONL)" if skipped_pending else ""))
 
-    # The project label inside a pending file is free text written by a hook, so
-    # it has to pass the same policy gate as every other source — otherwise an
-    # excluded project still reaches the LLM through this path.
+    # A pending draft passes the same gates as every other source — skip_dirs
+    # and the policy — or an excluded project still reaches the LLM this way.
     #
     # A denied draft gets ONE explicit disposition, decided here: dropped,
     # unread. Leaving it in the shared queue meant the outcome depended on what
@@ -864,28 +911,24 @@ def main():
     # daily, silently deleted by the cleanup loop when one did. Nothing is lost
     # by dropping it: the draft is a tail copy of a transcript that stays under
     # ~/.claude/projects and will never be processed while the policy stands.
-    denied = {p for p in pending if not project_allowed(p)}
-    if denied:
-        dropped = [(f, p) for f, p in pending_files if p in denied]
+    if denied_pending:
         if not is_dry_run():
-            for f, _ in dropped:
+            for f, _project, _reason in denied_pending:
                 try:
                     f.unlink()
                 except OSError:
                     pass
-            pending_files = [(f, p) for f, p in pending_files if p not in denied]
-        log(f"Pending denied by policy: {len(dropped)} file(s) from "
-            f"{', '.join(sorted(denied))} — "
+        reasons = sorted({f"{p} ({reason})" for _f, p, reason in denied_pending})
+        log(f"Pending denied: {len(denied_pending)} file(s) from "
+            f"{', '.join(reasons)} — "
             f"{'would be dropped (dry run)' if is_dry_run() else 'dropped unread'}")
 
-    # Sources B/C/E and the hook drafts carry no reliable session timestamp of
-    # their own (a draft is a tail, a feedback file is edited whenever), so they
-    # stay on the run's own date — the material they hold is what the last day
-    # or two produced.
-    for project, texts in pending.items():
-        if project in denied:
-            continue
-        buckets.setdefault((DATE, project), []).extend(texts)
+    # A draft goes to the daily of the day it was WRITTEN (its `Day:` header),
+    # like a JSONL slice; one written before the hooks stamped that keeps the
+    # run's date. Sources B/C/E carry no session timestamp of their own (a
+    # feedback file is edited whenever), so they stay on the run's own date.
+    for bucket, texts in pending.items():
+        buckets.setdefault(bucket, []).extend(texts)
 
     for project, texts in feedbacks.items():
         buckets.setdefault((DATE, project), []).extend(texts)
@@ -1045,9 +1088,9 @@ def main():
     # Pending files are deleted only now that the daily log is safely written,
     # and only for projects whose extraction succeeded — a transient LLM /
     # network failure must not permanently drop a project's session content.
-    # Drafts feed the run-date bucket, so that is the bucket that decides.
-    for pf, project in pending_files:
-        if (DATE, project) in failed_buckets:
+    # Each draft's own (day, project) bucket decides.
+    for pf, bucket in pending_files:
+        if bucket in failed_buckets:
             continue
         try:
             pf.unlink()

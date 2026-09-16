@@ -261,7 +261,7 @@ def _manifest_str_list(key: str) -> list:
     return []
 
 # Map the FULL Claude Code project-dir name → wiki project slug. Directory
-# format: the encoded cwd with `\`, `/`, `:` replaced by `-`. Configure via
+# format: the cwd with every non-alphanumeric character replaced by `-`. Configure via
 # bundle.local.yaml `project_map:`; the empty default falls back to the
 # trailing `-`-segment (see dir_to_project).
 # A malformed project_map is NOT ignorable: the map is what makes two cwds with
@@ -1150,8 +1150,9 @@ def dir_to_project(dirname: str) -> str:
     """Convert a Claude projects directory name into a wiki project name.
 
     Claude Code encodes the project cwd into the directory name by replacing
-    `\\`, `/`, and `:` with `-`. So `C:\\Users\\me\\projects\\myapp` becomes
-    `C--Users-me-projects-myapp`. There's no general way to recover the
+    every character outside `[A-Za-z0-9]` with `-` (see encode_cwd). So
+    `C:\\Users\\me\\projects\\myapp` becomes `C--Users-me-projects-myapp`, and
+    `my_app` ends up as `my-app`. There's no general way to recover the
     original last segment if the project name itself contains `-` — so we
     rely on PROJECT_MAP for accuracy and use the trailing segment as a
     best-effort fallback.
@@ -1342,56 +1343,99 @@ def parse_jsonl_delta(jsonl_path: str, start_offset: int = 0) -> tuple[list[dict
 def encode_cwd(cwd: str) -> str:
     """Encode a project cwd the way Claude Code names its projects directory.
 
-    `C:\\Users\\me\\projects\\myapp` → `C--Users-me-projects-myapp`, which is the
-    key PROJECT_MAP and dir_to_project are written against.
+    Claude Code replaces EVERY character outside `[A-Za-z0-9]` with `-`:
+    `C:\\Users\\me\\my_app` → `C--Users-me-my-app`, the key PROJECT_MAP and
+    dir_to_project are written against. This replaced only `\\`, `/` and `:`, so
+    a cwd with `_`, `.` or a space encoded to a directory that does not exist,
+    fell back to a different slug than flush derived from the real directory,
+    and `skip_projects` matched one of the two and not the other.
+
+    Still a reconstruction of somebody else's naming, which is why
+    project_dir_from_payload uses it only when there is no transcript path.
     """
     if not isinstance(cwd, str) or not cwd.strip():
         return ""
-    return re.sub(r"[\\/:]", "-", cwd.strip().rstrip("\\/"))
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd.strip().rstrip("\\/"))
+
+
+def project_dir_from_payload(data: dict) -> str:
+    """The ~/.claude/projects/<dir> name a hook payload belongs to, or "".
+
+    The transcript's parent directory IS that name, so it wins whenever the
+    payload carries a transcript path — it is exactly the directory flush reads
+    the same session from. `cwd` is the fallback for payloads without one (a
+    fresh or resumed session), and only the fallback: its encoding is a
+    reconstruction, and it is the CURRENT directory, which need not be the one
+    the session is filed under. This used to be the other way round, with a
+    docstring promising "the two agree whenever both exist"; they did not.
+    """
+    if not isinstance(data, dict):
+        return ""
+    transcript_path = data.get("transcript_path", "")
+    if isinstance(transcript_path, str) and transcript_path.strip():
+        name = os.path.basename(os.path.dirname(transcript_path.strip()))
+        if name:
+            return name
+    return encode_cwd(data.get("cwd", ""))
 
 
 def project_from_payload(data: dict) -> str:
-    """Project name for a hook payload: `cwd` first, transcript_path second.
+    """Project name for a hook payload — see project_dir_from_payload.
 
-    The transcript's parent directory IS the encoded cwd, so the two agree
-    whenever both exist — but `transcript_path` can be absent or empty (a fresh
-    session, a resumed one), and the collectors that keyed off it alone then
-    silently attributed nothing. `cwd` is present in every Claude Code hook
-    payload, so it is the better primary and the other is the fallback.
-
-    One implementation: session-start.py carried its own copy of the same
-    regex, which is exactly how two encoders drift.
+    One implementation: session-start.py carried its own copy of the cwd
+    encoder, which is exactly how two encoders drift.
     """
-    if not isinstance(data, dict):
-        return DEFAULT_PROJECT
-    encoded = encode_cwd(data.get("cwd", ""))
-    if encoded:
-        return dir_to_project(encoded)
-    transcript_path = data.get("transcript_path", "")
-    if isinstance(transcript_path, str) and transcript_path:
-        return dir_to_project(os.path.basename(os.path.dirname(transcript_path)))
-    return DEFAULT_PROJECT
+    dir_name = project_dir_from_payload(data)
+    return dir_to_project(dir_name) if dir_name else DEFAULT_PROJECT
 
 
-def save_to_pending(session_id: str, messages: list[dict], project: str = "unknown"):
+def messages_day(messages: list[dict]) -> str:
+    """YYYY-MM-DD of the newest message that carries a timestamp, or "".
+
+    Shared by the flush (which dates a transcript slice by it) and the session
+    hooks (which stamp a pending draft with it), so a draft and the JSONL it was
+    cut from land in the same daily.
+    """
+    for msg in reversed(messages):
+        stamp = msg.get("ts") or ""
+        if len(stamp) >= 10 and stamp[4] == "-" and stamp[7] == "-":
+            return stamp[:10]
+    return ""
+
+
+def save_to_pending(session_id: str, messages: list[dict], project: str = "unknown",
+                    dir_name: str = "", day: str = ""):
     """Save messages into .pending/ for later flush processing.
 
     The id is sanitized (it becomes a filename) and the body is masked (this
     file is a verbatim slice of a chat, it sits on disk until the next nightly
     run, and it is then sent to the provider as-is).
+
+    `dir_name` and `day` become `Dir:` and `Day:` header lines. `Project:` is a
+    slug this hook computed at session end; `Dir:` is the projects directory
+    itself, so flush re-derives the project with its own map and applies
+    skip_dirs, and `Day:` files the draft under the day it was written rather
+    than the day of the run that finds it.
     """
     PENDING_DIR.mkdir(parents=True, exist_ok=True)
 
     out_path = PENDING_DIR / f"{safe_session_id(session_id)}.md"
 
-    lines = [f"# Session {safe_session_id(session_id)}", f"Project: {project}", ""]
+    lines = [f"# Session {safe_session_id(session_id)}", f"Project: {project}"]
+    if dir_name:
+        lines.append(f"Dir: {dir_name}")
+    if day:
+        lines.append(f"Day: {day}")
+    lines.append("")
     for msg in messages:
         role_label = "USER" if msg["role"] == "user" else "ASSISTANT"
         lines.append(f"### {role_label}")
         lines.append(masked(msg["text"]))
         lines.append("")
 
-    out_path.write_text("\n".join(lines), encoding="utf-8", errors="replace")
+    # Atomic: the nightly flush may read this file while a session is ending,
+    # and a bare write_text left it a truncated draft to send.
+    atomic_write_text(out_path, "\n".join(lines))
 
 
 def save_session_tail(data: dict, last_n: int = 30) -> tuple[str, str] | None:
@@ -1407,6 +1451,9 @@ def save_session_tail(data: dict, last_n: int = 30) -> tuple[str, str] | None:
     the following night — but between the session and the night the name and the
     content of a hidden project sat on disk, and the task monitor could carry it
     off-box. precompact-handoff.py already applied the gate; now they agree.
+
+    skip_dirs is applied here too. It never was: the setting documented as
+    "dropped before name resolution" reached every nightly collector and no hook.
     """
     session_id = data.get("session_id", "unknown")
     transcript_path = data.get("transcript_path", "")
@@ -1414,12 +1461,16 @@ def save_session_tail(data: dict, last_n: int = 30) -> tuple[str, str] | None:
         return None
     if not os.path.exists(transcript_path):
         return None
-    project = project_from_payload(data)
+    dir_name = project_dir_from_payload(data)
+    if dir_name in SKIP_DIRS:
+        return None
+    project = dir_to_project(dir_name) if dir_name else DEFAULT_PROJECT
     if not project_allowed(project):
         return None
     messages = parse_jsonl_messages(transcript_path, last_n=last_n)
     if messages:
-        save_to_pending(session_id, messages, project)
+        save_to_pending(session_id, messages, project, dir_name=dir_name,
+                        day=messages_day(messages))
     return transcript_path, session_id
 
 

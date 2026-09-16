@@ -52,8 +52,12 @@ if ($InstallPath) {
 $configRoot = if ($ClaudeHome) { $ClaudeHome.TrimEnd('\', '/') } else { $home_claude }
 # Every deployment check derives from this one path, so -InstallPath can never
 # silently validate a different tree than the one the installer wrote to. With
-# no -InstallPath the only deployment that can exist is the documented default.
-$deployRoot = if ($deployed) { $home_claude } else { Join-Path $env:USERPROFILE '.claude' }
+# no -InstallPath it is the default install.ps1 uses: CLAUDE_CONFIG_DIR when set,
+# else ~/.claude — checking ~/.claude alone reported on a deployment that was
+# never made while the real one went unchecked.
+$deployRoot = if ($deployed) { $home_claude }
+    elseif ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR.TrimEnd('\', '/') }
+    else { Join-Path $env:USERPROFILE '.claude' }
 
 # The ONE PowerShell .env parser (scripts/lib/dotenv.ps1). It is always next to
 # this script in a checkout; the guard exists so a partial copy of the bundle

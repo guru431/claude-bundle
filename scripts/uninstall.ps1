@@ -34,8 +34,13 @@
 #                 elevated, or -Unregister failed) — nothing was deleted.
 
 param(
+    # Defaults to CLAUDE_CONFIG_DIR when set — the root install.ps1 wrote the
+    # manifest to. Looking only in ~/.claude, an uninstall of such an install
+    # found "no install manifest" and exited 1. (install.ps1 and self-test.ps1
+    # carry the same expression; a param default runs before any library
+    # could be dot-sourced, so it cannot live in one.)
     [Alias('InstallPath')]
-    [string]$ClaudeHome = (Join-Path $env:USERPROFILE '.claude'),
+    [string]$ClaudeHome = $(if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }),
     [switch]$Confirm,
     [switch]$Force,
     [switch]$DryRun

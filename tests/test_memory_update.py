@@ -11,10 +11,12 @@ file, USER.md and the ledger all land in tmp.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -58,6 +60,25 @@ def _run(bundle: Path, home: Path, response: str | None,
         encoding="utf-8", errors="replace", timeout=120)
 
 
+@pytest.fixture()
+def memory(cron_copy: Path, tmp_path: Path, monkeypatch):
+    """The module itself, for the checks a subprocess cannot observe.
+
+    Every path the functions under test read or write is pointed into tmp by
+    hand: `utils` may already be imported by an earlier test, with CLAUDE_HOME
+    resolved before the sandbox HOME existed — i.e. at the developer's real
+    ~/.claude.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "memory_update_under_test", cron_copy / "cron" / "memory-update.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "USER_MD", tmp_path / "memory" / "USER.md")
+    monkeypatch.setattr(mod, "CROSS_NOTES", tmp_path / "memory" / "cross-project-notes.md")
+    monkeypatch.setattr(mod, "PROJECTS_DIR", tmp_path / "projects")
+    return mod
+
+
 def _ledger() -> list[dict]:
     """Every row the runs wrote — into the sandbox ledger (tests/conftest.py)."""
     rows: list[dict] = []
@@ -65,6 +86,35 @@ def _ledger() -> list[dict]:
         rows += [json.loads(line) for line in
                  part.read_text(encoding="utf-8").splitlines() if line.strip()]
     return [r for r in rows if r.get("task") == "ClaudeMemoryUpdate"]
+
+
+def test_both_prompts_mask_credentials_before_they_leave(memory, monkeypatch):
+    """WIKI_MASK_SECRETS is a promise about every request, not about one of two.
+
+    The USER.md prompt masked the day's messages; the cross-notes prompt sent
+    the very same messages raw, in the second and larger call.
+    """
+    # Assembled at runtime: written out whole, the fixture would trip the
+    # repository's own secret scan.
+    secret = "sk-" + "Zq7Xw9Vb" * 3
+    prompts: list[str] = []
+
+    def provider(prompt, timeout=600, model=None):
+        prompts.append(prompt)
+        answer = '{"add": ""}' if "USER.md" in prompt else '{"links": []}'
+        return types.SimpleNamespace(text=answer, kind="ok", detail="")
+
+    monkeypatch.setattr(memory, "llm_call_ex", provider)
+    monkeypatch.setenv("MEMORY_CROSS_NOTES", "1")
+    messages = {"alpha": f"deploy with the key {secret} from the vault",
+                "beta": "the beta service reuses alpha's deploy script"}
+
+    memory.update_user_md(messages)
+    memory.update_cross_notes(messages)
+
+    assert len(prompts) == 2
+    for prompt in prompts:
+        assert secret not in prompt, "a credential left the box unmasked"
 
 
 def test_a_night_with_no_projects_dir_still_leaves_a_ledger_row(bundle, tmp_path):

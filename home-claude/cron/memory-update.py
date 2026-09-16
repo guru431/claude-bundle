@@ -431,13 +431,16 @@ def update_cross_notes(proj_messages: dict[str, str]) -> str:
              if CROSS_NOTES.exists() else "")
     summary = build_summary(proj_messages, cap=25000)
 
+    # masked(), exactly like the USER.md prompt. This one went out raw — the
+    # same day's messages, in a second and larger call — so WIKI_MASK_SECRETS
+    # held for one of the two requests carrying them.
     prompt = f"""Task: find NEW cross-project connections in today's sessions.
 
 CURRENT CROSS-PROJECT NOTES:
 {context_window(cross)}
 
 TODAY'S USER MESSAGES BY PROJECT:
-{summary}
+{masked(summary)}
 
 OUTPUT: strict JSON:
 {{"links": ["project1 → project2: link description in 1-2 lines", ...]}}

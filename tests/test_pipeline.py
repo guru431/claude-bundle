@@ -647,6 +647,8 @@ def test_llm_queue_loses_the_steal_race_gracefully(bundle: Path, monkeypatch):
     import time
     u = _load_utils(bundle, "utils_race")
     u.LLM_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    # The put-back waits a second before retrying; the fast suite does not.
+    monkeypatch.setattr(u.time, "sleep", lambda _s: None)
     # A real live PID: the competing waiter must look alive, or the queue is
     # entitled to reclaim its lock and the race this test models never happens.
     u.LLM_LOCK.write_text(f"{os.getpid()} other-waiter\n", encoding="utf-8")
@@ -673,6 +675,63 @@ def test_llm_queue_loses_the_steal_race_gracefully(bundle: Path, monkeypatch):
         "the competing waiter's lock was overwritten"
     assert not list(u.LLM_LOCK.parent.glob(f"{u.LLM_LOCK.name}.stale.*")), \
         "the undone steal left debris behind"
+
+
+def test_a_holder_that_was_taken_over_leaves_the_new_lock_alone(bundle: Path):
+    """Release used to unlink the lock file whoever's it was.
+
+    A provider call can legitimately hold the queue past LLM_LOCK_STALE (five
+    retries of a 600-second timeout). A waiter then takes the lock over, as it
+    should — and when the original holder finished, it deleted the NEW holder's
+    lock, a third process got in, and each release after that repeated it.
+    """
+    u = _load_utils(bundle, "utils_takeover")
+    with u._llm_queue():
+        # Taken over while we worked: our file renamed away, the waiter's in place.
+        u.LLM_LOCK.unlink()
+        u.LLM_LOCK.write_text("4242 2026-01-01T00:00:00 waiter-token\n", encoding="utf-8")
+    assert u.LLM_LOCK.exists(), "the released holder deleted the lock of the one that took over"
+    assert "waiter-token" in u.LLM_LOCK.read_text(encoding="utf-8")
+
+
+def test_putting_a_stolen_lock_back_never_overwrites_a_newer_one(bundle: Path,
+                                                                 monkeypatch):
+    """A steal undone with os.replace clobbered a lock taken in the meantime.
+
+    The waiter moves an old-looking lock aside, finds it was fresh after all and
+    puts it back — but while the slot was empty a third process created its own
+    lock there. Replacing that file handed the slot to two holders at once.
+    """
+    import os
+    import time
+    u = _load_utils(bundle, "utils_put_back")
+    u.LLM_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(u.time, "sleep", lambda _s: None)
+    u.LLM_LOCK.write_text(f"{os.getpid()} original-holder\n", encoding="utf-8")
+    old = time.time() - 10_000
+    os.utime(u.LLM_LOCK, (old, old))
+    u.LLM_LOCK_STALE = 1800
+    u.LLM_LOCK_WAIT = 0
+
+    real_replace = os.replace
+
+    def steal_then_race(src, dst):
+        if Path(src) != u.LLM_LOCK:
+            return real_replace(src, dst)
+        os.utime(src, None)                # it was fresh after all
+        result = real_replace(src, dst)
+        # …and while it is aside, a third process takes the empty slot.
+        u.LLM_LOCK.write_text(f"{os.getpid()} third-process\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(os, "replace", steal_then_race)
+    with u._llm_queue():
+        pass
+
+    assert u.LLM_LOCK.read_text(encoding="utf-8").startswith(f"{os.getpid()} third-process"), \
+        "putting the stolen lock back overwrote the lock taken in the meantime"
+    assert not list(u.LLM_LOCK.parent.glob(f"{u.LLM_LOCK.name}.stale.*")), \
+        "the abandoned put-back left debris behind"
 
 
 def test_llm_queue_reclaims_a_dead_owners_lock_at_once(bundle: Path, monkeypatch):

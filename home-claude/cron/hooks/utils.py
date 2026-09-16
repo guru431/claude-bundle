@@ -6,6 +6,7 @@ Customize PROJECT_MAP / KNOWN_PROJECTS for your own setup.
 """
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -802,9 +803,113 @@ def _lock_owner_pid(path: Path) -> int | None:
         return None
 
 
+_O_BINARY = getattr(os, "O_BINARY", 0)
+
+
+def _lock_timeout_notice(label: str, wait: float, fail_open: bool) -> None:
+    if fail_open:
+        print(f"  {label}: no slot after {int(wait)}s — proceeding "
+              "unqueued (429 possible)", file=sys.stderr)
+    else:
+        print(f"WARNING: {label} timeout — skipping this write "
+              "(a live writer holds it; the phase retries next run)",
+              file=sys.stderr)
+
+
+def _lock_put_back(steal: Path, path: Path) -> None:
+    """Return a lock that was taken aside by mistake — never over a newer one.
+
+    It used to go back with `os.replace`, which overwrites: if a third process
+    had taken the free slot in the meantime, its lock was replaced by the old
+    one and two holders ran at once. Exclusive creation cannot overwrite. When
+    the slot is taken, the old lock is simply dropped — its owner finds a lock
+    that is not its own when it releases, and leaves it (see _file_lock).
+    """
+    try:
+        content, st = steal.read_bytes(), steal.stat()
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_BINARY)
+    except OSError:
+        steal.unlink(missing_ok=True)
+        return
+    try:
+        os.write(fd, content)
+    finally:
+        os.close(fd)
+    try:
+        os.utime(path, (st.st_atime, st.st_mtime))   # its age is the owner's, not ours
+    except OSError:
+        pass
+    steal.unlink(missing_ok=True)
+
+
+# errno values meaning "somebody else holds it"; anything else from the OS lock
+# call means this filesystem cannot lock at all (ENOLCK on an NFS mount without
+# a lock daemon, EOPNOTSUPP on some FUSE/SMB mounts).
+_LOCK_BUSY_ERRNOS = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK,
+                     getattr(errno, "EDEADLOCK", errno.EDEADLK)}
+
+
+def _os_lock_try(fd: int) -> None:
+    """Take a non-blocking exclusive OS lock on `fd`; OSError when it is not taken."""
+    if os.name == "nt":
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _os_lock_release(fd: int) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass                  # closing the descriptor releases it anyway
+    finally:
+        os.close(fd)
+
+
+_OS_LOCK_UNSUPPORTED = -2
+
+
+def _os_lock_acquire(path: Path, wait: float, fail_open: bool, label: str) -> int:
+    """A descriptor holding an OS lock on `path`; -1 when it was not taken;
+    _OS_LOCK_UNSUPPORTED when this filesystem cannot take OS locks."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as e:
+        print(f"  {label}: unavailable ({e}) — "
+              f"{'proceeding unqueued' if fail_open else 'skipping this write'}",
+              file=sys.stderr)
+        return -1
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            _os_lock_try(fd)
+            return fd
+        except OSError as e:
+            if e.errno not in _LOCK_BUSY_ERRNOS:
+                os.close(fd)
+                print(f"  {label}: no OS file locks here ({e}) — using an "
+                      f"exclusive lock file instead", file=sys.stderr)
+                return _OS_LOCK_UNSUPPORTED
+        if time.monotonic() >= deadline:
+            os.close(fd)
+            _lock_timeout_notice(label, wait, fail_open)
+            return -1
+        time.sleep(0.05)
+
+
 @contextlib.contextmanager
 def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
-               label: str):
+               label: str, *, mode: str = "excl"):
     """Cross-process lock on `path`. Yields True when it is actually held.
 
     `fail_open=False` (the state ledger): a caller that could not take the lock
@@ -813,21 +918,55 @@ def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
     `fail_open=True` (the LLM queue): the caller proceeds anyway; risking a 429
     beats silently skipping a nightly job.
 
-    An abandoned lock is taken over by RENAMING it (`os.replace` is atomic, so
-    exactly one waiter wins) either after `stale` seconds or as soon as its owner
-    PID is known to be dead.
+    Two mechanisms:
+
+    mode="os" (the state ledger) — an OS lock (msvcrt / flock) on a file that is
+    never deleted. The OS drops it the moment its process dies, so there is no
+    such thing as an abandoned lock: no PID probing, no stale age, no takeover.
+    Those were exactly where the O_EXCL lock could go wrong for the ledger: a
+    PID reused by an unrelated process kept a crashed writer's lock "alive" for
+    the full 600-second stale window, and every phase in it skipped its write —
+    after its sources had already been sent. A filesystem that cannot lock at
+    all falls back to the other mechanism, on a sibling `.excl` file.
+
+    mode="excl" (the LLM queue, and that fallback) — O_CREAT|O_EXCL on the lock
+    file. A holder legitimately outlives `stale` (a provider with five retries
+    of a 600-second timeout holds the queue close to an hour), so an abandoned
+    lock is taken over by RENAMING it (atomic: exactly one waiter wins) after
+    `stale` seconds or as soon as its owner PID is known to be dead. Each lock
+    carries a unique token, and the holder removes the lock on release ONLY if
+    the token is still its own: it used to unlink unconditionally, deleting the
+    lock of the waiter that had taken over, so a third process got in and the
+    queue fell apart into parallel callers, one release at a time.
     """
+    if mode == "os":
+        fd = _os_lock_acquire(path, wait, fail_open, label)
+        if fd != _OS_LOCK_UNSUPPORTED:
+            try:
+                yield fd >= 0 or fail_open
+            finally:
+                if fd >= 0:
+                    _os_lock_release(fd)
+            return
+        path = path.with_name(f"{path.name}.excl")
+
     acquired = False
+    token = b""
     deadline = time.time() + wait
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         while True:
             try:
                 # O_CREAT|O_EXCL is atomic on every filesystem this runs on,
-                # including SMB — unlike a stat-then-write check.
-                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, f"{os.getpid()} "
-                             f"{datetime.now().isoformat(timespec='seconds')}\n".encode())
+                # including SMB — unlike a stat-then-write check. O_BINARY: on
+                # Windows the text mode rewrites `\n`, and the release compares
+                # the file's bytes with the token.
+                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_BINARY)
+                # PID first: _lock_owner_pid reads it. The nonce makes the
+                # token ours alone, whatever the PID or the clock say.
+                token = (f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')} "
+                         f"{uuid.uuid4().hex[:12]}\n").encode()
+                os.write(fd, token)
                 os.close(fd)
                 acquired = True
                 break
@@ -856,7 +995,7 @@ def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
                         else:
                             still_stale = time.time() - steal.stat().st_mtime > stale
                         if not still_stale:
-                            os.replace(steal, path)
+                            _lock_put_back(steal, path)
                             time.sleep(1)
                             continue
                     except OSError:
@@ -868,13 +1007,7 @@ def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
                     steal.unlink(missing_ok=True)
                     continue
                 if time.time() >= deadline:
-                    if fail_open:
-                        print(f"  {label}: no slot after {int(wait)}s — proceeding "
-                              "unqueued (429 possible)", file=sys.stderr)
-                    else:
-                        print(f"WARNING: {label} timeout — skipping this write "
-                              "(a live writer holds it; the phase retries next run)",
-                              file=sys.stderr)
+                    _lock_timeout_notice(label, wait, fail_open)
                     break
                 time.sleep(1.0)
     except OSError as e:
@@ -884,11 +1017,16 @@ def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
     try:
         yield acquired or fail_open
     finally:
-        # Only the holder releases. A caller that timed out must not delete
-        # someone else's lock, or the lock degrades into no lock at all.
+        # Only the holder releases, and only its OWN lock. A caller that timed
+        # out must not delete someone else's lock, and neither may a holder
+        # whose lock was taken over while it worked.
         if acquired:
             try:
-                path.unlink(missing_ok=True)
+                if path.read_bytes() == token:
+                    path.unlink()
+                else:
+                    print(f"  {label}: held past {int(stale)}s and taken over — "
+                          f"leaving the new holder's lock in place", file=sys.stderr)
             except OSError:
                 pass
 
@@ -899,7 +1037,7 @@ STATE_LOCK = STATE_PATH.with_name(STATE_PATH.name + ".lock")
 def _state_lock(timeout: float = 60.0):
     """The `.processed.json` lock — `_file_lock` with the ledger's parameters."""
     return _file_lock(STATE_LOCK, wait=timeout, stale=600.0, fail_open=False,
-                      label="state lock")
+                      label="state lock", mode="os")
 
 
 def state_add(section: str, key: str, items) -> None:

@@ -824,3 +824,53 @@ def test_feedback_of_a_camelcase_project_is_not_collected_when_skipped(
     spec.loader.exec_module(flush)
     assert flush.collect_feedback_files() == {}
     assert flush.collect_incidents_sessions() == {}
+
+
+# ── the state ledger's lock belongs to the OS, not to a file on disk ────────
+
+def test_a_lock_file_left_behind_does_not_block_the_state_ledger(bundle_tree: Path,
+                                                                 monkeypatch):
+    """A crashed writer's lock file used to hold the ledger hostage.
+
+    The exclusive-create lock trusted the PID written in the file. Windows
+    reuses PIDs quickly, and once a live process owned that number the lock
+    looked held for the whole 600-second stale window — every phase in it
+    skipped its state write after its sources had already gone to the provider.
+    An OS lock dies with its process, so a file on disk proves nothing.
+    """
+    import functools
+    utils = _import_utils(monkeypatch, bundle_tree)
+    utils.STATE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    utils.STATE_LOCK.write_text(f"{os.getpid()} 2026-01-01T00:00:00\n", encoding="utf-8")
+    monkeypatch.setattr(utils, "_state_lock",
+                        functools.partial(utils._state_lock, timeout=0.5))
+    utils.state_add("flush", "processed_jsonls", ["p/s.jsonl@10"])
+    assert utils.state_get("flush", "processed_jsonls") == {"p/s.jsonl@10"}, \
+        "a leftover lock file blocked the ledger write"
+
+
+def test_the_state_lock_still_excludes_a_second_holder(bundle_tree: Path, monkeypatch):
+    utils = _import_utils(monkeypatch, bundle_tree)
+    with utils._state_lock(timeout=0) as held:
+        assert held is True
+        with utils._state_lock(timeout=0) as second:
+            assert second is False, "two writers held the ledger lock at once"
+    with utils._state_lock(timeout=0) as again:
+        assert again is True, "the lock was not released"
+
+
+def test_the_state_lock_falls_back_where_os_locks_are_unsupported(bundle_tree: Path,
+                                                                  monkeypatch):
+    """A filesystem without OS locks (NFS without a lock daemon, some FUSE and
+    SMB mounts) must not turn every state write into a skipped one."""
+    import errno
+    utils = _import_utils(monkeypatch, bundle_tree)
+
+    def unsupported(_fd):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(utils, "_os_lock_try", unsupported)
+    utils.state_add("compile_sessions", "compiled_pairs", ["2026-01-01#p@abc"])
+    assert utils.state_get("compile_sessions", "compiled_pairs") == {"2026-01-01#p@abc"}
+    assert not list(utils.STATE_LOCK.parent.glob(f"{utils.STATE_LOCK.name}.excl*")), \
+        "the fallback lock was not released"

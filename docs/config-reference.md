@@ -25,7 +25,7 @@ installer generates the first from the second.
 | `ANTHROPIC_API_KEY` | declared | — |
 | `API_TIMEOUT_MS` | optional (commented) | `scripts/claude-switch.ps1` |
 | `BASH_BIN` | not in .env (internal) | `home-claude/cron/claude-healthcheck.sh`, `home-claude/cron/claude-task-monitor.sh`, `home-claude/cron/git-push-all.sh` |
-| `BASH_EXE` | declared | `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh`, `home-claude/hooks/session-telegram.py` |
+| `BASH_EXE` | declared | `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh` |
 | `CCR_API_KEY` | declared | — |
 | `CCR_HOST` | declared | `scripts/claude-switch.ps1` |
 | `CLAUDE_BASH_DENY` | not in .env (internal) | `home-claude/hooks/bash-guard.py` |
@@ -34,6 +34,7 @@ installer generates the first from the second.
 | `CLAUDE_HOME` | — | `home-claude/cron/hooks/utils.py`, `home-claude/hooks/session-telegram.py` |
 | `CLAUDE_HOOK_PYTHON` | — | `home-claude/cron/md2pdf-sync.py`, `home-claude/hooks/md2pdf-on-edit.py` |
 | `CLAUDE_MD2PDF` | not in .env (internal) | `home-claude/hooks/md2pdf-on-edit.py` |
+| `CLAUDE_STOP_ALERT_COOLDOWN_MINUTES` | optional (commented) | `home-claude/hooks/session-telegram.py` |
 | `CLAUDE_STOP_ALERT_MINUTES` | optional (commented) | `home-claude/hooks/session-telegram.py` |
 | `DEEPINFRA_BASE_URL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `DEEPINFRA_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
@@ -91,7 +92,7 @@ installer generates the first from the second.
 | `WIKI_RETRY_LIMIT` | optional (commented) | — |
 | `WIN_REMOTE_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 
-_69 variables._
+_70 variables._
 
 ## `bundle.local.yaml` keys
 

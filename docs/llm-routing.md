@@ -323,9 +323,11 @@ another round trip to a door that is known to be shut — see
 
 The latch is shared across processes through `cron/state/depleted.json`, each
 provider under its own timestamp, so the whole night learns from the first
-refusal and no refusal extends another. A 401 for a per-call model override
-does not latch: a gateway also answers 401 for a model its route does not
-serve, and one job's model must not take the provider from every other task.
+refusal and no refusal extends another. A 401 or 403 for a per-call model
+override does not latch, and does not count toward the 403's two in a row: a
+gateway also answers 401 for a model its route does not serve and 403 for one
+the account does not carry, and one job's model must not take the provider
+from every other task.
 `local` is the exception twice over — its latch lasts at most five minutes
 (`depleted_ttl` in its registry row) and is never written to the file. A local
 server that stops answering is usually restarting, and a ten-second restart

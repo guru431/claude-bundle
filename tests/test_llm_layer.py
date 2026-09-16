@@ -163,6 +163,28 @@ def test_a_refused_key_latches_but_a_refused_override_model_does_not(cron_copy: 
     assert _depleted(cron_copy)["deepseek"]["reason"] == "401"
 
 
+def test_a_403_for_an_override_model_neither_latches_nor_counts(cron_copy: Path,
+                                                               monkeypatch, clock):
+    """The 401 reasoning holds for 403 too. A 403 for a per-call `model` is that
+    model not being enabled for the account, which says nothing about the model
+    every other task uses — but two of them in a row took the provider out for
+    six hours all the same. They do not count toward the configured model's two
+    either, or one blip right after them would be enough."""
+    u = _load_utils(cron_copy, "utils_403_override")
+    monkeypatch.setenv("DEEPSEEK_KEY", "unit-test-placeholder")
+    calls = _stub_requests(monkeypatch, _Resp(403, text="model not enabled"))
+
+    for _ in range(2):
+        assert u._llm_openai_compat("deepseek", "hi", model="other-model").kind == "config"
+    assert not u._is_depleted("deepseek"), "an override model's 403s latched the provider"
+
+    u._llm_openai_compat("deepseek", "hi")
+    assert not u._is_depleted("deepseek"), "one 403 of the configured model latched"
+    u._llm_openai_compat("deepseek", "hi")
+    assert u._is_depleted("deepseek"), "two in a row for the configured model must latch"
+    assert len(calls) == 4
+
+
 # ── How long the circuit breaker keeps a provider out ────────────────────────
 
 def test_each_latch_keeps_its_own_timestamp(cron_copy: Path, clock):

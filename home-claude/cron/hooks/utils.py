@@ -3849,12 +3849,22 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
                 # of the night and hand the payload to the next one in the
                 # chain — a real bill for someone else's blip. Two in a row is
                 # a shut door; one is not yet evidence.
-                streak = _FORBIDDEN_STREAK.get(provider, 0) + 1
-                _FORBIDDEN_STREAK[provider] = streak
-                print(f"  {label} 403 forbidden ({streak} in a row): "
-                      f"{resp.text[:200]}", file=sys.stderr)
-                if streak >= 2:
-                    mark_depleted(provider, "403")
+                #
+                # And only for the CONFIGURED model, as with 401 below. A 403 for
+                # a per-call `model` override means THAT model is not enabled for
+                # the account, which says nothing about the one every other task
+                # uses: it neither latches nor counts toward the two, or a single
+                # blip right after two of them would be enough.
+                if model == configured_model:
+                    streak = _FORBIDDEN_STREAK.get(provider, 0) + 1
+                    _FORBIDDEN_STREAK[provider] = streak
+                    print(f"  {label} 403 forbidden ({streak} in a row): "
+                          f"{resp.text[:200]}", file=sys.stderr)
+                    if streak >= 2:
+                        mark_depleted(provider, "403")
+                else:
+                    print(f"  {label} 403 forbidden for the per-call model {model} "
+                          f"(not latched): {resp.text[:200]}", file=sys.stderr)
                 return LLMResult(None, "config", f"{label} 403 forbidden")
             if resp.status_code == 401:
                 # The key is wrong, revoked or not sent. That is the same answer

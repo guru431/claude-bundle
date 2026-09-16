@@ -1,6 +1,15 @@
 # Cron Task Registry — single source of truth for Windows Task Scheduler.
 # Edit this file by hand, then apply with cron/admin/sync.cmd (one UAC prompt).
 #
+# ── File format: every field on ONE line ───────────────────────────────────
+#   sync-tasks.ps1 does not read YAML; it reads a subset of it
+#   (cron/admin/lib/registry-parse.ps1): `key: value` on a single line, quoted
+#   or not, and `[a, b]` lists. No `>-` or `|` block scalars, no value that
+#   continues on the next line, no `- item` lists under a field. PyYAML reads
+#   all of those, so every check stays green while Task Scheduler gets something
+#   else — `>-` was the registered description of five tasks.
+#   scripts/check-registry.py rejects such a line.
+#
 # ── LogonType policy (default: Password) ───────────────────────────────────
 #   Password (default) — task fires BEFORE the user logs in. Critical: without
 #   this, every Daily/Weekly trigger that lands while the user isn't logged in
@@ -120,15 +129,12 @@ tasks:
 
   - name: ClaudeWikiPipeline
     project: main
-    description: >-
-      Nightly wiki pipeline — runs flush, compile-sessions and build-index in
-      ORDER, in one process. This is the default; the three phase tasks below
-      are the advanced "run the phases separately" arrangement and ship
-      disabled. Ordering was never enforced between the three independent
-      timers, and after a missed trigger StartWhenAvailable can bunch them up
-      and fire them almost together — safe, because every phase is idempotent,
-      but it makes a per-night status unreliable and gives the shared provider
-      key three windows to collect a 429 in instead of one.
+    # Why one task and not three: ordering was never enforced between the three
+    # independent phase timers, and after a missed trigger StartWhenAvailable can
+    # bunch them up and fire them almost together — safe, because every phase is
+    # idempotent, but it makes a per-night status unreliable and gives the shared
+    # provider key three windows to collect a 429 in instead of one.
+    description: Nightly wiki pipeline — runs flush, compile-sessions and build-index in ORDER, in one process. This is the default; the three phase tasks below are the advanced arrangement that runs the phases separately, and ship disabled.
     script: <bundle-install-path>\cron\wiki\wiki-pipeline.py
     kind: python
     trigger: Daily 02:30
@@ -144,11 +150,7 @@ tasks:
 
   - name: ClaudeWikiFlush
     project: main
-    description: >-
-      Daily wiki flush (phase 1) — JSONL sessions to daily/YYYY-MM-DD.md.
-      ADVANCED, off by default. ClaudeWikiPipeline runs this phase in order
-      with the other two; enable this task only if you deliberately want the
-      three phases on separate timers.
+    description: Daily wiki flush (phase 1) — JSONL sessions to daily/YYYY-MM-DD.md. ADVANCED, off by default. ClaudeWikiPipeline runs this phase in order with the other two; enable this task only if you deliberately want the three phases on separate timers.
     script: <bundle-install-path>\cron\wiki\wiki-flush-sessions.py
     kind: python
     trigger: Daily 02:30
@@ -176,9 +178,7 @@ tasks:
 
   - name: ClaudeWikiCompileSessions
     project: main
-    description: >-
-      Compile daily logs into wiki/projects/ (phase 2). ADVANCED, off by
-      default — see ClaudeWikiPipeline.
+    description: Compile daily logs into wiki/projects/ (phase 2). ADVANCED, off by default — see ClaudeWikiPipeline.
     script: <bundle-install-path>\cron\wiki\wiki-compile-sessions.py
     kind: python
     trigger: Daily 04:00
@@ -192,9 +192,7 @@ tasks:
 
   - name: ClaudeWikiBuildIndex
     project: main
-    description: >-
-      Rebuild wiki/projects/index.md and wiki/kb/index.md (phase 3).
-      ADVANCED, off by default — see ClaudeWikiPipeline.
+    description: Rebuild wiki/projects/index.md and wiki/kb/index.md (phase 3). ADVANCED, off by default — see ClaudeWikiPipeline.
     script: <bundle-install-path>\cron\wiki\wiki-build-index.py
     kind: python
     trigger: Daily 04:05
@@ -271,11 +269,7 @@ tasks:
 
   - name: ClaudeTaskMonitorPosix
     project: main
-    description: >-
-      POSIX counterpart of ClaudeTaskMonitor — reports FAILED systemd --user
-      units (Linux) or launchd agents with a non-zero last exit (macOS) that
-      belong to the bundle, to Telegram. Disabled by default; enable it on
-      Linux/macOS after generating the units with scripts/gen-scheduler.py.
+    description: POSIX counterpart of ClaudeTaskMonitor — reports FAILED systemd --user units (Linux) or launchd agents with a non-zero last exit (macOS) that belong to the bundle, to Telegram. Disabled by default; enable it on Linux/macOS after generating the units with scripts/gen-scheduler.py.
     script: <bundle-install-path>\cron\claude-task-monitor.py
     kind: python
     platform: posix

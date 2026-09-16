@@ -175,108 +175,16 @@ function Get-StoredPassword() {
 }
 
 # ── tiny YAML parser (subset: top-level scalars + `tasks:` list of mappings) ─
-function Unwrap-Value([string]$v) {
-    $v = $v.Trim()
-    if ($v.Length -ge 2 -and $v[0] -eq "'" -and $v[-1] -eq "'") {
-        return $v.Substring(1, $v.Length - 2) -replace "''", "'"
-    }
-    # DOUBLE quotes too. Only single quotes were unwrapped, so a registry entry
-    # written `- "--full"` — perfectly ordinary YAML — reached Task Scheduler as
-    # the literal three-character argument `"--full"`, and `enabled: "false"`
-    # unwrapped to the non-empty STRING "false", which is truthy: the task was
-    # registered as enabled.
-    if ($v.Length -ge 2 -and $v[0] -eq '"' -and $v[-1] -eq '"') {
-        $v = $v.Substring(1, $v.Length - 2) -replace '\\"', '"'
-        # Fall through to the scalar coercions below so a quoted 'false' is
-        # still recognised as the boolean it is written to be.
-    }
-    if ($v -eq 'true')  { return $true }
-    if ($v -eq 'false') { return $false }
-    if ($v -match '^-?\d+$') { return [int]$v }
-    return $v
+# In lib\registry-parse.ps1, so that what registers a task, what uninstall.ps1
+# and self-test.ps1 read, and what tests/test_registry_parse.py holds against
+# PyYAML are one and the same code. Without it this script cannot tell what the
+# registry says, so a copy that lost lib\ stops here rather than guessing.
+$script:_registryParser = Join-Path $PSScriptRoot 'lib\registry-parse.ps1'
+if (-not (Test-Path -LiteralPath $script:_registryParser)) {
+    Write-Host "ERROR: $script:_registryParser not found — copy cron\admin\ whole, lib\ included" -ForegroundColor Red
+    exit 1
 }
-function Parse-InlineArray([string]$body) {
-    $body = $body.Trim()
-    if ($body -eq '') { return @() }
-    # Split on commas that are NOT inside quotes, so a quoted element like
-    # 'a,b,c' stays one item (the naive -split ',' tore quoted commas apart).
-    # $q holds the open quote char ('' = outside quotes).
-    $items = @()
-    $cur = ''
-    $q = ''
-    foreach ($c in $body.ToCharArray()) {
-        $ch = [string]$c
-        if ($q -ne '') {
-            $cur += $ch
-            if ($ch -eq $q) { $q = '' }
-        } elseif ($ch -eq "'" -or $ch -eq '"') {
-            $q = $ch; $cur += $ch
-        } elseif ($ch -eq ',') {
-            $items += $cur; $cur = ''
-        } else {
-            $cur += $ch
-        }
-    }
-    $items += $cur
-    return $items | ForEach-Object { Unwrap-Value $_.Trim() }
-}
-function Parse-RegistryYaml([string]$path) {
-    $lines = Get-Content $path -Encoding UTF8
-    $result = @{ launcher = $null; managed_marker = 'managed-by-registry'; tasks = @() }
-    $currentTask = $null
-    $inTasks = $false
-    foreach ($raw in $lines) {
-        $line = $raw -replace '^\s*#.*$', ''
-        # Strip trailing inline comments, but NOT when the value is quoted
-        # (a quoted value may legitimately contain '#', e.g. `desc: 'see #42'`).
-        # We only look at the part after the first ':' to decide.
-        $valPart = if ($line -match '^\s*[^:]+:\s*(.*)$') { $Matches[1].TrimStart() } else { '' }
-        if (-not ($valPart.StartsWith("'") -or $valPart.StartsWith('"'))) {
-            $line = $line -replace '\s+#[^\n]*$', ''
-        }
-        if ($line.Trim() -eq '') { continue }
-
-        # Top-level key (column 0). `tasks:` opens the list; any OTHER top-level
-        # key is recorded wherever it appears — even AFTER `tasks:` — so the
-        # parser is not order-dependent. A top-level key also flushes the task
-        # currently being accumulated. (List items are `- name:` and task fields
-        # are indented, so neither collides with this column-0 match.)
-        if ($line -match '^([a-z_]+):\s*(.*)$') {
-            $k = $Matches[1]; $v = $Matches[2]
-            if ($k -eq 'tasks') { $inTasks = $true; continue }
-            if ($currentTask) { $result.tasks += $currentTask; $currentTask = $null }
-            $result[$k] = Unwrap-Value $v
-            continue
-        }
-        if (-not $inTasks) { continue }
-
-        if ($line -match '^\s*-\s+name:\s*(.+)$') {
-            if ($currentTask) { $result.tasks += $currentTask }
-            $currentTask = @{
-                name = (Unwrap-Value $Matches[1])
-                kind = 'bash'
-                user = $env:USERNAME
-                runlevel = 'limited'
-                logon_type = 'password'
-                hidden = $true
-                timeout_hours = 72
-                enabled = $true
-                script_args = @()
-            }
-            continue
-        }
-        if ($line -match '^\s+([a-z_]+):\s*\[(.*)\]\s*$' -and $currentTask) {
-            $currentTask[$Matches[1]] = Parse-InlineArray $Matches[2]
-            continue
-        }
-        if ($line -match '^\s+([a-z_]+):\s*(.*)$' -and $currentTask) {
-            $currentTask[$Matches[1]] = Unwrap-Value $Matches[2]
-            continue
-        }
-    }
-    if ($currentTask) { $result.tasks += $currentTask }
-    return $result
-}
+. $script:_registryParser
 
 # ── trigger builder (XML) ────────────────────────────────────────────────────
 # All triggers go through a single XML path Register-ScheduledTask -Xml. This

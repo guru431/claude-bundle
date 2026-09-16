@@ -14,6 +14,9 @@ The trigger grammar is NOT re-implemented here: it is imported from
 scripts/gen-scheduler.py (TRIGGER_* regexes), so this validator and the unit
 generator can never disagree about what a valid trigger is.
 
+Everything above is checked on what PyYAML reads — and the Windows syncer does
+not read YAML. check_subset() covers that gap; see its comment.
+
 Runs in the ubuntu CI job and from scripts/self-test.ps1.
 
 Exit 0 = registry is valid; 1 = at least one problem (all are printed, with the
@@ -23,6 +26,7 @@ WARN, same as its other PyYAML-dependent steps).
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -182,6 +186,77 @@ def check_task(task: dict) -> list[str]:
     return problems
 
 
+# sync-tasks.ps1 registers from cron/admin/lib/registry-parse.ps1, which reads a
+# SUBSET of YAML: single-line `key: value` fields and a `tasks:` list whose items
+# start with `- name:`. Everything outside it is still valid YAML, so every check
+# in this file passed while Task Scheduler got something else — five shipped
+# tasks used `description: >-` and were registered with the description `>-`.
+# Widening the PowerShell parser was rejected (it has to run on a bare PS 5.1),
+# so a line it cannot read fails here. tests/test_registry_parse.py holds the two
+# parsers against each other on the shipped file; this covers the one a user
+# edits. The patterns mirror registry-parse.ps1 — change them together.
+_TOP_KEY = re.compile(r"^[A-Za-z_]+:(?:\s|$)")
+_TASK_ITEM = re.compile(r"^\s*-\s+name:\s*\S")
+_TASK_FIELD = re.compile(r"^\s+[A-Za-z0-9_]+:(?:\s|$)")
+_BLOCK_SCALAR = re.compile(r"^(\s*)(?:-\s+)?([A-Za-z0-9_]+):\s*([|>][0-9+-]*)\s*(?:#.*)?$")
+_QUOTED_VALUE = re.compile(r"^\s*(?:-\s+)?([A-Za-z0-9_]+):\s*(['\"])(.*)$")
+
+
+def check_subset(text: str) -> list[str]:
+    """Lines of `text` that registry-parse.ps1 would read differently from YAML."""
+    problems: list[str] = []
+    in_tasks = False
+    block_indent = None      # inside a block scalar's body: already reported
+    prev_reported = False    # one report per run of unreadable lines
+    for no, raw in enumerate(text.lstrip("﻿").splitlines(), 1):
+        line = raw.rstrip()
+        body = line.strip()
+        if not body or body.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if block_indent is not None:
+            if indent > block_indent:
+                continue
+            block_indent = None
+        m = _BLOCK_SCALAR.match(line)
+        if m:
+            problems.append(
+                f"line {no}: `{m.group(2)}: {m.group(3)}` is a YAML block scalar — "
+                f"sync-tasks.ps1 would register `{m.group(3)}` itself as the value; "
+                f"write the value on one line")
+            block_indent = len(m.group(1))
+            prev_reported = False
+            continue
+        m = _QUOTED_VALUE.match(line)
+        if m and not m.group(3).rstrip().endswith(m.group(2)):
+            problems.append(
+                f"line {no}: `{m.group(1)}:` has text after its closing quote, or "
+                f"continues on the next line — sync-tasks.ps1 would keep that text "
+                f"in the value")
+            prev_reported = False
+            continue
+        if _TOP_KEY.match(line):
+            key, value = line.split(":", 1)
+            if key == "tasks":
+                in_tasks = True
+                if value.strip():
+                    problems.append(f"line {no}: `tasks:` takes its list on the "
+                                    f"following lines — sync-tasks.ps1 ignores a "
+                                    f"value written after it")
+            prev_reported = False
+            continue
+        if in_tasks and (_TASK_ITEM.match(line) or _TASK_FIELD.match(line)):
+            prev_reported = False
+            continue
+        if not prev_reported:
+            problems.append(
+                f"line {no}: `{body[:60]}` is not a one-line `key: value` field — "
+                f"sync-tasks.ps1 skips it (a value continued from the line above, "
+                f"a `- item` list, or a task that does not start with `- name:`)")
+        prev_reported = True
+    return problems
+
+
 def check(registry: Path = REGISTRY) -> int:
     try:
         import yaml
@@ -190,10 +265,11 @@ def check(registry: Path = REGISTRY) -> int:
               "(pip install -r requirements.txt)")
         return 2
 
-    data = yaml.safe_load(registry.read_text(encoding="utf-8"))
+    text = registry.read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
     tasks = data.get("tasks") or []
 
-    problems: list[str] = []
+    problems: list[str] = check_subset(text)
     seen: dict[str, int] = {}
     for i, task in enumerate(tasks):
         if not isinstance(task, dict):

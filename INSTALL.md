@@ -274,22 +274,28 @@ every file it wrote (with a checksum) and which root it went to:
 ```
 
 It removes only what the manifest lists — your `.env`, `bundle.local.yaml`,
-wiki notes, logs and pipeline state are never touched — and finds the
-pipeline root from the manifest, so you don't have to remember it. A file
-changed since install is reported and kept unless you pass `-Force`.
-Scheduled tasks are **not** unregistered by the uninstaller (that needs
-elevation). Remove them the same way they were created — through the
-registry, never with a hand-typed `schtasks /delete`, which drifts from
-`registry.yaml` and leaves it describing tasks that no longer exist:
+your bootstrapped `registry.yaml`, wiki notes, logs and pipeline state are
+never touched — and finds the pipeline root from the manifest, so you don't
+have to remember it. A file changed since install is reported and kept unless
+you pass `-Force`.
+
+On a full install the uninstaller removes the scheduled tasks **first**, the
+same way they were created — through the deployment's registry
+(`cron\admin\sync-tasks.ps1 -Unregister`), never a hand-typed
+`schtasks /delete`, which drifts from `registry.yaml`. That step needs
+elevation, so **run the uninstaller from an elevated PowerShell**. Without
+elevation it refuses (exit 3) while any task named in that registry is still
+registered, and deletes nothing: the files it would remove include the tool
+that unregisters the tasks. To take the task step on its own:
 
 ```powershell
 # elevated
 powershell -File "<PipelineRoot>\cron\admin\sync-tasks.ps1" -Unregister
 ```
 
-It deletes only tasks carrying the `managed-by-registry` marker, so a
-same-named task somebody else created is left alone. Add `-DryRun` to see
-the list first.
+Either way only the tasks named in the deployment's `registry.yaml` that still
+carry the `managed-by-registry` marker are removed, so a same-named task
+somebody else created is left alone. Add `-DryRun` to see the list first.
 
 ### 8. Copy the wiki and cron components
 

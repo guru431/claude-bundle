@@ -9,9 +9,13 @@
 # A file whose content changed since the install is reported and SKIPPED unless
 # -Force — the manifest records a sha256 per file for exactly that check.
 #
-# Scheduled tasks are NOT unregistered (they need elevation, and their names
-# come from your registry.yaml). Remove them first, elevated, e.g.:
-#   schtasks /delete /tn <task-name> /f
+# On a full install the scheduled tasks go FIRST, before any file: through the
+# deployment's own registry (cron/admin/sync-tasks.ps1 -Unregister), never a
+# hand-typed `schtasks /delete`, which this project forbids because it drifts
+# from registry.yaml. That needs elevation. Run elevated and this script does it
+# for you; run without, and while any task named in this deployment's registry
+# is still registered it refuses (exit 3) and deletes nothing — the files it
+# would remove include the tool that unregisters those tasks.
 #
 # The install may span two roots (install.ps1 -PipelineRoot): config in
 # ~/.claude, pipeline elsewhere. Both are recorded IN the manifest, and each
@@ -25,7 +29,9 @@
 #   powershell -File scripts/uninstall.ps1 -ClaudeHome D:\claude -Confirm
 #
 # Exit codes: 0 = ok (or dry run), 1 = missing / unreadable manifest,
-#             2 = finished, but some files were skipped.
+#             2 = finished, but some files were skipped,
+#             3 = this deployment's scheduled tasks are still registered (not
+#                 elevated, or -Unregister failed) — nothing was deleted.
 
 param(
     [Alias('InstallPath')]
@@ -119,6 +125,19 @@ function Resolve-Root($rootName) {
     return $mfClaudeHome
 }
 
+# The scheduled tasks that are THIS deployment's: named in its own registry.yaml
+# and still carrying its marker — the same two conditions sync-tasks.ps1
+# -Unregister acts on. The filter used to be the marker alone, so a second
+# install on the same machine made a non-elevated uninstall of the first refuse
+# with exit 3 over tasks that were never its own. $names = $null (no readable
+# registry) means there is no telling, and every marked task counts.
+function Select-DeploymentTasks($tasks, $names, [string]$marker) {
+    return @($tasks | Where-Object {
+        "$($_.Description)" -like "*$marker*" -and
+        ($null -eq $names -or $names -contains $_.TaskName)
+    })
+}
+
 # ── 1b. Scheduled tasks come FIRST, before their own uninstaller is deleted ──
 # The order used to be the wrong way round: the file sweep removed
 # cron/admin/sync-tasks.ps1 and cron/registry.yaml, and only then did the
@@ -132,11 +151,22 @@ if ($mf.tier -eq 'full' -and (Test-Path $syncTasks)) {
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $isAdmin = ([System.Security.Principal.WindowsPrincipal]$me).IsInRole(
         [System.Security.Principal.WindowsBuiltInRole]::Administrator)
-    # Are there any registry-managed tasks left at all?
+    # Are any of this deployment's tasks left? Its registry is read with the
+    # syncer's own parser, from this checkout: a deployment older than that
+    # parser's library does not carry it.
+    $taskNames = $null
+    $taskMarker = 'managed-by-registry'
+    $regFile = Join-Path $mfPipelineRoot 'cron\registry.yaml'
+    $regParser = Join-Path (Split-Path -Parent $PSScriptRoot) 'home-claude\cron\admin\lib\registry-parse.ps1'
+    if ((Test-Path $regFile) -and (Test-Path $regParser)) {
+        . $regParser
+        $regData = Parse-RegistryYaml $regFile
+        $taskNames = @($regData.tasks | ForEach-Object { "$($_.name)" })
+        if ($regData.managed_marker) { $taskMarker = "$($regData.managed_marker)" }
+    }
     $managed = @()
     try {
-        $managed = @(Get-ScheduledTask -ErrorAction SilentlyContinue |
-                     Where-Object { "$($_.Description)" -like '*managed-by-registry*' })
+        $managed = @(Select-DeploymentTasks @(Get-ScheduledTask -ErrorAction SilentlyContinue) $taskNames $taskMarker)
     } catch { $managed = @() }
     if ($managed.Count -gt 0) {
         if (-not $apply) {
@@ -151,8 +181,9 @@ if ($mf.tier -eq 'full' -and (Test-Path $syncTasks)) {
             }
             Good "scheduled tasks unregistered"
         } else {
-            Write-Host "ERROR: $($managed.Count) registry-managed scheduled task(s) still exist," -ForegroundColor Red
-            Write-Host "       and removing the files first would delete the tool that unregisters them." -ForegroundColor Red
+            Write-Host "ERROR: $($managed.Count) scheduled task(s) of this deployment are still registered" -ForegroundColor Red
+            Write-Host "       ($(@($managed | ForEach-Object { $_.TaskName }) -join ', ')), and removing the files first" -ForegroundColor Red
+            Write-Host "       would delete the tool that unregisters them." -ForegroundColor Red
             Write-Host "       Run this ELEVATED (the uninstaller will do it for you), or first run:" -ForegroundColor Red
             Write-Host "         powershell -File `"$syncTasks`" -Unregister" -ForegroundColor Red
             Write-Host "       Nothing has been removed." -ForegroundColor Red

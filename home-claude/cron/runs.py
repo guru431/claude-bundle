@@ -330,12 +330,26 @@ def last_known_good(task: str, log_path: Path | None = None) -> dict | None:
 _FRESHNESS_BY_TRIGGER = {"daily": 2.0, "weekly": 10.0, "monthly": 40.0}
 
 
+def _runs_on_this_host(task: dict) -> bool:
+    """False for a task whose `platform:` names the other family of hosts.
+
+    The rule the healthcheck's dead-man switch applies: `all` (the default)
+    runs everywhere, `windows` only where os.name is "nt", `posix` elsewhere.
+    """
+    platform = str(task.get("platform", "all")).lower()
+    return not ((platform == "windows" and os.name != "nt")
+                or (platform == "posix" and os.name == "nt"))
+
+
 def freshness_windows(registry: Path | None = None) -> dict[str, float]:
     """task → days its last verdict stays meaningful, derived from the registry.
 
     Derived, so a rescheduled task needs no second edit here. Tasks with no
     time-based trigger (AtLogOn / AtStartup) have no meaningful window and get
-    none; a disabled task gets none either — it is SUPPOSED to be silent.
+    none; a disabled task gets none either — it is SUPPOSED to be silent — and
+    neither does a task whose `platform:` excludes this host. ClaudeTaskMonitor
+    ships enabled with `platform: windows`, so every POSIX box used to list it as
+    never having recorded a run.
 
     Without PyYAML there is no registry to read: returns {} and every caller
     simply shows verdicts without a staleness judgement rather than failing.
@@ -351,6 +365,8 @@ def freshness_windows(registry: Path | None = None) -> dict[str, float]:
     out: dict[str, float] = {}
     for t in tasks:
         if not isinstance(t, dict) or t.get("enabled") is False or not t.get("name"):
+            continue
+        if not _runs_on_this_host(t):
             continue
         kind = str(t.get("trigger", "")).strip().split(" ", 1)[0].lower()
         if kind in _FRESHNESS_BY_TRIGGER:
@@ -440,6 +456,25 @@ def stale_report(seen: dict, now: datetime | None = None,
             sorted(t for t in current if before.get(t) == current[t]))
 
 
+def stale_alert(seen: dict, now: datetime | None = None,
+                log_path: Path | None = None,
+                registry: Path | None = None) -> tuple[list[str], list[str]]:
+    """(lines a monitor sends about silent tasks today, tasks it only logs).
+
+    The silences never alerted about, plus — on Mondays — one digest line for
+    those already reported, which the second value names for the log. One
+    function for both task monitors, so they cannot drift on what "once" means:
+    the Windows one runs it through `runs.py stale --seen`, the POSIX one calls
+    it in-process.
+    """
+    now = now or datetime.now()
+    lines, standing = stale_report(seen, now, log_path, registry)
+    if standing and now.weekday() == 0:
+        lines.append(f"{len(standing)} task(s) still silent since an earlier alert: "
+                     + ", ".join(standing)[:400])
+    return lines, standing
+
+
 # ---------- CLI (for shell tasks and the self-test) ----------
 
 def _cli_record(args) -> None:
@@ -466,21 +501,18 @@ def _cli_stale_seen(state: Path, now: datetime | None = None,
         seen = seen if isinstance(seen, dict) else {}
     except (OSError, ValueError):
         seen = {}
-    new, standing = stale_report(seen, now, log_path, registry)
-    for line in new:
+    lines, standing = stale_alert(seen, now, log_path, registry)
+    for line in lines:
         print(line)
     if standing:
         print(f"already reported, still stale: {', '.join(standing)}", file=sys.stderr)
-        if now.weekday() == 0:
-            print(f"{len(standing)} task(s) still silent since an earlier alert: "
-                  + ", ".join(standing)[:400])
     try:
         state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text(json.dumps(seen, indent=1), encoding="utf-8")
     except OSError as exc:
         print(f"seen-state not written ({exc}) — the next run may repeat this",
               file=sys.stderr)
-    return 1 if new or standing else 0
+    return 1 if lines or standing else 0
 
 
 def _selftest() -> int:

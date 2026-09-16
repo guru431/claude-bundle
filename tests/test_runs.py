@@ -9,6 +9,7 @@ been keyed so that each is said once. Every test pins its clock.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -93,6 +94,25 @@ def test_the_seen_mode_cli_repeats_standing_silences_only_on_mondays(ledger, tmp
     assert out.startswith("2 task(s) still silent since an earlier alert: ClaudeDaily, "
                           "ClaudeNeverRan"), out
     assert json.loads(state.read_text(encoding="utf-8"))["SomeTask"] == "2026-09-01 08:00"
+
+
+def test_a_task_for_the_other_platform_is_never_owed_a_run(tmp_path):
+    """ClaudeTaskMonitor ships enabled with `platform: windows`.
+
+    Freshness ignored `platform:`, so every POSIX box listed it as "enabled, but
+    never recorded a run" — in bundle-status, and in any monitor that reports
+    silence — about a task that cannot run there. Platform names are relative to
+    the host running the test, so both directions are covered wherever it runs.
+    """
+    pytest.importorskip("yaml")
+    here, other = ("windows", "posix") if os.name == "nt" else ("posix", "windows")
+    reg = tmp_path / "registry.yaml"
+    reg.write_text("version: 1\ntasks:\n"
+                   f"  - name: ClaudeElsewhere\n    trigger: Daily 09:30\n    platform: {other}\n"
+                   f"  - name: ClaudeHere\n    trigger: Daily 09:30\n    platform: {here}\n"
+                   "  - name: ClaudeEverywhere\n    trigger: Daily 09:30\n", encoding="utf-8")
+
+    assert runs.never_recorded(tmp_path / "empty.jsonl", reg) == ["ClaudeEverywhere", "ClaudeHere"]
 
 
 def test_stale_seen_is_wired_to_the_cli(monkeypatch, tmp_path):

@@ -19,6 +19,11 @@ cron/registry.yaml — a failing unit that is not ours is not our business):
     as the Windows monitor: a task that hangs holds its instance, every later
     trigger is dropped, and "still running" reads as healthy. launchd exposes no
     start time in `launchctl list`, so that half of the check is Linux-only.
+  * Both   — a task gone silent in the run ledger (cron/runs.py): enabled with a
+    time trigger, and no record within its window. A unit that stopped firing
+    has no failed run for systemd or launchd to show. Each silence is reported
+    once and repeated in the Monday digest — the Windows monitor's StaleVerdict
+    check, through the same function.
 
 Alerts go to Telegram in the same format as the Windows monitor, and every run
 writes one terminal record to the ledger (cron/runs.py), so bundle-status can
@@ -36,7 +41,7 @@ box once the units are installed.
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary naming the bundle's own units and a down LLM chain's providers -> Telegram Bot API money=no writes=cron/state/task-monitor-posix-seen.json
+# bundle-io: offbox=a failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers -> Telegram Bot API money=no writes=cron/state/task-monitor-posix-seen.json
 from __future__ import annotations
 
 import json
@@ -58,7 +63,7 @@ sys.path.insert(0, str(CRON_DIR / "hooks"))
 from utils import find_bash  # noqa: E402
 
 sys.path.insert(0, str(CRON_DIR))
-from runs import terminal_record  # noqa: E402
+from runs import STALE_SEEN_KEY, stale_alert, terminal_record  # noqa: E402
 # Shared with the Windows monitor (claude-task-monitor.sh): the registry parser,
 # the service port probe and the once-per-outage LLM-chain report. Two copies
 # had already drifted — see monitor_checks' header.
@@ -278,27 +283,49 @@ def main() -> int:
         # before — the Windows monitor's rule, for the same reason: an unfixed
         # failure that reports every morning stops being read.
         seen = load_seen()
+        now = datetime.now()
         # The LLM provider chain, once per outage — the same rule and wording as
         # the Windows monitor (monitor_checks.chain_dead_report). It keeps its
         # own key in `seen`, which the prune below must leave alone.
-        chain = chain_dead_report(seen, datetime.now(), CHAIN_DEAD_PATH)
+        chain = chain_dead_report(seen, now, CHAIN_DEAD_PATH)
         if chain:
             log(chain)
+        # Tasks gone silent in the run ledger. systemd and launchd only show runs
+        # that happened, so a unit that stopped firing has nothing to fail above —
+        # it was the one failure this monitor could not report at all. The Windows
+        # monitor's StaleVerdict check, through the same function
+        # (runs.stale_alert): once per (task, bucket), a Monday digest for the rest.
+        try:
+            stale, standing = stale_alert(seen, now, registry=REGISTRY)
+            stale_block = (["StaleVerdict: task(s) have not reported a run in a while",
+                            *stale] if stale else [])
+        except Exception as exc:
+            # As on Windows (rc > 1 there): for the check whose job is noticing
+            # silence, a crash must not read as a clean bill of health.
+            standing = []
+            stale_block = [f"StaleVerdict: the staleness check itself failed "
+                           f"({type(exc).__name__}: {exc}) — nothing was verified"]
+        for line in stale_block:
+            log(line)
+        if standing:
+            log(f"already reported, still stale: {', '.join(standing)}")
         fresh = [(name, line) for name, line in problems if seen.get(name) != line]
         for name, line in problems:
             log(line if seen.get(name) != line else f"{line} (already reported)")
             seen[name] = line
         for name in list(seen):
-            if name != CHAIN_SEEN_KEY and name not in {n for n, _ in problems}:
+            if (name not in (CHAIN_SEEN_KEY, STALE_SEEN_KEY)
+                    and name not in {n for n, _ in problems}):
                 seen.pop(name, None)
         save_seen(seen)
 
-        if not fresh and not chain:
+        if not fresh and not chain and not stale_block:
             log("no new failures")
             rec["note"] = f"{len(tasks)} task(s) checked, {len(problems)} failing"
             return 0
 
-        body = "\n".join(([chain] if chain else []) + [line for _, line in fresh])
+        body = "\n".join(([chain] if chain else []) + [line for _, line in fresh]
+                         + stale_block)
         header = (f"Bundle tasks (POSIX): {len(fresh)} failed unit(s)" if fresh
                   else "Bundle tasks (POSIX): attention needed")
         msg = f"{header}\n\n{body}\n\nCheck logs: cron/logs/\n"

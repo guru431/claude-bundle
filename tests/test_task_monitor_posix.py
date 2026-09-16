@@ -202,6 +202,9 @@ def test_the_posix_monitor_reports_a_down_llm_chain_once(tmp_path, monkeypatch):
     monkeypatch.setattr(monitor, "CHAIN_DEAD_PATH", state / "chain-dead.json")
     monkeypatch.setattr(monitor, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(monitor, "LOG_FILE", tmp_path / "logs" / "task-monitor-posix.log")
+    # No task owes the ledger a run here, so the stale check has nothing to add.
+    (tmp_path / "registry.yaml").write_text("version: 1\ntasks: []\n", encoding="utf-8")
+    monkeypatch.setattr(monitor, "REGISTRY", tmp_path / "registry.yaml")
 
     assert monitor.main() == 0
     assert len(sent) == 1 and "LLM chain is DOWN (no provider answered)" in sent[0], sent
@@ -209,3 +212,64 @@ def test_the_posix_monitor_reports_a_down_llm_chain_once(tmp_path, monkeypatch):
 
     assert monitor.main() == 0
     assert not any("LLM chain is DOWN (" in s for s in sent[1:]), "reported twice"
+
+
+def test_the_posix_monitor_reports_a_silent_task_once_and_again_on_monday(tmp_path,
+                                                                          monkeypatch):
+    """A task that stopped firing has no failed unit to show — only the ledger knows.
+
+    The Windows monitor has long sent that as StaleVerdict; the POSIX one said
+    nothing. It now runs the same function (runs.stale_alert): each silence once,
+    per (task, the record it went quiet on), and again only in the Monday digest.
+    The clock is injected, so which day is Monday is the test's decision.
+    """
+    import contextlib
+    import types
+
+    import runs
+
+    pytest.importorskip("yaml")          # freshness windows come from the registry
+    reg = tmp_path / "registry.yaml"
+    reg.write_text("version: 1\ntasks:\n  - name: ClaudeDaily\n    trigger: Daily 02:00\n",
+                   encoding="utf-8")
+    monkeypatch.setattr(runs, "read_latest_runs", lambda log_path=None: [
+        {"task": "ClaudeDaily", "ts": "2026-09-11T02:00:00", "verdict": "green"}])
+    clock = {"now": datetime(2026, 9, 16, 9, 30)}                   # a Wednesday
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock["now"]
+
+    sent: list[str] = []
+
+    @contextlib.contextmanager
+    def no_ledger(_task, **defaults):
+        yield dict(defaults)
+
+    monkeypatch.setattr(monitor, "datetime", Clock)
+    monkeypatch.setattr(monitor, "os", types.SimpleNamespace(name="posix"))
+    monkeypatch.setattr(monitor, "terminal_record", no_ledger)
+    monkeypatch.setattr(monitor, "REGISTRY", reg)
+    monkeypatch.setattr(monitor, "registry_tasks", lambda: [])
+    monkeypatch.setattr(monitor, "check_systemd", lambda tasks: ([], None))
+    monkeypatch.setattr(monitor, "check_launchd", lambda tasks: ([], None))
+    monkeypatch.setattr(monitor, "send_telegram", lambda text: sent.append(text) or True)
+    monkeypatch.setattr(monitor, "STATE_PATH", tmp_path / "state" / "seen.json")
+    monkeypatch.setattr(monitor, "CHAIN_DEAD_PATH", tmp_path / "state" / "chain-dead.json")
+    monkeypatch.setattr(monitor, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(monitor, "LOG_FILE", tmp_path / "logs" / "task-monitor-posix.log")
+
+    assert monitor.main() == 0
+    assert len(sent) == 1, sent
+    assert "ClaudeDaily: last verdict 5d old (expected within 2d)" in sent[0], sent[0]
+
+    clock["now"] = datetime(2026, 9, 17, 9, 30)                     # Thursday
+    assert monitor.main() == 0
+    assert len(sent) == 1, f"the same silence went out again: {sent[1:]}"
+
+    clock["now"] = datetime(2026, 9, 21, 9, 30)                     # Monday
+    assert monitor.main() == 0
+    assert len(sent) == 2, sent
+    assert "1 task(s) still silent since an earlier alert: ClaudeDaily" in sent[1], sent[1]
+    assert "last verdict" not in sent[1], "the digest repeated the full line"

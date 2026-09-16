@@ -259,7 +259,7 @@ this table reflects it.
 | `ClaudeHealthcheck` | host metrics → your LLM provider (see below) | yes (PAYG tokens) | no | on |
 | `ClaudeGitPushAll` | your git remotes | no | yes (`git push`) | off (opt-in) |
 | `ClaudeTaskMonitor` / alerts | failure summary (failed tasks, down services, a down LLM chain's providers) plus the titles of stale findings from every allowed project → Telegram Bot API | no | no | on |
-| `ClaudeTaskMonitorPosix` | failure summary naming the bundle's own units and a down LLM chain's providers → Telegram Bot API | no | no | off (POSIX only) |
+| `ClaudeTaskMonitorPosix` | failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers → Telegram Bot API | no | no | off (POSIX only) |
 | `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
 | `ClaudeMd2PdfSync` | a failure summary → Telegram Bot API. The render itself is local | no | no | off |
 | `ClaudeWikiLint` | a lint summary → Telegram Bot API, only with `WIKI_LINT_TELEGRAM=1` | no | rewrites vault pages, only with `--fix` | on (alerts off) |

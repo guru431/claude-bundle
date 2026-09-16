@@ -45,7 +45,7 @@
           },
           {
             "type": "command",
-            "command": "\"<python-exe>\" \"<claude-home>/hooks/ps1-bom-guard.py\""
+            "command": "\"<python-exe>\" \"<claude-home>/hooks/text-encoding-guard.py\""
           }
         ]
       }

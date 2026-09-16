@@ -23,7 +23,7 @@ entries you need into your `settings.json`.
 > | `PreToolUse` → `block-iptables-save-to-rules.py` | Tier 1 | a real Python interpreter |
 > | `PreToolUse` → `bash-guard.py` | Tier 1 | a real Python interpreter + PyYAML |
 > | `PostToolUse` → `md2pdf-on-edit.py` | Tier 1 | a real Python interpreter + `bin/md2pdf.py` (ships full-tier) + markdown-it-py + Edge/Chrome |
-> | `PostToolUse` → `ps1-bom-guard.py` | Tier 1 | a real Python interpreter |
+> | `PostToolUse` → `text-encoding-guard.py` | Tier 1 | a real Python interpreter |
 > | `UserPromptSubmit` → `prompt-secret-warn.py` | **Tier 2 only** | `cron/lib/secret_shapes.py` (full-tier install) |
 > | `Notification` → `session-telegram.py` | **Tier 2 only** | `cron/telegram-send.sh` + `TELEGRAM_*` in `.env` |
 > | `SessionStart` / `SessionEnd` / `PreCompact` → `cron/hooks/*.py` | **Tier 2 only** | the full-tier `~/.claude/cron/` install |
@@ -118,16 +118,32 @@ not matter. It used to: the hook stopped at the first match, and
 FAILS OPEN on purpose — a missing rules file, a malformed one, a bad regex or a
 missing PyYAML disables the guard rather than blocking every Bash call.
 
-## ps1-bom-guard.py
+## text-encoding-guard.py (formerly ps1-bom-guard.py)
 
-**PostToolUse / Write|Edit|MultiEdit.** When a `.ps1` is written with non-ASCII
-content and no UTF-8 BOM, adds the BOM and says so.
+**PostToolUse / Write|Edit|MultiEdit.** Enforces the byte-level form of two
+script types after every write, from one table in the file:
 
-`CLAUDE.md` § File Encoding has always stated this rule, and nothing enforced
-it: it rested on the model remembering, on every write, forever. Without the BOM
-PowerShell 5.1 reads the file in the system ANSI codepage, so Cyrillic turns
+| Extension | Must be | The hook |
+|---|---|---|
+| `.ps1` | UTF-8 **with** a BOM when non-ASCII | adds the BOM |
+| `.sh` | UTF-8 **without** a BOM, LF line endings | removes the BOM, converts CRLF |
+
+`CLAUDE.md` § File Encoding has always stated both rules, and nothing enforced
+them: they rested on the model remembering, on every write, forever. Without the
+BOM PowerShell 5.1 reads a `.ps1` in the system ANSI codepage, so Cyrillic turns
 into smart-quote characters that break string parsing — and the script fails at
-02:30 with an error about a quote.
+02:30 with an error about a quote. A BOM or a CR in a `.sh` breaks bash the same
+way.
+
+It never guesses an encoding. A `.ps1` in UTF-16 (the default of `Out-File` in
+PS 5.1) or in a legacy codepage is reported and left alone — the old hook glued
+a UTF-8 BOM onto such files, producing exactly the mis-decoded script it exists
+to prevent. Every report goes out twice: as `systemMessage` for you and as
+`additionalContext` for the model, which otherwise does not learn that the file
+it just wrote changed under it.
+
+`ps1-bom-guard.py` stays as a thin entry point that runs this file, so a
+`settings.json` that names it keeps working — and now also gets the `.sh` rule.
 
 ## prompt-secret-warn.py
 

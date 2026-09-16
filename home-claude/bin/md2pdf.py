@@ -34,12 +34,15 @@ No LaTeX, no pandoc: md -> HTML -> headless `--print-to-pdf`.
 from __future__ import annotations
 
 import argparse
+import html
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 CSS = """
@@ -257,8 +260,70 @@ def sweep_stale_temp(target_dir: Path, budget: int) -> None:
                 continue
 
 
-def _print_once(browser: str, url: str, target: Path, timeout: float) -> None:
-    """One browser, one attempt. Raises unless `target` ends up a printed PDF."""
+# Where a Chromium print keeps the page title: the Info dictionary the trailer
+# names, as a literal string or — for anything non-ASCII — UTF-16BE hex.
+_PDF_INFO_REF = re.compile(rb"/Info\s+(\d+)\s+(\d+)\s+R")
+_PDF_TITLE = re.compile(rb"/Title\s*(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>)", re.S)
+_PDF_ESCAPES = {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b", b"f": b"\f",
+                b"\n": b"", b"\r": b""}
+
+
+def _pdf_unescape(seq: bytes) -> bytes:
+    if seq[:1].isdigit():
+        return bytes([int(seq, 8) & 0xFF])
+    return _PDF_ESCAPES.get(seq, seq)
+
+
+def pdf_title(data: bytes) -> str | None:
+    """The title in a PDF's Info dictionary, or None when it cannot be read.
+
+    Only the shape Chromium's writer produces is understood — a classic trailer
+    naming the Info object, a literal or hex string in it. Anything else is None,
+    which the caller treats as "cannot tell", never as "wrong".
+    """
+    refs = _PDF_INFO_REF.findall(data)
+    if not refs:
+        return None
+    num, gen = refs[-1]  # the last trailer wins, as in an incremental update
+    obj = re.search(rb"(?<!\d)" + num + rb"\s+" + gen + rb"\s+obj\b(.*?)\bendobj", data, re.S)
+    found = _PDF_TITLE.search(obj.group(1)) if obj else None
+    if not found:
+        return None
+    token = found.group(1)
+    if token.startswith(b"<"):
+        digits = re.sub(rb"\s", b"", token[1:-1]).decode("ascii")
+        raw = bytes.fromhex(digits + "0" * (len(digits) % 2))
+    else:
+        raw = re.sub(rb"\\([0-7]{1,3}|.)", lambda m: _pdf_unescape(m.group(1)),
+                     token[1:-1], flags=re.S)
+    if raw.startswith(b"\xfe\xff"):
+        return raw[2:].decode("utf-16-be", errors="replace")
+    return raw.decode("latin-1")
+
+
+def comparable_title(text: str) -> str:
+    """A title as a browser reports it: NFC, whitespace runs collapsed."""
+    return " ".join(unicodedata.normalize("NFC", text).split())
+
+
+def html_title(html_path: Path) -> str:
+    """The <title> of the HTML about to be printed — md2pdf's own, near the top."""
+    try:
+        with open(html_path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(65536)
+    except OSError:
+        return ""
+    found = re.search(r"<title>(.*?)</title>", head, re.S | re.I)
+    return html.unescape(found.group(1)) if found else ""
+
+
+def _print_once(browser: str, url: str, target: Path, timeout: float,
+                title: str = "") -> None:
+    """One browser, one attempt. Raises unless `target` ends up a printed PDF.
+
+    `title` is the comparable title of the page being printed; when given, a
+    PDF carrying a different one is refused.
+    """
     # A PRIVATE profile directory. Without it headless attaches to an already
     # running Edge/Chrome, which then prints from a context where the temp HTML
     # is not visible — that is how a trip itinerary turned into a PDF reading
@@ -297,6 +362,18 @@ def _print_once(browser: str, url: str, target: Path, timeout: float) -> None:
     size = target.stat().st_size
     if size < MIN_PDF_BYTES:
         raise RuntimeError(f"{name}: printed only {size} bytes {stderr}".strip())
+    # The right size is not the right document. The incident behind this whole
+    # function printed a browser error page — a valid PDF far above
+    # MIN_PDF_BYTES — in place of a 10-page itinerary. Chromium writes the
+    # page's <title> into the PDF, and a page that is not ours carries another
+    # one: the error page is titled with the URL it failed to load. (Its
+    # "ERR_…" text cannot be grepped for: it sits in compressed, glyph-encoded
+    # content streams. The title is plain metadata.)
+    if title:
+        printed = pdf_title(target.read_bytes())
+        if printed is not None and comparable_title(printed) != title:
+            raise RuntimeError(f"{name}: printed a different page, titled "
+                               f"{printed[:120]!r} {stderr}".strip())
 
 
 def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
@@ -319,6 +396,9 @@ def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
     # not $TMP, so the swap below is a rename within one filesystem.
     budget = timeout_budget()
     deadline = time.monotonic() + budget
+    # Blank when the HTML has no usable title — a browser then substitutes the
+    # file name, so there is nothing to compare against.
+    title = comparable_title(html_title(html_path))
     sweep_stale_temp(pdf_path.parent, budget)
     tmp_dir = Path(tempfile.mkdtemp(dir=pdf_path.parent, prefix=TEMP_DIR_PREFIX))
     tmp = tmp_dir / "out.pdf"
@@ -338,7 +418,7 @@ def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
                                 f"budget (MD2PDF_TIMEOUT) is spent")
                 continue
             try:
-                _print_once(browser, url, tmp, share)
+                _print_once(browser, url, tmp, share, title)
             except RuntimeError as e:
                 failures.append(str(e))
                 tmp.unlink(missing_ok=True)

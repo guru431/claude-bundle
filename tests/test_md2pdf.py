@@ -215,6 +215,126 @@ def test_browser_candidates_honours_the_override(md2pdf, monkeypatch):
     assert md2pdf.browser_candidates() == ["/opt/my-browser"]
 
 
+# ── the right size is not the right document ────────────────────────────────
+#
+# The guard above catches "printed nothing" and "printed a stub". The incident
+# itself was neither: a browser error page is a valid PDF far above
+# MIN_PDF_BYTES. What gives it away is the title Chromium writes into the PDF —
+# ours is the document's, the error page's is the URL it failed to load. The
+# fixtures below have the shape Chromium 152/153 (Skia/PDF) was measured to
+# write: the Info object first, a classic trailer naming it, and the page body in
+# compressed streams where no "ERR_" text is ever visible.
+
+def chromium_pdf(title: bytes) -> bytes:
+    return (b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<</Title " + title
+            + b"\n/Creator (HeadlessChrome)\n/Producer (Skia/PDF m152)>>\nendobj\n"
+            + b"3 0 obj\n<</Filter /FlateDecode\n/Length 4096>> stream\n"
+            + b"\x9c" * 4096 + b"\nendstream\nendobj\n"
+            + b"trailer\n<</Size 4\n/Root 2 0 R\n/Info 1 0 R>>\nstartxref\n9\n%%EOF\n")
+
+
+ERROR_PAGE = chromium_pdf(b"(file:///C:/Users/me/AppData/Local/Temp/tmpk3j9x2.html)")
+
+
+@pytest.fixture()
+def titled(tmp_path: Path):
+    html = tmp_path / "doc.html"
+    html.write_text('<!DOCTYPE html><html><head><meta charset="utf-8">'
+                    "<title>Trip itinerary</title></head><body>…</body></html>",
+                    encoding="utf-8")
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(OLD_PDF)
+    return html, pdf
+
+
+def test_a_printed_error_page_does_not_replace_the_document(md2pdf, titled, monkeypatch):
+    html, pdf = titled
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: ["/fake/edge"])
+    monkeypatch.setattr(md2pdf.subprocess, "run", FakeBrowser(writes=ERROR_PAGE))
+
+    with pytest.raises(RuntimeError, match="different page"):
+        md2pdf.html_to_pdf(html, pdf)
+
+    assert pdf.read_bytes() == OLD_PDF
+
+
+def test_the_next_browser_is_tried_after_an_error_page(md2pdf, titled, monkeypatch):
+    html, pdf = titled
+    ours = chromium_pdf(b"(Trip itinerary)")
+
+    def run(cmd, **kwargs):
+        page = ERROR_PAGE if cmd[0] == "/fake/edge" else ours
+        return FakeBrowser(writes=page)(cmd, **kwargs)
+
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: ["/fake/edge", "/fake/chrome"])
+    monkeypatch.setattr(md2pdf.subprocess, "run", run)
+
+    md2pdf.html_to_pdf(html, pdf)
+
+    assert pdf.read_bytes() == ours
+
+
+def test_a_non_ascii_title_is_recognised_as_ours(md2pdf, tmp_path, monkeypatch):
+    """Chromium writes a non-ASCII title as UTF-16BE hex — and collapses spaces."""
+    html = tmp_path / "doc.html"
+    html.write_text("<html><head><title>Маршрут  поездки</title></head></html>",
+                    encoding="utf-8")
+    pdf = tmp_path / "doc.pdf"
+    printed = chromium_pdf(b"<FEFF" + "Маршрут поездки".encode("utf-16-be").hex().upper().encode()
+                           + b">")
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: ["/fake/edge"])
+    monkeypatch.setattr(md2pdf.subprocess, "run", FakeBrowser(writes=printed))
+
+    md2pdf.html_to_pdf(html, pdf)
+
+    assert pdf.read_bytes() == printed
+
+
+@pytest.mark.parametrize("token, expected", [
+    (b"(a \\(b\\) c)", "a (b) c"),
+    (b"(back\\\\slash \\101)", "back\\slash A"),
+    (b"<FEFF041C0438>", "Ми"),
+    (b"<616263>", "abc"),
+])
+def test_pdf_title_decodes_what_chromium_writes(md2pdf, token, expected):
+    assert md2pdf.pdf_title(chromium_pdf(token)) == expected
+
+
+def test_a_pdf_whose_title_cannot_be_read_is_not_called_wrong(md2pdf):
+    """No trailer, no Info, another producer: "cannot tell" must not refuse a print."""
+    assert md2pdf.pdf_title(NEW_PDF) is None
+    assert md2pdf.pdf_title(b"%PDF-1.5\n1 0 obj\n<</Type /ObjStm>>\nendobj\n") is None
+
+
+@pytest.mark.integration
+def test_the_title_guard_agrees_with_the_installed_browser(md2pdf, tmp_path):
+    """Pins the guard to a real print in both directions.
+
+    A browser update that changed how the title is written would turn the guard
+    into one that refuses every document or none — exactly what a unit fixture
+    cannot notice.
+    """
+    try:
+        browser = md2pdf.browser_candidates()[0]
+    except RuntimeError:
+        pytest.skip("no Chromium-family browser on this machine")
+    md = tmp_path / "Маршрут_поездки (v2).md"
+    md.write_text("# Day 1\n\nA stop.\n", encoding="utf-8")
+    pdf = tmp_path / "out.pdf"
+    try:
+        md2pdf.convert(md, pdf)
+    except RuntimeError as exc:
+        if "different page" in str(exc):
+            raise                                   # the guard refused a real document
+        pytest.skip(f"this environment cannot print at all: {exc}")
+    assert md2pdf.pdf_title(pdf.read_bytes()) == "Маршрут поездки (v2)"
+
+    error_page = tmp_path / "error.pdf"
+    with pytest.raises(RuntimeError, match="different page"):
+        md2pdf._print_once(browser, (tmp_path / "never-there.html").as_uri(),
+                           error_page, 60, md2pdf.comparable_title("Маршрут поездки (v2)"))
+
+
 # ── one time budget for the whole run ───────────────────────────────────────
 #
 # The limit was 120 s PER BROWSER, while md2pdf-on-edit killed this process at

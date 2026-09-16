@@ -159,4 +159,65 @@ grep -q "outgoing secret-scan: clean" "$LOG_FILE" || fail "T10: no outgoing-scan
 [ "$(git -C "$R10" rev-parse "origin/$(br "$R10")")" != "$(git -C "$R10" rev-parse HEAD)" ] \
     || fail "T10: dry-run actually pushed"
 
-echo "PASS: push_repo (10 scenarios)"
+# === Test 11: an UNTRACKED sensitive file is not swept into the auto-commit ===
+# The name table only ever looked at what the user had staged by hand, BEFORE
+# `git add --all`; the add's pathspec excludes the .env family and nothing else.
+# `credentials.json` holding `password=hunter2` has no token shape either, so it
+# was committed and pushed with pushed=1 failed=0.
+R11="$TMP/r11"; mkrepo "$R11"
+printf '{"password": "hunter2"}\n' > "$R11/credentials.json"
+echo code > "$R11/app3.py"
+: > "$LOG_FILE"
+DRY_RUN=1
+reset_counters; push_repo "$R11" "r11" "Auto-commit: test"
+DRY_RUN=0
+grep -q "WOULD FAIL this repo" "$LOG_FILE" || fail "T11: the dry-run preview did not report the sensitive file"
+reset_counters; push_repo "$R11" "r11" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T11: an untracked credentials.json did not fail the repo (failed=$failed pushed=$pushed)"
+[ "$pushed" = "0" ] || fail "T11: pushed (pushed=$pushed)"
+git -C "$R11" log --all --name-only --format= | grep -qx 'credentials.json' && fail "T11: credentials.json reached a commit"
+[ "$(git -C "$R11" rev-list --count HEAD)" = "1" ] || fail "T11: a commit was created"
+# Left staged, the file would stay in the index after the user gitignores it,
+# and the repo would keep failing on a fix that looked complete.
+[ -z "$(git -C "$R11" diff --cached --name-only -- credentials.json)" ] \
+    || fail "T11: the sweep left credentials.json staged"
+
+# === Test 12: the name table sees a path under a non-ASCII folder ===
+# git C-quotes such a path by default ("\320\277…/.env"), and the anchored table
+# never matched the quoted form: a hand-staged .env there was committed.
+R12="$TMP/r12"; mkrepo "$R12"
+mkdir -p "$R12/проект"
+printf 'DB_PASSWORD=hunter2\n' > "$R12/проект/.env"
+git -C "$R12" add -- "проект/.env"
+echo more >> "$R12/app.py"
+reset_counters; push_repo "$R12" "r12" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T12: a staged .env under a Cyrillic folder did not fail the repo (failed=$failed pushed=$pushed)"
+git -C "$R12" -c core.quotePath=false log --all --name-only --format= | grep -q '\.env$' \
+    && fail "T12: the .env reached a commit"
+
+# === Test 13: a protected deletion under a non-ASCII folder is still held back ===
+R13="$TMP/r13"; mkrepo "$R13"
+mkdir -p "$R13/проект"
+echo data > "$R13/проект/FINDINGS.md"
+git -C "$R13" add -A; git -C "$R13" commit -qm addfind
+git -C "$R13" push -q origin "$(br "$R13")"
+rm "$R13/проект/FINDINGS.md"; echo more >> "$R13/app.py"
+reset_counters; push_repo "$R13" "r13" "Auto-commit: test"
+git -C "$R13" -c core.quotePath=false ls-tree -r --name-only HEAD | grep -qx 'проект/FINDINGS.md' \
+    || fail "T13: the deletion of a protected file under a Cyrillic folder was committed"
+git -C "$R13" show --name-only --format= HEAD | grep -qx 'app.py' || fail "T13: app.py not committed"
+
+# === Test 14: md2pdf's temp directory is never swept into a commit ===
+# bin/md2pdf.py prints into `.md2pdf-XXXX/` next to the PDF; a killed converter
+# leaves it behind, at the top of a project or deep inside it.
+R14="$TMP/r14"; mkrepo "$R14"
+mkdir -p "$R14/.md2pdf-a1b2" "$R14/docs/.md2pdf-c3d4"
+echo '%PDF-1.4 partial' > "$R14/.md2pdf-a1b2/out.pdf"
+echo '%PDF-1.4 partial' > "$R14/docs/.md2pdf-c3d4/out.pdf"
+echo more >> "$R14/app.py"
+reset_counters; push_repo "$R14" "r14" "Auto-commit: test"
+[ "$pushed" = "1" ] || fail "T14: the regular change was not pushed (pushed=$pushed failed=$failed)"
+git -C "$R14" show --name-only --format= HEAD | grep -q 'md2pdf-' && fail "T14: an .md2pdf-* temp directory was committed"
+git -C "$R14" show --name-only --format= HEAD | grep -qx 'app.py' || fail "T14: app.py not committed"
+
+echo "PASS: push_repo (14 scenarios)"

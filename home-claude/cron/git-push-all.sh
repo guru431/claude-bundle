@@ -84,33 +84,58 @@ git_push() {
 # reaches the commit/push) and alert. Real deletions must be done by hand.
 PROTECTED_RE='(^|/)(FINDINGS\.md|AGENTS\.md|CLAUDE\.md|registry\.yaml|project-knowledge-base\.yaml)$'
 
-# Sensitive paths, same family as the `git add --all` pathspec exclusions below.
-# The pathspec only stops US from staging them; a file the USER already staged
-# by hand stays in the index and would be swept into the auto-commit.
-# From the shared table (cron/lib/secret-scan.sh, generated out of
-# secret_shapes.py). Three private copies of this list used to exist and they
+# What the sweep's own `git add --all` never stages, as git pathspecs. The .env
+# family is excluded at add time so a file that appears between status and add
+# can never sneak in. `.md2pdf-*` is bin/md2pdf.py's temporary print directory,
+# created next to the PDF it refreshes: a converter killed mid-print leaves it
+# behind inside a project, and a nightly commit of it publishes a half-written
+# copy of the document. Both spellings of each: without the `**/` form a pattern
+# matches at the top level only, and without the bare one never at the top.
+SWEEP_EXCLUDES=(':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' ':!.md2pdf-*' ':!**/.md2pdf-*')
+
+# Sensitive paths, from the shared table (cron/lib/secret-scan.sh, generated out
+# of secret_shapes.py). Three private copies of this list used to exist and they
 # disagreed: `.env.example` was blocked here and waved through by pre-commit,
 # while `credentials.json`, `.npmrc`, `.netrc`, `.pypirc`, `*.ppk`, `*.jks`,
 # `id_ecdsa`, `.git-credentials` and `terraform.tfstate` were known to none of
-# them. The local fallback keeps this script working if the lib is missing.
-SENSITIVE_RE="${SENSITIVE_PATH_PATTERN:-(^|/)\.env(\.[^/]+)?\$}"
-SENSITIVE_ALLOW_RE="${SENSITIVE_PATH_ALLOW:-\.env\.(example|sample|template|dist)\$}"
-
-# Hard-fail (never silently unstage — that would hide the user's own intent) a
-# repo whose index already contains a sensitive path. Returns non-zero so the
-# caller counts the repo as failed and skips it.
+# them.
+#
+# The table is applied TWICE per repo. Before `git add --all` it catches what the
+# USER staged by hand — hard-fail, never silently unstage: that would hide the
+# user's own intent. After it, it catches what the SWEEP staged (swept=1). That
+# second pass is the one that was missing: the pathspec above excludes only the
+# .env family, so an untracked `credentials.json`, `.pgpass`, `.git-credentials`
+# or `.envrc` was added, passed guard_secrets — which looks for token SHAPES, and
+# `password=hunter2` has none — and reached origin with pushed=1 failed=0. Those
+# are unstaged again before the repo is failed, because staging them was this
+# run's doing: left in the index, gitignoring the file would not have fixed the
+# next night. Returns non-zero so the caller counts the repo as failed.
 guard_staged_sensitive() {
-    local label="$1"
-    local staged
-    staged=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
-        | grep -iE "$SENSITIVE_RE" | grep -ivE "$SENSITIVE_ALLOW_RE")
+    local label="$1" swept="${2:-0}"
+    local staged p
+    # No lib → no table. Fail CLOSED, as guard_secrets does.
+    if ! command -v secret_scan_paths >/dev/null 2>&1; then
+        echo "[$label] SECRET-SCAN unavailable (lib not loaded) — repo FAILED, nothing committed (fail closed)" >> "$LOG_FILE"
+        return 1
+    fi
+    # Unquoted paths (secret_scan_git_paths): git C-quotes a non-ASCII name by
+    # default, and the anchored table never matched `"\320\277…/.env"`.
+    staged=$(secret_scan_git_paths diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
+        | secret_scan_paths)
     [ -z "$staged" ] && return 0
-    echo "[$label] SENSITIVE path already staged — repo skipped, nothing committed:" >> "$LOG_FILE"
+    if [ "$swept" = "1" ]; then
+        while IFS= read -r p; do
+            [ -n "$p" ] && git reset -q -- ":(literal)$p" >> "$LOG_FILE" 2>&1
+        done <<< "$staged"
+        echo "[$label] SENSITIVE path in the working tree — not auto-committed (unstaged again), repo FAILED:" >> "$LOG_FILE"
+    else
+        echo "[$label] SENSITIVE path already staged — repo skipped, nothing committed:" >> "$LOG_FILE"
+    fi
     echo "$staged" | sed 's/^/    /' >> "$LOG_FILE"
     if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
-        "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: sensitive path staged in [$label] — repo skipped (not committed, not pushed):
+        "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: sensitive path in [$label] — repo skipped (not committed, not pushed):
 $staged
-(unstage it by hand, or gitignore it)" >> "$LOG_FILE" 2>&1
+(gitignore it, or unstage it by hand if you staged it)" >> "$LOG_FILE" 2>&1
     fi
     return 1
 }
@@ -118,12 +143,14 @@ $staged
 guard_protected_deletions() {
     local label="$1"
     local deleted
-    deleted=$(git diff --cached --name-only --diff-filter=D 2>/dev/null | grep -E "$PROTECTED_RE")
+    # Unquoted paths, for the same reason as above: a FINDINGS.md under a
+    # non-ASCII folder was quoted, matched nothing, and its deletion was committed.
+    deleted=$(secret_scan_git_paths diff --cached --name-only --diff-filter=D 2>/dev/null | grep -E "$PROTECTED_RE")
     [ -z "$deleted" ] && return 0
     echo "[$label] PROTECTED deletion blocked from auto-commit:" >> "$LOG_FILE"
     echo "$deleted" | sed 's/^/    /' >> "$LOG_FILE"
     while IFS= read -r p; do
-        [ -n "$p" ] && git reset -q HEAD -- "$p" >> "$LOG_FILE" 2>&1
+        [ -n "$p" ] && git reset -q HEAD -- ":(literal)$p" >> "$LOG_FILE" 2>&1
     done <<< "$deleted"
     if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
         "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: blocked auto-delete of protected file(s) in [$label]:
@@ -178,16 +205,22 @@ guard_secrets() {
 # preview at all — the preview diverged from the real run in exactly the gate
 # the run exists for, and reported a clean night for a repo the real sweep would
 # refuse. Scan what the real run WOULD stage: tracked changes plus new files,
-# minus the .env pathspec.
+# minus the SWEEP_EXCLUDES pathspecs — names as well as contents.
 guard_secrets_preview() {
     local label="$1"
     if ! command -v secret_scan_diff >/dev/null 2>&1; then
         echo "[$label] [DRY] secret-scan lib unavailable — the real run WOULD SKIP this repo (fail closed)" >> "$LOG_FILE"
         return 0
     fi
-    local hits untracked f fhits
-    hits=$(git diff HEAD --unified=0 -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' 2>/dev/null | secret_scan_diff)
-    untracked=$(git ls-files --others --exclude-standard -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' 2>/dev/null)
+    local hits untracked f fhits bad
+    hits=$(git -c core.quotePath=false diff HEAD --unified=0 -- "${SWEEP_EXCLUDES[@]}" 2>/dev/null | secret_scan_diff)
+    untracked=$(secret_scan_git_paths ls-files --others --exclude-standard -- "${SWEEP_EXCLUDES[@]}" 2>/dev/null)
+    bad=$( { secret_scan_git_paths diff HEAD --name-only --diff-filter=ACMR -- "${SWEEP_EXCLUDES[@]}"
+             printf '%s\n' "$untracked"; } 2>/dev/null | secret_scan_paths)
+    if [ -n "$bad" ]; then
+        echo "[$label] [DRY] sensitive path(s) in the working tree — the real run WOULD FAIL this repo:" >> "$LOG_FILE"
+        printf '%s\n' "$bad" | sed 's/^/    /' >> "$LOG_FILE"
+    fi
     while IFS= read -r f; do
         [ -n "$f" ] && [ -f "$f" ] || continue
         # A new file is entirely "added" — scan its raw contents.
@@ -296,10 +329,15 @@ push_repo() {
         else
             # Safety: exclude any path matching .env / .env.* / **/.env* via
             # pathspec so a file that appears between status and add can never
-            # sneak in. If you actually want this repo to track .env*, gitignore
-            # it explicitly or stage the file by hand once.
-            git add --all -- ':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' >> "$LOG_FILE" 2>&1
+            # sneak in (and md2pdf's temp directory — see SWEEP_EXCLUDES).
+            git add --all -- "${SWEEP_EXCLUDES[@]}" >> "$LOG_FILE" 2>&1
             guard_protected_deletions "$label"
+            # The sensitive-path table again, on what the add above just staged.
+            if ! guard_staged_sensitive "$label" 1; then
+                failed=$((failed + 1))
+                failed_repos="${failed_repos:+$failed_repos, }$label"
+                return
+            fi
             if ! guard_secrets "$label"; then
                 # FAILED, not skipped: same event class as
                 # guard_outgoing_secrets, so the sweep exits non-zero and the

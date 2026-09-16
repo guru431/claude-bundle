@@ -65,8 +65,6 @@ installer generates the first from the second.
 | `PYTHON` | not in .env (internal) | `home-claude/cron/claude-healthcheck.sh`, `home-claude/cron/claude-task-monitor.sh`, `home-claude/cron/claude-warm-window.sh`, `home-claude/cron/git-push-all.sh`, `home-claude/cron/telegram-send.sh` |
 | `PYTHON_EXE` | declared | `home-claude/cron/hooks/pre-compact.py`, `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh`, `home-claude/cron/md2pdf-sync.py` |
 | `REMOTE_SSH_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
-| `SENSITIVE_PATH_ALLOW` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
-| `SENSITIVE_PATH_PATTERN` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
 | `SESSION_START_MAX_CHARS` | optional (commented) | `home-claude/cron/hooks/session-start.py` |
 | `SYNC_CHECK_PRIVATE_HOSTS` | optional (commented) | `home-claude/cron/agents-md-sync-check.py` |
 | `TELEGRAM_BOT_TOKEN` | declared | `home-claude/cron/bundle-status.py`, `home-claude/cron/telegram-send.sh` |
@@ -93,7 +91,7 @@ installer generates the first from the second.
 | `WIKI_RETRY_LIMIT` | optional (commented) | — |
 | `WIN_REMOTE_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 
-_71 variables._
+_69 variables._
 
 ## `bundle.local.yaml` keys
 

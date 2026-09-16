@@ -1183,6 +1183,74 @@ def test_a_compiled_section_is_skipped_until_it_changes(bundle: Path):
         f"an edited section was not compiled again:\n{r.stdout}"
 
 
+def _load_wiki_script(bundle: Path, monkeypatch, name: str, script: str):
+    """Import a COPIED wiki script together with ITS utils.
+
+    A `utils` already in sys.modules may belong to another test's tree (and its
+    BUNDLE_ROOT), so the shared modules are dropped before the import.
+    """
+    import importlib.util
+    monkeypatch.syspath_prepend(str(bundle / "cron"))
+    monkeypatch.syspath_prepend(str(bundle / "cron" / "hooks"))
+    for mod in ("utils", "untrusted", "runs"):
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+    spec = importlib.util.spec_from_file_location(name, bundle / "cron" / "wiki" / script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_compile_shows_the_pages_the_data_links_to_without_frontmatter(bundle: Path,
+                                                                       monkeypatch):
+    """What the byte cap cuts, and what it spends the budget on.
+
+    Bodies went into the prompt in mtime order, so a cap could cut the older
+    page the new notes explicitly link to while showing fresher pages they never
+    mention — and every body carried its frontmatter: a `sources:` list and an
+    `updated:` stamp, dead tokens in every call.
+    """
+    wcs = _load_wiki_script(bundle, monkeypatch, "wcs_context", "wiki-compile-sessions.py")
+    proj = bundle / "wiki" / "projects" / "myproject"
+    proj.mkdir(parents=True, exist_ok=True)
+    filler = "lorem ipsum " * 1800            # ~22 KB: two bodies pass the 40 KB cap
+    for i, name in enumerate(["linked-old", "fresh-a", "fresh-b"]):
+        page = proj / f"{name}.md"
+        page.write_text(f"---\nsources:\n  - path: daily/2020-01-0{i + 1}.md\n"
+                        f"updated: 2020-01-0{i + 1}\n---\n# {name}\n\n"
+                        f"BODY-OF-{name} {filler}\n", encoding="utf-8")
+        os.utime(page, (1_000_000 + i * 1000,) * 2)    # linked-old is the oldest
+    sent: list[str] = []
+
+    def fake_llm(prompt, timeout=600):
+        sent.append(prompt)
+        return types.SimpleNamespace(text="[]", kind="ok", detail="")
+
+    monkeypatch.setattr(wcs, "llm_call_ex", fake_llm)
+    wcs.compile_project_data("myproject", "The fix touched [[linked-old]] again.",
+                             wcs.get_existing_project_pages("myproject"))
+    assert "BODY-OF-linked-old" in sent[0], "the cap cut the page the data links to"
+    assert "daily/2020-01-0" not in sent[0] and "updated: 2020-01-0" not in sent[0], \
+        "page frontmatter was sent to the provider"
+
+
+def test_lint_walkers_skip_the_same_folders(bundle: Path, monkeypatch):
+    """The page list, the link targets and the orphan check each had their own
+    skip set; `.git` was in none of them, while build-index skips it."""
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_skip", "wiki-lint.py")
+    wiki = bundle / "wiki"
+    (wiki / ".git").mkdir()
+    (wiki / ".git" / "notes.md").write_text("# Notes\n\n[[projects/myproject/lonely]]\n",
+                                            encoding="utf-8")
+    (wiki / "projects" / "myproject").mkdir(parents=True, exist_ok=True)
+    (wiki / "projects" / "myproject" / "lonely.md").write_text(
+        "# Lonely\n\nNobody links here.\n", encoding="utf-8")
+    pages = lint.find_all_pages()
+    assert "notes" not in pages
+    assert ".git/notes" not in lint.vault_targets()[0]
+    assert "WARN: orphan page: projects/myproject/lonely" in lint.check_orphan_pages(pages), \
+        "a link from outside the vault kept a page from being reported as an orphan"
+
+
 def test_a_second_section_of_a_compiled_project_is_sent_alone(bundle: Path):
     """The next night's append must not re-send the section already compiled.
 

@@ -84,6 +84,13 @@ BASELINE_DELTA_MIN = 20
 # as inbound links would make the orphan check come up clean after every build.
 GENERATED_INDEXES = {"index.md", "projects/index.md", "kb/index.md"}
 
+# Folders whose markdown is not the vault: editor config, the raw daily logs and
+# the session drafts under them, a git directory. ONE set for every walker in
+# this file — the page list, the link targets and the orphan check each spelled
+# their own, and a folder added to one of them silently disagreed with the
+# others. `.git` is skipped by wiki-build-index and wiki-conflict-resolve too.
+SKIP_PARTS = frozenset({".obsidian", "daily", ".pending", ".git"})
+
 
 def find_all_pages() -> dict[str, list[Path]]:
     """Find every .md file in the wiki (except auxiliary ones).
@@ -94,10 +101,9 @@ def find_all_pages() -> dict[str, list[Path]]:
     reports such collisions.
     """
     pages: dict[str, list[Path]] = {}
-    skip = {".obsidian", "daily", ".pending"}
     for f in WIKI_ROOT.rglob("*.md"):
         parts = f.relative_to(WIKI_ROOT).parts
-        if any(p in skip for p in parts):
+        if any(p in SKIP_PARTS for p in parts):
             continue
         # _log.md is the script-managed per-project activity feed — every
         # project has one, so it would trip the ambiguous-name and
@@ -146,10 +152,9 @@ def vault_targets() -> tuple[set[str], dict[str, int]]:
     """
     paths: set[str] = set()
     stems: dict[str, int] = {}
-    skip = {".obsidian", "daily", ".pending"}
     for f in WIKI_ROOT.rglob("*.md"):
         rel = f.relative_to(WIKI_ROOT)
-        if any(p in skip for p in rel.parts):
+        if any(p in SKIP_PARTS for p in rel.parts):
             continue
         paths.add(rel.with_suffix("").as_posix())
         stems[f.stem] = stems.get(f.stem, 0) + 1
@@ -212,7 +217,7 @@ def check_orphan_pages(pages: dict[str, list[Path]]) -> list[str]:
 
     for f in WIKI_ROOT.rglob("*.md"):
         rel = f.relative_to(WIKI_ROOT)
-        if ".obsidian" in rel.parts or "daily" in rel.parts:
+        if any(p in SKIP_PARTS for p in rel.parts):
             continue
         if rel.as_posix() in GENERATED_INDEXES:
             continue

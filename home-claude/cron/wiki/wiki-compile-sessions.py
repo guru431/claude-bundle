@@ -35,6 +35,7 @@ from utils import (  # noqa: E402
     append_per_project_log,
     attempt_reset,
     config_report,
+    extract_wikilinks,
     give_up_after_repeated_failure,
     iter_md_lines,
     llm_call_ex,
@@ -260,9 +261,9 @@ def parse_daily_by_project(text: str) -> dict[str, str]:
 
 
 def get_existing_project_pages(project: str) -> dict[str, str]:
-    """Read existing wiki PAGES for a project, freshest first.
+    """Read existing wiki PAGES for a project, freshest first → {stem: body}.
 
-    Two changes that matter for the prompt budget:
+    Three things that matter for the prompt budget:
       * WIKI_NON_PAGES is excluded. `_log.md` is a script-managed journal, not a
         page, and it grows without bound — sent as if it were a page it ate the
         body budget, tripped the size cap early and pushed the whole project onto
@@ -270,6 +271,10 @@ def get_existing_project_pages(project: str) -> dict[str, str]:
       * Sorted by mtime. The truncation used to happen in `glob()` order, so
         WHICH pages the model got to see was down to the filesystem; the recently
         touched ones are the ones the day's notes are about.
+      * The BODY only. The frontmatter — a `sources:` list that grows with every
+        compile, the `updated:` stamp — is script-owned bookkeeping: dead tokens
+        in every call, and shown to the model it invites the model to write
+        a stale `updated:` back into the page it returns.
     """
     pages: dict[str, str] = {}
     proj_dir = PROJECTS_DIR / project
@@ -278,7 +283,7 @@ def get_existing_project_pages(project: str) -> dict[str, str]:
     files = [f for f in proj_dir.glob("*.md") if f.name not in WIKI_NON_PAGES]
     for f in sorted(files, key=lambda p: p.stat().st_mtime if p.exists() else 0,
                     reverse=True):
-        pages[f.stem] = f.read_text(encoding="utf-8", errors="replace")
+        pages[f.stem] = read_page(f)[1]
     return pages
 
 
@@ -325,19 +330,26 @@ def compile_project_data(project: str, data: str,
     # are many pages, send only the names (see MAX_PAGES_WITH_CONTENT above).
     MAX_CONTENT_BYTES = 40000
 
-    def render_existing() -> tuple[str, str, bool]:
+    def render_existing(part: str) -> tuple[str, str, bool]:
         """Render the page-name list and bodies for a prompt from current state.
 
         Called per part rather than once: each part merges its own output back
         into existing_pages, so a later part must see what an earlier one wrote
         or it would rewrite the page from the pre-run body and erase those facts.
+
+        Pages the part LINKS to go first, then the rest freshest-first: when the
+        byte cap cuts the list, it now cuts pages the new data does not mention,
+        rather than an older page it is explicitly about.
         """
         names = "\n".join(f"- {name}" for name in sorted(existing_pages.keys()))
         bodies = ""
         withheld = len(existing_pages) > MAX_PAGES_WITH_CONTENT
         if not withheld:
-            for name, content in existing_pages.items():
-                bodies += f"\n### {name}\n{content}\n"
+            linked = {link.rsplit("/", 1)[-1].removesuffix(".md")
+                      for link in extract_wikilinks(part)}
+            # sorted() is stable: within each group the mtime order is kept.
+            for name in sorted(existing_pages, key=lambda n: n not in linked):
+                bodies += f"\n### {name}\n{existing_pages[name]}\n"
                 if len(bodies) > MAX_CONTENT_BYTES:
                     bodies += "\n(remaining pages omitted due to size)\n"
                     withheld = True
@@ -371,7 +383,7 @@ def compile_project_data(project: str, data: str,
     complete = True
     kinds: list[str] = []   # LLMResult kinds of the failures, worst wins
     for part_idx, part in enumerate(parts):
-        existing_list, existing_content, part_withheld = render_existing()
+        existing_list, existing_content, part_withheld = render_existing(part)
         part_label = f" (part {part_idx+1}/{len(parts)})" if len(parts) > 1 else ""
         # masked() on the daily text below: WIKI_MASK_SECRETS is a promise about
         # what LEAVES the machine, and it was honored only on the way to disk.
@@ -466,7 +478,9 @@ JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
                 # the page from its pre-run body — the exact loss this guards.
                 norm = normalize_wiki_path(chg["path"])
                 if norm:
-                    existing_pages[Path(norm).stem] = chg["content"]
+                    # A body, like the pages read from disk: frontmatter the
+                    # model emitted anyway is stripped on write, not shown back.
+                    existing_pages[Path(norm).stem] = strip_leading_frontmatter(chg["content"])
         if part_idx < len(parts) - 1:
             llm_pace()
 

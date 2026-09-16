@@ -207,6 +207,30 @@ def test_a_legacy_digest_list_is_converted_not_dropped(bundle, tmp_path):
     assert len(book) == 3
 
 
+def test_a_project_denied_by_the_policy_never_reaches_the_prompt(bundle, tmp_path):
+    """skip_projects is promised for EVERY source collector, this one included.
+
+    Covered for flush, compile and session-end; nothing would have noticed a
+    regression here, in the task that ships a day of the user's own messages.
+    """
+    pytest.importorskip("yaml")
+    (bundle / "bundle.local.yaml").write_text("skip_projects:\n  - secretproj\n",
+                                              encoding="utf-8")
+    home = tmp_path / "home_policy"
+    _seed(home, "C--work-secretproj", ["The acquisition closes on the 3rd — tell nobody."])
+    _seed(home, "C--work-openproj", ["The open project now builds with the new toolchain."])
+
+    # The preview first: it records nothing, and it names every project it collected.
+    preview = _run(bundle, home, None, "--dry-run")
+    assert "openproj:" in preview.stdout and "secretproj:" not in preview.stdout, preview.stdout
+
+    r = _run(bundle, home, json.dumps({"add": "- the open project uses the new toolchain"}))
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Collected user messages from 1 projects" in r.stdout, r.stdout
+    assert len(_sent_book(bundle)) == 1, "only the allowed project's message may go out"
+
+
 def test_a_night_with_no_projects_dir_still_leaves_a_ledger_row(bundle, tmp_path):
     """The early exit returned 0 before record_run was reached.
 

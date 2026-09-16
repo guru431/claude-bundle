@@ -77,10 +77,13 @@ if [ -n "$RANGE" ] && [ "$N" = "0" ]; then
   echo "Nothing to publish — github is already up to date."; exit 0
 fi
 
-# --- collect diff/files to check ---
-# Per-commit patches, not the net tree diff: a secret added in one outgoing
-# commit and removed in a later one is invisible to `git diff A..B` but still
-# ships in the published history. --diff-filter=AR: a rename to .env is an R.
+# --- what the publication carries ---
+# Every step below reads the OBJECTS the range introduces, not its patches. The
+# per-commit patches (`git log -p` / `--name-only`, what this used to read) show
+# nothing at all for a merge commit, so a `.env` or a hostname born on a merge —
+# an "evil merge" — passed steps 1 and 3 untouched; step 2 alone had moved to
+# the object walk. The patches also showed a UTF-16 file as "Binary files
+# differ", so the personal denylist never read one.
 #
 # The FIRST push takes the same path with the branch itself as the range — the
 # whole reachable history is what gets published. Scanning the working tree
@@ -88,72 +91,55 @@ fi
 # added and later deleted was published invisibly by the very command whose job
 # is to stop that.
 #
-# --format=%B keeps the commit MESSAGE (a secret pasted into a commit message
-# ships just as publicly as one in a file) but drops the `commit` / `Author:` /
-# `Date:` header lines. Commit metadata is not published content: the author
-# identity is identical across the whole already-public history, yet it was
-# rescanned on every push and matched `.sanitize-patterns` — where a username
-# belongs so it can be found IN FILES — blocking the push on a false positive.
+# A commit that CLEANS a hostname out of a file still passes: its new blob no
+# longer carries the name, and the old one is already on github — outside the
+# range. (Scanning whole patches once matched their `-` side and blocked exactly
+# that commit, leaving GITHUB_PUSH_FORCE=1, which disables all four checks.)
 SCAN_RANGE="${RANGE:-$BRANCH}"
-diff_content=$(git log -p --format=%B --unified=0 "$SCAN_RANGE" -- . ':(exclude).githooks/' 2>/dev/null || true)
-added=$(git log --name-only --diff-filter=AR --pretty=format: "$SCAN_RANGE" -- . | sort -u || true)
+# Unquoted by construction — secret_scan_objects reads paths from the object
+# walk, which git never C-quotes the way `--name-only` quotes a non-ASCII name.
+added=$(secret_scan_range_paths "$SCAN_RANGE")
 
 fail=0
 
 # 1) sensitive filenames (allow *.example* templates and *.pub public keys)
-if [ -n "$added" ]; then
-  # SENSITIVE_PATH_PATTERN comes from the shared table (secret_shapes.py →
-  # cron/lib/secret-scan.sh), so this list, pre-commit's and git-push-all's are
-  # one list. `.pub` is a public key and stays allowed.
-  bad=$(printf '%s\n' "$added" \
-    | grep -iE -e "$SENSITIVE_PATH_PATTERN" -e '(^|/)\.sanitize-patterns$' \
-    | grep -ivE -e "$SENSITIVE_PATH_ALLOW" -e '\.pub$' || true)
-  if [ -n "$bad" ]; then
-    # "$bad" quoted: an unquoted expansion word-splits a path containing spaces
-    # into several bogus "files", so the block list misreports what was found.
-    echo "BLOCKED: sensitive files in the publication:"; printf '%s\n' "$bad" | sed 's/^/  /'; fail=1
-  fi
+# The one shared table (secret_shapes.py → cron/lib/secret-scan.sh), which also
+# knows `.sanitize-patterns` and the `.pub` exception, so this list, pre-commit's,
+# pre-push's and git-push-all's are one list. A MODIFIED sensitive file counts as
+# well as an added one: its new content is what would be published.
+if [ -n "$added" ] && ! bad=$(printf '%s\n' "$added" | secret_scan_paths); then
+  # "$bad" quoted: an unquoted expansion word-splits a path containing spaces
+  # into several bogus "files", so the block list misreports what was found.
+  echo "BLOCKED: sensitive files in the publication:"; printf '%s\n' "$bad" | sed 's/^/  /'; fail=1
 fi
 
-# 2) generic secret/token formats. secret_scan_range walks the BLOBS the range
-#    introduces plus every commit MESSAGE — which is what makes an "evil merge"
-#    visible (a merge commit shows no diff in `git log -p`, so a key introduced
-#    on the merge itself scanned clean) and what transcodes UTF-16 content that
-#    `grep -I` would otherwise dismiss as binary.
+# 2) generic secret/token formats and 3) the personal denylist from
+#    .sanitize-patterns, in ONE walk: secret_scan_range reads the BLOBS the range
+#    introduces plus every commit MESSAGE, transcodes UTF-16, scans binary
+#    content as bytes, and applies both tables to each.
 #
 #    It also honours `# secret-scan:allow`. Without that, step 2 of the very
 #    procedure that publishes THIS bundle blocked on the bundle's own detector
 #    fixtures, and the only way past was GITHUB_PUSH_FORCE=1 — which switches
 #    off all four checks at once.
-if ! hits=$(secret_scan_range "${RANGE:-$BRANCH}" ".githooks/"); then
-  echo "BLOCKED: possible secret/token in the publication:"; printf '%s\n' "$hits" | sed 's/^/  /'; fail=1
+#
+#    A denylist that exists but cannot be used — a line grep cannot compile —
+#    blocks. `grep -f` exits 2 on such a line, the old `|| true` read that as
+#    "no match", and the whole denylist was silently off.
+sp="$REPO/.sanitize-patterns"
+pat=$(mktemp 2>/dev/null || echo "$REPO/.sanitize-patterns.tmp")
+if ! secret_scan_denylist "$sp" "$pat"; then
+  echo "BLOCKED: $sp cannot be used (see above) — the personal denylist would be OFF."; fail=1
+elif [ ! -f "$sp" ]; then
+  echo "WARN: no .sanitize-patterns in $(basename "$REPO") — personal-denylist check skipped"
+fi
+if ! hits=$(secret_scan_range "$SCAN_RANGE" ".githooks/" "$pat"); then
+  echo "BLOCKED: possible secret/token or personal data (.sanitize-patterns) in the publication:"
+  printf '%s\n' "$hits" | sed 's/^/  /'; fail=1
 elif [ -n "$hits" ]; then
   printf '%s\n' "$hits" | sed 's/^/  /'      # e.g. the "N blob(s) over 1 MiB" note
 fi
-
-# 3) personal denylist from .sanitize-patterns
-sp="$REPO/.sanitize-patterns"
-if [ -f "$sp" ]; then
-  pat=$(mktemp 2>/dev/null || echo "$REPO/.sanitize-patterns.tmp")
-  # tr -d '\r': a CRLF-saved .sanitize-patterns (the Windows default) leaves a
-  # trailing \r on every regex, so nothing ever matches and the whole personal
-  # denylist silently does nothing. Same treatment as .githooks/pre-push.
-  grep -vE '^[[:space:]]*$' "$sp" 2>/dev/null | tr -d '\r' > "$pat" || true
-  if [ -s "$pat" ]; then
-    # ADDED lines only. Scanning the whole patch matched the `-` side too, so
-    # the one commit that CLEANS a hostname out of the tree was blocked by the
-    # denylist that names it — leaving GITHUB_PUSH_FORCE=1, which disables all
-    # four checks, as the only way to publish the fix.
-    hits=$(printf '%s\n' "$diff_content" | grep -E '^\+' | grep -vE '^\+\+\+' \
-      | grep -inEf "$pat" || true)
-    if [ -n "$hits" ]; then
-      echo "BLOCKED: personal data (.sanitize-patterns) in the publication:"; printf '%s\n' "$hits" | sed 's/^/  /'; fail=1
-    fi
-  fi
-  rm -f "$pat"
-else
-  echo "WARN: no .sanitize-patterns in $(basename "$REPO") — personal-denylist check skipped"
-fi
+rm -f "$pat"
 
 # 4) per-project PATH denylist (.github-push-deny) — hard-fail by PATH, not by
 #    content. For files that must NEVER leave for a public remote (PII corpora,

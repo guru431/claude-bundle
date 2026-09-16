@@ -30,6 +30,7 @@ from test_guards import _bash   # the one resolver that avoids the WSL launcher
 ROOT = Path(__file__).resolve().parent.parent
 HOOKS = ROOT / ".githooks"
 LIB = ROOT / "home-claude" / "cron" / "lib" / "secret-scan.sh"
+GITHUB_PUSH = ROOT / "home-claude" / "cron" / "github-push.sh"
 
 BASH = _bash()
 GIT = shutil.which("git")
@@ -371,6 +372,100 @@ def test_a_clean_merge_runs_the_pre_commit_checks(guarded: Repo):
     cp = guarded.git("merge", "--no-ff", "-m", "merge side", "side")
     assert cp.returncode != 0, f"a merge bringing in a token was committed:\n{_out(cp)}"
     assert guarded.head() == main_head != base, "a merge commit was created"
+
+
+# ── cron/github-push.sh --check-only ────────────────────────────────────────
+# The gate for projects that have no hooks of their own: before this script
+# pushes to a public `github` remote, it is the ONLY check.
+
+@pytest.fixture()
+def published(tmp_path: Path) -> Repo:
+    """A hook-less project whose `github` remote already has the first commit."""
+    repo = _new_repo(tmp_path, "project", "github")
+    (repo.path / ".git" / "info").mkdir(exist_ok=True)
+    (repo.path / ".git" / "info" / "exclude").write_text("/.sanitize-patterns\n",
+                                                         encoding="utf-8")
+    repo.write("README.md", "hello\n")
+    repo.plant("init")
+    cp = repo.git("push", "-q", "github", "main")
+    assert cp.returncode == 0, _out(cp)
+    return repo
+
+
+def _check_only(repo: Repo) -> subprocess.CompletedProcess:
+    return subprocess.run([BASH, GITHUB_PUSH.as_posix(), "--check-only",
+                           repo.path.as_posix(), "main"],
+                          env=repo.env, capture_output=True, timeout=600)
+
+
+@integration
+def test_github_push_passes_a_clean_publication(published: Repo):
+    published.write(".sanitize-patterns", HOST + "\n")
+    published.write("src/app.py", "print('hello')\n")
+    published.plant()
+    cp = _check_only(published)
+    assert cp.returncode == 0, _out(cp)
+
+
+@integration
+def test_github_push_sees_what_an_evil_merge_introduces(published: Repo):
+    """Steps 1 and 3 read `git log --name-only` / `git log -p`, which print
+    nothing for a merge commit — only the token step had moved to the object
+    walk, and neither `PASSWORD=` nor a hostname has a token shape."""
+    published.write(".sanitize-patterns", HOST + "\n")
+    assert published.git("checkout", "-q", "-b", "side").returncode == 0
+    published.write("side.txt", "side\n")
+    published.plant("side")
+    assert published.git("checkout", "-q", "main").returncode == 0
+    published.write("main.txt", "main\n")
+    published.plant("main")
+    assert published.git("merge", "-q", "--no-ff", "--no-commit", "side").returncode == 0
+    published.write(".env", "PASSWORD=hunter2\n")
+    published.write("docs/deploy.md", f"ssh {HOST}\n")
+    published.plant("merge side")
+    cp = _check_only(published)
+    out = _out(cp)
+    assert cp.returncode != 0, f"an evil merge passed the public-remote gate:\n{out}"
+    assert ".env" in out and f"ssh {HOST}" in out, out
+
+
+@integration
+def test_github_push_reads_a_utf16_file_against_the_denylist(published: Repo):
+    published.write(".sanitize-patterns", HOST + "\n")
+    published.write("notes.txt", b"\xff\xfe" + f"deploy to {HOST}\r\n".encode("utf-16-le"))
+    published.plant()
+    cp = _check_only(published)
+    assert cp.returncode != 0, f"a UTF-16 file with a denylisted name passed:\n{_out(cp)}"
+
+
+@integration
+def test_github_push_blocks_dotenv_in_a_non_ascii_directory(published: Repo):
+    published.write("проект/.env", "PASSWORD=hunter2\n")
+    published.plant()
+    cp = _check_only(published)
+    assert cp.returncode != 0, f"a .env under a Cyrillic folder passed:\n{_out(cp)}"
+    assert "проект/.env" in _out(cp)
+
+
+@integration
+def test_github_push_refuses_an_invalid_denylist(published: Repo):
+    published.write(".sanitize-patterns", f"{HOST}\n192\\.168\\.1\\.(42\n")
+    published.write("docs/deploy.md", f"ssh {HOST}\n")
+    published.plant()
+    cp = _check_only(published)
+    assert cp.returncode != 0, f"published with a broken denylist:\n{_out(cp)}"
+
+
+@integration
+def test_github_push_lets_the_commit_that_scrubs_a_name_through(published: Repo):
+    published.write("docs/deploy.md", f"ssh {HOST}\n")
+    published.plant()
+    assert published.git("push", "-q", "github", "main").returncode == 0
+    published.write(".sanitize-patterns", HOST + "\n")
+    published.write("docs/deploy.md", "ssh the build host\n")
+    published.plant("scrub the host name")
+    cp = _check_only(published)
+    assert cp.returncode == 0, f"the commit that REMOVES a name was blocked:\n{_out(cp)}"
 
 
 # ── library probes (one shell each) ─────────────────────────────────────────

@@ -727,18 +727,24 @@ def write_daily(day: str, lines: list[str], log) -> Path:
 
     An append is the case that needs care: it adds sections to a daily whose
     other sections may already be compiled. compile-sessions skips a whole daily
-    via `compiled_dailies`, so that marker has to go; it skips an individual
-    project via a pair marker fingerprinted over THAT PROJECT'S SECTION, which
-    an append to another project's section does not change — so the pair markers
-    are deliberately left alone. Clearing them (as this did while the pair marker
-    was fingerprinted over the whole file) re-sent every already-compiled section
-    of the day to the provider.
+    via `compiled_dailies`, so that marker has to go; it skips a section via a
+    marker fingerprinted over THAT SECTION, which an append does not change —
+    it adds a new section even when the project already has one — so the section
+    markers are deliberately left alone. Clearing them (as this did while the
+    pair marker was fingerprinted over the whole file) re-sent every
+    already-compiled section of the day to the provider.
+
+    For the same reason the existing text is kept byte for byte. It used to be
+    rstrip()ed first, which trimmed the trailing blank lines of the LAST section
+    — its fingerprint changed, and that section was compiled and billed again.
     """
     path = DAILY_DIR / f"{day}.md"
     if path.exists():
-        existing = path.read_text(encoding="utf-8", errors="replace").rstrip()
+        existing = path.read_text(encoding="utf-8", errors="replace")
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
         new_sections = "\n".join(lines[2:]).strip()
-        atomic_write_text(path, existing + "\n\n" + new_sections + "\n")
+        atomic_write_text(path, existing + "\n" + new_sections + "\n")
         log(f"Daily log: {path} (appended to existing)")
         stale_dailies = [d for d in state_get("compile_sessions", "compiled_dailies")
                          if d == day or d.startswith(f"{day}@")]

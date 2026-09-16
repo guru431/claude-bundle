@@ -26,6 +26,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (  # noqa: E402
@@ -100,7 +101,7 @@ def daily_fingerprint(text: str) -> str:
     overlap is a no-op).
 
     The daily-level marker fingerprints the WHOLE file; the pair marker
-    fingerprints only its own project SECTION — see pair_marker.
+    fingerprints only one project SECTION — see pair_marker.
     """
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
 
@@ -108,14 +109,70 @@ def daily_fingerprint(text: str) -> str:
 def pair_marker(daily_stem: str, project: str, section_text: str) -> str:
     """State key for a granular (daily, project) pair marker.
 
-    Pinned to the fingerprint of THIS PROJECT'S SECTION, not of the whole daily.
+    Pinned to the fingerprint of ONE SECTION's text, not of the whole daily.
     With the whole-file hash, any append to the daily — and flush writes several
     dailies per run now, appending to each — changed every project's marker at
     once, so every already-compiled section of that day was sent to the provider
     again. The marker exists to say "this text is compiled"; the text it means is
     the section.
+
+    One section, not the project's sections merged: see daily_units.
     """
     return f"{daily_stem}#{project}@{daily_fingerprint(section_text)}"
+
+
+class CompileUnit(NamedTuple):
+    """What one daily still needs compiled for one project."""
+    data: str            # the uncompiled sections, joined — what goes to the LLM
+    marker: str          # retry/quarantine key for exactly that text ("" = nothing to do)
+    markers: list[str]   # one per uncompiled section, recorded when the unit succeeds
+    total: int           # sections of this project in the daily
+
+
+def daily_units(daily_stem: str, daily_text: str,
+                compiled_pairs: set[str]) -> dict[str, CompileUnit]:
+    """{project: CompileUnit} for one daily, with compiled sections left out.
+
+    A daily can hold the same project TWICE: the 02:30 flush writes `## P` for
+    what was said before it ran, and the next night appends a second `## P` for
+    the rest of that day (a session's day is its own, not the run's). Both
+    sections used to be merged and fingerprinted together, so the append made a
+    new marker for the pair, and the section compiled the night before went to
+    the provider again with the new one — billed twice, its pages rewritten
+    again. Each section now carries its own marker, and only unmarked ones are
+    sent (joined into one call, so a fresh daily costs what it always did).
+
+    Markers written before this change fingerprinted the merged text. They are
+    still honoured two ways, so upgrading re-sends nothing that was compiled:
+    the old merged marker over the whole current daily (nothing appended since),
+    and over each leading run of sections (sections appended after it).
+    """
+    by_project: dict[str, list[str]] = {}
+    for raw_name, body in parse_daily_sections(daily_text):
+        by_project.setdefault(normalize_project_name(raw_name), []).append(body)
+    legacy: dict[str, str] = {}
+    for raw_name, body in parse_daily_by_project(daily_text).items():
+        norm = normalize_project_name(raw_name)
+        legacy[norm] = legacy[norm] + "\n\n" + body if norm in legacy else body
+
+    units: dict[str, CompileUnit] = {}
+    for project, bodies in by_project.items():
+        if pair_marker(daily_stem, project, legacy[project]) in compiled_pairs:
+            units[project] = CompileUnit("", "", [], len(bodies))
+            continue
+        done = next((k for k in range(len(bodies), 1, -1)
+                     if pair_marker(daily_stem, project, "\n\n".join(bodies[:k]))
+                     in compiled_pairs), 0)
+        pending: dict[str, str] = {}
+        for body in bodies[done:]:
+            marker = pair_marker(daily_stem, project, body)
+            if marker not in compiled_pairs:
+                pending.setdefault(marker, body)
+        data = "\n\n".join(pending.values())
+        units[project] = CompileUnit(
+            data, pair_marker(daily_stem, project, data) if pending else "",
+            list(pending), len(bodies))
+    return units
 
 
 def get_compiled_dailies() -> set[str]:
@@ -156,39 +213,48 @@ def find_uncompiled_dailies(compiled: set[str]) -> list[tuple[Path, str, str]]:
     return dailies
 
 
-def parse_daily_by_project(text: str) -> dict[str, str]:
-    """Split a daily log into sections per `## project_name`.
+def parse_daily_sections(text: str) -> list[tuple[str, str]]:
+    """Every `## name` section of a daily log, in file order → [(name, body)].
+
+    Nothing is merged: two sections with one heading are two entries.
 
     Fenced code is not markup: a `## …` line inside a ``` block belongs to
     somebody's code sample (a transcript is full of them) and starting a new
     project section there cut that block in half, splitting its two halves
     across two projects.
     """
-    by_project: dict[str, str] = {}
+    sections: list[tuple[str, str]] = []
     current_project = None
     current_lines: list[str] = []
-
-    def _store(name: str, lines: list[str]) -> None:
-        # Two same-named '## main' blocks must merge, not overwrite — mirror
-        # the '+=' merge main() uses for normalized names.
-        body = "\n".join(lines)
-        if name in by_project:
-            by_project[name] += "\n\n" + body
-        else:
-            by_project[name] = body
 
     for line, in_code in iter_md_lines(text):
         if line.startswith("## ") and not in_code:
             if current_project and current_lines:
-                _store(current_project, current_lines)
+                sections.append((current_project, "\n".join(current_lines)))
             current_project = line[3:].strip()
             current_lines = []
         elif current_project is not None:
             current_lines.append(line)
 
     if current_project and current_lines:
-        _store(current_project, current_lines)
+        sections.append((current_project, "\n".join(current_lines)))
 
+    return sections
+
+
+def parse_daily_by_project(text: str) -> dict[str, str]:
+    """Split a daily log into sections per `## project_name`, same names merged.
+
+    What compile used before daily_units, kept because the markers it wrote
+    were computed over this merged text and daily_units has to recognise them.
+    """
+    by_project: dict[str, str] = {}
+    for name, body in parse_daily_sections(text):
+        # Two same-named '## main' blocks must merge, not overwrite.
+        if name in by_project:
+            by_project[name] += "\n\n" + body
+        else:
+            by_project[name] = body
     return by_project
 
 
@@ -603,7 +669,8 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
 
 
 def give_up_on_pair(marker: str, project: str, daily_path: Path, kind: str,
-                    changes: list, rejected: list, log) -> bool:
+                    changes: list, rejected: list, log,
+                    record: list[str] | None = None) -> bool:
     """Stop retrying a (daily, project) pair that fails the same way every night.
 
     A thin wrapper over utils.give_up_after_repeated_failure — the ceiling logic
@@ -612,6 +679,9 @@ def give_up_on_pair(marker: str, project: str, daily_path: Path, kind: str,
     of documentation. This adds only the two things specific to compile-sessions:
     the pair marker is recorded (so nothing retries it), and the finding names the
     prompt/normalizer mismatch that is almost always the cause.
+
+    `marker` counts the attempts; `record` lists the section markers to set on
+    quarantine (see daily_units) and defaults to the marker itself.
 
     A `transient` failure (provider down, quota spent) does NOT count — waiting
     fixes it, and a ceiling on it would throw away content over a bad week. Nor
@@ -639,7 +709,7 @@ def give_up_on_pair(marker: str, project: str, daily_path: Path, kind: str,
                           f"{daily_path.stem}#{project}`."),
         log=log)
     if quarantined:
-        state_add("compile_sessions", "compiled_pairs", [marker])
+        state_add("compile_sessions", "compiled_pairs", record or [marker])
     return quarantined
 
 
@@ -745,14 +815,19 @@ def main():
         return
 
     if is_dry_run():
+        # What WOULD be sent, and nothing else: sections already compiled and
+        # projects the policy denies cost nothing, and a preview that counted
+        # them overstated the bill and named projects that never leave the box.
         log("DRY RUN — dailies that WOULD be compiled (no LLM, no writes):")
         grand = 0
         for daily_path, _fp, daily_text in dailies:
-            raw = parse_daily_by_project(daily_text)
-            projects = sorted({normalize_project_name(k) for k in raw})
-            chars = sum(len(v) for v in raw.values())
+            units = {p: u for p, u in daily_units(daily_path.stem, daily_text,
+                                                  compiled_pairs).items()
+                     if u.markers and project_allowed(p)}
+            chars = sum(len(u.data) for u in units.values())
             grand += chars
-            log(f"  {daily_path.name}: {len(raw)} section(s) → projects {projects}, "
+            log(f"  {daily_path.name}: {sum(len(u.markers) for u in units.values())} "
+                f"section(s) → projects {sorted(units)}, "
                 f"{chars} chars (~{chars // 4} tokens)")
         log(f"  TOTAL ~{grand // 4} tokens of daily text would reach the provider")
         log("DRY RUN — no pages written, no state changes.")
@@ -762,21 +837,14 @@ def main():
     hard_failure = False
     for daily_path, daily_fp, daily_text in dailies:
         log(f"Processing: {daily_path.name}")
-        raw_by_project = parse_daily_by_project(daily_text)
-
-        # Collapse free-form section names ("project — extracted facts (...)")
-        # to known project keys.
-        by_project: dict[str, str] = {}
-        for raw_name, data in raw_by_project.items():
-            norm = normalize_project_name(raw_name)
-            if norm in by_project:
-                by_project[norm] += "\n\n" + data
-            else:
-                by_project[norm] = data
-        log(f"  Projects (after normalization): {len(by_project)} from {len(raw_by_project)} sections")
+        # Free-form section names ("project — extracted facts (...)") collapse
+        # to project keys; sections already compiled are left out of each unit.
+        units = daily_units(daily_path.stem, daily_text, compiled_pairs)
+        log(f"  Projects (after normalization): {len(units)} from "
+            f"{sum(u.total for u in units.values())} sections")
 
         failed = 0
-        for project, data in by_project.items():
+        for project, unit in units.items():
             # The privacy policy is unified across the pipeline, and this phase
             # was the hole in it: flush gates every SOURCE, but a project added
             # to skip_projects AFTER its daily was written still had that
@@ -790,10 +858,13 @@ def main():
             # Granular dedup: this (daily, project) pair already compiled —
             # skip it, so one big failing project no longer drags its
             # already-succeeded neighbours through the LLM on every retry.
-            marker = pair_marker(daily_path.stem, project, data)
-            if marker in compiled_pairs:
+            if not unit.markers:
                 log(f"  [{project}] already compiled (pair marker) — skip")
                 continue
+            if len(unit.markers) < unit.total:
+                log(f"  [{project}] {unit.total - len(unit.markers)} of {unit.total} "
+                    f"section(s) already compiled — sending only the rest")
+            data, marker = unit.data, unit.marker
 
             existing = get_existing_project_pages(project)
             log(f"  [{project}] existing pages: {len(existing)}, data: {len(data)} chars")
@@ -841,8 +912,8 @@ def main():
                     # succeeded project is skipped rather than re-compiled.
                     # Anything rejected keeps the pair unmarked (the branches
                     # above), so a drop is never silently finalized here.
-                    state_add("compile_sessions", "compiled_pairs", [marker])
-                    compiled_pairs.add(marker)
+                    state_add("compile_sessions", "compiled_pairs", unit.markers)
+                    compiled_pairs.update(unit.markers)
                     attempt_reset("compile_sessions", marker)
                     # Nothing applied AND nothing rejected means every change was
                     # a blind_update whose content the page already had. That is
@@ -854,25 +925,26 @@ def main():
                     # A part failed — the pair stays unmarked, the retry redoes
                     # the whole project (succeeded parts overwrite idempotently).
                     if not give_up_on_pair(marker, project, daily_path, kind,
-                                           changes, rejected, log):
+                                           changes, rejected, log,
+                                           record=unit.markers):
                         failed += 1
                         log(f"  [{project}] → partial failure ({len(applied)} applied), pair NOT marked — retry next run")
                     else:
-                        compiled_pairs.add(marker)
+                        compiled_pairs.update(unit.markers)
             elif complete:
                 # Empty result, but every part ran (LLM extracted nothing) —
                 # mark the pair so an empty daily is not retried forever.
-                state_add("compile_sessions", "compiled_pairs", [marker])
-                compiled_pairs.add(marker)
+                state_add("compile_sessions", "compiled_pairs", unit.markers)
+                compiled_pairs.update(unit.markers)
                 attempt_reset("compile_sessions", marker)
                 log(f"  [{project}] → 0 changes (LLM extracted nothing)")
             else:
                 if not give_up_on_pair(marker, project, daily_path, kind,
-                                       changes, [], log):
+                                       changes, [], log, record=unit.markers):
                     log(f"  [{project}] → ERROR (all parts failed)")
                     failed += 1
                 else:
-                    compiled_pairs.add(marker)
+                    compiled_pairs.update(unit.markers)
 
             llm_pace()
 
@@ -882,13 +954,13 @@ def main():
         # from duplicating their pages.
         if failed:
             hard_failure = True
-            log(f"  {failed}/{len(by_project)} project(s) failed — "
+            log(f"  {failed}/{len(units)} project(s) failed — "
                 f"{daily_path.name} left uncompiled for retry")
         else:
             state_add("compile_sessions", "compiled_dailies",
                       [f"{daily_path.stem}@{daily_fp}"])
             with open(LOG_MD, "a", encoding="utf-8") as f:
-                f.write(f"- [compile-sessions] compiled: {daily_path.stem}.md ({len(by_project)} projects)\n")
+                f.write(f"- [compile-sessions] compiled: {daily_path.stem}.md ({len(units)} projects)\n")
 
     # projects/index.md is rebuilt by wiki-build-index.py, scheduled right
     # after this task — no duplicate index writer here.

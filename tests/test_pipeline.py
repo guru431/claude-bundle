@@ -223,6 +223,33 @@ def test_flush_dates_the_daily_by_session_not_by_run(bundle: Path, tmp_path: Pat
     assert not stray, f"the session was also filed under the run date: {stray}"
 
 
+def test_flush_appends_to_a_daily_without_touching_what_is_there(bundle: Path,
+                                                                 tmp_path: Path):
+    """An append must leave every existing section byte for byte.
+
+    compile pins a marker to each section's text. write_daily rstrip()ed the
+    file before appending, which trimmed the LAST section's trailing blank lines
+    — a new fingerprint, so that already-compiled section was billed again.
+    """
+    home = tmp_path / "home_append"
+    proj_dir = home / ".claude" / "projects" / "C--Users-test-projects-dated"
+    proj_dir.mkdir(parents=True)
+    _seed_session_jsonl(proj_dir / "s.jsonl", 12, SESSION_DAY)
+    daily = bundle / "wiki" / "daily" / f"{SESSION_DAY}.md"
+    before = f"# {SESSION_DAY}\n\n## other\nCompiled last night.\n\n\n"
+    daily.write_text(before, encoding="utf-8", newline="\n")
+
+    resp = bundle / "append_response.md"
+    resp.write_text("- A durable fact. [[index]]\n", encoding="utf-8")
+    r = _run(bundle / "cron" / "wiki" / "wiki-flush-sessions.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp),
+              "USERPROFILE": str(home), "HOME": str(home)}, cwd=bundle)
+    assert r.returncode == 0, f"flush failed:\n{r.stdout}\n{r.stderr}"
+    after = daily.read_bytes().decode("utf-8")
+    assert after.startswith(before), "the append rewrote the sections already there"
+    assert "## dated" in after[len(before):]
+
+
 def test_flush_resends_only_the_tail_of_a_grown_session(bundle: Path, tmp_path: Path):
     """A session that grew must cost only its DELTA.
 
@@ -796,6 +823,76 @@ def test_nothing_to_compile_is_a_failure_when_pending_is_not_empty(bundle: Path)
         f"a lost night reported green:\n{r.stdout}\n{r.stderr}"
     assert ".pending" in r.stdout, \
         f"the reason must name .pending, or nobody can act on it:\n{r.stdout}"
+
+
+_WIDGET_PAGE = json.dumps([{
+    "path": "projects/myproject/widget-parser-fix.md", "action": "create",
+    "content": "# Widget parser fix\n\nThe boundary check was off by one. "
+               "See [[index]] and [[projects/myproject/tokenizer]].\n"}])
+
+
+def _sent_chars(stdout: str, project: str) -> list[int]:
+    """What compile logged as the data it sent for `project`, per call."""
+    return [int(n) for n in re.findall(
+        rf"\[{re.escape(project)}\] existing pages: \d+, data: (\d+) chars", stdout)]
+
+
+def test_a_second_section_of_a_compiled_project_is_sent_alone(bundle: Path):
+    """The next night's append must not re-send the section already compiled.
+
+    A daily holds one project twice whenever a day is split across two runs —
+    the 02:30 flush writes `## P` for what came before it, the next night appends
+    `## P` for the rest of that day. The two used to be merged and fingerprinted
+    together, so the append minted a new marker and the old section went to the
+    provider again with it.
+    """
+    resp = bundle / "widget.json"
+    resp.write_text(_WIDGET_PAGE, encoding="utf-8")
+    compile_ = bundle / "cron" / "wiki" / "wiki-compile-sessions.py"
+    r = _run(compile_, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0, f"first compile failed:\n{r.stdout}\n{r.stderr}"
+
+    later = "A later session: the tokenizer cache was cold after the fix.\n"
+    daily = bundle / "wiki" / "daily" / "2026-01-01.md"
+    with open(daily, "a", encoding="utf-8", newline="\n") as f:
+        f.write("\n## myproject\n" + later)
+
+    r = _run(compile_, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0, f"second compile failed:\n{r.stdout}\n{r.stderr}"
+    assert _sent_chars(r.stdout, "myproject") == [len(later)], \
+        f"the compiled section was sent again with the new one:\n{r.stdout}"
+
+
+def test_markers_from_before_per_section_compile_still_count(bundle: Path):
+    """Upgrading must not re-send what the old merged marker already covered.
+
+    Before per-section markers, `DATE#project@fp` fingerprinted the project's
+    sections MERGED. A daily compiled that way, then appended to, must send only
+    the appended section.
+    """
+    import hashlib
+    first = ("Investigated the widget parser dropping trailing tokens; the boundary\n"
+             "check was off by one. Fixed and verified against the sample corpus.\n")
+    second = "Second section written by an older run.\n"
+    daily = bundle / "wiki" / "daily" / "2026-01-01.md"
+    daily.write_text(f"# Daily 2026-01-01\n\n## myproject\n{first}\n## myproject\n{second}",
+                     encoding="utf-8", newline="\n")
+    merged = first + "\n\n" + second    # how the old compile joined same-named sections
+    legacy = "2026-01-01#myproject@" + hashlib.sha256(merged.encode("utf-8")).hexdigest()[:12]
+    (bundle / "wiki" / ".processed.json").write_text(json.dumps(
+        {"compile_sessions": {"compiled_pairs": [legacy]}}), encoding="utf-8")
+
+    third = "Third section, appended after the upgrade.\n"
+    with open(daily, "a", encoding="utf-8", newline="\n") as f:
+        f.write("\n## myproject\n" + third)
+
+    resp = bundle / "widget.json"
+    resp.write_text(_WIDGET_PAGE, encoding="utf-8")
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0, f"compile failed:\n{r.stdout}\n{r.stderr}"
+    assert _sent_chars(r.stdout, "myproject") == [len(third)], \
+        f"sections covered by a pre-upgrade marker were re-sent:\n{r.stdout}"
 
 
 def test_provider_sends_its_required_session_header(bundle: Path, monkeypatch):

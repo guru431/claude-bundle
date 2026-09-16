@@ -267,9 +267,11 @@ PROMPT=""
 [ -f "$PROMPT_FILE" ] && PROMPT=$(cat "$PROMPT_FILE")
 
 
-# Capture LLM output: llm-call.py exits 1 on LLM None/error, 2 on empty stdin.
-# On failure (provider depleted -> llm_call returns None) alert + exit 1,
-# otherwise the task scheduler sees exit 0 and the failure is lost silently.
+# Capture LLM output. llm-call.py's exit code names the kind of failure, and its
+# reason goes to stderr — this log: 1 deterministic (an answer came back and was
+# unusable), 2 usage (empty prompt), 3 transient (the provider did not answer),
+# 4 configuration (no usable provider or key). Any of them is an alert and exit 1
+# below, otherwise the task scheduler sees exit 0 and the failure is lost silently.
 #
 # The untrusted marker below is not decoration: METRICS is command and log output
 # from remote hosts. A compromised — or merely creative — line in it (a log entry
@@ -303,8 +305,15 @@ if [ $rc -ne 0 ] || [ -z "$ANALYSIS" ]; then
     # what the comment above the check promises can't happen. A full disk is
     # still a full disk when the narrator is down.
     echo "FATAL: LLM analysis failed (rc=$rc, empty=$([ -z "$ANALYSIS" ] && echo yes || echo no))" >> "$LOG_FILE"
-    "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "healthcheck: LLM analysis failed ($DATE)" >>"$LOG_FILE" 2>&1
-    ANALYSIS="(LLM analysis unavailable — the provider failed; disk severity below is measured, not inferred)"
+    # The two kinds that call for opposite responses get named in the page:
+    # transient passes on its own, configuration waits until someone fixes .env.
+    LLM_WHY="rc=$rc"
+    case "$rc" in
+        3) LLM_WHY="transient: the provider did not answer, usually passes on its own" ;;
+        4) LLM_WHY="configuration: no usable provider or key, check .env" ;;
+    esac
+    "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "healthcheck: LLM analysis failed ($DATE; $LLM_WHY)" >>"$LOG_FILE" 2>&1
+    ANALYSIS="(LLM analysis unavailable — $LLM_WHY; disk severity below is measured, not inferred)"
     LLM_FAILED=1
 fi
 

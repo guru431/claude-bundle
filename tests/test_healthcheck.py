@@ -114,6 +114,53 @@ def _stub(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def run_healthcheck(cron: Path, tmp_path: Path) -> tuple[subprocess.CompletedProcess,
+                                                         list[str], str]:
+    """Run the copied claude-healthcheck.sh; (result, Telegram messages, its log).
+
+    llm-call.py and telegram-send.sh in `cron` are expected to be stubs already;
+    the host collectors that fall back to PowerShell on Git Bash are stubbed here.
+    """
+    sent = tmp_path / "sent.txt"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    for tool in ("uptime", "free", "ps"):
+        _stub(fake_bin / tool, "#!/bin/bash\nexit 0\n")
+    _stub(cron / "telegram-send.sh", '#!/bin/bash\nprintf "%s\\n---\\n" "$1" >> "$SENT_FILE"\n')
+    env = dict(os.environ, PYTHON_EXE=sys.executable, BASH_EXE=_bash(),
+               SENT_FILE=sent.as_posix(), HEALTHCHECK_DISK_PCT="100",
+               REMOTE_SSH_HOST="", WIN_REMOTE_HOST="",
+               PATH=os.pathsep.join([str(fake_bin), os.environ.get("PATH", "")]))
+    res = subprocess.run([_bash(), (cron / "claude-healthcheck.sh").as_posix()],
+                         capture_output=True, text=True, env=env, timeout=120)
+    log = "\n".join(p.read_text(encoding="utf-8", errors="replace")
+                    for p in (cron / "logs").glob("healthcheck_*.log"))
+    messages = sent.read_text(encoding="utf-8").split("\n---\n")[:-1] if sent.exists() else []
+    return res, messages, log
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_bash() is None, reason="bash not available")
+@pytest.mark.parametrize("llm_rc, kind", [(3, "transient"), (4, "configuration")])
+def test_a_failed_analysis_says_what_kind_of_failure_it_was(cron_copy: Path, tmp_path: Path,
+                                                             llm_rc: int, kind: str):
+    """Transient and configuration failures need opposite responses.
+
+    llm-call.py exits 3 when the provider did not answer — wait, it passes — and 4
+    when no provider or key is usable — nothing passes until .env is fixed. The
+    page used to read "LLM analysis failed" for both.
+    """
+    cron = cron_copy / "cron"
+    _stub(cron / "llm-call.py", f"import sys\nsys.stdin.read()\nsys.exit({llm_rc})\n")
+    (cron / "registry.yaml").write_text(registry(True, True), encoding="utf-8")
+
+    res, messages, log = run_healthcheck(cron, tmp_path)
+
+    assert res.returncode == 1, log
+    assert len(messages) == 1 and "LLM analysis failed" in messages[0], messages
+    assert kind in messages[0], messages[0]
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(_bash() is None, reason="bash not available")
 @pytest.mark.parametrize("chain_down, monitor_on", [(True, False), (True, True), (False, True)])
@@ -128,11 +175,10 @@ def test_an_llm_outage_morning_says_it_once(cron_copy: Path, tmp_path: Path,
     which the monitor then reported as a fourth.
     """
     cron = cron_copy / "cron"
-    sent, llm_mark = tmp_path / "sent.txt", tmp_path / "llm-called"
+    llm_mark = tmp_path / "llm-called"
     _stub(cron / "llm-call.py",
           "import sys\nfrom pathlib import Path\nsys.stdin.read()\n"
           f"Path({str(llm_mark)!r}).write_text('x')\nprint('OK')\n")
-    _stub(cron / "telegram-send.sh", '#!/bin/bash\nprintf "%s\\n---\\n" "$1" >> "$SENT_FILE"\n')
     (cron / "registry.yaml").write_text(registry(monitor_on, monitor_on), encoding="utf-8")
     if chain_down:
         now = datetime.now()
@@ -141,21 +187,8 @@ def test_an_llm_outage_morning_says_it_once(cron_copy: Path, tmp_path: Path,
             "first_iso": (now - timedelta(hours=7)).isoformat(timespec="seconds"),
             "last_iso": (now - timedelta(hours=5)).isoformat(timespec="seconds"),
             "fails": 40, "depleted": {"deepseek": "403"}}), encoding="utf-8")
-    # The host collectors that fall back to PowerShell on Git Bash, stubbed.
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    for tool in ("uptime", "free", "ps"):
-        _stub(fake_bin / tool, "#!/bin/bash\nexit 0\n")
 
-    env = dict(os.environ, PYTHON_EXE=sys.executable, BASH_EXE=_bash(),
-               SENT_FILE=sent.as_posix(), HEALTHCHECK_DISK_PCT="100",
-               REMOTE_SSH_HOST="", WIN_REMOTE_HOST="",
-               PATH=os.pathsep.join([str(fake_bin), os.environ.get("PATH", "")]))
-    res = subprocess.run([_bash(), (cron / "claude-healthcheck.sh").as_posix()],
-                         capture_output=True, text=True, env=env, timeout=120)
-    log = "\n".join(p.read_text(encoding="utf-8", errors="replace")
-                    for p in (cron / "logs").glob("healthcheck_*.log"))
-    messages = sent.read_text(encoding="utf-8").split("\n---\n")[:-1] if sent.exists() else []
+    res, messages, log = run_healthcheck(cron, tmp_path)
 
     assert res.returncode == 0, f"{res.stderr}\n{log}"
     assert llm_mark.exists() == (not chain_down), \

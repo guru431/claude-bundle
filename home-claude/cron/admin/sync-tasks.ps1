@@ -123,8 +123,10 @@ if ($ArgsFile) {
 # A DRY RUN changes nothing and therefore has nothing to keep a record of. It
 # used to open a transcript anyway, so every `-DryRun` — including the one
 # scripts/self-test.ps1 makes on every run — left another timestamped file in
-# %TEMP% that nothing ever cleaned up. An explicit -LogPath still wins.
-if (-not $LogPath -and -not $DryRun) {
+# %TEMP% that nothing ever cleaned up. -Verify is read-only too, and the
+# self-test runs it against every deployment it checks. An explicit -LogPath
+# still wins.
+if (-not $LogPath -and -not $DryRun -and -not $Verify) {
     $stamp = (Get-Date).ToString('yyyy-MM-dd_HHmmss')
     $LogPath = Join-Path $env:TEMP "sync-tasks_$stamp.log"
 }
@@ -489,6 +491,17 @@ function Test-PathOnMappedDrive([string]$path) {
     return $false
 }
 
+# Every path a task needs when it fires: its script, its executable and — for
+# the kinds Build-Action routes through it — the launcher. The launcher was not
+# in the list, so `launcher:` on a mapped drive registered a Password task that
+# exits 127 in session 0: the very layout the launcher redistribution below is
+# there to handle, and the one case this predicate did not see.
+function Get-TaskRunPaths([hashtable]$task, [string]$launcher, [string]$wantedExec) {
+    $paths = @($task.script, $task.execute, $wantedExec)
+    if (@('vbs', 'python_local', 'exec') -notcontains "$($task.kind)") { $paths += $launcher }
+    return @($paths | Where-Object { $_ })
+}
+
 # ── main ─────────────────────────────────────────────────────────────────────
 $reg = Parse-RegistryYaml $RegistryPath
 $launcher = $reg.launcher
@@ -678,8 +691,8 @@ foreach ($task in $reg.tasks) {
     # Fail-loud on the mapped-drive + Password footgun (see Test-PathOnMappedDrive).
     # claude-task-monitor.sh is only a daily backstop; this is primary enforcement.
     if ($logonType -eq 'Password') {
-        $checkPaths = @($task.script, $task.execute, $wantedExec) | Where-Object { $_ }
-        $badPath = $checkPaths | Where-Object { Test-PathOnMappedDrive $_ } | Select-Object -First 1
+        $badPath = Get-TaskRunPaths $task $launcher $wantedExec |
+            Where-Object { Test-PathOnMappedDrive $_ } | Select-Object -First 1
         if ($badPath) {
             Write-Host ("[skipped: mapped drive + Password] " + $task.name + " — '" + $badPath + "' is on a mapped network drive (absent in session 0). Use a local C:\ path or a UNC \\host\share path.") -ForegroundColor DarkYellow
             $summary.skipped++

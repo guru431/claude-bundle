@@ -511,7 +511,9 @@ if __name__ == "__main__":
         have = page.read_text(encoding="utf-8") if page.is_file() else ""
         if have.replace("\r\n", "\n") != want:
             print("docs/config-reference.md is out of date — regenerate it:")
-            print("  python scripts/check-env-ref.py --emit-table > docs/config-reference.md")
+            # No shell redirect: --emit-table writes the file itself, and a `>`
+            # onto the same path then overwrote its first line with "wrote …".
+            print("  python scripts/check-env-ref.py --emit-table")
             sys.exit(1)
         print("config-reference: up to date")
         sys.exit(0)

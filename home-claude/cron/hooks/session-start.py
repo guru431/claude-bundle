@@ -54,14 +54,16 @@ except ValueError:
 # 45s, not 20. The writer calls the LLM with a 120-second timeout, so a 20-second
 # wait expired before a normal answer arrived and the handoff — written correctly,
 # on disk moments later — was missed by the very session it was written for.
-# A MANUAL /compact no longer detaches at all (pre-compact.py writes it inline),
-# so this wait is now only about the automatic case.
+# A MANUAL /compact waits for the writer inside pre-compact.py, so this wait
+# mostly matters for the automatic case.
 HANDOFF_WAIT_SECONDS = 45
 try:
     HANDOFF_WAIT_SECONDS = max(0, int(os.environ.get("HANDOFF_WAIT_SECONDS", "45")))
 except ValueError:
     pass
-# A marker older than this belongs to a writer that died without clearing it.
+# The marker carries the writer's deadline and no wait runs past it. A marker
+# without one (written before markers carried it) falls back to its age: older
+# than this, it belongs to a writer that died without clearing it.
 HANDOFF_MARKER_MAX_AGE = 300
 
 # Everything below is written by the unattended nightly pipeline out of session
@@ -121,19 +123,38 @@ def _read_fresh(path: Path) -> str:
         return ""
 
 
-def _wait_for_handoff(path: Path, marker: Path) -> None:
-    """Block until this session's handoff lands, the writer gives up, or we
-    run out of patience. Only ever called when the marker says one is coming."""
+def _marker_deadline(marker: Path) -> float | None:
+    """The writer's deadline recorded in the marker, or None if it has none."""
+    try:
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        return float(record["deadline"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _wait_for_handoff(marker: Path) -> None:
+    """Block until the writer clears its marker, its deadline passes, or we run
+    out of patience. Only ever called when the marker says a handoff is coming.
+
+    The writer removes the marker on every exit path, so its disappearance — not
+    the handoff file appearing — is the signal: an earlier compaction of the same
+    session left a handoff-<id>.md behind, and that file says nothing about this
+    one.
+    """
     if HANDOFF_WAIT_SECONDS <= 0:
         return
-    try:
-        if time.time() - marker.stat().st_mtime > HANDOFF_MARKER_MAX_AGE:
-            return  # left by a writer that died — nothing is coming
-    except OSError:
-        return
-    deadline = time.time() + HANDOFF_WAIT_SECONDS
-    while time.time() < deadline:
-        if path.exists() or not marker.exists():
+    now = time.time()
+    deadline = _marker_deadline(marker)
+    if deadline is None:
+        try:
+            if now - marker.stat().st_mtime > HANDOFF_MARKER_MAX_AGE:
+                return  # left by a writer that died — nothing is coming
+        except OSError:
+            return
+        deadline = now + HANDOFF_WAIT_SECONDS
+    stop = min(now + HANDOFF_WAIT_SECONDS, deadline)
+    while time.time() < stop:
+        if not marker.exists():
             return
         time.sleep(0.5)
 
@@ -161,8 +182,11 @@ def get_handoff(transcript_dir: str, session_id: str = "") -> tuple[str, str]:
     if safe_id:
         own = mem_dir / f"handoff-{safe_id}.md"
         marker = mem_dir / f".handoff-{safe_id}.pending"
-        if not own.exists() and marker.exists():
-            _wait_for_handoff(own, marker)
+        # Even when an own handoff already exists: a second compaction of the
+        # same session has one from the first, and not waiting handed the new
+        # session the PREVIOUS compaction's state as if it were the latest.
+        if marker.exists():
+            _wait_for_handoff(marker)
         text = _read_fresh(own)
         if text:
             return text, ""

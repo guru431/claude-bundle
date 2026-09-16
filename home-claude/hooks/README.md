@@ -256,6 +256,22 @@ tier supports). Replace the placeholders before pasting:
   a Windows path out in full, which made the file unusable as-is on macOS and
   Linux even though every hook in it is cross-platform.
 
+## Checking the wiring
+
+    python ~/.claude/cron/bundle-status.py --hooks            # parse and resolve
+    python ~/.claude/cron/bundle-status.py --hooks --smoke    # ... and run them
+
+reads the `settings.json` Claude Code loads (`$CLAUDE_CONFIG_DIR`, else
+`~/.claude`; `--settings PATH` for another) and checks every command hook in it:
+the command parses, no `<placeholder>` was left in, the interpreter and the
+script exist, and on Windows that Git Bash is there to run the quoted form. With
+`--smoke` it also runs each hook this bundle ships once, with a payload that hook
+ignores (no transcript, a Bash command no rule matches, a notification type
+nobody alerts on), and expects exit 0 and valid JSON. A hook that is not the
+bundle's own is never run — it could do anything with the payload. Exits 1 when
+anything is broken, so an installer or a CI step can gate on it. It needs the
+full tier (`cron/`); from a source checkout, run `home-claude/cron/bundle-status.py`.
+
 ## Adjusting
 
 - `CLAUDE_HOOK_PYTHON` chooses the interpreter `md2pdf-on-edit.py` uses to

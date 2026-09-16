@@ -31,6 +31,7 @@ installer generates the first from the second.
 | `CLAUDE_BASH_DENY` | not in .env (internal) | `home-claude/hooks/bash-guard.py` |
 | `CLAUDE_BIN` | declared | `home-claude/cron/claude-warm-window.sh`, `home-claude/cron/hooks/utils.py` |
 | `CLAUDE_BUNDLE_RUNS_DIR` | not in .env (internal) | `home-claude/cron/runs.py` |
+| `CLAUDE_CONFIG_DIR` | — | `home-claude/cron/bundle-status.py` |
 | `CLAUDE_HOME` | — | `home-claude/cron/hooks/utils.py`, `home-claude/hooks/session-telegram.py` |
 | `CLAUDE_HOOK_PYTHON` | — | `home-claude/cron/md2pdf-sync.py`, `home-claude/hooks/md2pdf-on-edit.py` |
 | `CLAUDE_MD2PDF` | not in .env (internal) | `home-claude/hooks/md2pdf-on-edit.py` |
@@ -93,7 +94,7 @@ installer generates the first from the second.
 | `WIKI_RETRY_LIMIT` | optional (commented) | — |
 | `WIN_REMOTE_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 
-_71 variables._
+_72 variables._
 
 ## `bundle.local.yaml` keys
 

@@ -11,10 +11,22 @@ Makes NO network call and changes nothing. Run it any time:
 
 Exit code is always 0 (it's a status view, not a gate — use scripts/self-test.ps1
 for the pass/fail check). Lines are tagged [ok] / [--] / [!!] for quick scanning.
+
+  python ~/.claude/cron/bundle-status.py --hooks [--settings PATH] [--smoke]
+
+is the hook doctor instead: every command hook in settings.json — does it parse,
+do its interpreter and script exist — and with --smoke, one run of each hook the
+bundle ships, with a payload it ignores. That mode exits 1 when a hook is broken.
 """
+import argparse
 import json
 import os
+import re
+import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
 
@@ -28,6 +40,7 @@ from utils import (  # noqa: E402
     BUNDLE_ROOT, WIKI_ROOT, PENDING_DIR, STATE_PATH, LLM_PROVIDER,
     DEFAULT_CHAIN, PROVIDERS, _env_first, ALLOW_OFFBOX,
     PROJECTS_ROOT, PROJECTS_ROOT_SOURCE, count_wiki_pages, quarantined_count,
+    CLAUDE_HOME, find_bash,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -250,5 +263,190 @@ def main() -> int:
     return 0
 
 
+# ── hook doctor (--hooks) ────────────────────────────────────────────────────
+# INSTALL.md warns that merging a hook entry before its tier is installed "fires
+# a hook against a missing file" at every session start, and nothing checked for
+# it: self-test.ps1 smoke-ran two tier-1 hooks from fixed paths, on Windows only,
+# and never read settings.json at all. This reads the settings.json Claude Code
+# loads and checks every command hook wired in it.
+
+# The hooks this bundle ships — the only ones --smoke runs. Each is a no-op on the
+# payload below; a hook of the user's own could do anything with it. A test keeps
+# this set equal to the hook files in the bundle.
+SHIPPED_HOOKS = frozenset({
+    "bash-guard.py", "block-iptables-save-to-rules.py", "md2pdf-on-edit.py",
+    "prompt-secret-warn.py", "ps1-bom-guard.py", "sensitive-path-guard.py",
+    "session-telegram.py", "text-encoding-guard.py",
+    "pre-compact.py", "session-end.py", "session-start.py",
+})
+# Events whose plain-text stdout Claude Code adds to the context; for every other
+# event, non-empty stdout has to be JSON.
+PLAIN_TEXT_EVENTS = frozenset({"SessionStart", "UserPromptSubmit"})
+SCRIPT_SUFFIXES = (".py", ".sh", ".ps1", ".js", ".mjs", ".ts")
+HOOK_SMOKE_TIMEOUT = 30
+
+
+def noop_payload(event: str, scratch: Path) -> dict | None:
+    """A payload every shipped hook answers with nothing: no file, no message.
+
+    No transcript path (nothing to save, compact or measure), a Bash command no
+    rule matches, a file no hook cares about, a notification type nobody alerts
+    on. None for an event this bundle wires no hook to.
+    """
+    specific = {
+        "PreToolUse": {"tool_name": "Bash", "tool_input": {"command": "true"}},
+        "PostToolUse": {"tool_name": "Write", "tool_response": {"success": True},
+                        "tool_input": {"file_path": str(scratch / "hook-doctor.txt")}},
+        "UserPromptSubmit": {"prompt": "hook doctor"},
+        "SessionStart": {"source": "startup"},
+        "SessionEnd": {"reason": "other"},
+        "PreCompact": {"trigger": "auto", "custom_instructions": None},
+        "Stop": {"stop_hook_active": False},
+        "Notification": {"notification_type": "hook_doctor", "message": "hook doctor"},
+    }.get(event)
+    if specific is None:
+        return None
+    return {"session_id": "hook-doctor", "transcript_path": "", "cwd": str(scratch),
+            "hook_event_name": event, **specific}
+
+
+def _hook_argv(hook: dict) -> tuple[list[str] | None, str]:
+    """(argv, problem). Shell form is split the way sh and Git Bash split it."""
+    command = hook.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None, "has no command"
+    args = hook.get("args")
+    if args is not None:            # exec form: no shell, argv as written
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            return None, "`args` must be a list of strings"
+        return [command, *args], ""
+    try:
+        return shlex.split(command), ""
+    except ValueError as exc:
+        return None, f"does not parse as a shell command ({exc})"
+
+
+def _check_hook(event: str, hook: dict, smoke: bool, scratch: Path) -> bool:
+    """Print the verdict for one hook entry; True when it is broken."""
+    if hook.get("type") != "command":
+        na(f"{event}: a `{hook.get('type')}` hook — not checked")
+        return False
+    argv, problem = _hook_argv(hook)
+    if argv is None:
+        bad(f"{event}: {problem}: {hook.get('command')!r}")
+        return True
+    argv = [os.path.expanduser(os.path.expandvars(a)) for a in argv]
+    scripts = [a for a in argv[1:] if a.lower().endswith(SCRIPT_SUFFIXES)]
+    label = f"{event} → {Path(scripts[0]).name if scripts else argv[0]}"
+
+    placeholders = [a for a in argv if re.search(r"<[\w-]+>", a)]
+    if placeholders:
+        bad(f"{label}: placeholder never replaced: {', '.join(placeholders)}")
+        return True
+    exe = argv[0]
+    found = Path(exe).is_file() if ("/" in exe or "\\" in exe) else shutil.which(exe)
+    if not found:
+        bad(f"{label}: interpreter not found: {exe}")
+        return True
+    for script in scripts:
+        if "$" in script:
+            na(f"{label}: {script} is expanded by Claude Code at run time — not checked")
+        elif not Path(script).is_file():
+            bad(f"{label}: script not found: {script}")
+            return True
+
+    if (os.name == "nt" and hook.get("args") is None
+            and hook["command"].lstrip().startswith(('"', "'")) and not find_bash()):
+        bad(f"{label}: no Git Bash on this machine, so Claude Code runs the command "
+            f"through PowerShell, which rejects a command starting with a quoted "
+            f"path — install Git for Windows, or use exec form (command + args)")
+        return True
+    if event == "SessionEnd" and "timeout" not in hook:
+        na(f"{label}: no `timeout` — every SessionEnd hook then shares a 1.5 s budget")
+
+    if not smoke:
+        ok(f"{label}: command resolves")
+        return False
+    name = Path(scripts[0]).name if scripts else ""
+    payload = noop_payload(event, scratch)
+    if name not in SHIPPED_HOOKS or payload is None:
+        ok(f"{label}: command resolves (not a bundle hook here — not run)")
+        return False
+    try:
+        r = subprocess.run(argv, input=json.dumps(payload), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", cwd=scratch,
+                           timeout=HOOK_SMOKE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        bad(f"{label}: no answer within {HOOK_SMOKE_TIMEOUT}s")
+        return True
+    except OSError as exc:
+        bad(f"{label}: could not start ({exc})")
+        return True
+    if r.returncode != 0:
+        tail = " | ".join((r.stderr or r.stdout).strip().splitlines()[-3:])[:300]
+        bad(f"{label}: exited {r.returncode}: {tail}")
+        return True
+    if r.stdout.strip() and event not in PLAIN_TEXT_EVENTS:
+        try:
+            json.loads(r.stdout)
+        except ValueError:
+            bad(f"{label}: stdout is not JSON: {r.stdout.strip()[:120]!r}")
+            return True
+    ok(f"{label}: smoke run exit 0")
+    return False
+
+
+def check_hooks(settings_arg: str | None, smoke: bool) -> int:
+    """The --hooks mode. 0 when every command hook resolves (and runs), else 1."""
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    settings = (Path(settings_arg).expanduser() if settings_arg else
+                (Path(config_dir).expanduser() if config_dir else CLAUDE_HOME)
+                / "settings.json")
+    print(f"=== hook doctor: {settings} ===")
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        bad(f"cannot read {settings} ({exc})")
+        return 1
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not hooks:
+        na("no hooks configured")
+        return 0
+    if not isinstance(hooks, dict):
+        bad("`hooks` must be an object keyed by event name")
+        return 1
+    broken = 0
+    with tempfile.TemporaryDirectory(prefix="hook-doctor-",
+                                     ignore_cleanup_errors=True) as tmp:
+        for event, groups in hooks.items():
+            for group in groups if isinstance(groups, list) else [None]:
+                entries = group.get("hooks") if isinstance(group, dict) else None
+                if not isinstance(entries, list):
+                    bad(f"{event}: an entry without a `hooks` list")
+                    broken += 1
+                    continue
+                for hook in entries:
+                    if not isinstance(hook, dict):
+                        bad(f"{event}: a hook that is not an object")
+                        broken += 1
+                    elif _check_hook(event, hook, smoke, Path(tmp)):
+                        broken += 1
+    print(f"\n{broken} broken hook(s)" if broken else "\nall hooks resolve")
+    return 1 if broken else 0
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Read-only health report for the "
+                                                 "bundle, or (--hooks) a hook doctor.")
+    parser.add_argument("--hooks", action="store_true",
+                        help="check the command hooks wired in settings.json")
+    parser.add_argument("--settings", metavar="PATH",
+                        help="settings.json to check (default: $CLAUDE_CONFIG_DIR, "
+                             "else ~/.claude)")
+    parser.add_argument("--smoke", action="store_true",
+                        help="with --hooks: also run each bundle hook once, with a "
+                             "payload it ignores")
+    opts = parser.parse_args()
+    if opts.hooks or opts.smoke:
+        sys.exit(check_hooks(opts.settings, opts.smoke))
     sys.exit(main())

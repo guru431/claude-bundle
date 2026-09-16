@@ -208,8 +208,12 @@ def remember_sent(sent, seen, today: date | None = None) -> None:
 
     A legacy list is converted in place with every entry dated today. Dropping it
     instead would resend the whole catch-up window once.
+
+    A night that neither sent nor met anything leaves the state file alone:
+    pruning can wait for the next night with messages, and an idle install
+    should not start writing .processed.json at 02:00.
     """
-    if is_dry_run():
+    if is_dry_run() or not (sent or seen):
         return
     today = today or date.today()
     stamp = today.isoformat()

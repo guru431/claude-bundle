@@ -189,6 +189,17 @@ def test_sent_digests_are_refreshed_while_seen_and_expire_after(bundle, tmp_path
     assert book[digest] != "2000-01-01", "a message still being re-read must be refreshed"
 
 
+def test_an_idle_night_does_not_start_a_state_file(bundle, tmp_path):
+    """Nothing sent, nothing met again: no reason to take the lock and write."""
+    home = tmp_path / "home_idle"
+    (home / ".claude" / "projects").mkdir(parents=True)
+
+    r = _run(bundle, home, None)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (bundle / "wiki" / ".processed.json").exists()
+
+
 def test_a_legacy_digest_list_is_converted_not_dropped(bundle, tmp_path):
     """Dropping the old list would resend the whole catch-up window once."""
     state_path = bundle / "wiki" / ".processed.json"

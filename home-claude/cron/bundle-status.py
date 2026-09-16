@@ -23,7 +23,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
-    config_report, config_errors, quarantined,
+    config_report, config_errors,
     PROJECT_MAP, manifest_broken, policy_summary,
     BUNDLE_ROOT, WIKI_ROOT, PENDING_DIR, STATE_PATH, LLM_PROVIDER,
     DEFAULT_CHAIN, PROVIDERS, _env_first, ALLOW_OFFBOX,
@@ -146,7 +146,9 @@ def main() -> int:
     # and this script promises to change nothing.
     try:
         state = json.loads(STATE_PATH.read_text(encoding="utf-8")) if STATE_PATH.is_file() else {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        bad(f".processed.json unreadable ({exc}) — treating as empty; the next "
+            f"pipeline run quarantines a copy and rebuilds it from log.md")
         state = {}
     # Valid JSON whose root is a list/string parses fine and then raises on
     # .get() — a status view must survive a corrupt state file, not crash on it.
@@ -175,7 +177,13 @@ def main() -> int:
     # be the only symptom of a source that fails identically every night, and it
     # never said WHICH source; this does.
     for phase in ("flush", "compile_sessions", "compile_kb"):
-        stuck = quarantined(phase)
+        # From the state read above, not utils.quarantined(): that goes through
+        # load_state(), which on a corrupt state file writes a copy into
+        # cron/logs/rejected/ — so every run of this "changes nothing" view added
+        # a file to the very quarantine count it prints two lines up.
+        section = state.get(phase)
+        stuck = section.get("quarantined") if isinstance(section, dict) else None
+        stuck = sorted({str(s) for s in stuck}) if isinstance(stuck, list) else []
         if stuck:
             # NAME them. The count alone used to be the whole report, and it was
             # always 0 anyway: it counted `attempts >= RETRY_LIMIT`, while every

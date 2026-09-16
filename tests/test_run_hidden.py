@@ -1,0 +1,73 @@
+"""bin/_run-hidden.vbs end to end: what Task Scheduler actually executes.
+
+Every scheduled bash/python/cmd task runs through this launcher, and nothing in
+the suite ran it. These tests start it with cscript (same engine as the wscript
+Task Scheduler uses, with a console) from a copy under tmp_path, so its
+`<bundle>\\.env` and `cron\\logs\\launcher.log` land in the sandbox too. The
+parsing rules themselves are pinned in tests/test_dotenv_parity.py.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+CSCRIPT = shutil.which("cscript") if os.name == "nt" else None
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(CSCRIPT is None, reason="no cscript (Windows Script Host)"),
+]
+
+
+def _bundle(tmp_path: Path) -> Path:
+    bundle = tmp_path / "bundle"
+    (bundle / "bin").mkdir(parents=True)
+    (bundle / "cron" / "logs").mkdir(parents=True)
+    shutil.copyfile(ROOT / "home-claude" / "bin" / "_run-hidden.vbs",
+                    bundle / "bin" / "_run-hidden.vbs")
+    return bundle
+
+
+def _recorder(path: Path, exit_code: int) -> Path:
+    """A .cmd that writes the arguments it received next to itself."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'@echo off\r\necho %*> "%~dp0received.txt"\r\nexit /b {exit_code}\r\n',
+                    encoding="ascii")
+    return path
+
+
+def _launch(bundle: Path, *args: str) -> int:
+    env = {k: v for k, v in os.environ.items() if k not in ("BASH_EXE", "PYTHON_EXE")}
+    return subprocess.run([CSCRIPT, "//B", "//nologo", str(bundle / "bin" / "_run-hidden.vbs"),
+                           *args], env=env, timeout=60).returncode
+
+
+def test_kind_cmd_passes_a_quoted_script_and_quoted_arguments(tmp_path):
+    """`cmd /c "C:\\p q\\x.cmd" "arg"` holds four quotes, so cmd.exe stripped the
+    first and the last of the line and tried to run `C:\\p` — exit 1, nothing
+    executed. A path with `(x86)` in it is the everyday case."""
+    bundle = _bundle(tmp_path)
+    script = _recorder(tmp_path / "dir with space (x86)" / "task.cmd", exit_code=7)
+    assert _launch(bundle, "cmd", str(script), "arg one", "a&b") == 7
+    assert (script.parent / "received.txt").read_text(encoding="ascii").strip() == \
+        '"arg one" "a&b"'
+
+
+def test_an_interpreter_from_a_bom_export_quoted_non_ascii_env_line_is_used(tmp_path):
+    """The .env line a Windows user actually ends up with: saved with a BOM,
+    written `export KEY='...'`, pointing into a profile with a non-ASCII name.
+    The ANSI reader ignored the key (BOM, `export`) or mangled the path, so the
+    task either ran some other python or ended with 9009."""
+    bundle = _bundle(tmp_path)
+    interpreter = _recorder(tmp_path / "Пользователь" / "python.cmd", exit_code=4)
+    (bundle / ".env").write_bytes(
+        b"\xef\xbb\xbf" + f"export PYTHON_EXE='{interpreter}'\r\n".encode("utf-8"))
+    task = tmp_path / "task.py"
+    assert _launch(bundle, "python", str(task), "--full") == 4
+    assert (interpreter.parent / "received.txt").read_text(encoding="ascii").strip() == \
+        f'"{task}" "--full"'

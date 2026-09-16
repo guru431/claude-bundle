@@ -18,6 +18,8 @@ test_guards.py.
 
 The Python and bash legs run in the fast suite. PowerShell and VBScript start an
 external host, so those legs are `integration` and skip where the host is absent.
+The VBScript leg runs the launcher's own parser block, lifted out between its
+marker comments — the launcher itself is exercised in tests/test_run_hidden.py.
 (This replaces test_guards.py::test_both_dotenv_parsers_read_the_same_fixture.)
 """
 from __future__ import annotations
@@ -143,7 +145,55 @@ def _powershell(tmp_path: Path, monkeypatch) -> dict:
     return json.loads(out.read_text(encoding="utf-8"))
 
 
-LEGS = {"python": _python, "bash": _bash, "powershell": _powershell}
+CSCRIPT = shutil.which("cscript") if os.name == "nt" else None
+
+# Appended to the parser block lifted out of the launcher. Each key and value is
+# written as UTF-16 code units in hex, so the file is plain ASCII whatever it
+# carries, and nothing in between can re-encode a character.
+_VBS_DUMP = """
+Function Units(s)
+    Dim n, out
+    out = ""
+    For n = 1 To Len(s)
+        out = out & Right("000" & Hex(AscW(Mid(s, n, 1)) And &HFFFF&), 4)
+    Next
+    Units = out
+End Function
+
+Dim parsed, name, fs, outFile
+Set parsed = ReadDotEnv(WScript.Arguments(0))
+Set fs = CreateObject("Scripting.FileSystemObject")
+Set outFile = fs.CreateTextFile(WScript.Arguments(1), True, False)
+For Each name In parsed.Keys
+    outFile.WriteLine Units(name) & " " & Units(parsed(name))
+Next
+outFile.Close
+"""
+
+
+def _vbscript(tmp_path: Path, monkeypatch) -> dict:
+    source = (ROOT / "home-claude" / "bin" / "_run-hidden.vbs").read_text(encoding="utf-8")
+    block = re.search(r"^' ---- \.env parser: begin.*?^' ---- \.env parser: end ----$",
+                      source, re.S | re.M)
+    assert block, "_run-hidden.vbs lost its marked `.env parser` block"
+    assert block.group(0).isascii(), \
+        "the launcher's parser block must stay ASCII: WSH reads a .vbs in the ANSI codepage"
+    harness = tmp_path / "harness.vbs"
+    harness.write_text("Option Explicit\n" + block.group(0) + "\n" + _VBS_DUMP,
+                       encoding="ascii", newline="\r\n")
+    out = tmp_path / "parsed.txt"
+    res = subprocess.run([CSCRIPT, "//nologo", str(harness), str(FIXTURE), str(out)],
+                         capture_output=True, text=True, errors="replace", timeout=60)
+    assert res.returncode == 0 and out.is_file(), f"VBScript leg failed:\n{res.stdout}{res.stderr}"
+
+    def text(units: str) -> str:
+        return bytes.fromhex(units).decode("utf-16-be")
+
+    return dict((text(k), text(v)) for k, _, v in
+                (line.partition(" ") for line in out.read_text(encoding="ascii").splitlines()))
+
+
+LEGS = {"python": _python, "bash": _bash, "powershell": _powershell, "vbscript": _vbscript}
 
 
 def _describe(key: str, want, got) -> str:
@@ -161,6 +211,9 @@ def _describe(key: str, want, got) -> str:
     pytest.param("powershell", marks=[
         pytest.mark.integration,
         pytest.mark.skipif(POWERSHELL is None, reason="no PowerShell host")]),
+    pytest.param("vbscript", marks=[
+        pytest.mark.integration,
+        pytest.mark.skipif(CSCRIPT is None, reason="no cscript (Windows Script Host)")]),
 ])
 def test_every_parser_reads_the_fixture_the_same_way(parser, tmp_path, monkeypatch):
     got = LEGS[parser](tmp_path, monkeypatch)

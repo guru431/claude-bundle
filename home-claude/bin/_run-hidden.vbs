@@ -76,35 +76,95 @@ If pythonIsDefault Then pythonExe = "python.exe"
 ' bundle .env, which lives one level up from this script (<bundle>\.env), so an
 ' interpreter override survives before-logon. Only overrides values that are
 ' still at their hardcoded defaults; ignores every other key.
-Dim fso, envPath, envFile, line, eqPos, envKey, envVal
+Dim fso, envPath, dotEnv
 On Error Resume Next
 Set fso = CreateObject("Scripting.FileSystemObject")
 envPath = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName)) & "\.env"
-If fso.FileExists(envPath) Then
-    Set envFile = fso.OpenTextFile(envPath, 1)
-    Do Until envFile.AtEndOfStream
-        line = Trim(envFile.ReadLine)
-        If line <> "" And Left(line, 1) <> "#" Then
-            eqPos = InStr(line, "=")
-            If eqPos > 0 Then
-                envKey = Trim(Left(line, eqPos - 1))
-                envVal = Trim(Mid(line, eqPos + 1))
-                If Left(envVal, 1) = """" And Right(envVal, 1) = """" Then
-                    envVal = Mid(envVal, 2, Len(envVal) - 2)
-                End If
-                If envKey = "BASH_EXE" And bashIsDefault And envVal <> "" Then
-                    bashExe = envVal
-                    bashIsDefault = False
-                ElseIf envKey = "PYTHON_EXE" And pythonIsDefault And envVal <> "" Then
-                    pythonExe = envVal
-                    pythonIsDefault = False
+On Error Goto 0
+Set dotEnv = ReadDotEnv(envPath)
+' Exists() before the lookup: reading a missing key ADDS it to a Dictionary.
+If bashIsDefault And dotEnv.Exists("BASH_EXE") Then
+    If dotEnv("BASH_EXE") <> "" Then
+        bashExe = dotEnv("BASH_EXE")
+        bashIsDefault = False
+    End If
+End If
+If pythonIsDefault And dotEnv.Exists("PYTHON_EXE") Then
+    If dotEnv("PYTHON_EXE") <> "" Then
+        pythonExe = dotEnv("PYTHON_EXE")
+        pythonIsDefault = False
+    End If
+End If
+
+' ---- .env parser: begin (tests/test_dotenv_parity.py runs this block) ----
+' The VBScript member of the bundle's four .env parsers. What every one of them
+' must read out of a file is pinned by tests/fixtures/dotenv-parity.env. Keep
+' the block self-contained and ASCII-only: the test lifts it into a harness.
+'
+' ADODB.Stream, not FileSystemObject.OpenTextFile. OpenTextFile reads in the
+' system ANSI codepage, so a UTF-8 BOM became part of the first key (and that
+' variable silently went missing), and a non-ASCII interpreter path arrived as
+' mojibake, failed FileExists below and ended every task with 9009. The utf-8
+' charset consumes the BOM itself. Now read as the other parsers read them:
+' `export KEY=`, one pair of single or double quotes, tabs, CRLF or LF.
+Function ReadDotEnv(path)
+    Dim result, stream, text, lines, n, line, eqPos, key, value, identifier
+    Set result = CreateObject("Scripting.Dictionary")
+    Set ReadDotEnv = result
+    On Error Resume Next
+    Set stream = CreateObject("ADODB.Stream")
+    stream.Type = 2                    ' adTypeText
+    stream.Charset = "utf-8"
+    stream.Open
+    stream.LoadFromFile path
+    text = stream.ReadText(-1)         ' adReadAll
+    stream.Close
+    If Err.Number <> 0 Then            ' no .env, or unreadable: nothing to add
+        Err.Clear
+        Exit Function
+    End If
+    On Error Goto 0
+    Set identifier = New RegExp
+    identifier.Pattern = "^[A-Za-z_][A-Za-z0-9_]*$"
+    lines = Split(Replace(Replace(text, vbCrLf, vbLf), vbCr, vbLf), vbLf)
+    For n = 0 To UBound(lines)
+        line = TrimBlank(lines(n))
+        If Left(line, 7) = "export " Then line = TrimBlank(Mid(line, 8))
+        eqPos = InStr(line, "=")
+        If Left(line, 1) <> "#" And eqPos > 1 Then
+            key = TrimBlank(Left(line, eqPos - 1))
+            value = TrimBlank(Mid(line, eqPos + 1))
+            If Len(value) >= 2 Then
+                If (Left(value, 1) = """" And Right(value, 1) = """") Or _
+                   (Left(value, 1) = "'" And Right(value, 1) = "'") Then
+                    value = Mid(value, 2, Len(value) - 2)
                 End If
             End If
+            ' The first occurrence wins, as it does in the Python and bash parsers.
+            If identifier.Test(key) Then
+                If Not result.Exists(key) Then result.Add key, value
+            End If
         End If
+    Next
+End Function
+
+' Trim() removes spaces only; every other parser trims tabs as well.
+Function TrimBlank(s)
+    Dim blank, first, last
+    blank = " " & vbTab & vbCr & vbLf & Chr(11) & Chr(12)
+    first = 1
+    last = Len(s)
+    Do While first <= last
+        If InStr(blank, Mid(s, first, 1)) = 0 Then Exit Do
+        first = first + 1
     Loop
-    envFile.Close
-End If
-On Error Goto 0
+    Do While last >= first
+        If InStr(blank, Mid(s, last, 1)) = 0 Then Exit Do
+        last = last - 1
+    Loop
+    TrimBlank = Mid(s, first, last - first + 1)
+End Function
+' ---- .env parser: end ----
 
 ' Still on the hardcoded default: probe BOTH bash.exe locations a
 ' Git-for-Windows install can have. Git\bin\bash.exe is the usual one, but the
@@ -129,7 +189,12 @@ Select Case kind
     Case "python"
         cmd = """" & pythonExe & """ """ & script & """" & extra
     Case "cmd"
-        cmd = "cmd /c """ & script & """" & extra
+        ' /s plus ONE more pair of quotes around the whole command. Without /s,
+        ' cmd.exe keeps the quotes only when the line holds exactly two of them;
+        ' with a quoted argument as well it strips the first and the last quote
+        ' of the line, so `cmd /c "C:\p q\x.cmd" "arg"` ran `C:\p` - exit 1,
+        ' nothing executed (reproduced with cscript).
+        cmd = "cmd /s /c """"" & script & """" & extra & """"
     Case Else
         WScript.Quit 3
 End Select

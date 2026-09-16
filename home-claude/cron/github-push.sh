@@ -146,12 +146,19 @@ rm -f "$pat"
 #    etc.) where a line-by-line secret scan over tens of thousands of lines is
 #    unreliable. One extended-regex path per line; blank lines and '#' comments
 #    are ignored. Opt-in: no .github-push-deny file → this check does not run.
+#    The same two ways a hand-written denylist went silently OFF are closed here
+#    as for .sanitize-patterns: a CRLF line never matched anything, and a line
+#    grep cannot compile (exit 2) read as "no match".
 deny="$REPO/.github-push-deny"
 if [ -f "$deny" ] && [ -n "$added" ]; then
   while IFS= read -r glob || [ -n "$glob" ]; do
+    glob=${glob%$'\r'}
     case "$glob" in ''|\#*) continue ;; esac
-    bad=$(printf '%s\n' "$added" | grep -E "$glob" || true)
-    if [ -n "$bad" ]; then
+    deny_rc=0
+    bad=$(printf '%s\n' "$added" | grep -aE -e "$glob") || deny_rc=$?
+    if [ "$deny_rc" -gt 1 ]; then
+      echo "BLOCKED: .github-push-deny line grep cannot compile: '$glob'"; fail=1
+    elif [ -n "$bad" ]; then
       echo "BLOCKED: path from .github-push-deny ('$glob') in the publication:"; printf '%s\n' "$bad" | sed 's/^/  /'; fail=1
     fi
   done < "$deny"

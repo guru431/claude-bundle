@@ -92,8 +92,9 @@ def test_prose_that_merely_spells_key_is_left_alone(text: str):
 
 
 @pytest.mark.parametrize("path,sensitive", [
-    # Guarded only by pre-commit's private additions until they joined the one
-    # table — so the push guard and the nightly sweep published them.
+    # Guarded only by private additions in pre-commit (and, for the bare
+    # `.sanitize-patterns`, github-push.sh) until they joined the one table — so
+    # the push guard and the nightly sweep published them.
     (".sanitize-patterns", True),
     ("sub/.sanitize-patterns.md", True),
     ("ops/vault.env", True),

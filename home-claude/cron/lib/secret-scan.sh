@@ -210,7 +210,7 @@ secret_scan_denylist() {
     # Four copies of this loader lived in the three hooks and github-push.sh, each
     # ending in `|| true`, and every consumer then ran `grep -f` — whose exit
     # status 2, "cannot compile this pattern", reads exactly like 1, "no match".
-    # One typo such as `192.168.1.(42` in a file people write by hand switched the
+    # One typo — an unclosed `(` in a file people write by hand — switched the
     # denylist OFF in every gate at once, and every gate reported success.
     : > "$2" || return 2
     [ -e "$1" ] || return 0

@@ -68,8 +68,8 @@ class Repo:
         self.path = path
         self.env = env
 
-    def git(self, *args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run([GIT, *args], cwd=self.path, env=self.env, input=stdin,
+    def git(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([GIT, *args], cwd=self.path, env=self.env,
                               capture_output=True, timeout=300)
 
     def write(self, rel: str, data: str | bytes) -> None:
@@ -88,8 +88,8 @@ class Repo:
         cp = self.commit(message, verify=False)
         assert cp.returncode == 0, _out(cp)
 
-    def head(self, ref: str = "HEAD") -> str:
-        return self.git("rev-parse", ref).stdout.decode().strip()
+    def head(self) -> str:
+        return self.git("rev-parse", "HEAD").stdout.decode().strip()
 
     def remote_head(self, branch: str = "main") -> str:
         out = self.git("ls-remote", "origin", f"refs/heads/{branch}").stdout.decode()
@@ -171,7 +171,7 @@ def test_pre_commit_reads_a_utf16_file_in_a_non_ascii_directory(guarded: Repo):
 def test_pre_commit_refuses_to_run_with_an_invalid_denylist(guarded: Repo):
     """`grep -f` exits 2 on a pattern it cannot compile, which `|| true` read as
     "no match": one typo switched the whole personal denylist off."""
-    guarded.write(".sanitize-patterns", f"{HOST}\n192\\.168\\.1\\.(42\n")
+    guarded.write(".sanitize-patterns", f"{HOST}\nbuild-box-(7\n")
     guarded.write("docs/note.md", f"deploy to {HOST}\n")
     cp = guarded.commit("note")
     assert cp.returncode != 0, f"committed with a broken denylist:\n{_out(cp)}"
@@ -261,7 +261,7 @@ def test_pre_push_scans_a_binary_blob(guarded: Repo):
 def test_pre_push_refuses_to_run_with_an_invalid_denylist(guarded: Repo):
     guarded.write("docs/note.md", f"deploy to {HOST}\n")
     guarded.plant()
-    guarded.write(".sanitize-patterns", f"{HOST}\n192\\.168\\.1\\.(42\n")
+    guarded.write(".sanitize-patterns", f"{HOST}\nbuild-box-(7\n")
     cp = guarded.git("push", "origin", "main")
     assert cp.returncode != 0, f"pushed with a broken denylist:\n{_out(cp)}"
     assert "sanitize-patterns" in _out(cp)
@@ -449,11 +449,24 @@ def test_github_push_blocks_dotenv_in_a_non_ascii_directory(published: Repo):
 
 @integration
 def test_github_push_refuses_an_invalid_denylist(published: Repo):
-    published.write(".sanitize-patterns", f"{HOST}\n192\\.168\\.1\\.(42\n")
+    published.write(".sanitize-patterns", f"{HOST}\nbuild-box-(7\n")
     published.write("docs/deploy.md", f"ssh {HOST}\n")
     published.plant()
     cp = _check_only(published)
     assert cp.returncode != 0, f"published with a broken denylist:\n{_out(cp)}"
+
+
+@integration
+@pytest.mark.parametrize("deny", [b"^exports/\r\n", b"^exports/(\n"], ids=["crlf", "invalid"])
+def test_github_push_path_denylist_cannot_be_switched_off_by_accident(published: Repo,
+                                                                     deny: bytes):
+    """`.github-push-deny` is hand-written too: a CRLF line never matched, and a
+    line grep cannot compile read as "no match" — both published the path."""
+    published.write(".github-push-deny", deny)
+    published.write("exports/customers.csv", "id,name\n1,someone\n")
+    published.plant()
+    cp = _check_only(published)
+    assert cp.returncode != 0, f"a .github-push-deny path was published:\n{_out(cp)}"
 
 
 @integration
@@ -478,11 +491,11 @@ def _lib(tmp_path: Path, body: str, env: dict | None = None) -> subprocess.Compl
 
 
 def test_denylist_loader_refuses_a_pattern_grep_cannot_compile(tmp_path: Path):
-    (tmp_path / "sp").write_text(f"{HOST}\n192.168.1.(42\n", encoding="utf-8")
+    (tmp_path / "sp").write_text(f"{HOST}\nbuild-box-(7\n", encoding="utf-8")
     cp = _lib(tmp_path, 'secret_scan_denylist sp pat; echo "rc=$?"')
     out = _out(cp)
     assert "rc=2" in out, out
-    assert "192.168.1.(42" in out, "the message does not name the broken line"
+    assert "build-box-(7" in out, "the message does not name the broken line"
 
 
 @pytest.mark.parametrize("raw", [

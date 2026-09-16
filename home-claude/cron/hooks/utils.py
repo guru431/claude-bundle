@@ -1877,6 +1877,23 @@ def _provider_cfg(name: str) -> tuple[str, str, str]:
     return key, base.rstrip("/"), model
 
 
+def _missing_setting(name: str, model: str | None = None) -> str | None:
+    """The env var a registry provider still lacks before it can be called at
+    all — its key (unless optional), then its model — or None once it is set up.
+
+    One answer for two questions: _llm_openai_compat refuses such a provider
+    before any request, and the chain leaves it out of its verdict, since a
+    provider that never saw the prompt says nothing about it.
+    """
+    p = PROVIDERS[name]
+    key, _base, configured_model = _provider_cfg(name)
+    if not key and not p.get("key_optional"):
+        return p["key_env"][0]
+    if not (model or configured_model):
+        return p["model_env"]
+    return None
+
+
 # ── Which provider(s) a call goes to ─────────────────────────────────────────
 # `WIKI_LLM_PROVIDER` has THREE kinds of value:
 #
@@ -3695,25 +3712,34 @@ def _llm_call_unlocked(prompt: str, timeout: int = 600,
         return _llm_openai_compat(LLM_PROVIDER, prompt, timeout, model=model)
 
     previous: str | None = None
+    # The kinds of the providers that could have answered. One nobody set up —
+    # no key, no model — never saw the prompt, and its `config` used to outrank
+    # every other verdict: with an optional fallback left without a key (as
+    # DEEPINFRA_KEY is), every dead chain was a configuration problem, so a
+    # payload the primary rejected every night never reached WIKI_RETRY_LIMIT
+    # and an outage paged as CONFIGURATION. Only when NOTHING in the chain is set
+    # up is that the answer — hence the "config" for an empty list below.
     kinds: list[str] = []
     for provider in DEFAULT_CHAIN:
         if previous is not None:
             if not OFFBOX_FALLBACK:
                 print(f"  {PROVIDERS[previous]['label']} failed → returning None "
                       "(WIKI_OFFBOX_FALLBACK=0 forbids the off-box fallback)", file=sys.stderr)
-                return LLMResult(None, worst_kind(kinds), "fallback disabled")
+                return LLMResult(None, worst_kind(kinds) if kinds else "config",
+                                 "fallback disabled")
             print(f"  {PROVIDERS[previous]['label']} failed, falling back to "
                   f"{PROVIDERS[provider]['label']}", file=sys.stderr)
         res = _llm_openai_compat(provider, prompt, timeout, fallback_from=previous,
                                  model=model)
         if res.text is not None:
             return res
-        kinds.append(res.kind)
+        if not _missing_setting(provider, model):
+            kinds.append(res.kind)
         previous = provider
     print(f"  {PROVIDERS[previous]['label']} also failed → returning None "
           "(claude fallback disabled)", file=sys.stderr)
-    record_chain_dead(kinds)
-    return LLMResult(None, worst_kind(kinds), "whole chain failed")
+    record_chain_dead(kinds or ["config"])
+    return LLMResult(None, worst_kind(kinds) if kinds else "config", "whole chain failed")
 
 
 def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
@@ -3764,12 +3790,11 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
               f"LOCAL_LLM_ALLOWED_HOSTS to allow it on purpose.", file=sys.stderr)
         return LLMResult(None, "config", "local-only provider, non-local endpoint")
 
-    if not key and not cfg.get("key_optional"):
-        print(f"  {cfg['key_env'][0]} env var not set", file=sys.stderr)
-        return LLMResult(None, "config", f"{cfg['key_env'][0]} not set")
-    if not model:
-        print(f"  {cfg['model_env']} env var not set (no default for {label})", file=sys.stderr)
-        return LLMResult(None, "config", f"{cfg['model_env']} not set")
+    missing = _missing_setting(provider, model)
+    if missing:
+        hint = f" (no default for {label})" if missing == cfg["model_env"] else ""
+        print(f"  {missing} env var not set{hint}", file=sys.stderr)
+        return LLMResult(None, "config", f"{missing} not set")
 
     if _is_depleted(provider):
         return LLMResult(None, _DEPLETED_KIND.get(_DEPLETED_PROVIDERS[provider],

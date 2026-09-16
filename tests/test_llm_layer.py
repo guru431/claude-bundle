@@ -185,6 +185,39 @@ def test_a_403_for_an_override_model_neither_latches_nor_counts(cron_copy: Path,
     assert len(calls) == 4
 
 
+@pytest.mark.parametrize("status,kind", [(400, "deterministic"), (503, "transient")])
+def test_a_provider_nobody_set_up_does_not_decide_the_chains_verdict(cron_copy: Path,
+                                                                   monkeypatch,
+                                                                   status: int, kind: str):
+    """DEEPINFRA_KEY is optional, and a provider without a key never sees the
+    prompt — yet its `config` refusal outranked every other kind, so every dead
+    chain became a configuration problem. A payload the primary rejects every
+    night never reached WIKI_RETRY_LIMIT, and an outage paged as CONFIGURATION."""
+    monkeypatch.setenv("DEEPSEEK_KEY", "unit-test-placeholder")
+    u = _load_utils(cron_copy, f"utils_chain_verdict_{status}")
+    monkeypatch.setattr(u.time, "sleep", lambda _s: None)
+    calls = _stub_requests(monkeypatch, _Resp(status, text="nope"))
+
+    res = u._llm_call_unlocked("hi")
+
+    assert (res.text, res.kind) == (None, kind)
+    assert calls, "the one configured provider was never asked"
+
+
+def test_a_chain_with_nothing_set_up_is_still_a_configuration_problem(cron_copy: Path,
+                                                                     monkeypatch):
+    """Leaving unconfigured providers out must not leave NOTHING to judge by:
+    when no provider in the chain is set up, that is the configuration problem —
+    also when WIKI_OFFBOX_FALLBACK=0 stops the chain after its first member."""
+    u = _load_utils(cron_copy, "utils_chain_unset")
+    calls = _stub_requests(monkeypatch, _Resp(200))
+
+    assert u._llm_call_unlocked("hi").kind == "config"
+    monkeypatch.setattr(u, "OFFBOX_FALLBACK", False)
+    assert u._llm_call_unlocked("hi").kind == "config"
+    assert not calls, "a provider with no key was called"
+
+
 # ── How long the circuit breaker keeps a provider out ────────────────────────
 
 def test_each_latch_keeps_its_own_timestamp(cron_copy: Path, clock):

@@ -341,3 +341,11 @@ same answer for every request the setup sends — a 401 is the key, a 404 a typo
 in a model name or a base URL — so it is *configuration*, and it never
 quarantines a source: the source is not what is broken. 408, 429 and 5xx are
 *transient*.
+
+When the whole chain fails, the verdict comes from the providers that could
+have answered. One with no key or no model never saw the prompt, so it is left
+out: an optional fallback without a key (DeepInfra, typically) no longer turns
+every dead chain into a configuration problem — which kept a payload the
+primary rejects every night from ever reaching `WIKI_RETRY_LIMIT`, and paged an
+ordinary outage as CONFIGURATION. Only a chain with nothing set up at all is a
+configuration problem.

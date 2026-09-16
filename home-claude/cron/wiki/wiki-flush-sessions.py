@@ -1062,6 +1062,11 @@ def main():
                 f"{chars} chars (~{chars // 4} tokens)")
         log(f"  TOTAL: {grand_parts} LLM call(s), {grand_chars} chars "
             f"(~{grand_chars // 4} tokens)")
+        # The same numbers as one machine-readable line: wiki-pipeline.py sums
+        # the phases of a preview night into the notice it sends on the last one.
+        log("DRY-RUN-SUMMARY " + json.dumps({
+            "phase": "flush", "calls": grand_parts, "chars": grand_chars,
+            "projects": sorted({project for _day, project in buckets})}))
         log("DRY RUN — no daily log written, no state changes.")
         return
 

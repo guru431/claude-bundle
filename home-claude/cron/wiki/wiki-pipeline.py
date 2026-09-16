@@ -27,8 +27,9 @@ Usage:
 
 # Declared I/O for scripts/check-io-matrix.py, which fails when this line and
 # the table in docs/cron-architecture.md disagree. This is the UNION of the
-# phases it runs — it makes no call of its own.
-# bundle-io: offbox=session/daily-log text of allowed projects -> LLM provider (via the flush and compile phases) money=tokens writes=wiki/daily/, wiki/projects/, wiki/kb/ and the vault indexes
+# phases it runs — it makes no LLM call of its own, only the two Telegram lines.
+# bundle-io: offbox=session/daily-log text of allowed projects -> LLM provider (via the flush and compile phases); a failure alert, and on the last dry_run_until night a preview summary (project names, sizes, provider), -> Telegram money=tokens writes=wiki/daily/, wiki/projects/, wiki/kb/ and the vault indexes
+import json
 import os
 import subprocess
 import sys
@@ -47,7 +48,8 @@ LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 # is not on PATH. Absent on POSIX -> Telegram is skipped gracefully.
 TELEGRAM = BUNDLE_ROOT / "cron" / "telegram-send.sh"
 sys.path.insert(0, str(BUNDLE_ROOT / "cron" / "hooks"))
-from utils import find_bash  # noqa: E402
+import utils  # noqa: E402
+from utils import dry_run_last_night, find_bash, is_dry_run  # noqa: E402
 
 # BASH_EXE > PATH > the Git-for-Windows default. The hardcoded Windows path with
 # only an env-var escape hatch meant no alert ever went out on Linux/macOS.
@@ -85,10 +87,66 @@ def send_telegram(msg: str) -> None:
         log(f"telegram-send failed: {e}")
 
 
+# The line a phase logs, in preview, with what it WOULD have sent (JSON after it).
+SUMMARY_TAG = "DRY-RUN-SUMMARY "
+
+
+def read_summaries(start: int) -> list[dict]:
+    """The DRY-RUN-SUMMARY lines the phases wrote into LOG_FILE after byte `start`."""
+    try:
+        with open(LOG_FILE, "rb") as f:
+            f.seek(start)
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    found = []
+    for line in text.splitlines():
+        _, tag, payload = line.partition(SUMMARY_TAG)
+        if not tag:
+            continue
+        try:
+            summary = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(summary, dict):
+            found.append(summary)
+    return found
+
+
+def preview_notice(summaries: list[dict], last_night: bool) -> str:
+    """One line on what tonight's preview would have sent.
+
+    A dated dry_run_until window ends by itself, so the first night that really
+    ships transcripts to a provider was one nobody chose, and nothing said it
+    was coming. On the window's last night this line goes to Telegram.
+    """
+    def total(phase: str, field: str) -> int:
+        return sum(int(s.get(field) or 0) for s in summaries if s.get("phase") == phase)
+
+    projects = sorted({p for s in summaries for p in (s.get("projects") or [])
+                       if isinstance(p, str)})
+    shown = ", ".join(projects[:10]) + (f" (+{len(projects) - 10} more)"
+                                        if len(projects) > 10 else "")
+    chars = total("flush", "chars")
+    head = (f"wiki-pipeline: tonight was the LAST preview night (dry_run_until="
+            f"{utils.DRY_RUN_UNTIL}); from the next run the pipeline sends for real."
+            if last_night else "wiki-pipeline preview:")
+    tail = (" To keep previewing, move dry_run_until in bundle.local.yaml or set it "
+            "to `confirm`." if last_night else "")
+    return (f"{head} Tonight flush would have sent {chars} chars (~{chars // 4} "
+            f"tokens) in {total('flush', 'calls')} call(s)"
+            f"{' from ' + shown if shown else ''}, and compile "
+            f"{total('compile', 'chars')} chars of dailies already on disk plus what "
+            f"flush writes. Provider: {utils.LLM_PROVIDER}; WIKI_ALLOW_OFFBOX="
+            f"{'1' if utils.ALLOW_OFFBOX else '0'}.{tail}")
+
+
 def main() -> int:
     passthrough = [a for a in sys.argv[1:] if a in ("--dry-run", "--no-llm")]
+    preview = is_dry_run()
     log(f"=== Wiki Pipeline {DATE} (ordered flush -> compile -> index) ===")
     failed: list[str] = []
+    summaries: list[dict] = []
     for name, script in PHASES:
         if not script.is_file():
             log(f"[{name}] script missing: {script} — skipping")
@@ -98,12 +156,22 @@ def main() -> int:
         # Redirect the child's stdout/stderr into this pipeline log so the whole
         # ordered run is captured in one place (each phase also keeps its own
         # per-task log). LOG_DIR is created by the log() call above.
+        start = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             rc = subprocess.run([sys.executable, str(script), *passthrough],
                                 stdout=f, stderr=subprocess.STDOUT).returncode
         log(f"[{name}] done (rc={rc})")
+        if preview:
+            summaries.extend(read_summaries(start))
         if rc != 0:
             failed.append(name)
+
+    if preview:
+        last_night = dry_run_last_night()
+        notice = preview_notice(summaries, last_night)
+        log(notice)
+        if last_night:
+            send_telegram(notice)
 
     if failed:
         log(f"=== Wiki Pipeline: FAILED phase(s): {', '.join(failed)} ===")

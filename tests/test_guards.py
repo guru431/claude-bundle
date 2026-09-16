@@ -983,3 +983,33 @@ def test_a_journaled_compile_kb_failure_is_not_migrated_as_processed(bundle_tree
         encoding="utf-8")
     utils = _import_utils(monkeypatch, bundle_tree)
     assert utils._migrated_state_from_log()["compile_kb"]["processed"] == ["articles/ok.md"]
+
+
+# ── the end of the preview window: announced, or chosen ─────────────────────
+
+def test_dry_run_until_confirm_previews_until_a_date_is_written(bundle_tree: Path,
+                                                                 monkeypatch):
+    pytest.importorskip("yaml")
+    from datetime import date
+    (bundle_tree / "bundle.local.yaml").write_text("dry_run_until: confirm\n",
+                                                   encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.is_dry_run([]) is True
+    assert utils.dry_run_last_night(date(9999, 12, 30)) is False, \
+        "`confirm` has no last night — it ends when someone writes a date"
+    assert "dry_run_until     = confirm" in "\n".join(utils.config_report())
+    assert not utils.config_errors()
+
+
+@pytest.mark.parametrize("today,expected", [
+    ("2030-01-09", True), ("2030-01-08", False), ("2030-01-10", False), ("2030-01-11", False),
+])
+def test_the_last_night_of_a_dated_preview_window(bundle_tree: Path, monkeypatch,
+                                                  today: str, expected: bool):
+    """The night before the first real send — the one the pipeline announces."""
+    pytest.importorskip("yaml")
+    from datetime import date
+    (bundle_tree / "bundle.local.yaml").write_text("dry_run_until: 2030-01-10\n",
+                                                   encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.dry_run_last_night(date.fromisoformat(today)) is expected

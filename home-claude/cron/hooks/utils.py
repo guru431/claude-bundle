@@ -2656,16 +2656,37 @@ def config_errors() -> list[str]:
     return list(_CONFIG_ERRORS)
 
 
+class _UntilConfirmed(date):
+    """`dry_run_until: confirm` — a window that does not close by itself.
+
+    A date (the last one there is), so every `date.today() < DRY_RUN_UNTIL`
+    keeps working, that prints as what the user wrote.
+    """
+
+    def __str__(self) -> str:
+        return "confirm"
+
+
+DRY_RUN_CONFIRM = _UntilConfirmed(9999, 12, 31)
+
+
 def _dry_run_until() -> date | None:
     """`dry_run_until:` from bundle.local.yaml, or None.
 
     A bad value is a loud warning and None: unlike the privacy fields this one
     cannot leak anything by being ignored — it only fails to hold the pipeline
     back — so it must not deny every project the way a broken policy does.
+
+    `confirm` holds the pipeline in preview until the value is replaced with a
+    date. A self-expiring window has a cost the date form does not name: the
+    first real send happens on a night nobody chose. The pipeline announces that
+    night (see dry_run_last_night); `confirm` is for whoever wants to choose it.
     """
     raw = _MANIFEST.get("dry_run_until")
     if raw is None:
         return None
+    if isinstance(raw, str) and raw.strip().lower() == "confirm":
+        return DRY_RUN_CONFIRM
     try:
         # A value carrying a time arrives as EITHER type, depending on how the
         # user spelled it, and both used to be wrong:
@@ -2688,8 +2709,8 @@ def _dry_run_until() -> date | None:
         return date.fromisoformat(str(raw).strip().split()[0])
     except (TypeError, ValueError, IndexError):   # IndexError: an empty value
         print(f"ERROR: bundle.local.yaml 'dry_run_until' must be a YYYY-MM-DD "
-              f"date, got {raw!r} — ignored, the pipeline runs normally.",
-              file=sys.stderr)
+              f"date or `confirm`, got {raw!r} — ignored, the pipeline runs "
+              f"normally.", file=sys.stderr)
         return None
 
 
@@ -2724,11 +2745,28 @@ def is_dry_run(argv: list[str] | None = None) -> bool:
         global _dry_run_banner_shown
         if not _dry_run_banner_shown:
             _dry_run_banner_shown = True
+            if DRY_RUN_UNTIL is DRY_RUN_CONFIRM:
+                ends = "Replace it with a date to start; it does not expire."
+            else:
+                ends = "Delete the key to start early; it expires on its own."
             print(f"  [dry-run] bundle.local.yaml says dry_run_until={DRY_RUN_UNTIL} "
-                  f"— previewing only, nothing is sent or written. Delete the key "
-                  f"to start early; it expires on its own.", file=sys.stderr)
+                  f"— previewing only, nothing is sent or written. {ends}",
+                  file=sys.stderr)
         return True
     return False
+
+
+def dry_run_last_night(today: date | None = None) -> bool:
+    """True on the last night of a DATED dry_run_until window.
+
+    The next run is the first that really sends, and nobody picked that night —
+    the window just ran out. wiki-pipeline.py uses this to announce it, with a
+    summary of what the preview would have sent. Never True for `confirm`, which
+    only ends when someone writes a date.
+    """
+    if DRY_RUN_UNTIL is None or DRY_RUN_UNTIL is DRY_RUN_CONFIRM:
+        return False
+    return (DRY_RUN_UNTIL - (today or date.today())).days == 1
 
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)

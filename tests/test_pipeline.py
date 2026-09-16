@@ -626,6 +626,50 @@ def test_wiki_pipeline_runs_phases_in_order(bundle: Path, tmp_path: Path):
     assert "all phases OK" in r.stdout
 
 
+def test_the_last_preview_night_announces_what_the_first_real_one_sends(bundle: Path,
+                                                                       monkeypatch):
+    """A dated dry_run_until window ends by itself, so the first night that ships
+    transcripts off-box was one nobody chose and nothing announced. On the last
+    preview night the pipeline now sends one line: projects, size, provider."""
+    home = Path(os.environ["HOME"])
+    proj_dir = home / ".claude" / "projects" / "C--Users-test-projects-dated"
+    proj_dir.mkdir(parents=True)
+    _seed_session_jsonl(proj_dir / "s.jsonl", 12, SESSION_DAY)
+    monkeypatch.setenv("WIKI_LLM_PROVIDER", "mock")
+    monkeypatch.setattr(sys, "argv", ["wiki-pipeline.py", "--dry-run"])
+    pipe = _load_wiki_script(bundle, monkeypatch, "pipeline_notice", "wiki-pipeline.py")
+    sent: list[str] = []
+    monkeypatch.setattr(pipe, "send_telegram", sent.append)
+    monkeypatch.setattr(pipe, "dry_run_last_night", lambda: True)
+
+    assert pipe.main() == 0
+    assert len(sent) == 1, f"expected one notice, got {sent}"
+    notice = sent[0]
+    assert "LAST preview night" in notice and "dated" in notice, notice
+    assert "Provider: mock" in notice and "WIKI_ALLOW_OFFBOX=1" in notice, notice
+    chars = int(re.search(r"flush would have sent (\d+) chars", notice).group(1))
+    assert chars > 5000, f"the notice did not carry the preview's size: {notice}"
+
+
+def test_the_preview_notice_reads_each_phase_once(bundle: Path, monkeypatch):
+    """Every preview night logs the line; only the last one says LAST."""
+    pipe = _load_wiki_script(bundle, monkeypatch, "pipeline_summary", "wiki-pipeline.py")
+    pipe.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    pipe.LOG_FILE.write_text(
+        "noise\n[02:30:00] DRY-RUN-SUMMARY {\"phase\": \"flush\", \"calls\": 2, "
+        "\"chars\": 4000, \"projects\": [\"alpha\"]}\n", encoding="utf-8")
+    start = pipe.LOG_FILE.stat().st_size
+    with open(pipe.LOG_FILE, "a", encoding="utf-8") as f:
+        f.write("[02:31:00] DRY-RUN-SUMMARY {\"phase\": \"compile\", \"chars\": 800, "
+                "\"projects\": [\"beta\"]}\nDRY-RUN-SUMMARY not json\n")
+    assert [s["phase"] for s in pipe.read_summaries(0)] == ["flush", "compile"]
+    assert [s["phase"] for s in pipe.read_summaries(start)] == ["compile"]
+    notice = pipe.preview_notice(pipe.read_summaries(0), last_night=False)
+    assert "LAST" not in notice
+    assert "4000 chars" in notice and "2 call(s)" in notice and "800 chars" in notice
+    assert "alpha, beta" in notice
+
+
 def test_gen_scheduler_skips_windows_only_task(tmp_path: Path):
     """gen-scheduler must not emit a POSIX unit for a `platform: windows` task
     (ClaudeTaskMonitor) — guards against a Windows-only task leaking into

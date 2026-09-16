@@ -88,8 +88,17 @@ skip_jsonl_projects: []
 # This is that missing brake. The installer sets it to a week out; the window
 # expires by itself, which is the point — a flag you must remember to remove is
 # a flag that stays on for a year. Delete the key to start immediately.
+#
+# The other side of a window that ends by itself: the first night that really
+# sends is one nobody chose. So on the window's LAST night the pipeline sends one
+# Telegram line (when Telegram is configured) summarising what the preview would
+# have sent — projects, size, provider — and every preview night writes the same
+# line to cron/logs/wiki-pipeline_<date>.log. Write `confirm` instead of a date
+# and the window never ends on its own: the pipeline previews until you replace
+# it with a date.
 dry_run_until:
 #   dry_run_until: 2026-09-05
+#   dry_run_until: confirm
 
 # ── Unattributed sources ─────────────────────────────────────────────────────
 

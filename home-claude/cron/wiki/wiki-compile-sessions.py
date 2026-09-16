@@ -905,16 +905,21 @@ def main():
         # them overstated the bill and named projects that never leave the box.
         log("DRY RUN — dailies that WOULD be compiled (no LLM, no writes):")
         grand = 0
+        sending: set[str] = set()
         for daily_path, _fp, daily_text in dailies:
             units = {p: u for p, u in daily_units(daily_path.stem, daily_text,
                                                   compiled_pairs).items()
                      if u.markers and project_allowed(p)}
             chars = sum(len(u.data) for u in units.values())
             grand += chars
+            sending.update(units)
             log(f"  {daily_path.name}: {sum(len(u.markers) for u in units.values())} "
                 f"section(s) → projects {sorted(units)}, "
                 f"{chars} chars (~{chars // 4} tokens)")
         log(f"  TOTAL ~{grand // 4} tokens of daily text would reach the provider")
+        # For wiki-pipeline.py's preview notice (see the flush's line).
+        log("DRY-RUN-SUMMARY " + json.dumps({"phase": "compile", "chars": grand,
+                                             "projects": sorted(sending)}))
         log("DRY RUN — no pages written, no state changes.")
         return
 

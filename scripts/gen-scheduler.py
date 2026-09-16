@@ -18,21 +18,34 @@ Usage:
   scripts/gen-scheduler.py --target systemd --install-path ~/.claude --out-dir ./units
   scripts/gen-scheduler.py --target launchd --install-path ~/.claude
   scripts/gen-scheduler.py --target both --all      # include disabled tasks too
+  scripts/gen-scheduler.py --check --install-path ~/.claude \\
+      --registry ~/.claude/cron/registry.yaml       # installed units vs the registry
 
 Then follow the printed enable instructions (systemctl --user enable --now, or
 launchctl load).
+
+--check writes nothing. It generates into a temporary directory and compares
+that with the units the init system actually loads (systemd:
+$XDG_CONFIG_HOME/systemd/user, else ~/.config/systemd/user; launchd:
+~/Library/LaunchAgents — or --units-dir): `new` (not installed), `changed`
+(installed, different), `stale` (installed, no longer generated — a removed or
+disabled task whose timer still fires) and `unchanged`. Exit 3 on any drift.
+Pass the same --install-path / --registry / --all you installed with.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import plistlib
 import re
 import shlex
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY = ROOT / "home-claude" / "cron" / "registry.yaml"
+LAUNCHD_PREFIX = "com.claude-bundle."
 
 # registry weekday -> (systemd 3-letter, launchd 0=Sun..6=Sat)
 DOW = {
@@ -209,7 +222,7 @@ def emit_launchd(task: dict, install_path: str, out: Path) -> str | None:
     argv = exec_argv(task, install_path)
     if argv is None:
         return f"skip {name}: kind={task.get('kind')} has no POSIX equivalent"
-    label = f"com.claude-bundle.{name}"
+    label = f"{LAUNCHD_PREFIX}{name}"
     rep_raw = str(task.get("repeat_every", "") or "")
     rep = iso_seconds(rep_raw)
     trig = str(task.get("trigger", ""))
@@ -280,10 +293,77 @@ def emit_launchd(task: dict, install_path: str, out: Path) -> str | None:
     return None
 
 
-def main() -> int:
+def generate(tasks: list[dict], targets: list[str], install_path: str, out: Path,
+             include_disabled: bool, verbose: bool = True) -> int:
+    """Emit the units of every task that applies; return how many were written."""
+    written = 0
+    for task in tasks:
+        if task.get("enabled") is False and not include_disabled:
+            if verbose:
+                print(f"  - {task['name']}: disabled in registry (use --all to include)")
+            continue
+        plat = str(task.get('platform', 'all')).lower()
+        if plat not in ('all', 'posix'):
+            if verbose:
+                print(f"  - {task['name']}: platform={plat}, skipped (not POSIX)")
+            continue
+        for tgt in targets:
+            note = (emit_systemd if tgt == "systemd" else emit_launchd)(task, install_path, out)
+            if note:
+                print(f"  ! {note}")
+            else:
+                written += 1
+                if verbose:
+                    print(f"  + {tgt}: {task['name']}")
+    return written
+
+
+def installed_units_dir(target: str) -> Path:
+    """Where a per-user unit has to be for the init system to load it at all."""
+    if target == "launchd":
+        return Path.home() / "Library" / "LaunchAgents"
+    # systemd --user reads $XDG_CONFIG_HOME/systemd/user, which falls back to
+    # ~/.config when the variable is unset.
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd" / "user"
+
+
+def is_bundle_unit(target: str, filename: str, task_names: set[str]) -> bool:
+    """Whether an installed file belongs to the bundle — the naming convention
+    this generator emits, so somebody else's units are never called stale."""
+    if target == "launchd":
+        return filename.startswith(LAUNCHD_PREFIX) and filename.endswith(".plist")
+    stem, _, suffix = filename.rpartition(".")
+    # `Claude*` is the prefix every shipped task carries, and the one the enable
+    # loop in INSTALL.md already treats as the bundle's; a registry name covers
+    # a task of yours that does not follow it.
+    return suffix in ("service", "timer") and (stem.startswith("Claude") or stem in task_names)
+
+
+def check_units(generated: Path, installed: Path, target: str,
+                task_names: set[str]) -> dict[str, list[str]]:
+    """Compare freshly generated unit files with the installed ones, by content."""
+    status: dict[str, list[str]] = {"new": [], "changed": [], "stale": [], "unchanged": []}
+    fresh = {p.name: p for p in generated.iterdir() if p.is_file()} if generated.is_dir() else {}
+    for name in sorted(fresh):
+        have = installed / name
+        if not have.is_file():
+            status["new"].append(name)
+        elif have.read_bytes() != fresh[name].read_bytes():
+            status["changed"].append(name)
+        else:
+            status["unchanged"].append(name)
+    if installed.is_dir():
+        for p in sorted(installed.iterdir()):
+            if p.is_file() and p.name not in fresh and is_bundle_unit(target, p.name, task_names):
+                status["stale"].append(p.name)
+    return status
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--target", choices=["systemd", "launchd", "both"], default="both")
+    ap.add_argument("--target", choices=["systemd", "launchd", "both"], default=None,
+                    help="default: both; with --check, the init system of this OS")
     ap.add_argument("--install-path", default="~/.claude",
                     help="POSIX path the bundle is deployed to (replaces "
                          "<bundle-install-path> in registry script paths)")
@@ -296,7 +376,20 @@ def main() -> int:
                          "to regenerate units after editing your own schedule — "
                          "otherwise changing a trigger on POSIX meant editing the "
                          "repository, and the next `git pull` reverted it")
-    args = ap.parse_args()
+    ap.add_argument("--check", action="store_true",
+                    help="write nothing; compare the units this registry generates "
+                         "with the installed ones and exit 3 on any drift")
+    ap.add_argument("--units-dir", default=None,
+                    help="with --check: where the installed units are (default: "
+                         "the per-user directory of the target)")
+    args = ap.parse_args(argv)
+    if args.target is None:
+        # A Linux box has no LaunchAgents: checking both there would report every
+        # plist as missing, which is noise, not drift.
+        native = "launchd" if sys.platform == "darwin" else "systemd"
+        args.target = native if args.check else "both"
+    if args.units_dir and args.target == "both":
+        ap.error("--units-dir names ONE directory — pass --target systemd or launchd")
 
     install_path = str(Path(args.install_path).expanduser()) \
         if args.install_path.startswith("~") else args.install_path
@@ -309,23 +402,35 @@ def main() -> int:
     print(f"registry: {registry}")
     tasks = load_tasks(registry)
     targets = ["systemd", "launchd"] if args.target == "both" else [args.target]
-    written = 0
-    for task in tasks:
-        if task.get("enabled") is False and not args.all:
-            print(f"  - {task['name']}: disabled in registry (use --all to include)")
-            continue
-        plat = str(task.get('platform', 'all')).lower()
-        if plat not in ('all', 'posix'):
-            print(f"  - {task['name']}: platform={plat}, skipped (not POSIX)")
-            continue
-        for tgt in targets:
-            note = (emit_systemd if tgt == "systemd" else emit_launchd)(task, install_path, out)
-            if note:
-                print(f"  ! {note}")
-            else:
-                written += 1
-                print(f"  + {tgt}: {task['name']}")
 
+    if args.check:
+        # "cp and hope" was the whole POSIX install: nothing compared what the
+        # init system loads with what the registry now says, so an edited trigger
+        # kept its old schedule and the timer of a removed task fired forever.
+        names = {str(t.get("name")) for t in tasks if isinstance(t, dict)}
+        drift = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            generate(tasks, targets, install_path, Path(tmp), args.all, verbose=False)
+            for tgt in targets:
+                units = Path(args.units_dir).expanduser() if args.units_dir \
+                    else installed_units_dir(tgt)
+                status = check_units(Path(tmp) / tgt, units, tgt, names)
+                print(f"\n{tgt} units in {units}:")
+                for kind in ("new", "changed", "stale"):
+                    for name in status[kind]:
+                        hint = ("  (no longer generated: disable it, then delete it)"
+                                if kind == "stale" else "")
+                        print(f"  {kind:<10} {name}{hint}")
+                print(f"  {'unchanged':<10} {len(status['unchanged'])} file(s)")
+                drift += len(status["new"]) + len(status["changed"]) + len(status["stale"])
+        if drift:
+            print(f"\nDRIFT: {drift} unit file(s) differ from the registry - "
+                  f"reinstall the units (INSTALL.md, Linux / macOS notes)")
+            return 3
+        print("\nin sync: the installed units are exactly what the registry generates")
+        return 0
+
+    written = generate(tasks, targets, install_path, out, args.all)
     print(f"\nWrote {written} unit file(s) under {out}/")
     print("Enable them:")
     if "systemd" in targets:

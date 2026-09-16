@@ -735,6 +735,12 @@ for t in ~/.config/systemd/user/Claude*.timer; do systemctl --user enable --now 
 # run while you are logged in, so nightly jobs silently never happen:
 loginctl enable-linger "$USER"           # check: loginctl show-user "$USER" -p Linger
 
+# 4c. After editing the registry or upgrading the bundle: what is installed vs what
+# the registry now generates. Writes nothing; exit 3 on drift — `new`/`changed`
+# units to copy in, `stale` ones (a removed or disabled task) to disable and delete.
+# Pass the same --install-path / --registry / --all you generated with.
+python scripts/gen-scheduler.py --check --install-path ~/.claude
+
 # 5. Inspect a run:
 journalctl --user -u ClaudeWikiFlush.service --no-pager | tail -n 40
 tail -n 40 ~/.claude/cron/logs/*.log     # the scripts' own per-task logs

@@ -429,8 +429,13 @@ fi
 # ledger verdict just sits there reading `green` for months. `runs.py stale`
 # compares each task's newest record against a window derived from its own
 # registry trigger and exits 1 when something has gone quiet.
+#
+# `--seen`: each silence is sent once and repeated only in the Monday digest,
+# like the failures above — the plain form put the same list (six "never
+# recorded" lines on a fresh install) into every morning's alert. The full list
+# still lands in this log, on stderr.
 echo "TRACE: stage=stale $(date '+%H:%M:%S')" >> "$LOG_FILE"
-STALE_OUT=$("$PYTHON" "$CRON_DIR/runs.py" stale 2>>"$LOG_FILE")
+STALE_OUT=$("$PYTHON" "$CRON_DIR/runs.py" stale --seen "$CRON_DIR/state/task-monitor-seen.json" 2>>"$LOG_FILE")
 STALE_RC=$?
 # rc 0 = nothing stale, 1 = something is stale, anything else = the CHECK broke.
 # Branching on "is the output empty" made a traceback in the log indistinguishable

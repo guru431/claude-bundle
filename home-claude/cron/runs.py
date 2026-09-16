@@ -367,7 +367,8 @@ def age_days(ts: str, now: datetime | None = None) -> float | None:
 
 
 def stale_tasks(log_path: Path | None = None,
-                registry: Path | None = None) -> list[tuple[str, float, float]]:
+                registry: Path | None = None,
+                now: datetime | None = None) -> list[tuple[str, float, float]]:
     """[(task, age_days, window_days)] for verdicts that are too old to trust."""
     windows = freshness_windows(registry)
     if not windows:
@@ -378,7 +379,7 @@ def stale_tasks(log_path: Path | None = None,
         rec = latest.get(task)
         if rec is None:
             continue  # never instrumented — reported by never_recorded() instead
-        age = age_days(rec.get("ts", ""))
+        age = age_days(rec.get("ts", ""), now)
         if age is not None and age > window:
             out.append((task, age, window))
     return out
@@ -400,6 +401,45 @@ def never_recorded(log_path: Path | None = None,
     return sorted(set(windows) - seen)
 
 
+# Where the task monitor's seen-state (cron/state/task-monitor-seen.json) keeps
+# the stale verdicts already alerted about. `<` cannot occur in a Task Scheduler
+# task name, so the key cannot collide with the per-task keys that file holds.
+STALE_SEEN_KEY = "<stale>"
+
+
+def stale_report(seen: dict, now: datetime | None = None,
+                 log_path: Path | None = None,
+                 registry: Path | None = None) -> tuple[list[str], list[str]]:
+    """(lines never alerted about, tasks alerted about before); updates `seen`.
+
+    `runs.py stale` printed the whole list every morning: on a fresh install six
+    "never recorded a run" lines a day, for a weekly task gone quiet a week of
+    them, for a task enabled in the registry but never registered, forever. A
+    report that repeats itself daily stops being read — the reason the task
+    monitor keys its own alerts on (task, LastRun).
+
+    Here the key is (task, bucket), the bucket being the ledger record a task
+    went stale ON (its `ts`), or "never". A task that reports again and later
+    goes quiet again stands on a different record, so it is news again; one no
+    longer stale is dropped.
+    """
+    now = now or datetime.now()
+    latest = latest_by_task(read_latest_runs(log_path))
+    current: dict[str, str] = {}
+    lines: dict[str, str] = {}
+    for task, age, window in stale_tasks(log_path, registry, now):
+        current[task] = str(latest[task].get("ts", ""))
+        lines[task] = f"{task}: last verdict {age:.0f}d old (expected within {window:.0f}d)"
+    for task in never_recorded(log_path, registry):
+        current[task] = "never"
+        lines[task] = f"{task}: enabled, but never recorded a run"
+    before = seen.get(STALE_SEEN_KEY)
+    before = before if isinstance(before, dict) else {}
+    seen[STALE_SEEN_KEY] = current
+    return ([lines[t] for t in current if before.get(t) != current[t]],
+            sorted(t for t in current if before.get(t) == current[t]))
+
+
 # ---------- CLI (for shell tasks and the self-test) ----------
 
 def _cli_record(args) -> None:
@@ -410,6 +450,37 @@ def _cli_record(args) -> None:
         delivery=args.delivery, message_id=args.message_id, note=args.note or "",
     )
     print(f"{rec['task']}: verdict={rec['verdict']} artifact_bytes={rec['artifact_bytes']}")
+
+
+def _cli_stale_seen(state: Path, now: datetime | None = None,
+                    log_path: Path | None = None, registry: Path | None = None) -> int:
+    """`stale --seen <file>`: the alert-once form the task monitor runs each morning.
+
+    Prints only what was never alerted about, plus — on Mondays — one digest line
+    for the silences still standing; the log (stderr) gets the whole picture
+    every day. The exit code keeps its meaning: 1 while anything is stale.
+    """
+    now = now or datetime.now()
+    try:
+        seen = json.loads(state.read_text(encoding="utf-8"))
+        seen = seen if isinstance(seen, dict) else {}
+    except (OSError, ValueError):
+        seen = {}
+    new, standing = stale_report(seen, now, log_path, registry)
+    for line in new:
+        print(line)
+    if standing:
+        print(f"already reported, still stale: {', '.join(standing)}", file=sys.stderr)
+        if now.weekday() == 0:
+            print(f"{len(standing)} task(s) still silent since an earlier alert: "
+                  + ", ".join(standing)[:400])
+    try:
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps(seen, indent=1), encoding="utf-8")
+    except OSError as exc:
+        print(f"seen-state not written ({exc}) — the next run may repeat this",
+              file=sys.stderr)
+    return 1 if new or standing else 0
 
 
 def _selftest() -> int:
@@ -472,12 +543,18 @@ def main() -> None:
     st = sub.add_parser("stale", help="list tasks whose last verdict is too old")
     st.add_argument("--json", action="store_true",
                     help="machine-readable output (bundle-status reads this)")
+    st.add_argument("--seen", metavar="STATE_JSON", type=Path, default=None,
+                    help="alert once (the task monitor): print only verdicts not "
+                         "reported before, plus a Monday digest of the rest, and "
+                         "remember them in this JSON file")
 
     args = ap.parse_args()
     if args.cmd == "record":
         _cli_record(args)
     elif args.cmd == "selftest":
         sys.exit(_selftest())
+    elif args.cmd == "stale" and args.seen and not args.json:
+        sys.exit(_cli_stale_seen(args.seen))
     elif args.cmd == "stale":
         # Exit 1 when anything is stale, so a shell monitor can branch on the
         # code instead of parsing the text. The monitor also has to be able to

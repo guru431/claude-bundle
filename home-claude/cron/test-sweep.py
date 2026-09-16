@@ -72,6 +72,9 @@ from utils import (PROJECTS_ROOT, append_finding as file_finding,  # noqa: E402
 sys.path.insert(0, str(CRON_DIR))
 from runs import terminal_record  # noqa: E402
 
+sys.path.insert(0, str(CRON_DIR / "lib"))
+from env_names import TEMPLATE_NAMES  # noqa: E402
+
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
@@ -466,22 +469,21 @@ def child_env() -> dict:
     printed the bundle's credentials, and `mask_secrets` only ever saw the tail
     of the output.
 
-    Stripped: every name the bundle's own env template declares, plus anything
-    that merely LOOKS like a credential.
+    Stripped: every name the bundle's own env template carries — set, or offered
+    as a commented-out override, because an override somebody uncommented in
+    `.env` is loaded just the same — plus anything that merely LOOKS like a
+    credential.
+
+    The names come from cron/lib/env_names.py, generated from the template. The
+    template itself lives in config/, which the installer does not deploy: read
+    from `BUNDLE_ROOT.parent`, it was found only in a source checkout, so a real
+    install stripped nothing but the credential-shaped names and handed
+    TELEGRAM_CHAT_ID, REMOTE_SSH_HOST and PROJECTS_ROOT to every foreign suite.
     """
     env = dict(os.environ)
-    template = BUNDLE_ROOT.parent / "config" / "llm-providers.example.env"
-    declared: set[str] = set()
-    try:
-        for line in template.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                declared.add(line.split("=", 1)[0].strip())
-    except OSError:
-        pass
     secretish = re.compile(r"(?i)(key|token|secret|password|passwd|credential)")
     for name in list(env):
-        if name in declared or secretish.search(name):
+        if name in TEMPLATE_NAMES or secretish.search(name):
             env.pop(name, None)
     return env
 

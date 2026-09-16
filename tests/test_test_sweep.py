@@ -145,6 +145,54 @@ def test_suite_runs_in_its_own_process_group(tmp_path, monkeypatch):
         assert seen["kwargs"]["start_new_session"] is True
 
 
+# ── the environment a foreign suite is handed ────────────────────────────────
+
+def test_child_env_strips_bundle_settings_with_no_template_on_disk(tmp_path, monkeypatch):
+    """A deployed sweep has no config/ next to it, and must not need one.
+
+    child_env read the .env template from BUNDLE_ROOT.parent. The installer
+    deploys cron/ but not config/, so on a real install nothing was found and
+    TELEGRAM_CHAT_ID, REMOTE_SSH_HOST and PROJECTS_ROOT reached every foreign
+    project's pytest.
+    """
+    monkeypatch.setattr(sweep, "BUNDLE_ROOT", tmp_path / "deployed")
+    leaked = {"TELEGRAM_CHAT_ID": "12345", "REMOTE_SSH_HOST": "backup-box",
+              "PROJECTS_ROOT": str(tmp_path),
+              # a commented-out override in the template, uncommented in .env
+              "LOCAL_LLM_ALLOWED_HOSTS": "gpu-box"}
+    for name, value in leaked.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("SOME_PROJECT_SETTING", "kept")
+
+    env = sweep.child_env()
+
+    assert not set(leaked) & set(env), "bundle settings reached a foreign pytest"
+    assert env.get("SOME_PROJECT_SETTING") == "kept"
+
+
+def test_env_guard_fails_when_the_shipped_names_go_stale(tmp_path, monkeypatch, capsys):
+    """The deployed name list is a COPY of the template, so drift must fail CI.
+
+    A variable added to the template and not regenerated into
+    cron/lib/env_names.py would quietly reach foreign suites again.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "check_env_ref_under_test", ROOT / "scripts" / "check-env-ref.py")
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    assert guard.check() == 0, "the committed tree must start in sync"
+
+    template = tmp_path / "llm-providers.example.env"
+    template.write_text(guard.ENV_TEMPLATE.read_text(encoding="utf-8")
+                        + "\n# A knob nobody regenerated the list for.\n"
+                          "# SWEEP_BRAND_NEW_KNOB=\n", encoding="utf-8")
+    monkeypatch.setattr(guard, "ENV_TEMPLATE", template)
+    capsys.readouterr()
+
+    assert guard.check() == 1
+    assert "env_names.py" in capsys.readouterr().out
+
+
 # ── poisoned basetemp vs broken tests ────────────────────────────────────────
 #
 # Leftover `%TEMP%/sweep-*` directories from a process with an admin token (a

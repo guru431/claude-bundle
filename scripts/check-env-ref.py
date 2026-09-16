@@ -19,6 +19,10 @@ Three directions, all checked:
      (the only deterministic alert threshold in the pipeline) and
      MEMORY_CROSS_NOTES (which enables a SECOND LLM call carrying user
      messages) were both discoverable only by reading the source.
+  4. template → home-claude/cron/lib/env_names.py: the template's names as a
+     GENERATED module that ships with cron/, because config/ is not deployed
+     (see emit_env_names). `--emit-names` rewrites it; this check fails while
+     it is stale.
 
 Extraction differs per direction on purpose. (1) searches the raw doc text, so
 a var mentioned outside backticks still counts (no false failures). (2) only
@@ -246,6 +250,41 @@ COMMENTED_RE = re.compile(r"^#\s*([A-Z][A-Z0-9_]*)=(\S*)\s*$", re.MULTILINE)
 # requirement keeps acronyms (`UAC`, `LLM`) out.
 DOC_VAR_RE = re.compile(r"`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)[=`]")
 
+ENV_NAMES_MODULE = ROOT / "home-claude" / "cron" / "lib" / "env_names.py"
+
+
+def template_names(env_text: str) -> set[str]:
+    """Every name the template carries: declared, or offered as a commented override."""
+    return set(DECL_RE.findall(env_text)) | {m.group(1) for m in COMMENTED_RE.finditer(env_text)}
+
+
+def emit_env_names(env_text: str | None = None) -> str:
+    """The generated body of home-claude/cron/lib/env_names.py.
+
+    The installer deploys cron/, bin/, wiki/ and hooks/ — not config/ — so code
+    running from an installed cron/ cannot read the template. test-sweep.py did,
+    found nothing on a real install, and handed TELEGRAM_CHAT_ID, REMOTE_SSH_HOST
+    and PROJECTS_ROOT to every foreign pytest it ran. Generated rather than
+    hand-kept, and compared by check() — the same arrangement as
+    docs/config-reference.md — so the shipped copy cannot drift from the template.
+    """
+    if env_text is None:
+        env_text = ENV_TEMPLATE.read_text(encoding="utf-8")
+    names = "\n".join(f'    "{name}",' for name in sorted(template_names(env_text)))
+    return (
+        '"""Every variable name config/llm-providers.example.env carries. GENERATED.\n'
+        "\n"
+        "Do not edit: `python scripts/check-env-ref.py --emit-names` rewrites this file\n"
+        "from the template, and `python scripts/check-env-ref.py` (CI) fails while the\n"
+        "two disagree. It exists because config/ is not deployed, so code running from\n"
+        "an installed cron/ cannot read the template itself.\n"
+        '"""\n'
+        "\n"
+        "TEMPLATE_NAMES = frozenset({\n"
+        f"{names}\n"
+        "})\n"
+    )
+
 
 def check() -> int:
     env_text = ENV_TEMPLATE.read_text(encoding="utf-8")
@@ -302,6 +341,15 @@ def check() -> int:
         problems.append(f"{var}: listed in CODE_ONLY ({Path(__file__).name}) "
                         f"but no longer mentioned by any code under "
                         f"{CODE_ROOT.name}/ — stale entry, drop it")
+
+    # 4. the deployed copy of the template's names. A copy is only safe while
+    # something fails the build the moment it goes stale.
+    have = (ENV_NAMES_MODULE.read_text(encoding="utf-8")
+            if ENV_NAMES_MODULE.is_file() else "")
+    if have.replace("\r\n", "\n") != emit_env_names(env_text):
+        problems.append(f"{ENV_NAMES_MODULE.relative_to(ROOT).as_posix()}: out of "
+                        f"date with {ENV_TEMPLATE.name} — regenerate it: "
+                        f"python scripts/check-env-ref.py --emit-names")
 
     if problems:
         print("ENV/DOC DRIFT:")
@@ -442,6 +490,12 @@ def emit_table() -> str:
 
 
 if __name__ == "__main__":
+    if "--emit-names" in sys.argv:
+        # LF explicitly, like the rest of the tree (.gitattributes): check()
+        # compares the text, and a CRLF rewrite on Windows must not read as drift.
+        ENV_NAMES_MODULE.write_text(emit_env_names(), encoding="utf-8", newline="\n")
+        print(f"wrote {ENV_NAMES_MODULE.relative_to(ROOT).as_posix()}")
+        sys.exit(0)
     if "--emit-table" in sys.argv:
         # Written to the file directly, not printed for a shell redirect: on a
         # Windows console `>` encodes stdout in the ANSI codepage, and the em

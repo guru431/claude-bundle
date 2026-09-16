@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # enable-guard.sh — activate the secret-guards for THIS bundle repo.
 #
-# The three hooks under .githooks/ are the enforcement mechanism for the
+# The four hooks under .githooks/ are the enforcement mechanism for the
 # cardinal rule: nothing private is ever committed to this PUBLIC repo. Git
 # ignores custom hook paths until you opt in, so a fresh clone has ZERO leak
 # protection until this runs. Run it once per clone.
 #
-#   pre-commit  — the staged DIFF and the filenames being added
-#   commit-msg  — the commit MESSAGE (published verbatim by `git log`)
-#   pre-push    — the BLOBS a push would publish, and the messages with them
+#   pre-commit        — the staged DIFF and the filenames being added
+#   pre-merge-commit  — the same checks for a merge (`git merge` skips pre-commit)
+#   commit-msg        — the commit MESSAGE (published verbatim by `git log`)
+#   pre-push          — what a push would publish: names, blobs, commit and tag messages
 set -eu
 cd "$(dirname "$0")/.."   # repo root
 
@@ -18,10 +19,10 @@ git config core.hooksPath .githooks
 # bit (a zip download, a copy across filesystems) the pre-push guard — the one
 # that scans what is actually published — was inert, and both the message here
 # and README claimed the pair was active.
-for h in pre-commit commit-msg pre-push; do
+for h in pre-commit pre-merge-commit commit-msg pre-push; do
     chmod +x ".githooks/$h" 2>/dev/null || true
 done
-echo "[ok] core.hooksPath = .githooks — pre-commit, commit-msg and pre-push guards are active"
+echo "[ok] core.hooksPath = .githooks — pre-commit, pre-merge-commit, commit-msg and pre-push guards are active"
 
 # Seed a LOCAL, untracked .sanitize-patterns.md reference (never committed — both
 # the hook and .gitignore block it) listing the CLASSES of personal regex to put

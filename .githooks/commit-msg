@@ -34,7 +34,9 @@ fail=0
 # Decode BEFORE stripping comments: an editor configured for UTF-16 (the default
 # of `>` and `Out-File` in Windows PowerShell 5.1) writes a message whose BOM and
 # NUL-interleaved bytes make every grep below see either binary or nothing.
-body=$(secret_scan_decode < "$msg_file" | grep -v '^#' || true)
+# -a: GNU grep drops a line it cannot decode, and a message line carrying a
+# CP1251 word and a token would have vanished before the scan.
+body=$(secret_scan_decode < "$msg_file" | grep -av '^#' || true)
 
 if ! hits=$(printf '%s\n' "$body" | secret_scan_text); then
   echo "BLOCKED: possible secret/token format in the commit message:"
@@ -44,23 +46,18 @@ fi
 
 # Personal denylist — the same untracked .sanitize-patterns the other two hooks
 # read. A hostname or a username belongs out of a public commit message just as
-# much as out of a file.
-sp="$repo_root/.sanitize-patterns"
-if [ -f "$sp" ]; then
-  pat=$(mktemp 2>/dev/null || echo "$repo_root/.sanitize-patterns.tmp")
-  # tr -d '\r': a CRLF-saved .sanitize-patterns (the Windows default) leaves a
-  # trailing \r on every regex and silently disables the whole denylist.
-  grep -vE '^[[:space:]]*$' "$sp" 2>/dev/null | tr -d '\r' > "$pat" || true
-  if [ -s "$pat" ]; then
-    hits=$(printf '%s\n' "$body" | grep -inEf "$pat" || true)
-    if [ -n "$hits" ]; then
-      echo "BLOCKED: personal data (matched .sanitize-patterns) in the commit message:"
-      printf '%s\n' "$hits" | sed 's/^/  /'
-      fail=1
-    fi
-  fi
-  rm -f "$pat"
+# much as out of a file. One that exists but cannot be used blocks.
+pat=$(mktemp 2>/dev/null || echo "$repo_root/.sanitize-patterns.tmp")
+if ! secret_scan_denylist "$repo_root/.sanitize-patterns" "$pat"; then
+  echo "BLOCKED: .sanitize-patterns cannot be used (see above) — the personal denylist"
+  echo "  would be OFF for this message. Fix the pattern, or move the file aside."
+  fail=1
+elif [ -s "$pat" ] && ! hits=$(printf '%s\n' "$body" | secret_scan_denylist_text "$pat"); then
+  echo "BLOCKED: personal data (matched .sanitize-patterns) in the commit message:"
+  printf '%s\n' "$hits" | sed 's/^/  /'
+  fail=1
 fi
+rm -f "$pat"
 
 if [ "$fail" -ne 0 ]; then
   echo ""

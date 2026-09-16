@@ -101,7 +101,7 @@ preserve that discipline.
 │                                       test-sweep, schtasks-status, page names
 ├── VERSION, requirements.txt, requirements-dev.txt  semver stamp + runtime + test deps
 ├── pytest.ini                          the reference impl of the test policy
-├── .githooks/{pre-commit,commit-msg,pre-push}  secret guards (git config core.hooksPath .githooks)
+├── .githooks/{pre-commit,pre-merge-commit,commit-msg,pre-push}  secret guards (git config core.hooksPath .githooks)
 ├── .github/workflows/ci.yml            compileall + JSON/YAML + secret-guard + doc/registry/
 │                                       env/mirror/io-matrix guards + shellcheck + pytest
 │                                       + PS parse/self-test CI
@@ -245,12 +245,16 @@ This grep is now **automated** by the `pre-commit` hook at
 [`.githooks/pre-commit`](.githooks/pre-commit) — it runs the denylist
 grep plus a generic scan for key/token formats (PEM, `ghp_`,
 `github_pat_`, `AKIA`, `sk-…`, JWT, Telegram bot tokens) and blocks
-commits of sensitive filenames (`.env`, `*.pem`, `id_rsa`, …). Two more
-hooks cover the channels it does not see:
+commits of sensitive filenames (`.env`, `*.pem`, `id_rsa`, …).
+[`.githooks/pre-merge-commit`](.githooks/pre-merge-commit) runs the same
+checks for a merge, which `git merge` would otherwise commit unscanned. Two
+more hooks cover the channels it does not see:
 [`.githooks/commit-msg`](.githooks/commit-msg) scans the commit MESSAGE
 (`git log` publishes it verbatim) and
-[`.githooks/pre-push`](.githooks/pre-push) scans the BLOBS a push would
-publish. Activate all three once per clone — the one-command way is
+[`.githooks/pre-push`](.githooks/pre-push) checks what a push would publish:
+file names, blob contents, commit and annotated-tag messages. A
+`.sanitize-patterns` line grep cannot compile blocks all of them rather than
+switching the denylist off. Activate all four once per clone — the one-command way is
 [`scripts/enable-guard.sh`](scripts/enable-guard.sh) (or
 `scripts/enable-guard.ps1`), which sets the hook path, restores the exec
 bit on each hook (POSIX git silently skips a non-executable one) and
@@ -364,9 +368,9 @@ as config.
   reports as SC1017 on every line. The index is LF and CI is unaffected;
   fix the local copy with `rm <file> && git checkout -- <file>`.
 - **Exec bits are pinned** — CI fails on any change to the set
-  `{.githooks/commit-msg, .githooks/pre-commit, .githooks/pre-push,
-  home-claude/cron/github-push.sh, scripts/enable-guard.sh}`. Adding or
-  dropping `+x` is an intentional
+  `{.githooks/commit-msg, .githooks/pre-commit, .githooks/pre-merge-commit,
+  .githooks/pre-push, home-claude/cron/github-push.sh,
+  scripts/enable-guard.sh}`. Adding or dropping `+x` is an intentional
   decision, not a side effect.
 
 CI (`.github/workflows/ci.yml`) runs two jobs. **Ubuntu** (matrix: 3.10 and

@@ -91,6 +91,25 @@ def test_prose_that_merely_spells_key_is_left_alone(text: str):
     assert shapes.mask(text) == text
 
 
+@pytest.mark.parametrize("path,sensitive", [
+    # Guarded only by pre-commit's private additions until they joined the one
+    # table — so the push guard and the nightly sweep published them.
+    (".sanitize-patterns", True),
+    ("sub/.sanitize-patterns.md", True),
+    ("ops/vault.env", True),
+    # Templates stay committable, including the per-environment spelling
+    # pre-commit accepted and the shared table refused.
+    (".env.local.example", False),
+    ("web/.env.production.sample", False),
+    ("keys/deploy.pub", False),
+    # …but a local copy that merely STARTS like a template is not one.
+    (".env.example.local", True),
+])
+def test_sensitive_path_table(path: str, sensitive: bool):
+    shapes = _shapes()
+    assert shapes.is_sensitive_path(path) is sensitive
+
+
 @pytest.mark.parametrize("text,marker", [
     ("GITHUB_TOKEN=ghp_" + "a" * 30, "[REDACTED-GITHUB-TOKEN]"),
     ('export OPENAI_API_KEY="sk-' + "d" * 32 + '"', "[REDACTED-API-KEY]"),

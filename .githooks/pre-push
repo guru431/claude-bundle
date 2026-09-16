@@ -2,8 +2,9 @@
 # pre-push secret-guard for a PUBLIC repository.
 # pre-commit only sees what it was present for: a secret committed BEFORE the
 # guard was enabled, or with `--no-verify`, still reaches the remote on push.
-# This hook scans the objects a push would actually publish — the ones the
-# remotes do not have yet.
+# This hook checks everything a push would actually publish — the objects the
+# TARGET remote does not have yet: file NAMES, file CONTENTS (text, UTF-16 and
+# binary), commit MESSAGES and annotated TAG messages.
 #
 # Activate once per clone:   git config core.hooksPath .githooks
 # Bypass a confirmed false positive:   git push --no-verify
@@ -68,13 +69,16 @@ mkdir -p "$tmpdir"
 # full of object ids. Clean up on every exit path, signals included.
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
 objects="$tmpdir/objects"
+typed="$tmpdir/typed"
 blobs="$tmpdir/blobs"
+pat="$tmpdir/patterns"
 
 # 2) New objects only: everything reachable from what we push, minus what the
 # TARGET remote already has. A brand-new target has nothing, so this is the
 # whole history — correct, and what a first push actually publishes.
-# `awk NF>1` keeps only objects that carry a path (blobs and trees); commits
-# and tags print bare. shellcheck disable=SC2086 — both vars must word-split.
+# `awk NF>1` keeps only objects that carry a name: blobs and trees (their path)
+# and annotated tags (the tag name); commits print bare.
+# shellcheck disable=SC2086 — both vars must word-split.
 if [ -n "$excludes" ]; then
   # shellcheck disable=SC2086
   git rev-list --objects $shas --not $excludes 2>/dev/null | awk 'NF>1' > "$objects" || true
@@ -84,11 +88,10 @@ else
 fi
 
 # One batch-check pass instead of `git cat-file -t` per object (that is a
-# process spawn each, and a first push has thousands). Drops trees and blobs
-# over the cap before anything gets read.
-awk '{print $1}' "$objects" \
-  | git cat-file --batch-check='%(objectname) %(objecttype) %(objectsize)' 2>/dev/null \
-  | awk -v max="$max_blob_bytes" '$2 == "blob" && $3 <= max {print $1}' > "$blobs" || true
+# process spawn each, and a first push has thousands). Every step below reads
+# its objects out of this one typed listing: `<sha> <type> <size> <path>`.
+secret_scan_objects "$objects" > "$typed"
+awk -v max="$max_blob_bytes" '$2 == "blob" && $3 <= max {print $1}' "$typed" > "$blobs"
 count=0
 if [ -s "$blobs" ]; then
   count=$(wc -l < "$blobs" | tr -d ' ')
@@ -100,49 +103,72 @@ fi
 # SAY what was skipped. "scanned everything under 1 MiB" is a different promise
 # from "scanned everything", and the hook only ever made the second one out
 # loud — a key pasted into a big generated file was published in silence.
-oversize=$(awk '{print $1}' "$objects" \
-  | git cat-file --batch-check='%(objecttype) %(objectsize)' 2>/dev/null \
-  | awk -v max="$max_blob_bytes" '$1 == "blob" && $2 > max' | wc -l | tr -d ' ')
+oversize=$(awk -v max="$max_blob_bytes" '$2 == "blob" && $3 > max' "$typed" | wc -l | tr -d ' ')
 if [ "${oversize:-0}" -gt 0 ]; then
   echo "pre-push: NOTE — $oversize blob(s) over $max_blob_bytes bytes were NOT scanned"
+fi
+
+# 2a) FILE NAMES. This hook exists for commits that never met pre-commit, yet it
+# only ever read CONTENT: `.env` holding `DB_PASSWORD=hunter2` — no token shape
+# anywhere — was published under its own name, merge commits included. Every
+# new blob counts, whatever its size.
+if ! bad=$(awk '$2 == "blob"' "$typed" | cut -d ' ' -f 4- | sort -u | secret_scan_paths); then
+  echo "BLOCKED: sensitive file name(s) in the objects this push would publish:"
+  printf '%s\n' "$bad" | sed 's/^/  /'
+  fail=1
+fi
+
+# The personal denylist — concrete values from the untracked .sanitize-patterns.
+# Loaded before the message pass, which uses it too. A file that exists but
+# cannot be used blocks the push instead of silently checking nothing.
+if ! secret_scan_denylist "$repo_root/.sanitize-patterns" "$pat"; then
+  echo "BLOCKED: .sanitize-patterns cannot be used (see above) — the personal denylist"
+  echo "  would be OFF for this push. Fix the pattern, or move the file aside."
+  fail=1
 fi
 
 # 2b) COMMIT MESSAGES. Nothing scanned them: a token pasted into a commit body
 # is published exactly as written and `git log` shows it forever. .githooks/
 # commit-msg catches new ones, but this hook also publishes commits made before
-# the guard was enabled or with --no-verify.
+# the guard was enabled or with --no-verify — so the denylist applies here as
+# well as the token shapes, exactly as it does in commit-msg.
 # Both vars must word-split.
 # shellcheck disable=SC2086
 if [ -n "$excludes" ]; then
-  msgs=$(git log --format='%H%n%B%n' $shas --not $excludes 2>/dev/null || true)
+  msg_rc=0; msg_hits=$(secret_scan_messages "$pat" $shas --not $excludes) || msg_rc=$?
 else
-  msgs=$(git log --format='%H%n%B%n' $shas 2>/dev/null || true)
+  msg_rc=0; msg_hits=$(secret_scan_messages "$pat" $shas) || msg_rc=$?
 fi
-if [ -n "$msgs" ]; then
-  msg_hits=$(printf '%s\n' "$msgs" | grep -nE -e "$SECRET_SCAN_PATTERN" \
-             | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
-  if [ -n "$msg_hits" ]; then
-    echo "BLOCKED: possible secret/token format in an outgoing COMMIT MESSAGE:"
-    printf '%s\n' "$msg_hits" | sed 's/^/  /'
-    fail=1
-  fi
+if [ "$msg_rc" -ne 0 ]; then
+  echo "BLOCKED: possible secret or personal data in an outgoing COMMIT MESSAGE:"
+  printf '%s\n' "$msg_hits" | sed 's/^/  /'
+  fail=1
 fi
 
-# Personal denylist — concrete values from untracked .sanitize-patterns
-sp="$repo_root/.sanitize-patterns"
-pat="$tmpdir/patterns"
-: > "$pat"
-if [ -f "$sp" ]; then
-  # tr -d '\r': a CRLF-saved .sanitize-patterns (the default on Windows) would
-  # leave a trailing \r on every regex and silently disable the whole denylist.
-  grep -vE '^[[:space:]]*$' "$sp" 2>/dev/null | tr -d '\r' > "$pat" || true
-fi
+# 2c) ANNOTATED TAGS. `git tag -a v1 -m "…"` publishes its message verbatim, and
+# no hook reads it: commit-msg never runs for a tag and every pass above looked
+# at commits and blobs only. The tagger line is identity metadata and skipped,
+# for the same reason commit messages are read without their author.
+awk '$2 == "tag"' "$typed" > "$tmpdir/tags"
+while read -r tag_sha _type _size tag_name; do
+  git cat-file tag "$tag_sha" 2>/dev/null | sed '1,/^$/d' > "$tmpdir/tag-message" || true
+  if ! hits=$(secret_scan_text < "$tmpdir/tag-message"); then
+    echo "BLOCKED: possible secret/token format in the message of tag $tag_name:"
+    printf '%s\n' "$hits" | sed 's/^/  /'
+    fail=1
+  fi
+  if [ -s "$pat" ] && ! hits=$(secret_scan_denylist_text "$pat" < "$tmpdir/tag-message"); then
+    echo "BLOCKED: personal data (matched .sanitize-patterns) in the message of tag $tag_name:"
+    printf '%s\n' "$hits" | sed 's/^/  /'
+    fail=1
+  fi
+done < "$tmpdir/tags"
 
 # 3) Fast path: one `cat-file --batch` stream through one grep, instead of two
 # process spawns per blob (~160ms each on Windows — minutes on a first push).
-# Deliberately OVER-eager: -a scans binary too, the stream ignores the size cap
-# and the .githooks/ exclusion. Anything it flags is re-checked precisely in
-# step 4, which is the only step that can fail the push. So a false alarm here
+# Deliberately OVER-eager: -a scans binary too, the stream ignores the
+# .githooks/ exclusion. Anything it flags is re-checked precisely in step 4,
+# which is the only content step that can fail the push. So a false alarm here
 # costs seconds, never a wrong verdict — and a clean push exits right now.
 #
 # `tr -d '\000'` is what makes UTF-16 visible here. Step 4 transcodes properly
@@ -152,21 +178,28 @@ fi
 # UTF-16 is the default of `>` and `Out-File` in Windows PowerShell 5.1, which is
 # the shell this bundle is written for. Deleting NUL bytes is crude — it can
 # glue two lines together and raise a false suspicion — and that is the right
-# trade here, because the cost of a false suspicion is one extra pass.
+# trade here, because the cost of a false suspicion is one extra pass. Step 4
+# scans binary blobs the same way, so what raises a suspicion here is also what
+# it looks for there.
+#
+# Any exit status but 1 ("no match") counts as a suspicion: a grep that FAILED
+# must never read as a clean push.
 suspect=0
-if [ -s "$blobs" ] && git cat-file --batch < "$blobs" 2>/dev/null | tr -d '\000' | grep -qaE -e "$SECRET_SCAN_PATTERN"; then
-  suspect=1
+if [ -s "$blobs" ]; then
+  scan_rc=0
+  git cat-file --batch < "$blobs" 2>/dev/null | tr -d '\000' | grep -qaE -e "$SECRET_SCAN_PATTERN" || scan_rc=$?
+  [ "$scan_rc" -eq 1 ] || suspect=1
 fi
 if [ "$suspect" -eq 0 ] && [ -s "$blobs" ] && [ -s "$pat" ]; then
-  if git cat-file --batch < "$blobs" 2>/dev/null | tr -d '\000' | grep -qaiEf "$pat"; then
-    suspect=1
-  fi
+  scan_rc=0
+  git cat-file --batch < "$blobs" 2>/dev/null | tr -d '\000' | grep -qaiEf "$pat" || scan_rc=$?
+  [ "$scan_rc" -eq 1 ] || suspect=1
 fi
 if [ "$suspect" -eq 0 ]; then
   rm -rf "$tmpdir"
   trap - EXIT INT TERM
-  # `fail` can already be 1 from the commit-message scan above, which runs
-  # whether or not the push carries any new blob.
+  # `fail` can already be 1 from the name, message and tag passes above, which
+  # run whether or not the push carries any suspicious blob.
   if [ "$fail" -ne 0 ]; then
     echo ""
     echo "Push aborted — this is a PUBLIC repository."
@@ -179,30 +212,30 @@ fi
 # 4) Something in there matched — now spend the per-blob spawns to name it.
 # Redirect, not a pipe: a pipe runs the loop in a subshell and every `fail=1`
 # is lost when it exits.
-while read -r sha; do
-  [ -n "$sha" ] || continue
-  path=$(grep -m1 "^$sha " "$objects" | cut -d' ' -f2- || true)
+while read -r sha type size path; do
+  if [ "$type" != blob ] || [ "$size" -gt "$max_blob_bytes" ]; then
+    continue
+  fi
   # .githooks/ documents token FORMATS on purpose — same exclusion as
   # pre-commit and the CI secret guard.
   case "$path" in .githooks/*) continue ;; esac
 
-  if ! hits=$(git cat-file blob "$sha" 2>/dev/null | secret_scan_text); then
+  # Read once, checked against both tables. secret_scan_text decodes UTF-16 and
+  # scans binary content as bytes — `grep -I` used to call such a blob "clean"
+  # right after step 3 had flagged it, and the push went through in silence.
+  git cat-file blob "$sha" > "$tmpdir/blob" 2>/dev/null || true
+  if ! hits=$(secret_scan_text < "$tmpdir/blob"); then
     echo "BLOCKED: possible secret/token format in $path (blob $sha):"
     printf '%s\n' "$hits" | sed 's/^/  /'
     fail=1
   fi
 
-  if [ -s "$pat" ]; then
-    # Through the decoder for the same reason as the token scan: `grep -I` calls
-    # a UTF-16 blob binary and reports nothing at all.
-    hits=$(git cat-file blob "$sha" 2>/dev/null | secret_scan_decode | grep -inIEf "$pat" || true)
-    if [ -n "$hits" ]; then
-      echo "BLOCKED: personal data (matched .sanitize-patterns) in $path (blob $sha):"
-      printf '%s\n' "$hits" | sed 's/^/  /'
-      fail=1
-    fi
+  if [ -s "$pat" ] && ! hits=$(secret_scan_denylist_text "$pat" < "$tmpdir/blob"); then
+    echo "BLOCKED: personal data (matched .sanitize-patterns) in $path (blob $sha):"
+    printf '%s\n' "$hits" | sed 's/^/  /'
+    fail=1
   fi
-done < "$blobs"
+done < "$typed"
 
 rm -rf "$tmpdir"
 trap - EXIT INT TERM

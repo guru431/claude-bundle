@@ -110,7 +110,7 @@ jobs:
           # NB: the tree is deliberately NOT uniform — most *.sh are 644 and the
           # *.py checkers are 644 too. This freezes today's state; changing which
           # files are executable is a separate, intentional decision.
-          expected=".githooks/commit-msg .githooks/pre-commit .githooks/pre-push home-claude/cron/github-push.sh scripts/enable-guard.sh"
+          expected=".githooks/commit-msg .githooks/pre-commit .githooks/pre-merge-commit .githooks/pre-push home-claude/cron/github-push.sh scripts/enable-guard.sh"
           actual=$(git ls-files -s | awk '$1=="100755"{print $4}' | sort | xargs)
           if [ "$actual" != "$expected" ]; then
             echo "exec-bit drift!"; echo "  expected: $expected"; echo "  actual:   $actual"

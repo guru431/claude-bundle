@@ -9,7 +9,7 @@
 # Exposes:
 #   SECRET_SCAN_PATTERN        — the bare ERE alternation (very low false-positive)
 #   SENSITIVE_PATH_PATTERN     — repository paths that must never be committed
-#   SENSITIVE_PATH_ALLOW       — `.env.example` and friends, which may be
+#   SENSITIVE_PATH_ALLOW       — `.env.example` and friends, which may be committed
 #   SECRET_SCAN_ALLOW          — inline marker that exempts a single line
 #   secret_scan_decode         — copy stdin to stdout, transcoding UTF-16 to
 #                                UTF-8 first when the input carries a UTF-16 BOM.
@@ -22,17 +22,29 @@
 #                                `path: +line` and returns non-zero on any hit;
 #                                returns 0 (silent) when clean.
 #   secret_scan_text           — same, but for RAW file/blob content on stdin (no
-#                                diff markers). Used by .githooks/pre-push, which
-#                                reads whole blobs out of the object store.
-#                                UTF-16 input is transcoded first — see below.
+#                                diff markers): the hooks and the outgoing gates
+#                                read whole blobs out of the object store with it.
+#                                UTF-16 is transcoded and binary content scanned
+#                                as bytes — see below.
+#   secret_scan_denylist       — load the personal denylist (.sanitize-patterns)
+#                                into a pattern file, or return 2 when it cannot
+#                                be used: a broken line must block, not switch
+#                                the denylist off.
+#   secret_scan_denylist_text  — secret_scan_text for that denylist.
+#   secret_scan_git_paths      — run a path-listing git command and print one
+#                                UNQUOTED path per line.
 #   secret_scan_paths          — scan a newline-separated list of paths on stdin
 #                                against SENSITIVE_PATH_PATTERN.
+#   secret_scan_objects        — type every object of a `git rev-list --objects`
+#                                listing in one cat-file pass.
+#   secret_scan_messages       — scan the commit MESSAGES of a rev list.
 #   secret_scan_range          — scan everything a rev range would PUBLISH:
 #                                every blob it introduces AND every commit
 #                                message. Used by the outgoing gates
 #                                (git-push-all.sh, github-push.sh) in place of
 #                                `git log -p`, which shows no diff for a merge
 #                                commit and therefore missed an evil merge.
+#   secret_scan_range_paths    — the path of every blob a rev range introduces.
 
 # High-confidence secret/token formats: PEM and PGP private keys, GitHub
 # PATs/tokens (all five prefixes), GitLab PATs, AWS access keys (AKIA/ASIA/…)
@@ -62,8 +74,8 @@ SECRET_SCAN_PATTERN='-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----|(^|[^A-Za-z0-9_
 # blocked by one and waved through by another, while `credentials.json`,
 # `.npmrc`, `.netrc`, `.pypirc`, `*.ppk`, `*.jks`, `id_ecdsa`,
 # `.git-credentials` and `terraform.tfstate` were known to none of them.
-SENSITIVE_PATH_PATTERN='(^|/)\.env(\.[A-Za-z0-9_.-]+)?$|(^|/)\.envrc$|(^|/)(id_rsa|id_dsa|id_ecdsa|id_ed25519)$|\.(pem|key|p12|pfx|ppk|jks|keystore)$|(^|/)\.git-credentials$|(^|/)\.(npmrc|netrc|pypirc)$|(^|/)credentials(\.json|\.yaml|\.yml)?$|(^|/)service-account.*\.json$|(^|/)terraform\.tfstate(\.backup)?$|(^|/)\.pgpass$|(^|/)secrets?\.(json|ya?ml|toml|ini)$'
-SENSITIVE_PATH_ALLOW='\.env\.(example|sample|template|dist)$|\.example\.env$'
+SENSITIVE_PATH_PATTERN='(^|/)\.env(\.[A-Za-z0-9_.-]+)?$|(^|/)\.envrc$|(^|/)(id_rsa|id_dsa|id_ecdsa|id_ed25519)$|\.(pem|key|p12|pfx|ppk|jks|keystore)$|(^|/)\.git-credentials$|(^|/)\.(npmrc|netrc|pypirc)$|(^|/)credentials(\.json|\.yaml|\.yml)?$|(^|/)service-account.*\.json$|(^|/)terraform\.tfstate(\.backup)?$|(^|/)\.pgpass$|(^|/)secrets?\.(json|ya?ml|toml|ini)$|(^|/)vault\.env$|(^|/)\.sanitize-patterns(\.[A-Za-z0-9]+)?$'
+SENSITIVE_PATH_ALLOW='\.env(\.[A-Za-z0-9_-]+)?\.(example|sample|template|dist)$|\.example\.env$|\.pub$'
 
 # Inline exemption for lines that MUST look like a secret — the test fixtures of
 # the detectors themselves, and documentation showing what a blocked line looks
@@ -91,10 +103,16 @@ secret_scan_diff() {
     # stream, which printed an ordinal matching nothing the author could open.
     # The secret regex is still grep's job — awk only moves text around, so no
     # ERE interval support is assumed of it.
+    #
+    # -a on every grep that decides a verdict, here and below: in a UTF-8 locale
+    # GNU grep treats a line that is not valid UTF-8 as binary, prints NOTHING
+    # for it and still exits 0 — so a key on the same line as a CP1251 comment
+    # was reported clean. (Git Bash's grep maps such bytes instead, which is why
+    # this only ever showed on Linux and macOS.)
     _ssd_hits=$(printf '%s\n' "$_ssd_diff" | awk '
         /^\+\+\+ /  { path = substr($0, 5); sub(/^b\//, "", path); next }
         /^\+/       { print path ": " $0 }' \
-        | grep -E -e "$SECRET_SCAN_PATTERN" | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
+        | grep -aE -e "$SECRET_SCAN_PATTERN" | grep -avF -e "$SECRET_SCAN_ALLOW" || true)
     if [ -n "$_ssd_hits" ]; then
         printf '%s\n' "$_ssd_hits"
         return 1
@@ -135,28 +153,128 @@ secret_scan_decode() {
     unset _ssdec_tmp _ssdec_enc
 }
 
-secret_scan_text() {
-    # Raw content on stdin — no '^+' filtering, every line is "added" here.
-    # Same no-trap rule as above; every return path removes its temp files.
-    _sst_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-scan.$$")
-    secret_scan_decode > "$_sst_tmp"
-    # -I: binary input yields no matches, so a blob can be piped in as-is.
-    _sst_hits=$(grep -nIE -e "$SECRET_SCAN_PATTERN" "$_sst_tmp" \
-        | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
-    rm -f "$_sst_tmp"
-    unset _sst_tmp
-    if [ -n "$_sst_hits" ]; then
-        printf '%s\n' "$_sst_hits"
+_secret_scan_grep() {
+    # Raw content on stdin. $1 — `token` for the credential shapes, or
+    # `denylist` with a pattern file from secret_scan_denylist in $2. Prints the
+    # hits and returns 1 when there are any. Same no-trap rule as above; every
+    # return path removes its temp file.
+    _ssg_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-scan.$$")
+    secret_scan_decode > "$_ssg_tmp"
+    if [ -s "$_ssg_tmp" ] && ! grep -Iq '' "$_ssg_tmp" 2>/dev/null; then
+        # BINARY — grep -I found a NUL byte. It used to answer "no match" for
+        # such content, so a key inside a SQLite file or a BOM-less UTF-16 dump
+        # was reported clean, even after pre-push's raw fast path had flagged
+        # the very same blob. Now scanned as bytes with the NULs removed and
+        # reported as the match alone: a binary "line" can be megabytes of
+        # noise. The allow marker cannot apply — nobody writes it into a binary.
+        if [ "$1" = token ]; then
+            _ssg_hits=$(tr -d '\000' < "$_ssg_tmp" | grep -aoE -e "$SECRET_SCAN_PATTERN" || true)
+        else
+            _ssg_hits=$(tr -d '\000' < "$_ssg_tmp" | grep -aoiEf "$2" || true)
+        fi
+        if [ -n "$_ssg_hits" ]; then
+            _ssg_hits=$(printf '%s\n' "$_ssg_hits" | LC_ALL=C tr -c '[:print:]\n' '?' \
+                | sed 's/^/binary content, NULs removed (check by hand): /')
+        fi
+    elif [ "$1" = token ]; then
+        _ssg_hits=$(grep -naE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp" \
+            | grep -avF -e "$SECRET_SCAN_ALLOW" || true)
+    else
+        _ssg_hits=$(grep -naiEf "$2" "$_ssg_tmp" || true)
+    fi
+    rm -f "$_ssg_tmp"
+    unset _ssg_tmp
+    if [ -n "$_ssg_hits" ]; then
+        printf '%s\n' "$_ssg_hits"
+        unset _ssg_hits
         return 1
     fi
+    unset _ssg_hits
     return 0
 }
 
+secret_scan_text() {
+    # Raw content on stdin — no '^+' filtering, every line is "added" here.
+    _secret_scan_grep token
+}
+
+secret_scan_denylist() {
+    # $1 — the personal denylist: one ERE per line (.sanitize-patterns).
+    # $2 — the file to write the usable patterns to. The CALLER owns it: a
+    #      sourced function cannot set a trap to clean up a temp file of its own.
+    # rc 0 — $2 holds the patterns. It is EMPTY when $1 does not exist, which is
+    #        a legitimate state: the denylist is optional and never committed.
+    # rc 2 — $1 exists but cannot be used. The reason is on stderr, $2 is empty,
+    #        and the caller MUST block.
+    #
+    # Four copies of this loader lived in the three hooks and github-push.sh, each
+    # ending in `|| true`, and every consumer then ran `grep -f` — whose exit
+    # status 2, "cannot compile this pattern", reads exactly like 1, "no match".
+    # One typo such as `192.168.1.(42` in a file people write by hand switched the
+    # denylist OFF in every gate at once, and every gate reported success.
+    : > "$2" || return 2
+    [ -e "$1" ] || return 0
+    if [ ! -f "$1" ] || [ ! -r "$1" ]; then
+        printf 'secret-scan: %s exists but cannot be read\n' "$1" >&2
+        return 2
+    fi
+    # What a Windows editor leaves in such a file, removed before grep sees it;
+    # each one disabled a pattern or the whole list without a word: UTF-16 (`>`
+    # in Windows PowerShell 5.1), a UTF-8 BOM glued to the first pattern, CRLF
+    # endings, and blank lines, which `grep -f` reads as "match every line".
+    secret_scan_decode < "$1" | tr -d '\r' \
+        | sed "1s/^$(printf '\357\273\277')//" \
+        | grep -avE '^[[:space:]]*$' > "$2" || true
+    # grep compiles every pattern before it reads a byte, so a probe on /dev/null
+    # fails exactly when the real scans would.
+    _ssdl_rc=0
+    grep -Ef "$2" /dev/null > /dev/null 2>&1 || _ssdl_rc=$?
+    if [ "$_ssdl_rc" -le 1 ]; then
+        unset _ssdl_rc
+        return 0
+    fi
+    printf 'secret-scan: %s holds a pattern grep cannot compile, so the denylist would match nothing:\n' "$1" >&2
+    while IFS= read -r _ssdl_line; do
+        _ssdl_rc=0
+        grep -Ee "$_ssdl_line" /dev/null > /dev/null 2>&1 || _ssdl_rc=$?
+        if [ "$_ssdl_rc" -gt 1 ]; then
+            printf '  %s\n' "$_ssdl_line" >&2
+        fi
+    done < "$2"
+    : > "$2"
+    unset _ssdl_rc _ssdl_line
+    return 2
+}
+
+secret_scan_denylist_text() {
+    # $1 — a pattern file from secret_scan_denylist; raw content on stdin.
+    # Case-insensitive, like every denylist check. Prints hits, returns 1 on any.
+    _secret_scan_grep denylist "$1"
+}
+
+secret_scan_git_paths() {
+    # $1 — a git subcommand that lists paths (`diff --name-only`, `ls-files`);
+    # the rest — its arguments. Prints one path per line, VERBATIM.
+    #
+    # With the default core.quotePath git prints a non-ASCII path C-quoted —
+    # `"\320\277\321\200…/.env"` — so an anchored name pattern never matched it
+    # and `git show ":$f"` failed on it: every gate that works on file names was
+    # blind to anyone whose folders are not ASCII. `-z` is what turns quoting off
+    # entirely (quotePath=false alone still quotes a tab, a backslash or a double
+    # quote); a newline inside a path is the one thing a line-based caller still
+    # cannot represent.
+    _ssgp_cmd="$1"
+    shift
+    git -c core.quotePath=false "$_ssgp_cmd" -z "$@" | tr '\000' '\n'
+    unset _ssgp_cmd
+}
+
 secret_scan_paths() {
-    # Newline-separated repository paths on stdin. Prints the offenders and
-    # returns non-zero when any path must not be committed.
-    _ssp_hits=$(grep -iE -e "$SENSITIVE_PATH_PATTERN" \
-        | grep -ivE -e "$SENSITIVE_PATH_ALLOW" || true)
+    # Newline-separated repository paths on stdin — unquoted, see
+    # secret_scan_git_paths. Prints the offenders and returns non-zero when any
+    # path must not be committed.
+    _ssp_hits=$(grep -aiE -e "$SENSITIVE_PATH_PATTERN" \
+        | grep -aivE -e "$SENSITIVE_PATH_ALLOW" || true)
     if [ -n "$_ssp_hits" ]; then
         printf '%s\n' "$_ssp_hits"
         unset _ssp_hits
@@ -166,9 +284,59 @@ secret_scan_paths() {
     return 0
 }
 
+secret_scan_objects() {
+    # $1 — a file holding `git rev-list --objects` output.
+    # Prints `<sha> <type> <size> <path>` for every listed object, in order, from
+    # ONE cat-file process. <path> is the tag name for an annotated tag.
+    awk '{print $1}' "$1" \
+        | git cat-file --batch-check='%(objectname) %(objecttype) %(objectsize)' 2>/dev/null \
+        | paste -d ' ' - "$1" | cut -d ' ' -f 1-3,5-
+}
+
+secret_scan_messages() {
+    # $1 — a pattern file from secret_scan_denylist, or "" for none.
+    # The rest — the revisions whose commit MESSAGES get published, as git log
+    # takes them (`origin/main..main`, `<sha> --not --remotes=origin`).
+    # Prints `commit message: N:line` per hit; returns 1 on any.
+    #
+    # %B and not the default format: the author line is identity metadata that
+    # repeats across a whole, already-public history, and `.sanitize-patterns`
+    # rightly names the username it carries.
+    _ssm_pat="$1"
+    shift
+    _ssm_fail=0
+    _ssm_msgs=$(git log --format='%H%n%B%n' "$@" 2>/dev/null || true)
+    if [ -n "$_ssm_msgs" ]; then
+        _ssm_hits=$(printf '%s\n' "$_ssm_msgs" | grep -naE -e "$SECRET_SCAN_PATTERN" \
+            | grep -avF -e "$SECRET_SCAN_ALLOW" || true)
+        if [ -n "$_ssm_hits" ]; then
+            printf '%s\n' "$_ssm_hits" | sed 's/^/commit message: /'
+            _ssm_fail=1
+        fi
+        if [ -n "$_ssm_pat" ] && [ -s "$_ssm_pat" ]; then
+            _ssm_hits=$(printf '%s\n' "$_ssm_msgs" | grep -naiEf "$_ssm_pat" || true)
+            if [ -n "$_ssm_hits" ]; then
+                printf '%s\n' "$_ssm_hits" | sed 's/^/commit message (.sanitize-patterns): /'
+                _ssm_fail=1
+            fi
+        fi
+    fi
+    unset _ssm_pat _ssm_msgs _ssm_hits
+    return "$_ssm_fail"
+}
+
+_secret_scan_prefix() {
+    # $1 — a label; $2 — lines. Prints every line as `label: line`.
+    printf '%s\n' "$2" | while IFS= read -r _ssx_line; do
+        printf '%s: %s\n' "$1" "$_ssx_line"
+    done
+}
+
 secret_scan_range() {
     # $1 — a rev range or list of revs ("origin/main..HEAD", "abc def").
     # $2 — optional pathspec-ish prefix to skip (e.g. ".githooks/").
+    # $3 — optional pattern file from secret_scan_denylist: the personal
+    #      denylist is then applied to the same messages and blobs.
     #
     # Scans everything the range would PUBLISH, in two passes:
     #   * every blob it introduces (so an evil merge — whose `git log -p` shows
@@ -178,6 +346,7 @@ secret_scan_range() {
     # Returns non-zero and prints `path: line` for each hit.
     _ssr_range="$1"
     _ssr_skip="${2:-}"
+    _ssr_pat="${3:-}"
     _ssr_fail=0
     _ssr_dir=$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-range.$$")
     mkdir -p "$_ssr_dir"
@@ -185,10 +354,7 @@ secret_scan_range() {
     # 1) Commit messages.
     # $_ssr_range is a rev LIST and must word-split.
     # shellcheck disable=SC2086
-    _ssr_msgs=$(git log --format='%H%n%B%n' $_ssr_range 2>/dev/null \
-        | grep -nE -e "$SECRET_SCAN_PATTERN" | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
-    if [ -n "$_ssr_msgs" ]; then
-        printf 'commit message: %s\n' "$_ssr_msgs"
+    if ! secret_scan_messages "$_ssr_pat" $_ssr_range; then
         _ssr_fail=1
     fi
 
@@ -196,31 +362,48 @@ secret_scan_range() {
     # Same reason as above.
     # shellcheck disable=SC2086
     git rev-list --objects $_ssr_range 2>/dev/null | awk 'NF>1' > "$_ssr_dir/objects" || true
-    awk '{print $1}' "$_ssr_dir/objects" \
-        | git cat-file --batch-check='%(objectname) %(objecttype) %(objectsize)' 2>/dev/null \
-        | awk -v max=1048576 '$2 == "blob" && $3 <= max {print $1}' > "$_ssr_dir/blobs" || true
-    _ssr_over=$(awk '{print $1}' "$_ssr_dir/objects" \
-        | git cat-file --batch-check='%(objecttype) %(objectsize)' 2>/dev/null \
-        | awk -v max=1048576 '$1 == "blob" && $2 > max' | wc -l | tr -d ' ')
+    secret_scan_objects "$_ssr_dir/objects" > "$_ssr_dir/typed"
+    _ssr_over=$(awk '$2 == "blob" && $3 > 1048576' "$_ssr_dir/typed" | wc -l | tr -d ' ')
     if [ "${_ssr_over:-0}" -gt 0 ]; then
         # Say so rather than skipping in silence: "scanned everything under
         # 1 MiB" is a different promise from "scanned everything".
         printf 'note: %s blob(s) over 1 MiB were NOT scanned\n' "$_ssr_over"
     fi
-    if [ -s "$_ssr_dir/blobs" ]; then
-        while read -r _ssr_sha; do
-            _ssr_path=$(grep -m1 "^$_ssr_sha " "$_ssr_dir/objects" | cut -d' ' -f2- || true)
-            if [ -n "$_ssr_skip" ]; then
-                case "$_ssr_path" in "$_ssr_skip"*) continue ;; esac
-            fi
-            if ! _ssr_hits=$(git cat-file blob "$_ssr_sha" 2>/dev/null | secret_scan_text); then
-                printf '%s: %s\n' "$_ssr_path" "$_ssr_hits"
-                _ssr_fail=1
-            fi
-        done < "$_ssr_dir/blobs"
-    fi
+    while read -r _ssr_sha _ssr_type _ssr_size _ssr_path; do
+        if [ "$_ssr_type" != blob ] || [ "$_ssr_size" -gt 1048576 ]; then
+            continue
+        fi
+        if [ -n "$_ssr_skip" ]; then
+            case "$_ssr_path" in "$_ssr_skip"*) continue ;; esac
+        fi
+        # Read once, scanned by both tables.
+        git cat-file blob "$_ssr_sha" > "$_ssr_dir/blob" 2>/dev/null || true
+        if ! _ssr_hits=$(secret_scan_text < "$_ssr_dir/blob"); then
+            _secret_scan_prefix "$_ssr_path" "$_ssr_hits"
+            _ssr_fail=1
+        fi
+        if [ -n "$_ssr_pat" ] && [ -s "$_ssr_pat" ] \
+            && ! _ssr_hits=$(secret_scan_denylist_text "$_ssr_pat" < "$_ssr_dir/blob"); then
+            _secret_scan_prefix "$_ssr_path (.sanitize-patterns)" "$_ssr_hits"
+            _ssr_fail=1
+        fi
+    done < "$_ssr_dir/typed"
 
     rm -rf "$_ssr_dir"
-    unset _ssr_range _ssr_skip _ssr_dir _ssr_msgs _ssr_over _ssr_sha _ssr_path _ssr_hits
+    unset _ssr_range _ssr_skip _ssr_pat _ssr_dir _ssr_over _ssr_sha _ssr_type _ssr_size _ssr_path _ssr_hits
     return "$_ssr_fail"
+}
+
+secret_scan_range_paths() {
+    # $1 — a rev range or list of revs. Prints the path of every blob the range
+    # introduces, whatever its size — the file NAMES a publication carries.
+    # From the object walk and not `git log --name-only`, which lists nothing for
+    # a merge commit: a `.env` born on a merge was invisible to the name gate.
+    _ssrp_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-paths.$$")
+    # A rev LIST, word-split on purpose.
+    # shellcheck disable=SC2086
+    git rev-list --objects $1 2>/dev/null | awk 'NF>1' > "$_ssrp_tmp" || true
+    secret_scan_objects "$_ssrp_tmp" | awk '$2 == "blob"' | cut -d ' ' -f 4- | sort -u
+    rm -f "$_ssrp_tmp"
+    unset _ssrp_tmp
 }

@@ -1,7 +1,7 @@
 ﻿# enable-guard.ps1 — activate the secret-guards for THIS bundle repo.
 #
-# The three hooks under .githooks/ (pre-commit, commit-msg, pre-push) enforce
-# the cardinal rule:
+# The four hooks under .githooks/ (pre-commit, pre-merge-commit, commit-msg,
+# pre-push) enforce the cardinal rule:
 # nothing private ever lands in this PUBLIC repo. Git ignores custom hook paths
 # until you opt in, so a fresh clone has ZERO leak protection until this runs.
 # Run it once per clone. (Git Bash is needed for the POSIX-sh hook to execute.)
@@ -10,7 +10,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
     git config core.hooksPath .githooks
-    Write-Host "[ok] core.hooksPath = .githooks - pre-commit, commit-msg and pre-push guards are active" -ForegroundColor Green
+    Write-Host "[ok] core.hooksPath = .githooks - pre-commit, pre-merge-commit, commit-msg and pre-push guards are active" -ForegroundColor Green
 
     # Seed a LOCAL, untracked .sanitize-patterns.md reference (never committed -
     # both the hook and .gitignore block it) listing the CLASSES of personal

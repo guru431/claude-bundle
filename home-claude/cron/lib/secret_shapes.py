@@ -235,7 +235,12 @@ SHAPES: tuple[Shape, ...] = (
 #
 # `.env.example` / `.env.sample` / `.env.template` are the deliberate exception:
 # they are the files a project SHOULD commit, so they are matched by
-# SENSITIVE_PATH_ALLOW_ERE and let through.
+# SENSITIVE_PATH_ALLOW and let through — `.env.local.example` as well.
+#
+# The last three entries on each side used to exist only inside pre-commit (and
+# `.sanitize-patterns` in github-push.sh as well), which is how the pre-push hook
+# and the nightly sweep came to publish the one file that lists everything
+# personal. `vault.env` is the name the very first version of the hook guarded.
 SENSITIVE_PATHS: tuple[str, ...] = (
     r"(^|/)\.env(\.[A-Za-z0-9_.-]+)?$",
     r"(^|/)\.envrc$",
@@ -248,11 +253,14 @@ SENSITIVE_PATHS: tuple[str, ...] = (
     r"(^|/)terraform\.tfstate(\.backup)?$",
     r"(^|/)\.pgpass$",
     r"(^|/)secrets?\.(json|ya?ml|toml|ini)$",
+    r"(^|/)vault\.env$",
+    r"(^|/)\.sanitize-patterns(\.[A-Za-z0-9]+)?$",
 )
 
 SENSITIVE_PATH_ALLOW: tuple[str, ...] = (
-    r"\.env\.(example|sample|template|dist)$",
+    r"\.env(\.[A-Za-z0-9_-]+)?\.(example|sample|template|dist)$",
     r"\.example\.env$",
+    r"\.pub$",
 )
 
 

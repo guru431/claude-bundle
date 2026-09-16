@@ -1,0 +1,13 @@
+#!/bin/sh
+# pre-merge-commit secret-guard: the pre-commit checks, for a merge commit.
+#
+# `git merge` never runs pre-commit. A merge that completes without conflicts
+# commits its result through THIS hook only (git >= 2.24), so whatever the merged
+# branch brought in — commits made before the guard was enabled, or with
+# --no-verify — was committed unscanned, and pre-push was the first thing to
+# look at it. The index here holds the merge result, so the staged diff
+# pre-commit reads is exactly what the merge adds to the current branch.
+#
+# Activate once per clone:   git config core.hooksPath .githooks
+# Bypass a confirmed false positive:   git merge --no-verify
+exec "$(dirname "$0")/pre-commit"

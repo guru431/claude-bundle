@@ -158,7 +158,9 @@ previously had three retry policies against one paragraph of documentation.
 A configuration nobody can parse denies rather than proceeds: a broken
 `bundle.local.yaml` denies every project, an unknown `WIKI_LLM_PROVIDER` refuses
 every call, an unparseable `WIKI_ALLOW_OFFBOX` means "off-box refused", a missing
-`secret-scan.sh` blocks the commit and the push.
+`secret-scan.sh` blocks the commit and the push — in every git hook, `pre-commit`
+included, and in both push scripts — and a `.sanitize-patterns` line that grep
+cannot compile blocks them too, instead of switching the denylist off.
 
 Two things fail OPEN, on purpose, and both are logged when they do:
 

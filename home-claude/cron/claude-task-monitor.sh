@@ -14,7 +14,7 @@
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary (failed tasks, down services, a down LLM chain's providers) plus the TITLES of stale findings from every allowed project -> Telegram Bot API money=no writes=cron/state/task-monitor-seen.json
+# bundle-io: offbox=a failure summary (failed tasks, down services, a down LLM chain's providers) plus the TITLES of stale findings from every allowed project -> Telegram Bot API money=no writes=$HOME/task-monitor-fatal.log OUTSIDE the bundle (a start-up failure, or the full text of an alert it could not deliver: task names, Password-task arguments), and cron/state/task-monitor-seen.json
 
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -z "$BUNDLE_ROOT" ] || [ ! -d "$BUNDLE_ROOT/cron" ]; then
@@ -345,12 +345,30 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# BUNDLE_ROOT passed via argv[1]. PROJECTS_ROOT env var (e.g. from the bundle
-# .env) overrides the default of "parent dir" — when the bundle is deployed to
-# ~/.claude, the parent is the user profile, not a projects workspace.
-import os
+# BUNDLE_ROOT passed via argv[1].
 BUNDLE_ROOT = Path(sys.argv[1])
-PROJECTS_ROOT = Path(os.environ.get("PROJECTS_ROOT") or BUNDLE_ROOT.parent)
+
+# utils FIRST, and for two things at once: the privacy gate every other
+# collector uses, and PROJECTS_ROOT. The root used to be read from the
+# environment BEFORE this import — but utils is what resolves
+# bundle.local.yaml::projects_root (the canon) and only then exports it, so with
+# the canon alone the watch fell back to the bundle's parent: on a deployed
+# ~/.claude, the user profile.
+#
+# Without utils there is no policy to honour, so no project is read — only the
+# bundle's own FINDINGS.md. The fallback was "allow every project", which in the
+# one job that carries finding titles to Telegram made a broken import a leak.
+sys.path.insert(0, str(BUNDLE_ROOT / 'cron' / 'hooks'))
+try:
+    import utils
+except Exception as exc:
+    utils = None
+    print(f"findings watch: utils not importable ({type(exc).__name__}: {exc}) — "
+          f"no project is read, only the bundle's own FINDINGS.md", file=sys.stderr)
+PROJECTS_ROOT = utils.PROJECTS_ROOT if utils is not None else None
+if utils is not None and PROJECTS_ROOT is None:
+    print("findings watch: projects_root is not set — only the bundle's own "
+          "FINDINGS.md is watched", file=sys.stderr)
 STALE_DAYS = 90
 NEW_P1_WINDOW = 7
 NEW_P1_LIMIT = 5
@@ -369,15 +387,9 @@ NOISE_PREFIX = re.compile(r'^code-review[\s:\-]', re.IGNORECASE)
 # FINDINGS.md of every directory under projects_root and puts their titles in a
 # Telegram message — so a project excluded by the policy was having its name and
 # its finding titles carried off-box by the one job that never asked.
-sys.path.insert(0, str(BUNDLE_ROOT / 'cron' / 'hooks'))
-try:
-    from utils import working_copy_allowed
-except Exception:
-    def working_copy_allowed(_name):
-        return True
-
-for findings in list(PROJECTS_ROOT.glob('*/FINDINGS.md')) + list(BUNDLE_ROOT.glob('FINDINGS.md')):
-    if findings.parent != BUNDLE_ROOT and not working_copy_allowed(findings.parent.name):
+project_findings = list(PROJECTS_ROOT.glob('*/FINDINGS.md')) if PROJECTS_ROOT else []
+for findings in project_findings + list(BUNDLE_ROOT.glob('FINDINGS.md')):
+    if findings.parent != BUNDLE_ROOT and not utils.working_copy_allowed(findings.parent.name):
         continue
     try:
         text = findings.read_text(encoding='utf-8', errors='replace')

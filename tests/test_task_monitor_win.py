@@ -10,7 +10,9 @@ Everything between those stubs and the printed alert is the shipped code.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import types
@@ -203,3 +205,79 @@ def test_the_windows_monitor_puts_a_down_chain_on_top_of_its_alert(run_task_stat
     assert "ClaudeNightly: exit 1" in first
 
     assert "LLM chain is DOWN (" not in run_task_status(failed), "reported twice"
+
+
+# ── findings watch ───────────────────────────────────────────────────────────
+
+STALE_ENTRY = "# Findings — {name}\n\n## 2020-01-01 · {title} [P2]\n**Status:** open\n"
+
+
+@pytest.fixture()
+def deployed(tmp_path: Path):
+    """A deployed layout: the bundle at <home>/.claude, working copies elsewhere.
+
+    <home>/decoy/FINDINGS.md sits where the watch used to look when nothing told
+    it otherwise — the bundle's parent, which on a real install is the user
+    profile, not a projects workspace.
+    """
+    home = tmp_path / "home"
+    bundle = home / ".claude"
+    shutil.copytree(CRON, bundle / "cron",
+                    ignore=shutil.ignore_patterns("__pycache__", "logs", "state"))
+    (home / "decoy").mkdir()
+    (home / "decoy" / "FINDINGS.md").write_text(
+        STALE_ENTRY.format(name="decoy", title="Not a project"), encoding="utf-8")
+    work = tmp_path / "work"
+    (work / "app").mkdir(parents=True)
+    (work / "app" / "FINDINGS.md").write_text(
+        STALE_ENTRY.format(name="app", title="An old one"), encoding="utf-8")
+    return bundle, work
+
+
+def run_findings_watch(bundle: Path, **env_extra: str) -> subprocess.CompletedProcess:
+    """The FINDINGS_ALERT heredoc as its own process, as the script runs it.
+
+    A process rather than in-process: what is under test is the order in which
+    it reads the environment and imports utils, which loads .env and the
+    manifest as a side effect.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "PROJECTS_ROOT"}
+    env.update(env_extra, PYTHONIOENCODING="utf-8")
+    return subprocess.run([sys.executable, "-X", "utf8", "-", str(bundle)],
+                          input=_heredoc("FINDINGS_ALERT"), capture_output=True,
+                          text=True, encoding="utf-8", env=env, timeout=60)
+
+
+def test_the_findings_watch_takes_projects_root_from_the_manifest(deployed):
+    """bundle.local.yaml::projects_root is the canon; the watch read the environment.
+
+    It computed its root BEFORE importing utils — the module that resolves the
+    manifest and only then exports PROJECTS_ROOT — so with the canon alone it
+    silently scanned the bundle's parent directory instead.
+    """
+    pytest.importorskip("yaml")          # utils reads the manifest through PyYAML
+    bundle, work = deployed
+    (bundle / "bundle.local.yaml").write_text(f"projects_root: {work.as_posix()}\n",
+                                              encoding="utf-8")
+
+    res = run_findings_watch(bundle)
+
+    assert "[app] 2020-01-01 P2: An old one" in res.stdout, res.stdout + res.stderr
+    assert "decoy" not in res.stdout, "scanned the bundle's parent, not projects_root"
+
+
+def test_without_utils_the_findings_watch_reads_no_project(deployed):
+    """No utils means no privacy policy — so no project's findings leave the box.
+
+    The fallback used to be `working_copy_allowed = lambda name: True`: a broken
+    import turned the gate every other collector honours into "allow all", in
+    the one job that carries finding titles to Telegram.
+    """
+    bundle, work = deployed
+    (bundle / "cron" / "hooks" / "utils.py").write_text(
+        "raise ImportError('broken on purpose')\n", encoding="utf-8")
+
+    res = run_findings_watch(bundle, PROJECTS_ROOT=str(work))
+
+    assert "[app]" not in res.stdout, res.stdout
+    assert "decoy" not in res.stdout, res.stdout

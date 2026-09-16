@@ -164,3 +164,48 @@ def test_the_fallback_registry_parser_also_sees_health_port(tmp_path, monkeypatc
 
     tasks = monitor.registry_tasks()
     assert tasks and tasks[0].get("health_port") == 8765
+
+
+def test_the_posix_monitor_reports_a_down_llm_chain_once(tmp_path, monkeypatch):
+    """The chain's voice is the monitors', so the POSIX one carries it too.
+
+    main() runs with the init-system probes, the ledger and delivery stubbed —
+    what is pinned is the message. The fixture sits relative to the moment of
+    the run, so the outcome does not depend on the date (the Monday digest is
+    pinned with a fixed clock in test_task_monitor_win.py).
+    """
+    import contextlib
+    import json
+    import types
+    from datetime import timedelta
+
+    now = datetime.now()
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "chain-dead.json").write_text(json.dumps({
+        "first_iso": (now - timedelta(hours=6)).isoformat(timespec="seconds"),
+        "last_iso": (now - timedelta(hours=2)).isoformat(timespec="seconds"),
+        "fails": 3, "depleted": {}}), encoding="utf-8")
+    sent: list[str] = []
+
+    @contextlib.contextmanager
+    def no_ledger(_task, **defaults):
+        yield dict(defaults)
+
+    monkeypatch.setattr(monitor, "os", types.SimpleNamespace(name="posix"))
+    monkeypatch.setattr(monitor, "terminal_record", no_ledger)
+    monkeypatch.setattr(monitor, "registry_tasks", lambda: [])
+    monkeypatch.setattr(monitor, "check_systemd", lambda tasks: ([], None))
+    monkeypatch.setattr(monitor, "check_launchd", lambda tasks: ([], None))
+    monkeypatch.setattr(monitor, "send_telegram", lambda text: sent.append(text) or True)
+    monkeypatch.setattr(monitor, "STATE_PATH", state / "task-monitor-posix-seen.json")
+    monkeypatch.setattr(monitor, "CHAIN_DEAD_PATH", state / "chain-dead.json")
+    monkeypatch.setattr(monitor, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(monitor, "LOG_FILE", tmp_path / "logs" / "task-monitor-posix.log")
+
+    assert monitor.main() == 0
+    assert len(sent) == 1 and "LLM chain is DOWN (no provider answered)" in sent[0], sent
+    assert "failed unit(s)" not in sent[0], "an LLM outage is not a failed unit"
+
+    assert monitor.main() == 0
+    assert not any("LLM chain is DOWN (" in s for s in sent[1:]), "reported twice"

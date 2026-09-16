@@ -9,10 +9,12 @@ Everything between those stubs and the printed alert is the shipped code.
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -126,3 +128,78 @@ def test_a_service_that_recovers_and_dies_again_is_news_again(run_task_status, m
     run_task_status(service)                                     # restarted by hand
     down["now"] = True
     assert "nothing listening" in run_task_status(service)       # crash 2: news again
+
+
+# ── the LLM provider chain ───────────────────────────────────────────────────
+
+WEDNESDAY = datetime(2026, 9, 16, 9, 30)
+MONDAY = datetime(2026, 9, 14, 9, 30)
+
+
+def write_chain_dead(state_dir: Path, first: datetime, last: datetime) -> Path:
+    """cron/state/chain-dead.json in the shape utils.record_chain_dead() writes."""
+    path = state_dir / "chain-dead.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "first_iso": first.isoformat(timespec="seconds"),
+        "last_iso": last.isoformat(timespec="seconds"),
+        "fails": 7, "kinds": ["transient"], "depleted": {"deepseek": "403"},
+    }), encoding="utf-8")
+    return path
+
+
+def test_a_down_chain_is_reported_once_per_outage(tmp_path):
+    """New outage → the line; the same outage → silence, except in Monday's digest.
+
+    A morning report that repeats itself daily stops being read, which is the
+    rule the monitor already applies to failed tasks.
+    """
+    assert (WEDNESDAY.weekday(), MONDAY.weekday()) == (2, 0)
+    path = write_chain_dead(tmp_path, WEDNESDAY - timedelta(hours=8),
+                            WEDNESDAY - timedelta(hours=5))
+    seen: dict = {}
+
+    line = monitor_checks.chain_dead_report(seen, WEDNESDAY, path)
+    assert line.startswith("LLM chain is DOWN (deepseek: 403); 7 failed call(s)"), line
+    assert monitor_checks.chain_dead_report(seen, WEDNESDAY + timedelta(hours=1), path) is None
+
+    monday_path = write_chain_dead(tmp_path / "monday", MONDAY - timedelta(hours=8),
+                                   MONDAY - timedelta(hours=5))
+    monday_seen: dict = {}
+    monitor_checks.chain_dead_report(monday_seen, MONDAY, monday_path)
+    digest = monitor_checks.chain_dead_report(monday_seen, MONDAY + timedelta(hours=1),
+                                              monday_path)
+    assert digest and "still DOWN" in digest, digest
+
+
+def test_an_outage_that_ended_is_forgotten_and_the_next_one_is_news(tmp_path):
+    path = write_chain_dead(tmp_path, WEDNESDAY - timedelta(hours=8),
+                            WEDNESDAY - timedelta(hours=5))
+    seen: dict = {}
+    assert monitor_checks.chain_dead_report(seen, WEDNESDAY, path)
+
+    # A day and more without a failed call: recovered, nothing to say, key dropped.
+    assert monitor_checks.chain_dead_report(seen, WEDNESDAY + timedelta(hours=30), path) is None
+    assert monitor_checks.CHAIN_SEEN_KEY not in seen
+
+    later = WEDNESDAY + timedelta(days=3)
+    write_chain_dead(tmp_path, later - timedelta(hours=2), later - timedelta(hours=1))
+    assert monitor_checks.chain_dead_report(seen, later, path), "a second outage is news"
+
+
+def test_the_windows_monitor_puts_a_down_chain_on_top_of_its_alert(run_task_status,
+                                                                    tmp_path):
+    """The monitor, not the healthcheck, is the chain's voice (see chain_dead_report).
+
+    The fixture is placed relative to the moment of the run, so the outcome does
+    not depend on the date; the Monday digest is pinned above with a fixed clock.
+    """
+    now = datetime.now()
+    write_chain_dead(tmp_path / "state", now - timedelta(hours=6), now - timedelta(hours=2))
+    failed = [_task("ClaudeNightly", result=1, state="Ready")]
+
+    first = run_task_status(failed)
+    assert first.splitlines()[0].startswith("LLM chain is DOWN ("), first
+    assert "ClaudeNightly: exit 1" in first
+
+    assert "LLM chain is DOWN (" not in run_task_status(failed), "reported twice"

@@ -14,7 +14,7 @@
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary plus the TITLES of stale findings from every allowed project -> Telegram Bot API money=no writes=cron/state/task-monitor-seen.json
+# bundle-io: offbox=a failure summary (failed tasks, down services, a down LLM chain's providers) plus the TITLES of stale findings from every allowed project -> Telegram Bot API money=no writes=cron/state/task-monitor-seen.json
 
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -z "$BUNDLE_ROOT" ] || [ ! -d "$BUNDLE_ROOT/cron" ]; then
@@ -207,6 +207,15 @@ for t in tasks:
         continue
     failures.append(t)
     seen[t['Name']] = t['LastRun']
+
+# The LLM provider chain (cron/state/chain-dead.json, written by
+# utils.record_chain_dead). This monitor is its voice rather than the
+# healthcheck: it needs no LLM to say so, and the root cause lands on top of the
+# failed tasks the outage caused. Once per outage — monitor_checks.chain_dead_report.
+chain = monitor_checks.chain_dead_report(
+    seen, NOW, Path(sys.argv[1]) / 'state' / 'chain-dead.json')
+if chain:
+    NOTES.insert(0, chain)
 
 try:
     STATE.parent.mkdir(parents=True, exist_ok=True)

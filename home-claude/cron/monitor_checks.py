@@ -4,7 +4,9 @@
 claude-task-monitor.sh (Windows Task Scheduler, through PowerShell) and
 claude-task-monitor.py (systemd --user / launchd) read their schedulers in
 nothing like the same way, but some of their questions never involve the
-scheduler at all. Each such answer lives here, once.
+scheduler at all — what the registry declares, whether a declared service's
+port answers, whether the LLM provider chain is down. Each such answer lives
+here, once.
 
 Written after `health_port` shipped probed by the POSIX monitor only. The
 Windows monitor — enabled by default, on the platform the field was invented
@@ -19,7 +21,9 @@ tests/test_task_monitor_posix.py.
 """
 from __future__ import annotations
 
+import json
 import socket
+from datetime import datetime
 from pathlib import Path
 
 # How long a health probe waits for its connection. A module constant so a test
@@ -27,6 +31,19 @@ from pathlib import Path
 # returns only after two SYN retransmits, about two seconds — and a fast-suite
 # test has a one-second budget. Production keeps its margin above that.
 PROBE_TIMEOUT_S = 3.0
+
+# The file utils.record_chain_dead() writes (utils.CHAIN_DEAD_PATH). Not imported
+# from there: importing utils loads .env and the privacy manifest, which is not
+# something a monitor heredoc should do to read one JSON file.
+CHAIN_DEAD_PATH = Path(__file__).resolve().parent / "state" / "chain-dead.json"
+# An outage is FRESH while its last failure is at most this old. Past that the
+# chain has recovered on its own, and it must not keep paging; the file stays
+# in place as a record.
+CHAIN_DEAD_FRESH_H = 24
+# Where a monitor's seen-state remembers the outage it already reported. `<`
+# cannot occur in a Task Scheduler task name, so the key cannot collide with the
+# per-task keys the same file holds.
+CHAIN_SEEN_KEY = "<chain-dead>"
 
 
 def read_registry(registry: Path) -> list[dict]:
@@ -100,3 +117,59 @@ def check_health_ports(tasks: list[dict]) -> list[tuple[str, str]]:
                              f"({type(exc).__name__}) — the {task.get('trigger', '?')} "
                              f"service is down, whatever its exit status says"))
     return problems
+
+
+def chain_dead(path: Path = CHAIN_DEAD_PATH,
+               now: datetime | None = None) -> tuple[str, str] | None:
+    """(alert line, outage start) while the LLM provider chain is down — else None.
+
+    The reading half of utils.record_chain_dead(), which writes the fact and on
+    purpose tells nobody (a night is a hundred calls meeting the same shut door).
+    Every job that reports it — both task monitors and the healthcheck — reads it
+    here, so they cannot disagree about when an outage is over or what it says.
+    """
+    try:
+        st = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        last = datetime.fromisoformat(st["last_iso"])
+        first = datetime.fromisoformat(st.get("first_iso", st["last_iso"]))
+    except Exception:
+        return None                      # no file / unreadable — nothing to report
+    now = now or datetime.now()
+    hours_since = (now - last).total_seconds() / 3600
+    if hours_since > CHAIN_DEAD_FRESH_H:
+        return None                      # stale: the outage is over
+    down_h = (last - first).total_seconds() / 3600
+    depleted = st.get("depleted") if isinstance(st.get("depleted"), dict) else {}
+    why = ", ".join(f"{p}: {r}" for p, r in depleted.items()) or "no provider answered"
+    return (f"LLM chain is DOWN ({why}); {st.get('fails', '?')} failed call(s) over "
+            f"{down_h:.0f}h, last {hours_since:.0f}h ago — wiki flush/compile and "
+            f"memory-update are doing no work",
+            first.isoformat(timespec="seconds"))
+
+
+def chain_dead_report(seen: dict, now: datetime,
+                      path: Path = CHAIN_DEAD_PATH) -> str | None:
+    """The LLM-chain line a task monitor should send today; updates `seen`.
+
+    The monitors are the outage's voice. The healthcheck used to be the only
+    one, and it is both the task the privacy section of docs/cron-architecture.md
+    suggests switching off — after which the chain was mute again — and a task
+    that depends on the chain itself: on the morning of an outage it paged "LLM
+    analysis failed" and then "chain is DOWN", two messages about one event. A
+    monitor runs every morning, needs no LLM, and puts the root cause on top of
+    the failed tasks that outage caused.
+
+    Once per outage, keyed by its start. One already reported comes back only in
+    the Monday digest, like any standing failure; one that is over is forgotten.
+    """
+    found = chain_dead(path, now)
+    if found is None:
+        seen.pop(CHAIN_SEEN_KEY, None)
+        return None
+    line, started = found
+    if seen.get(CHAIN_SEEN_KEY) != started:
+        seen[CHAIN_SEEN_KEY] = started
+        return line
+    if now.weekday() == 0:
+        return f"LLM chain still DOWN since {started} (reported earlier)"
+    return None

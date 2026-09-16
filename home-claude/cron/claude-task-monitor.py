@@ -36,7 +36,7 @@ box once the units are installed.
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary naming the bundle's own units -> Telegram Bot API money=no writes=cron/state/task-monitor-posix-seen.json
+# bundle-io: offbox=a failure summary naming the bundle's own units and a down LLM chain's providers -> Telegram Bot API money=no writes=cron/state/task-monitor-posix-seen.json
 from __future__ import annotations
 
 import json
@@ -50,6 +50,7 @@ BUNDLE_ROOT = Path(__file__).resolve().parents[1]
 CRON_DIR = BUNDLE_ROOT / "cron"
 LOG_DIR = CRON_DIR / "logs"
 STATE_PATH = CRON_DIR / "state" / "task-monitor-posix-seen.json"
+CHAIN_DEAD_PATH = CRON_DIR / "state" / "chain-dead.json"
 REGISTRY = CRON_DIR / "registry.yaml"
 TELEGRAM_SH = CRON_DIR / "telegram-send.sh"
 
@@ -60,7 +61,8 @@ sys.path.insert(0, str(CRON_DIR))
 from runs import terminal_record  # noqa: E402
 # Shared with the Windows monitor (claude-task-monitor.sh): the registry parser
 # and the service port probe. Two copies had already drifted — see its header.
-from monitor_checks import check_health_ports, read_registry  # noqa: E402
+from monitor_checks import (  # noqa: E402
+    CHAIN_SEEN_KEY, chain_dead_report, check_health_ports, read_registry)
 
 DATE = datetime.now().strftime("%Y-%m-%d")
 LOG_FILE = LOG_DIR / f"task-monitor-posix_{DATE}.log"
@@ -275,23 +277,30 @@ def main() -> int:
         # before — the Windows monitor's rule, for the same reason: an unfixed
         # failure that reports every morning stops being read.
         seen = load_seen()
+        # The LLM provider chain, once per outage — the same rule and wording as
+        # the Windows monitor (monitor_checks.chain_dead_report). It keeps its
+        # own key in `seen`, which the prune below must leave alone.
+        chain = chain_dead_report(seen, datetime.now(), CHAIN_DEAD_PATH)
+        if chain:
+            log(chain)
         fresh = [(name, line) for name, line in problems if seen.get(name) != line]
         for name, line in problems:
             log(line if seen.get(name) != line else f"{line} (already reported)")
             seen[name] = line
         for name in list(seen):
-            if name not in {n for n, _ in problems}:
+            if name != CHAIN_SEEN_KEY and name not in {n for n, _ in problems}:
                 seen.pop(name, None)
         save_seen(seen)
 
-        if not fresh:
+        if not fresh and not chain:
             log("no new failures")
             rec["note"] = f"{len(tasks)} task(s) checked, {len(problems)} failing"
             return 0
 
-        body = "\n".join(line for _, line in fresh)
-        msg = (f"Bundle tasks (POSIX): {len(fresh)} failed unit(s)\n\n{body}\n\n"
-               f"Check logs: cron/logs/\n")
+        body = "\n".join(([chain] if chain else []) + [line for _, line in fresh])
+        header = (f"Bundle tasks (POSIX): {len(fresh)} failed unit(s)" if fresh
+                  else "Bundle tasks (POSIX): attention needed")
+        msg = f"{header}\n\n{body}\n\nCheck logs: cron/logs/\n"
         delivered = send_telegram(msg)
         rec["delivery"] = "ok" if delivered else "failed"
         rec["note"] = f"{len(tasks)} task(s) checked, {len(fresh)} new failure(s)"

@@ -229,6 +229,35 @@ $REMOTE_DATA
 
 $WIN_DATA"
 
+# --- Is the LLM chain already known to be down? ---
+# utils.record_chain_dead() writes cron/state/chain-dead.json whenever EVERY
+# provider fails, and alerts nobody from there — a night is a hundred calls
+# meeting the same shut door. monitor_checks.chain_dead() is the one reading of
+# that file (fresh = last failure within a day), shared with both task monitors.
+#
+# Asked BEFORE the analysis: with the chain down, the call below meets the same
+# door, and its failure paged on its own ("LLM analysis failed") on the very
+# morning the outage itself was being reported — two messages about one event,
+# plus an exit 1 the task monitor then reported as a third.
+CHAIN_ALERT=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$BUNDLE_ROOT" 2>>"$LOG_FILE" <<'PYSCRIPT'
+import sys
+from pathlib import Path
+
+cron = Path(sys.argv[1]) / "cron"
+sys.path.insert(0, str(cron))
+try:
+    from monitor_checks import chain_dead
+except Exception:
+    sys.exit(0)                      # no shared module — nothing to judge
+found = chain_dead(cron / "state" / "chain-dead.json")
+if found:
+    print(found[0])
+PYSCRIPT
+)
+if [ -n "$CHAIN_ALERT" ]; then
+    echo "LLM chain: $CHAIN_ALERT" >> "$LOG_FILE"
+fi
+
 # --- Send collected metrics to the LLM for analysis ---
 # cron/prompts/healthcheck.md ships with the bundle; if it's missing the
 # inline default below is used.
@@ -247,7 +276,8 @@ PROMPT=""
 # phrased as an instruction, a process named like one) is indirect prompt
 # injection aimed at the analyzing model. Same fencing the pipeline applies to
 # session text elsewhere, see cron/hooks/untrusted.py.
-ANALYSIS=$("$PYTHON" "$(dirname "$0")/llm-call.py" 600 2>>"$LOG_FILE" <<LLM_EOF
+if [ -z "$CHAIN_ALERT" ]; then
+    ANALYSIS=$("$PYTHON" "$(dirname "$0")/llm-call.py" 600 2>>"$LOG_FILE" <<LLM_EOF
 ${PROMPT:-Analyze the following healthcheck metrics. Report any anomalies, low disk space, missing services or unusual load. Be concise.}
 
 METRICS:
@@ -255,7 +285,13 @@ METRICS:
 ${METRICS}
 LLM_EOF
 )
-rc=$?
+    rc=$?
+else
+    # Not this job's failure, and not a second page: the outage itself is
+    # reported once — by the task monitor, or further down when none runs here.
+    ANALYSIS="(LLM analysis skipped — the provider chain is down; disk severity below is measured, not inferred)"
+    rc=0
+fi
 
 echo "$ANALYSIS" >> "$LOG_FILE"
 
@@ -275,53 +311,58 @@ fi
 # --- Alert on the verdict ---
 # Without this the analysis only ever reached the log: an urgent finding was
 # invisible unless someone opened cron/logs/ by hand. Severity comes from the
-# deterministic checks — local disk, remote disk, and the monitor dead-man
-# switch below; the LLM text is the alert body (truncated to stay under
-# Telegram's 4096-char limit).
+# deterministic checks — local disk, remote disk, the monitor dead-man switch
+# below and the LLM chain above; the LLM text is the alert body (truncated to
+# stay under Telegram's 4096-char limit).
 echo "Disk check: max ${MAX_DISK_PCT}% on ${MAX_DISK_FS:-?} (threshold ${DISK_THRESHOLD}%)" >> "$LOG_FILE"
 echo "Remote disk check: max ${REMOTE_MAX_PCT}% on ${REMOTE_MAX_FS:-none} (threshold ${REMOTE_DISK_THRESHOLD}%)" >> "$LOG_FILE"
 
 # --- Dead-man switch for the task monitor ---
 # "A task that stopped firing has no failed run to notice" is the whole reason
-# cron/runs.py exists — and it is just as true of ClaudeTaskMonitor itself, the
+# cron/runs.py exists — and it is just as true of the task monitor itself, the
 # task that would otherwise be the one to say so. Nothing watches the watchman,
 # so the healthcheck (the other daily job) checks the ledger for it.
 #
 # Silent by design where the task does not apply: the check no-ops when the
-# registry has it disabled, when its `platform:` does not match this host (it is
-# `windows`, so every Linux/macOS box is out), and on a lite install where no
-# ledger exists at all. A daily false alarm is how a real one stops being read.
+# registry has it disabled, when its `platform:` does not match this host, and on
+# a lite install where no ledger exists at all. A daily false alarm is how a real
+# one stops being read.
+#
+# The exit code says which: 3 = no task monitor runs on this host. The LLM-chain
+# alert below depends on it — it is the monitor's to send when one runs here.
 MONITOR_ALERT=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$BUNDLE_ROOT" 2>>"$LOG_FILE" <<'PYSCRIPT'
 import os, sys
 from pathlib import Path
 
-TASK = "ClaudeTaskMonitor"
+# The monitor of THIS platform. It was ClaudeTaskMonitor everywhere, so on
+# Linux/macOS — where that task is `platform: windows` — the switch never fired.
+TASK = "ClaudeTaskMonitor" if os.name == "nt" else "ClaudeTaskMonitorPosix"
+NO_MONITOR = 3
 MAX_AGE_H = 30            # a daily task, plus grace: the healthcheck runs at
                           # 09:00 and the monitor at 09:30, so the freshest
                           # possible record is already ~23.5h old here. A flat
                           # 24h would page on half an hour of jitter.
 root = Path(sys.argv[1])
 sys.path.insert(0, str(root / "cron"))
+
+# The registry through the parser both monitors use, so a box without PyYAML
+# gets an answer instead of silence.
+try:
+    from monitor_checks import read_registry
+    task = next((t for t in read_registry(root / "cron" / "registry.yaml")
+                 if t.get("name") == TASK), None)
+except Exception:
+    sys.exit(NO_MONITOR)             # unreadable registry — nobody can be relied on
+if task is None or task.get("enabled") is False:
+    sys.exit(NO_MONITOR)
+platform = str(task.get("platform", "all")).lower()
+if (platform == "windows" and os.name != "nt") or (platform == "posix" and os.name == "nt"):
+    sys.exit(NO_MONITOR)
+
 try:
     from runs import read_latest_runs, latest_by_task, age_days
 except Exception:
     sys.exit(0)                      # no ledger module — nothing to judge
-
-reg = root / "cron" / "registry.yaml"
-task = None
-try:
-    import yaml
-    for t in (yaml.safe_load(reg.read_text(encoding="utf-8")).get("tasks") or []):
-        if isinstance(t, dict) and t.get("name") == TASK:
-            task = t
-            break
-except Exception:
-    sys.exit(0)                      # no PyYAML / unreadable registry — stay quiet
-if task is None or task.get("enabled") is False:
-    sys.exit(0)
-platform = str(task.get("platform", "all")).lower()
-if (platform == "windows" and os.name != "nt") or (platform == "posix" and os.name == "nt"):
-    sys.exit(0)
 
 runs = read_latest_runs()
 if not runs:
@@ -337,45 +378,8 @@ if age is not None and age * 24 > MAX_AGE_H:
           f"{MAX_AGE_H}h) — nothing is watching the other tasks")
 PYSCRIPT
 )
+MONITOR_RC=$?
 
-# Second dead-man switch: the LLM chain itself.
-#
-# When every provider fails, each task logs its own bad night and carries on;
-# nothing says "this machine has no LLM at all". Upstream that state lasted two
-# full nights unnoticed. utils.record_chain_dead() writes the fact to
-# cron/state/chain-dead.json — deliberately without alerting, since a night is
-# a hundred calls meeting the same shut door — and this job, which already owns
-# the Telegram channel, is what reports it.
-#
-# Only while it is FRESH (last failure within a day): a chain that recovered on
-# its own must not keep paging, and the file is left in place as a record.
-CHAIN_ALERT=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$BUNDLE_ROOT" 2>>"$LOG_FILE" <<'PYSCRIPT'
-import json, sys
-from datetime import datetime
-from pathlib import Path
-
-path = Path(sys.argv[1]) / "cron" / "state" / "chain-dead.json"
-try:
-    st = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    last = datetime.fromisoformat(st["last_iso"])
-    first = datetime.fromisoformat(st.get("first_iso", st["last_iso"]))
-except Exception:
-    sys.exit(0)                      # no file / unreadable — nothing to report
-
-hours_since = (datetime.now() - last).total_seconds() / 3600
-if hours_since > 24:
-    sys.exit(0)                      # stale: the outage is over
-down_h = (last - first).total_seconds() / 3600
-why = ", ".join(f"{p}: {r}" for p, r in (st.get("depleted") or {}).items()) or "no provider answered"
-print(f"LLM chain is DOWN ({why}); {st.get('fails', '?')} failed call(s) over "
-      f"{down_h:.0f}h, last {hours_since:.0f}h ago — wiki flush/compile and "
-      f"memory-update are doing no work")
-PYSCRIPT
-)
-
-if [ -n "$CHAIN_ALERT" ]; then
-    echo "LLM chain: $CHAIN_ALERT" >> "$LOG_FILE"
-fi
 if [ -n "$MONITOR_ALERT" ]; then
     echo "Dead-man switch: $MONITOR_ALERT" >> "$LOG_FILE"
 fi
@@ -393,9 +397,19 @@ if [ -n "$MONITOR_ALERT" ]; then
     ALERTS="${ALERTS:+$ALERTS
 }$MONITOR_ALERT"
 fi
+# The LLM chain is the task monitor's to report when one runs on this host: it
+# needs no LLM, says it once per outage, and puts it on top of the failed tasks
+# the outage caused. The healthcheck says it only when no monitor will — none
+# enabled for this platform (MONITOR_RC=3, or the check itself broke), or the one
+# that is has stopped reporting (MONITOR_ALERT). A user who switches this job
+# off, as the privacy docs suggest, therefore does not lose the alert.
 if [ -n "$CHAIN_ALERT" ]; then
-    ALERTS="${ALERTS:+$ALERTS
+    if [ "$MONITOR_RC" -ne 0 ] || [ -n "$MONITOR_ALERT" ]; then
+        ALERTS="${ALERTS:+$ALERTS
 }$CHAIN_ALERT"
+    else
+        echo "LLM chain: left to the task monitor, which reports it once per outage" >> "$LOG_FILE"
+    fi
 fi
 
 DELIVERY="n/a"
@@ -428,7 +442,7 @@ RC=0
 "$PYTHON" "$BUNDLE_ROOT/cron/runs.py" record \
     --task ClaudeHealthcheck --rc "$RC" --artifact "$LOG_FILE" \
     --delivery "$DELIVERY" \
-    --note "disk ${MAX_DISK_PCT}% / threshold ${DISK_THRESHOLD}%; remote ${REMOTE_MAX_PCT}% on ${REMOTE_MAX_FS:-none} / threshold ${REMOTE_DISK_THRESHOLD}%" \
+    --note "disk ${MAX_DISK_PCT}% / threshold ${DISK_THRESHOLD}%; remote ${REMOTE_MAX_PCT}% on ${REMOTE_MAX_FS:-none} / threshold ${REMOTE_DISK_THRESHOLD}%${CHAIN_ALERT:+; LLM analysis skipped: provider chain down}" \
     >>"$LOG_FILE" 2>&1 || true
 
 # The disk alert has fired (or not) on measured data by this point; only now

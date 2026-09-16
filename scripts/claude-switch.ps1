@@ -134,20 +134,20 @@ function Split-HostPort([string]$value, [string]$varName, [int]$defaultPort) {
     #   ::1 / 2001:db8::1                -> bare IPv6 (>=2 colons, no bracket)  -> default port
     #   127.0.0.1:3456 / host:3456       -> IPv4/hostname + port
     #   127.0.0.1 / host                 -> IPv4/hostname, default port
+    # THROWS on a malformed value instead of exiting: switching to that backend
+    # still ends with exit 2 (Set-CCR / Set-Ollama), but `status` and the menu
+    # only need to say the value is broken — see Get-CcrHostPort.
     $value = $value.Trim()
     $h = $null
     $p = $null
 
     if ($value.StartsWith("[")) {
         $close = $value.IndexOf("]")
-        if ($close -lt 0) {
-            Write-Host "ERROR: $varName has '[' without ']' (got '$value')." -ForegroundColor Red
-            exit 2
-        }
+        if ($close -lt 0) { throw "$varName has '[' without ']' (got '$value')." }
         $h = $value.Substring(1, $close - 1)
         $rest = $value.Substring($close + 1)
         if ($rest.StartsWith(":")) { $p = $rest.Substring(1) }
-        elseif ($rest -ne "")      { Write-Host "ERROR: $varName malformed after ']' (got '$value')." -ForegroundColor Red; exit 2 }
+        elseif ($rest -ne "")      { throw "$varName malformed after ']' (got '$value')." }
     }
     elseif (($value.ToCharArray() | Where-Object { $_ -eq ':' } | Measure-Object).Count -ge 2) {
         # Two or more colons and no brackets => bare IPv6 literal, no port given.
@@ -159,16 +159,12 @@ function Split-HostPort([string]$value, [string]$varName, [int]$defaultPort) {
         else { $h = $value.Substring(0, $idx); $p = $value.Substring($idx + 1) }
     }
 
-    if ([string]::IsNullOrEmpty($h)) {
-        Write-Host "ERROR: $varName has empty host (got '$value')." -ForegroundColor Red
-        exit 2
-    }
+    if ([string]::IsNullOrEmpty($h)) { throw "$varName has empty host (got '$value')." }
     if ($null -eq $p -or $p -eq "") { return @($h, $defaultPort) }
 
     $port = 0
     if (-not [int]::TryParse($p, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
-        Write-Host "ERROR: $varName port must be 1..65535 (got '$value')." -ForegroundColor Red
-        exit 2
+        throw "$varName port must be 1..65535 (got '$value')."
     }
     return @($h, $port)
 }
@@ -205,9 +201,11 @@ function New-BackendUrl([string]$h, [int]$port, [string]$varName) {
     return "https://${authorityHost}:${port}"
 }
 
-# Parsed LAZILY. At top level, `Split-HostPort` calls `exit 2` on a malformed
-# value — so a typo in CCR_HOST killed `claude-switch.ps1 status`, a read-only
-# command that has nothing to do with CCR, before it could print anything.
+# Parsed LAZILY, and a malformed value throws. Parsed eagerly with `exit 2`, a
+# typo in CCR_HOST killed `claude-switch.ps1 status` — a read-only command that
+# has nothing to do with CCR — before it could print anything, and OLLAMA_HOST,
+# still parsed at the top of the script, kept doing exactly that. Only a switch
+# TO that backend treats it as fatal now.
 $script:_ccrHost = $null
 $script:_ccrPort = $null
 function Get-CcrHostPort {
@@ -216,6 +214,17 @@ function Get-CcrHostPort {
     if (-not $hp) { $hp = "127.0.0.1:3456" }
     $script:_ccrHost, $script:_ccrPort = Split-HostPort $hp "CCR_HOST" 3456
     return @($script:_ccrHost, $script:_ccrPort)
+}
+
+# Ollama (local or LAN). Host:port from OLLAMA_HOST env (default 127.0.0.1:11434).
+$script:_ollamaHost = $null
+$script:_ollamaPort = $null
+function Get-OllamaHostPort {
+    if ($null -ne $script:_ollamaHost) { return @($script:_ollamaHost, $script:_ollamaPort) }
+    $hp = Get-EnvVar "OLLAMA_HOST"
+    if (-not $hp) { $hp = "127.0.0.1:11434" }
+    $script:_ollamaHost, $script:_ollamaPort = Split-HostPort $hp "OLLAMA_HOST" 11434
+    return @($script:_ollamaHost, $script:_ollamaPort)
 }
 
 function Test-SamePath([string]$a, [string]$b) {
@@ -313,12 +322,9 @@ $MINIMAX_DIRECT_MODELS = @("MiniMax-M3", "MiniMax-M2.7")
 # --- OpenCode Go direct (Anthropic /v1/messages surface) — messages-reachable models ---
 $OPENCODE_DIRECT_MODELS = @("minimax-m3", "qwen3.7-max")
 
-# Ollama (local or LAN). Host:port from OLLAMA_HOST env (default 127.0.0.1:11434).
+# Ollama (local or LAN) — host:port comes from Get-OllamaHostPort above.
 # Ollama serves the Anthropic /v1/messages API natively, so Claude Code talks to
 # it directly — no proxy needed. Adjust OLLAMA_MODELS to the models you've pulled.
-$ollamaHostPort = Get-EnvVar "OLLAMA_HOST"
-if (-not $ollamaHostPort) { $ollamaHostPort = "127.0.0.1:11434" }
-$ollamaHost, $ollamaPort = Split-HostPort $ollamaHostPort "OLLAMA_HOST" 11434
 $OLLAMA_MODELS = @("gemma4:12b", "qwen3.5:9b", "qwen3.6:35b-a3b-q4_K_M", "gpt-oss:20b")
 
 # Request timeout written into every backend env block. Default 3000000 ms (50 min)
@@ -419,11 +425,18 @@ function Get-CurrentMode($obj) {
     if ($envObj.PSObject.Properties.Match("ANTHROPIC_MODEL").Count -gt 0) {
         $modelStr = " → $($envObj.ANTHROPIC_MODEL)"
     }
-    $ccrHost, $ccrPort = Get-CcrHostPort
-    $ccrPattern = "127\.0\.0\.1:$ccrPort|localhost:$ccrPort|$([regex]::Escape($ccrHost)):$ccrPort"
-    $ollamaPattern = "$([regex]::Escape($ollamaHost)):$ollamaPort"
-    if ($url -match $ccrPattern) { return "ccr$modelStr  ($url)" }
-    if ($url -match $ollamaPattern) { return "ollama-local$modelStr  ($url)" }
+    # A malformed CCR_HOST / OLLAMA_HOST gives nothing to match against, but it
+    # must not end a read-only command: the URL falls through to `custom`, which
+    # still shows it.
+    try {
+        $ccrHost, $ccrPort = Get-CcrHostPort
+        $ccrPattern = "127\.0\.0\.1:$ccrPort|localhost:$ccrPort|$([regex]::Escape($ccrHost)):$ccrPort"
+        if ($url -match $ccrPattern) { return "ccr$modelStr  ($url)" }
+    } catch { }
+    try {
+        $ollamaHost, $ollamaPort = Get-OllamaHostPort
+        if ($url -match "$([regex]::Escape($ollamaHost)):$ollamaPort") { return "ollama-local$modelStr  ($url)" }
+    } catch { }
     if ($url -match "opencode\.ai")         { return "opencode-direct$modelStr  ($url)" }
     if ($url -match "minimax\.io|minimaxi") { return "minimax-direct$modelStr  ($url)" }
     if ($url -match "api\.deepseek\.com")   { return "deepseek-direct$modelStr  ($url)" }
@@ -758,6 +771,8 @@ function Set-Ollama($obj, [string]$modelName) {
     # Ollama speaks the Anthropic /v1/messages API natively — direct, no proxy.
     # No key needed for a local Ollama, but Claude Code prefers a stored OAuth
     # session over env; a dummy ANTHROPIC_AUTH_TOKEN (Bearer) overrides it.
+    try { $ollamaHost, $ollamaPort = Get-OllamaHostPort }
+    catch { Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red; exit 2 }
     $ollamaUrl = New-BackendUrl $ollamaHost $ollamaPort "OLLAMA_HOST"
 
     # Probe — is Ollama actually reachable?
@@ -789,7 +804,8 @@ function Set-Ollama($obj, [string]$modelName) {
 
 function Set-CCR($obj, [string]$modelName) {
     $key = Require-Key "CCR_API_KEY"
-    $ccrHost, $ccrPort = Get-CcrHostPort
+    try { $ccrHost, $ccrPort = Get-CcrHostPort }
+    catch { Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red; exit 2 }
     $ccrUrl  = New-BackendUrl $ccrHost $ccrPort "CCR_HOST"
 
     # Probe — is CCR actually reachable?
@@ -847,6 +863,10 @@ function Show-Menu($currentMode) {
     Write-Host " Claude Code: backend switcher" -ForegroundColor Cyan
     Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host ""
+    # The CCR line printed `${ccrHost}:${ccrPort}` — variables that only ever
+    # existed inside other functions — so it read "via local proxy :".
+    $ollamaAt = try { (Get-OllamaHostPort) -join ':' } catch { "(OLLAMA_HOST is malformed)" }
+    $ccrAt    = try { (Get-CcrHostPort) -join ':' } catch { "(CCR_HOST is malformed)" }
     Write-Host " File:    $settingsPath" -ForegroundColor DarkGray
     Write-Host " Current: $currentMode" -ForegroundColor White
     Write-Host ""
@@ -854,8 +874,8 @@ function Show-Menu($currentMode) {
     Write-Host "  2) DeepSeek direct     — V4-Flash + V4-Pro via api.deepseek.com/anthropic" -ForegroundColor Green
     Write-Host "  3) MiniMax direct      — M3 + M2.7 via api.minimax.io/anthropic" -ForegroundColor Green
     Write-Host "  4) OpenCode Go direct  — minimax-m3 / qwen3.7-max via opencode.ai/zen/go/v1" -ForegroundColor Green
-    Write-Host "  5) Ollama local        — local/LAN models via ${ollamaHost}:${ollamaPort} (Anthropic-native)" -ForegroundColor Green
-    Write-Host "  6) CCR                 — any model via local proxy ${ccrHost}:${ccrPort}" -ForegroundColor Green
+    Write-Host "  5) Ollama local        — local/LAN models via $ollamaAt (Anthropic-native)" -ForegroundColor Green
+    Write-Host "  6) CCR                 — any model via local proxy $ccrAt" -ForegroundColor Green
     Write-Host "  0) Exit" -ForegroundColor DarkGray
     Write-Host ""
 }

@@ -45,9 +45,11 @@ def ps_quote(value: object) -> str:
 
 def run_ps_file(script: Path, *args: object, env: dict | None = None,
                 cwd: Path | None = None, stdin: str | None = None,
-                timeout: int = 180) -> subprocess.CompletedProcess:
-    cmd = [powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-           "-File", str(script), *(str(a) for a in args)]
+                timeout: int = 180, interactive: bool = False) -> subprocess.CompletedProcess:
+    """`interactive=True` drops -NonInteractive, so Read-Host reads `stdin`
+    instead of failing — for a menu that must be answered to exit cleanly."""
+    cmd = [powershell(), "-NoProfile", *([] if interactive else ["-NonInteractive"]),
+           "-ExecutionPolicy", "Bypass", "-File", str(script), *(str(a) for a in args)]
     return subprocess.run(
         cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
         env=env if env is not None else os.environ.copy(), cwd=cwd,

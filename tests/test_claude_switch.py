@@ -21,9 +21,43 @@ SWITCH = ROOT / "scripts" / "claude-switch.ps1"
 FAKE_KEY = "test-provider-key-for-the-bak-check"
 
 
-def _switch(project: Path, *args: str, **env_extra: str):
+def _switch(project: Path, *args: str, stdin: str | None = None, **env_extra: str):
     env = dict(os.environ, **env_extra)
-    return run_ps_file(SWITCH, *args, "-ProjectPath", project, env=env)
+    return run_ps_file(SWITCH, *args, "-ProjectPath", project, env=env,
+                       stdin=stdin, interactive=stdin is not None)
+
+
+@pytest.mark.parametrize("var, url", [
+    ("OLLAMA_HOST", "http://127.0.0.1:11434"),
+    ("CCR_HOST", "http://127.0.0.1:3456"),
+])
+def test_status_survives_a_malformed_backend_host(tmp_path: Path, var: str, url: str):
+    """F54: a typo in OLLAMA_HOST (parsed at the top of the script) or CCR_HOST
+    (parsed while naming the current mode) ended the read-only `status` with
+    exit 2 before it printed anything. The mode now reads as `custom (url)`."""
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.local.json").write_text(
+        '{"env": {"ANTHROPIC_BASE_URL": "%s"}}' % url, encoding="utf-8")
+    r = _switch(project, "status", **{var: "127.0.0.1:99999"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"Before: custom  ({url})" in r.stdout, r.stdout
+
+
+def test_the_menu_names_the_ccr_proxy_it_would_use(tmp_path: Path):
+    """F54: the CCR line printed `${ccrHost}:${ccrPort}`, variables that only
+    existed inside other functions — "any model via local proxy :"."""
+    r = _switch(tmp_path / "project", stdin="0\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "via local proxy 127.0.0.1:3456" in r.stdout, r.stdout
+    assert "via 127.0.0.1:11434" in r.stdout, r.stdout
+
+
+def test_switching_to_a_backend_with_a_malformed_host_still_stops(tmp_path: Path):
+    """The other half of F54: only the read-only paths became lenient."""
+    r = _switch(tmp_path / "project", "ollama", "qwen3.5:9b", OLLAMA_HOST="[::1")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "OLLAMA_HOST has '[' without ']'" in r.stdout
 
 
 @pytest.mark.integration   # three switcher runs, ~2 s

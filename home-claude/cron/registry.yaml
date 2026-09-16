@@ -98,6 +98,13 @@
 #   fires at 01:00, then every 4h until ~24h later. Implemented in
 #   sync-tasks.ps1 via the <Repetition> block of the trigger XML.
 #
+#   P1D is the only `repeat_for` a task that also runs on POSIX may use:
+#   gen-scheduler.py has no equivalent and repeats through the whole day, so
+#   `Daily 01:00` + PT4H + PT8H would run three times here and six times there.
+#   check-registry.py rejects any other value unless the task is
+#   `platform: windows` — and, for the same reason, a Daily start time whose
+#   repetition the systemd unit cannot carry past midnight.
+#
 # ── `timeout_hours` policy ─────────────────────────────────────────────────
 #   The ceiling is the ONLY thing that ends a task that has stopped making
 #   progress. In session 0 there is no terminal: an ssh asking for a passphrase,
@@ -114,6 +121,11 @@
 #   timeout_hours, so a ceiling that is far too high blinds that check as well.
 #   The LLM tasks are the exception in degree, not in kind: their calls queue
 #   behind a shared provider key, so their ceilings are hours, not minutes.
+#
+#   Every task must state it — check-registry.py rejects a task without one.
+#   Leaving it out meant 72h in Task Scheduler and NO limit in the systemd unit:
+#   the same line, two behaviours. `timeout_hours: 0` says "no limit" and means
+#   it on both, for a service that is supposed to run indefinitely.
 #
 # ── settings ───────────────────────────────────────────────────────────────
 #   All tasks are registered with StartWhenAvailable=True — if a trigger is

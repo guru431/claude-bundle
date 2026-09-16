@@ -99,6 +99,44 @@ def test_a_byte_order_mark_is_not_an_unreadable_line():
     assert check_registry.check_subset("\ufeff# header\n" + HEAD) == []
 
 
+def _task(**fields) -> dict:
+    task = {"name": "T", "script": "C:\\b\\x.py", "trigger": "Daily 01:00",
+            "timeout_hours": 1}
+    task.update(fields)
+    return {k: v for k, v in task.items() if v is not None}
+
+
+def test_timeout_hours_is_required_and_zero_counts_as_stated():
+    """F55: absent meant 72h in Task Scheduler and no limit in the systemd unit."""
+    problems = check_registry.check_task(_task(timeout_hours=None))
+    assert any("timeout_hours" in p and "72h" in p for p in problems), problems
+    assert check_registry.check_task(_task(timeout_hours=0)) == []
+
+
+@pytest.mark.parametrize("repeat_for, platform, ok", [
+    ("P1D", None, True),
+    ("PT24H", None, True),
+    ("PT8H", None, False),        # three runs on Windows, six under systemd
+    ("P2D", "posix", False),
+    ("PT8H", "windows", True),    # never reaches the POSIX generator
+])
+def test_repeat_for_must_be_a_day_where_the_posix_generator_runs(repeat_for, platform, ok):
+    problems = check_registry.check_task(
+        _task(repeat_every="PT4H", repeat_for=repeat_for, platform=platform))
+    assert (not [p for p in problems if "repeat_for" in p]) is ok, problems
+
+
+@pytest.mark.parametrize("start, ok", [("01:00", True), ("03:30", True),
+                                       ("04:00", False), ("09:30", False)])
+def test_a_repetition_systemd_would_cut_at_midnight_is_rejected(start, ok):
+    """Task Scheduler carries `Daily 09:30` every PT4H through 01:30 and 05:30;
+    systemd's `09/4` stops at 21:30. Compared on the unit the generator writes."""
+    problems = check_registry.check_task(_task(trigger=f"Daily {start}", repeat_every="PT4H"))
+    assert (not [p for p in problems if "fires at hours" in p]) is ok, problems
+    assert check_registry.check_task(
+        _task(trigger=f"Daily {start}", repeat_every="PT4H", platform="windows")) == []
+
+
 def test_s4u_is_a_logon_type():
     task = {"name": "T", "script": "C:\\b\\x.py", "trigger": "Daily 02:00",
             "timeout_hours": 1, "logon_type": "s4u", "platform": "windows"}

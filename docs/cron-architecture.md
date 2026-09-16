@@ -113,7 +113,10 @@ Two rules follow:
   small multiple of the real runtime. The per-task reasoning lives in the
   `timeout_hours policy` block at the top of `cron/registry.yaml`, and
   `ClaudeTaskMonitor` now alerts on a task still RUNNING past its own
-  ceiling — which an inflated value blinds.
+  ceiling — which an inflated value blinds. The field is required:
+  left out, it meant 72 hours in Task Scheduler and no limit at all in the
+  systemd unit, so `check-registry.py` rejects a task without one
+  (`timeout_hours: 0` states "no limit" and means it on both).
 
 ## Script kinds
 
@@ -182,7 +185,7 @@ it out on ordinary scheduled tasks: they have a real exit status, and a probe
 would only invent failures.
 
 `repeat_every:` (also ISO-8601, e.g. `PT30M`) turns any of the above into a
-repeating trigger — the task fires, then again every interval. Two things to
+repeating trigger — the task fires, then again every interval. Three things to
 know before using it:
 
 - **Not every generator supports every pairing.** `repeat_every` on a `Weekly`
@@ -190,6 +193,14 @@ know before using it:
   equivalent, so `scripts/gen-scheduler.py` emits a `skip` line instead of a
   unit — and `check-registry.py` fails the build rather than letting a POSIX
   install quietly lose the task.
+- **`repeat_for` is P1D or nothing, on a task that also runs on POSIX.** Task
+  Scheduler stops repeating after `repeat_for`; the generator has no such field
+  and repeats through the day, so `Daily 01:00` + `PT4H` + `PT8H` would run
+  three times on Windows and six times under systemd. `check-registry.py`
+  rejects any other value unless the task is `platform: windows`, and it also
+  compares the hours of the unit the generator actually writes with the hours
+  Task Scheduler fires — a `Daily` start late enough that systemd's `HH/N` step
+  would stop at midnight, where Task Scheduler carries on, fails the same way.
 - **`AtStartup` + `repeat_every`** becomes `RunAtLoad` + `StartInterval` on
   launchd and a boot-anchored timer on systemd. A `startup_delay` alongside it
   applies to the first run only on Windows, but is repeated by the interval on

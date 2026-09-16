@@ -46,7 +46,10 @@ _spec.loader.exec_module(gen)
 # home-claude/cron/admin/sync-tasks.ps1.
 KINDS = ("bash", "python", "cmd", "vbs", "python_local", "exec")
 
-REQUIRED = ("name", "script", "trigger")
+# timeout_hours is required because leaving it out was not "no limit" but two
+# different ones: sync-tasks.ps1 registers 72h, gen-scheduler.py writes a unit
+# with no RuntimeMaxSec at all. `0` states "no limit" and means it everywhere.
+REQUIRED = ("name", "script", "trigger", "timeout_hours")
 
 # Every key sync-tasks.ps1 / gen-scheduler.py act on. Both silently ignore
 # anything else, so an unknown key here is a typo'd field name.
@@ -112,11 +115,30 @@ def check_time(h: int, mi: int) -> str | None:
     return None
 
 
+def _calendar_hours(field: str) -> set[int] | None:
+    """The hours a systemd OnCalendar hour field names: `07`, `07,19`, `01/4`.
+    systemd's `A/B` steps from A up to 23 and does NOT wrap past midnight."""
+    hours: set[int] = set()
+    for part in field.split(","):
+        m = re.fullmatch(r"(\d+)(?:/(\d+))?", part)
+        if not m:
+            return None
+        start, step = int(m.group(1)), int(m.group(2) or 0)
+        hours.update(range(start, 24, step) if step else {start})
+    return hours
+
+
 def check_task(task: dict) -> list[str]:
     problems = []
     for field in REQUIRED:
-        if not task.get(field):
-            problems.append(f"missing required field '{field}'")
+        # `timeout_hours: 0` is a value (no limit), so for it only an absent
+        # field is missing; for the others an empty one is too.
+        val = task.get(field)
+        if (val is None) if field == "timeout_hours" else (not val):
+            problems.append(f"missing required field '{field}'" + (
+                " — left out, Task Scheduler stops the task after 72h and the "
+                "systemd unit never does; state the ceiling (0 = no limit)"
+                if field == "timeout_hours" else ""))
     for key in sorted(set(task) - KNOWN_KEYS):
         problems.append(f"unknown field '{key}' (typo? both parsers ignore it)")
     for key, allowed in ENUMS.items():
@@ -175,7 +197,8 @@ def check_task(task: dict) -> list[str]:
     # the same registry line ran on a different schedule on Linux than on
     # Windows. Asking the generator itself is the only check that cannot drift.
     if task.get("enabled") is not False and str(task.get("platform", "")).lower() != "windows":
-        if task.get("trigger") and gen.systemd_oncalendar(task) is None:
+        sched = gen.systemd_oncalendar(task) if task.get("trigger") else None
+        if task.get("trigger") and sched is None:
             problems.append(
                 f"trigger '{task.get('trigger')}'"
                 + (f" + repeat_every '{task.get('repeat_every')}'"
@@ -183,6 +206,38 @@ def check_task(task: dict) -> list[str]:
                 + " is valid for Task Scheduler but gen-scheduler.py cannot "
                   "express it, so the POSIX unit would be SKIPPED — the same "
                   "line would run on two different schedules")
+        # A unit that IS emitted can still keep a different clock. Task
+        # Scheduler repeats for `repeat_for`; gen-scheduler.py never reads the
+        # field and repeats through the whole day, so `Daily 01:00` + PT4H +
+        # PT8H ran three times on Windows and six on Linux and macOS.
+        rep_for = task.get("repeat_for")
+        if (task.get("repeat_every") and rep_for is not None
+                and gen.iso_seconds(str(rep_for)) not in (None, 24 * 3600)):
+            problems.append(
+                f"repeat_for '{rep_for}' limits the repetition on Windows only — "
+                f"gen-scheduler.py repeats through the whole day, so the same "
+                f"line would run on two schedules. Use P1D, or mark the task "
+                f"platform: windows")
+        # And the day itself: Task Scheduler carries a repetition past midnight
+        # until the next day's start, while systemd's `HH/N` stops at 23:00 —
+        # `Daily 09:30` every PT4H is six runs there and four here. Compared on
+        # the generator's actual output, so a generator that learns to wrap
+        # stops tripping this without anyone touching it.
+        trig = gen.TRIGGER_DAILY.fullmatch(str(task.get("trigger", "")))
+        rep_h = gen.iso_hours(str(task.get("repeat_every") or ""))
+        cal = (re.fullmatch(r"\*-\*-\* ([\d,/]+):\d+:00", sched[1])
+               if sched and sched[0] == "OnCalendar" else None)
+        if trig and rep_h and cal:
+            start = int(trig.group(1))
+            windows = {(start + k * rep_h) % 24 for k in range(-(-24 // rep_h))}
+            posix = _calendar_hours(cal.group(1))
+            if posix is not None and posix != windows:
+                problems.append(
+                    f"trigger '{trig.group(0)}' + repeat_every "
+                    f"'{task.get('repeat_every')}' fires at hours "
+                    f"{sorted(windows)} under Task Scheduler but "
+                    f"{sorted(posix)} in the systemd unit gen-scheduler.py "
+                    f"writes — the same line would run on two schedules")
     return problems
 
 

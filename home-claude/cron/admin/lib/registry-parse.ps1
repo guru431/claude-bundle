@@ -110,6 +110,8 @@ function Parse-RegistryYaml([string]$path) {
                 runlevel = 'limited'
                 logon_type = 'password'
                 hidden = $true
+                # check-registry.py requires timeout_hours now; 72 remains only
+                # so that a registry written before that rule syncs as it did.
                 timeout_hours = 72
                 enabled = $true
                 script_args = @()

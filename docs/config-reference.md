@@ -143,6 +143,6 @@ syncer and the POSIX unit generator would ignore it in silence.
 | `script` | yes |
 | `script_args` | no |
 | `startup_delay` | no |
-| `timeout_hours` | no |
+| `timeout_hours` | yes |
 | `trigger` | yes |
 | `user` | no |

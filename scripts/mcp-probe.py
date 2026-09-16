@@ -58,19 +58,46 @@ TOOLS_LIST = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
 SHUTDOWN_GRACE = 2.0
 
 
-def load_servers(path: Path) -> dict:
-    """Read a config in either shape: {"mcpServers": {...}} or a bare mapping."""
+def _read_config(path: Path):
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"!! cannot read {path}: {exc}")
-        return {}
+        return None
+
+
+def _servers_in(data) -> dict:
     if isinstance(data, dict) and "mcpServers" in data:
         return data["mcpServers"] or {}
     # Some plugin configs omit the wrapper key and map names to specs directly.
     if isinstance(data, dict) and all(isinstance(v, dict) for v in data.values()):
         return data
     return {}
+
+
+def load_servers(path: Path) -> dict:
+    """Read a config in either shape: {"mcpServers": {...}} or a bare mapping."""
+    return _servers_in(_read_config(path))
+
+
+def declared_servers(path: Path) -> list[tuple[str, dict, str]]:
+    """(name, spec, where) for every server a config declares — for the audit.
+
+    Includes the "local" scope: `claude mcp add` stores a server in
+    ~/.claude.json under projects.<dir>.mcpServers by default, not in the
+    top-level mcpServers that load_servers() reads. The audit only read the
+    latter, so the most common way to add a server was the one it never saw.
+    """
+    data = _read_config(path)
+    found = [(name, spec, str(path)) for name, spec in _servers_in(data).items()
+             if isinstance(spec, dict)]
+    projects = data.get("projects") if isinstance(data, dict) else None
+    for project, entry in (projects.items() if isinstance(projects, dict) else ()):
+        servers = entry.get("mcpServers") if isinstance(entry, dict) else None
+        for name, spec in (servers.items() if isinstance(servers, dict) else ()):
+            if isinstance(spec, dict):
+                found.append((name, spec, f"{path} (project {project})"))
+    return found
 
 
 def _stem(token: str) -> str:
@@ -307,17 +334,12 @@ def check_wrappers(configs: list[Path]) -> int:
     problems = 0
     seen = 0
     for path in configs:
-        servers = load_servers(path)
-        if not servers:
-            continue
-        for name, spec in servers.items():
-            if not isinstance(spec, dict):
-                continue
+        for name, spec, where in declared_servers(path):
             seen += 1
             wrapper = is_wrapper(spec)
             if wrapper:
                 problems += 1
-                print(f"  WRAPPER  {name:<14} '{wrapper}' in {path}")
+                print(f"  WRAPPER  {name:<14} '{wrapper}' in {where}")
     print(f"\n  checked {seen} declaration(s) in {len(configs)} config(s)")
 
     live = running_wrappers()
@@ -334,10 +356,42 @@ def check_wrappers(configs: list[Path]) -> int:
     return 1 if problems else 0
 
 
+def projects_root() -> Path | None:
+    """Where the working copies live: `projects_root` in bundle.local.yaml, else
+    PROJECTS_ROOT — the precedence cron/hooks/utils.py gives the same value.
+
+    Read here rather than by importing utils, which loads .env into the
+    environment and prints manifest diagnostics as a side effect of import. A
+    manifest that cannot be read costs the project scan, never the audit.
+    """
+    manifest = HOME / ".claude" / "bundle.local.yaml"
+    value = None
+    if manifest.is_file():
+        try:
+            import yaml
+            data = yaml.safe_load(manifest.read_text(encoding="utf-8-sig"))
+            value = data.get("projects_root") if isinstance(data, dict) else None
+        except Exception as exc:  # ImportError included: PyYAML is optional here
+            print(f"  note: {manifest} not read ({type(exc).__name__}) — "
+                  f"falling back to PROJECTS_ROOT", file=sys.stderr)
+    if not (isinstance(value, str) and value.strip()):
+        value = os.environ.get("PROJECTS_ROOT", "").strip()
+    return Path(value).expanduser() if value else None
+
+
 def default_configs() -> list[Path]:
     configs = [DEFAULT_CONFIG]
     if PLUGIN_CACHE.is_dir():
         configs += sorted(PLUGIN_CACHE.glob("*/*/*/.mcp.json"))
+    # A repository's own .mcp.json: project-scoped servers Claude Code loads for
+    # anyone who opens that project. Only read here, never launched (probing a
+    # server would execute whatever a cloned repository declares). The privacy
+    # policy (allow_projects / skip_projects) is deliberately not applied: it
+    # governs what the pipeline sends off the machine, and this audit sends
+    # nothing — gating it would only hide the declarations of excluded projects.
+    root = projects_root()
+    if root is not None and root.is_dir():
+        configs += sorted(root.glob("*/.mcp.json"))
     return [p for p in configs if p.is_file()]
 
 

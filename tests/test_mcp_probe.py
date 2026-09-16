@@ -8,6 +8,7 @@ reason: it resolves Path.home() at import time.
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import threading
@@ -172,3 +173,68 @@ def test_the_audit_fails_on_a_cmd_wrapped_npx(tmp_path, monkeypatch, capsys):
                       '"args": ["/c", "npx", "-y", "some-mcp-server"]}}}', encoding="utf-8")
     assert mod.check_wrappers([config]) == 1
     assert "WRAPPER  docs" in capsys.readouterr().out
+
+
+# ── I24(d): the declarations that live next to projects ──────────────────────
+
+NPX = {"command": "npx", "args": ["-y", "some-mcp-server"]}
+
+
+def _project_with_wrapper(tmp_path: Path) -> tuple[Path, Path]:
+    work = tmp_path / "work"
+    (work / "app").mkdir(parents=True)
+    config = work / "app" / ".mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"docs": NPX}}), encoding="utf-8")
+    return work, config
+
+
+def _manifest(text: str) -> None:
+    path = Path.home() / ".claude" / "bundle.local.yaml"      # the conftest sandbox
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_default_configs_include_each_projects_mcp_json(tmp_path, monkeypatch, capsys):
+    """default_configs() knew ~/.claude.json and the plugin cache only, so a
+    wrapper in a repository's own .mcp.json — which Claude Code loads for anyone
+    opening that project — never reached the audit."""
+    pytest.importorskip("yaml")
+    work, config = _project_with_wrapper(tmp_path)
+    _manifest(f"projects_root: '{work.as_posix()}'\n")
+    mod = _load()
+    monkeypatch.setattr(mod, "running_wrappers", lambda: [])
+    configs = mod.default_configs()
+    assert config in configs
+    assert mod.check_wrappers(configs) == 1
+
+
+def test_projects_root_env_is_the_fallback(tmp_path, monkeypatch):
+    work, config = _project_with_wrapper(tmp_path)
+    monkeypatch.setenv("PROJECTS_ROOT", str(work))
+    assert config in _load().default_configs()
+
+
+def test_a_broken_manifest_costs_the_scan_not_the_audit(tmp_path, monkeypatch, capsys):
+    work, config = _project_with_wrapper(tmp_path)
+    _manifest("projects_root: [this is not closed\n")
+    monkeypatch.setenv("PROJECTS_ROOT", str(work))
+    configs = _load().default_configs()          # must not raise
+    assert config in configs
+    assert "bundle.local.yaml" in capsys.readouterr().err
+
+
+def test_local_scope_servers_in_claude_json_are_audited(tmp_path, monkeypatch, capsys):
+    """`claude mcp add` stores a server in ~/.claude.json under
+    projects.<dir>.mcpServers by default (the "local" scope). The audit read only
+    the top-level mcpServers, so the most common way to add a server was the one
+    it could not see."""
+    mod = _load()
+    monkeypatch.setattr(mod, "running_wrappers", lambda: [])
+    config = tmp_path / ".claude.json"
+    config.write_text(json.dumps({
+        "numStartups": 3,
+        "mcpServers": {},
+        "projects": {"/home/someone/app": {"allowedTools": [], "mcpServers": {"docs": NPX}}},
+    }), encoding="utf-8")
+    assert mod.check_wrappers([config]) == 1
+    assert "/home/someone/app" in capsys.readouterr().out

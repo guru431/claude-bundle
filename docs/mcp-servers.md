@@ -74,7 +74,10 @@ python scripts/mcp-probe.py --check-wrappers      # audit declarations only, not
 
 The probe launches each declared stdio server exactly as configured, runs `initialize`
 and `tools/list`, and reports stray stdout separately. `--check-wrappers` skips launching
-and just flags resolver wrappers and running processes that shouldn't be there.
+and just flags resolver wrappers and running processes that shouldn't be there. It reads
+`~/.claude.json` — including the per-project servers `claude mcp add` keeps there by
+default — plugin-provided configs, and the `.mcp.json` of every project directly under
+`projects_root` (from `bundle.local.yaml`, else the `PROJECTS_ROOT` environment variable).
 
 ## When a plugin declares the server for you
 

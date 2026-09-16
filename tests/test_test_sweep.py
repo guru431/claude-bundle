@@ -256,15 +256,32 @@ def test_cleanup_removes_run_dirs_and_keeps_the_named_one(tmp_path, monkeypatch)
     monkeypatch.setattr(sweep.tempfile, "gettempdir", lambda: str(tmp_path))
     monkeypatch.setattr(sweep, "_owner_alive", lambda name: False)
     (tmp_path / "sweep-run-111").mkdir()
-    (tmp_path / "sweep-photos").mkdir()          # leftover from the older scheme
     keep = tmp_path / "sweep-run-222"
     keep.mkdir()
     (tmp_path / "unrelated").mkdir()             # not ours, not touched
 
     removed = sweep.cleanup_temp_roots(keep=keep)
 
-    assert set(removed) == {"sweep-run-111", "sweep-photos"}
+    assert set(removed) == {"sweep-run-111"}
     assert keep.is_dir() and (tmp_path / "unrelated").is_dir()
+
+
+def test_cleanup_never_deletes_a_directory_the_sweep_did_not_create(tmp_path, monkeypatch):
+    """`%TEMP%/sweep-*` is anybody's namespace.
+
+    The glob was `sweep-*` and every name it could not parse counted as a dead
+    run's, so another program's `sweep-results` went the same way as our own
+    trees. Liveness is stubbed to "dead" so that only the NAME can save them.
+    """
+    monkeypatch.setattr(sweep.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(sweep, "_owner_alive", lambda name: False)
+    for name in ("sweep-results", "sweep-photos", "sweep-run-abc", "sweep-run-7-extra"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "sweep-run-111").mkdir()
+
+    assert sweep.cleanup_temp_roots() == ["sweep-run-111"]
+    for name in ("sweep-results", "sweep-photos", "sweep-run-abc", "sweep-run-7-extra"):
+        assert (tmp_path / name).is_dir(), f"{name} was not ours to delete"
 
 
 def test_cleanup_survives_undeletable_dir(tmp_path, monkeypatch):

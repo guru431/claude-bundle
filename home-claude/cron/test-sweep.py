@@ -37,7 +37,7 @@ Exit:  1 if anything is red or the run environment was broken — the task
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a masked summary of which suites broke -> Telegram Bot API money=no writes=FINDINGS.md of each affected project, DELETES %TEMP%/sweep-* and KILLS abandoned pytest processes
+# bundle-io: offbox=a masked summary of which suites broke -> Telegram Bot API money=no writes=FINDINGS.md of each affected project, DELETES the %TEMP%/sweep-run-<pid> trees of dead sweeps and KILLS abandoned pytest processes
 from __future__ import annotations
 
 import argparse
@@ -269,12 +269,14 @@ def _owner_alive(name: str) -> bool:
     environment problem either, because the directory did not fail to be
     cleaned up — it vanished from under a running pytest.
 
-    An unparsable name (a leftover from an older layout) counts as dead: it
-    belongs to no live run and is safe to reclaim.
+    A name this sweep does not create counts as OWNED, never as dead. It used to
+    be "a leftover from an older layout, safe to reclaim" — and `%TEMP%/sweep-*`
+    is a namespace any program can use, so the sweep deleted other people's
+    directories on that reasoning.
     """
     m = _SWEEP_DIR_RE.match(name)
     if not m:
-        return False
+        return True
     pid = int(m.group(1))
     if pid == os.getpid():
         return True
@@ -297,10 +299,15 @@ def cleanup_temp_roots(keep: Path | None = None) -> list[str]:
     """
     removed = []
     root = Path(tempfile.gettempdir())
-    # One glob, not `sweep-run-*` plus the superset `sweep-*`: the second
-    # pattern contained the first, so every directory was visited twice.
-    for path in sorted(root.glob("sweep-*")):
+    # Only the exact `sweep-run-<pid>` shape RUN_ROOT is built from. The glob was
+    # `sweep-*`, with every name it could not parse treated as a dead run's, so
+    # any other program's `%TEMP%/sweep-whatever` was deleted too. Leftovers of
+    # the older `sweep-<key>` layout now stay put: disk a human can reclaim is
+    # the cheap side of that trade, somebody else's data is not.
+    for path in sorted(root.glob("sweep-run-*")):
         if not path.is_dir() or (keep and path == keep):
+            continue
+        if not _SWEEP_DIR_RE.match(path.name):
             continue
         if path != RUN_ROOT and _owner_alive(path.name):
             continue
@@ -835,7 +842,7 @@ def _sweep(args, rec: dict) -> int:
         # directory, not by editing code.
         send_telegram(f"ClaudeTestSweep {DATE}: the run is unreliable for {len(env)} "
                       f"suite(s) — basetemp unavailable ({', '.join(env[:8])}). "
-                      f"The leftover %TEMP%/sweep-* directories belong to a process with "
+                      f"The leftover %TEMP%/sweep-run-* directories belong to a process with "
                       f"an admin token; clear them with "
                       f"takeown /F ... /R /D Y && icacls ... /reset /T. No findings filed.")
     # useful_items = suites actually run: zero means the sweep walked

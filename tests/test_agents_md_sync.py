@@ -199,6 +199,53 @@ def test_malformed_edits_are_reported_not_raised(sync):
     assert applied == [] and len(failed) == 3
 
 
+# ── autofix: the size guards around a model's edits ────────────────────────
+
+AGENTS_FIXTURE = ("# Project\n\nCompact pointer file.\n\n"
+                  "- entry point: `scripts/run.sh`\n- tests: `pytest -q`\n")
+
+
+def _stub_fix_answer(sync, monkeypatch, edits: list[dict]) -> None:
+    import json
+    monkeypatch.setattr(sync, "llm_call", lambda *a, **k: json.dumps(edits))
+
+
+def test_autofix_refuses_an_edit_that_balloons_the_file(sync, tmp_path, monkeypatch):
+    """Only shrinking was guarded; pouring CLAUDE.md into AGENTS.md was not.
+
+    A dump anchored on a unique line applies cleanly, and the nightly push
+    commits it into somebody's repository.
+    """
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text(AGENTS_FIXTURE, encoding="utf-8")
+    dump = "- tests: `pytest -q`\n" + "".join(
+        f"- rule {i}: a whole section copied over from CLAUDE.md\n" for i in range(12))
+    _stub_fix_answer(sync, monkeypatch,
+                     [{"item": "sync", "old": "- tests: `pytest -q`\n", "new": dump}])
+
+    applied, failed = sync.autofix("myproject", "# CLAUDE.md\n", AGENTS_FIXTURE,
+                                   "- drift", agents, public=False)
+
+    assert applied == []
+    assert any("grew" in item for item in failed), failed
+    assert agents.read_text(encoding="utf-8") == AGENTS_FIXTURE
+
+
+def test_autofix_still_applies_an_ordinary_addition(sync, tmp_path, monkeypatch):
+    """The growth limit must leave room for the edit this job exists to make."""
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text(AGENTS_FIXTURE, encoding="utf-8")
+    _stub_fix_answer(sync, monkeypatch, [{
+        "item": "add lint entry point", "old": "- tests: `pytest -q`\n",
+        "new": "- tests: `pytest -q`\n- lint: `ruff check .`\n"}])
+
+    applied, failed = sync.autofix("myproject", "# CLAUDE.md\n", AGENTS_FIXTURE,
+                                   "- drift", agents, public=False)
+
+    assert applied == ["add lint entry point"] and failed == []
+    assert "ruff check" in agents.read_text(encoding="utf-8")
+
+
 # ── file handling ──────────────────────────────────────────────────────────
 
 def test_detect_newline_preserves_the_files_own_style(sync, tmp_path):

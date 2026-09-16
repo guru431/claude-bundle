@@ -413,6 +413,15 @@ def autofix(project: str, claude_md: str, agents_md: str, report: str,
             f"all edits discarded — file shrank from {len(agents_md)} to "
             f"{len(new_text)} characters"
         ]
+    # ...nor make it half as long again. The shrink check cannot see the opposite
+    # failure: a model that "resolves the drift" by pouring CLAUDE.md into what is
+    # meant to be a compact pointer file. Such an edit anchors on a unique snippet
+    # like any other, so apply_edits passes it — and ClaudeGitPushAll commits it.
+    if len(new_text) > len(agents_md) * 1.5:
+        return [], failed + [
+            f"all edits discarded — file grew from {len(agents_md)} to "
+            f"{len(new_text)} characters"
+        ]
 
     # The DIFF goes into the log before the write. `ClaudeGitPushAll` commits and
     # pushes this file the next night, so without a record of what changed the

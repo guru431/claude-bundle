@@ -25,10 +25,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"<python-exe>\" \"<claude-home>/hooks/block-iptables-save-to-rules.py\""
-          },
-          {
-            "type": "command",
             "command": "\"<python-exe>\" \"<claude-home>/hooks/bash-guard.py\""
           }
         ]
@@ -84,7 +80,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"<python-exe>\" \"<claude-home>/cron/hooks/session-end.py\""
+            "command": "\"<python-exe>\" \"<claude-home>/cron/hooks/session-end.py\"",
+            "timeout": 10
           }
         ]
       }

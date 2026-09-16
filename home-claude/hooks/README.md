@@ -21,7 +21,6 @@ into your `settings.json`.
 >
 > | Entry in the example | Runs | Needs |
 > |---|---|---|
-> | `PreToolUse` → `block-iptables-save-to-rules.py` | Tier 1 | a real Python interpreter |
 > | `PreToolUse` → `bash-guard.py` | Tier 1 | a real Python interpreter + PyYAML |
 > | `PreToolUse` → `sensitive-path-guard.py` | **Tier 2 only** | `cron/lib/secret_shapes.py` (full-tier install) |
 > | `PostToolUse` → `md2pdf-on-edit.py` | Tier 1 | a real Python interpreter + `bin/md2pdf.py` (ships full-tier) + markdown-it-py + Edge/Chrome |
@@ -31,9 +30,29 @@ into your `settings.json`.
 > | `SessionStart` / `SessionEnd` / `PreCompact` → `cron/hooks/*.py` | **Tier 2 only** | the full-tier `~/.claude/cron/` install |
 >
 > **Lite** (config only, no Python): take **none** of them — every hook here is
-> a Python script. **Tier 1 + Python:** take the four marked Tier 1, drop the
+> a Python script. **Tier 1 + Python:** take the three marked Tier 1, drop the
 > rest — without `~/.claude/cron/` those commands point at files that don't
 > exist and every session start fails the hook. **Full:** take all of them.
+>
+> `block-iptables-save-to-rules.py` is no longer in the example: `bash-guard.py`
+> carries the same rule (the first entry of `bash-deny.yaml`, asserted identical
+> by `tests/test_bash_guard.py`), and a second hook on every Bash call was a
+> second Python process for nothing. Keep an existing entry for it only on a
+> machine without PyYAML, where `bash-guard.py` is inert.
+>
+> **On Windows the commands need Git for Windows.** Claude Code runs a hook's
+> `command` through Git Bash, and through PowerShell only when Git Bash is not
+> installed — and PowerShell rejects the example's `"<python-exe>" "<script>"`
+> form (`Unexpected token … in expression or statement`), so every hook fails.
+> The full tier needs Git for Windows anyway. Without it, write each entry in
+> exec form, which spawns the interpreter with no shell at all (Claude Code from
+> May 2026 on): `"command": "<python-exe>", "args": ["<claude-home>/hooks/bash-guard.py"]`.
+>
+> The `SessionEnd` entry carries `"timeout": 10`. Without a per-hook timeout,
+> all SessionEnd hooks share a 1.5-second budget (on exit, `/clear` and
+> switching sessions), and a Python start-up plus the `utils` import on a cold
+> cache can use most of that. A per-hook `timeout` raises the budget; it is a
+> ceiling, not a wait.
 
 ## What these guards are, and are not
 

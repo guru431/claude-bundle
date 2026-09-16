@@ -16,6 +16,17 @@
 # script — see hooks/README.md. Do not let a pattern grow permissive in the hope
 # of catching more: a false positive blocks real work and teaches everyone to
 # reach for the bypass.
+#
+# EVERY rule is evaluated, and `deny` beats `ask`. The hook used to stop at the
+# first match, so `git push --force origin main && rm -rf /` came back as the
+# force-push rule's `ask` and the `rm -rf /` denial below was never looked at.
+# The order of this file therefore means nothing.
+#
+# Each command is matched twice: as written, and with the spellings that change
+# nothing for the shell but hide a word from a regex taken out — quotes around a
+# whole word (`'cat' .env`) and a backslash inside one (`c\at .env`). Write
+# patterns against the plain spelling. tests/test_bash_guard.py holds a
+# must-match / must-pass table for every rule; add your cases there.
 
 rules:
   - pattern: '(ip6?tables(?:-legacy|-nft)?-save|\bnetfilter-persistent\s+save\b)[^;&]*(?:>>?|\btee\b|\bsponge\b|\bdd\s+of=|(?<![\w-])-f\b|--file\b)[^;&]*rules\.v[46](?![\w.-])'
@@ -28,7 +39,9 @@ rules:
       explicit `iptables -D <chain> <rule>`, or re-run the relevant section of
       your install script.
 
-  - pattern: '\bcommit\b[^;&]*(@''|''@)'
+  # The opening `@'` of a here-string is followed by a line break — PowerShell
+  # requires one. Matching a bare `@'` or `'@` denied `git commit -m 'fix @'`.
+  - pattern: '\bcommit\b[^;&]*@''\r?\n'
     severity: deny
     reason: >-
       A PowerShell here-string (@'...'@) in a `git commit` run through Bash. Bash
@@ -36,21 +49,35 @@ rules:
       The fix is shell-agnostic: write the message to a file and
       `git commit -F <file>`. A single-line `git commit -m "..."` is fine.
 
-  - pattern: '\bgit\s+push\b[^;&]*(--force(?!-with-lease)|(?<![\w-])-f\b)[^;&]*\b(main|master)\b'
+  # Two lookaheads, so the flag and the branch may come in either order —
+  # `git push origin main --force` used to pass. `git -C <dir>` and other global
+  # options are allowed before `push`. `--force` must be the whole option:
+  # `--force-with-lease` and `--force-if-includes` are the SAFE spellings. The
+  # branch must be a whole ref name: `feature/main-fix` is not main.
+  - pattern: '\bgit(?:\s+-[Cc]\s+(?:"[^"]*"|''[^'']*''|\S+)|\s+--[\w-]+(?:=\S+)?)*\s+push\b(?=[^;&|\n]*(?:--force(?![\w-])|(?<![\w-])-[A-Za-z]*f[A-Za-z]*(?![\w-])))(?=[^;&|\n]*(?:(?<![\w./-])|(?<=heads/))(?:main|master)(?![\w./-]))'
     severity: ask
     reason: >-
       A force-push to main/master rewrites published history for everyone who
       has cloned it. Use `--force-with-lease` (which refuses if the remote moved
       under you), or push to a branch and open a PR.
 
-  - pattern: '\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*[rR])\s+(/|/\*|~|~/\*|\$HOME/?\*?|[A-Za-z]:[\\/]\*?)\s*($|[;&|])'
+  # The two lookaheads find "recursive" and "force" anywhere in the run of
+  # options, so `rm -r -f /`, `rm --recursive --force /` and `rm -rf -- /` are
+  # the same command as `rm -rf /` — they used to pass. The target is a bare
+  # root only: `/`, a Git Bash drive (`/c/`), `C:\`, `~` or `$HOME`, with an
+  # optional trailing `/` or `*` (`rm -rf ~/` used to pass too).
+  - pattern: '\brm(?=(?:\s+-[\w-]*)*?\s+(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s))(?=(?:\s+-[\w-]*)*?\s+(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s))(?:\s+-[\w-]*)+\s+"?(?:/\*?|/[A-Za-z]/?\*?|~/?\*?|\$HOME/?\*?|\$\{HOME\}/?\*?|[A-Za-z]:[\\/]\*?)"?(?:\s+-[\w-]+)*[ \t]*(?:$|[;&|)\n])'
     severity: deny
     reason: >-
       `rm -rf` aimed at a filesystem root or a whole home directory. If you
       meant a specific subdirectory, name it in full — this pattern only fires
       on the bare root forms.
 
-  - pattern: '\b(cat|less|more|head|tail|bat)\b[^;&]*(^|[\s/])\.env(\.[A-Za-z0-9_.-]+)?(\s|$)'
+  # `.env.example` / `.sample` / `.template` / `.dist` are the templates a
+  # project SHOULD commit — the same exception cron/lib/secret_shapes.py makes
+  # in SENSITIVE_PATH_ALLOW — and reading one used to ask. A Windows path
+  # (`C:\proj\.env`) and a quoted one count as a path boundary.
+  - pattern: '\b(?:cat|less|more|head|tail|bat)\b[^;&|\n]*(?:^|[\s/\\"''])\.env(?!\.(?:example|sample|template|dist)(?![\w-]))(?:\.[A-Za-z0-9_.-]+)?(?:[\s"'';&|)]|$)'
     severity: ask
     reason: >-
       Printing a .env puts live credentials into the transcript, which is then
@@ -58,7 +85,8 @@ rules:
       provider. To check whether a KEY exists, use
       `grep -c '^NAME=' .env` instead of reading the file.
 
-  - pattern: '\bgit\s+(commit|push)\b[^;&]*--no-verify'
+  # Same global-option prefix as the force-push rule: `git -C <dir> commit`.
+  - pattern: '\bgit(?:\s+-[Cc]\s+(?:"[^"]*"|''[^'']*''|\S+)|\s+--[\w-]+(?:=\S+)?)*\s+(?:commit|push)\b[^;&|\n]*--no-verify'
     severity: ask
     reason: >-
       `--no-verify` switches off the secret-guard hooks for the whole

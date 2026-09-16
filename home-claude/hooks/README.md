@@ -38,9 +38,15 @@ entries you need into your `settings.json`.
 `block-iptables-save-to-rules.py` and `bash-guard.py` match a REGULAR EXPRESSION
 against the command string. That catches the spellings people and models
 actually write; it is not a sandbox. A command can still reach the same effect
-through a shell variable, a temp file plus `mv`, a heredoc, or a script — and it
-is meant to: these exist to stop a typo and a bad habit, not an adversary. The
-README used to say "hard-blocks", which promised more than a regex can deliver.
+through a shell variable, a temp file plus `mv`, a heredoc, `eval`, or a script —
+and it is meant to: these exist to stop a typo and a bad habit, not an
+adversary. The README used to say "hard-blocks", which promised more than a
+regex can deliver.
+
+`bash-guard.py` does take out two spellings that mean nothing to the shell and
+everything to a regex, because models produce them by accident: quotes around a
+word (`'cat' .env`) and a backslash inside one (`c\at .env`). Each command is
+matched as written and in that plain spelling.
 
 Do not widen a pattern to catch more. A false positive blocks real work and
 teaches everyone to reach for `--no-verify`, which switches off far more.
@@ -96,9 +102,18 @@ doesn't slip through unnoticed.
 Python file. Each rule has a `pattern`, a `reason` shown to the model verbatim,
 and a `severity` of `deny` (refuse) or `ask` (make the user confirm).
 
-Ships with the iptables rule plus four more: a force-push to `main`/`master`, an
-`rm -rf` aimed at a filesystem root or a home directory, printing a `.env`, and
-`git commit/push --no-verify`. Edit the YAML to add your own.
+Ships with the iptables rule plus five more: a PowerShell here-string in a
+`git commit`, a force-push to `main`/`master` (flag and branch in either order,
+`git -C <dir>` included), an `rm -rf` aimed at a filesystem root or a home
+directory (`rm -r -f`, `rm --recursive --force` and `rm -rf -- /` are the same
+command), printing a `.env` (templates like `.env.example` excepted), and
+`git commit/push --no-verify`. Edit the YAML to add your own, and add its
+must-match / must-pass cases to `tests/test_bash_guard.py`.
+
+Every rule is evaluated and `deny` beats `ask`, so the order of the file does
+not matter. It used to: the hook stopped at the first match, and
+`git push --force origin main && rm -rf /` came back as the force-push rule's
+`ask`.
 
 FAILS OPEN on purpose — a missing rules file, a malformed one, a bad regex or a
 missing PyYAML disables the guard rather than blocking every Bash call.

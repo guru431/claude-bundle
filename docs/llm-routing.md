@@ -282,8 +282,32 @@ the output (a weekly code review, an analysis whose result somebody reads). A
 slow model in a nightly window costs nothing but wall clock — which is what the
 window is for.
 
-Two things worth watching while you are there: HTTP 403 is latched for the rest
-of the run (a model not enabled for your account, or a WAF), and so is a 402 or
-an exhausted-cap 429 — see `_DEPLETED_PROVIDERS` in `utils.py`. Without that
-latch every remaining call of the batch pays another round trip to a door that
-is known to be shut.
+One more thing worth knowing while you are there: the circuit breaker takes a
+provider out of service rather than let every remaining call of the batch pay
+another round trip to a door that is known to be shut — see
+`_DEPLETED_PROVIDERS` in `utils.py`.
+
+| Answer | Latched | For |
+|---|---|---|
+| 402 (balance spent), 401 (key refused) | at once | 6 hours |
+| 403 (model not enabled for the account, or a WAF) | on the second in a row | 6 hours |
+| 429, 529, 500, 502, 503, 504 | once its retries are exhausted | 30 minutes |
+
+The latch is shared across processes through `cron/state/depleted.json`, each
+provider under its own timestamp, so the whole night learns from the first
+refusal and no refusal extends another. A 401 for a per-call model override
+does not latch: a gateway also answers 401 for a model its route does not
+serve, and one job's model must not take the provider from every other task.
+`local` is the exception twice over — its latch lasts at most five minutes
+(`depleted_ttl` in its registry row) and is never written to the file. A local
+server that stops answering is usually restarting, and a ten-second restart
+must not silence it for every task that night.
+
+How a failure is classified decides what the task does with the source it was
+working on (`LLMResult` in `utils.py`). Only a failure about the payload — 400,
+413, 415, 422, or an answer that arrived empty or unusable — is
+*deterministic* and counts against `WIKI_RETRY_LIMIT`. Every other 4xx is the
+same answer for every request the setup sends — a 401 is the key, a 404 a typo
+in a model name or a base URL — so it is *configuration*, and it never
+quarantines a source: the source is not what is broken. 408, 429 and 5xx are
+*transient*.

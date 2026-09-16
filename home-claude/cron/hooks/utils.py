@@ -1649,6 +1649,10 @@ _CONFIG_NOTES.append(("PROJECTS_ROOT", str(PROJECTS_ROOT or "not set"),
 # truncate_head's visible marker in the text, turns that whole class into one
 # slightly shorter answer. Roughly four characters per token, well under each
 # provider's context window to leave room for the completion.
+#
+# `depleted_ttl`, when present, caps how long the circuit breaker keeps THIS
+# provider out of service, in seconds, whatever the reason — see
+# _DEPLETED_TTL_BY_KIND below for the defaults it lowers.
 PROVIDERS: dict[str, dict] = {
     "deepseek": {  # primary: DeepSeek V4-Flash, OpenAI-compatible, cheapest
         "label": "DeepSeek",
@@ -1715,6 +1719,9 @@ PROVIDERS: dict[str, dict] = {
         "max_input_chars": 120000,  # local servers are usually the smallest
         "offbox": False,      # never leaves this machine
         "key_optional": True,  # most local servers accept any/no bearer token
+        # A local server that stops answering is usually restarting; five
+        # minutes out of service, not a night.
+        "depleted_ttl": 300,
     },
     # "claude" has no entry: it shells out to the `claude` CLI (manual/opt-in
     # mode only) and needs no key/url/model here.
@@ -1897,26 +1904,39 @@ OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL = _provider_cfg("opencode")
 # Three concerns the bare retry loops below don't cover, added so a nightly
 # cron sweep degrades gracefully and leaves a trail:
 #
-#   1. Circuit breaker (_DEPLETED_PROVIDERS): once a provider returns 402
-#      (insufficient balance) or exhausts its 429/529 retries, it is marked
-#      depleted for the rest of THIS process. Later llm_call()s skip it instead
-#      of hammering the same dead provider dozens of times across a multi-part
-#      job. Per-process only — a fresh cron run starts with a clean slate.
+#   1. Circuit breaker (_DEPLETED_PROVIDERS): a provider that answers 402
+#      (insufficient balance), 401 (the key is refused), a second 403 in a row,
+#      or exhausts its 429/529/5xx retries is taken out of service for a while.
+#      Later llm_call()s skip it instead of hammering the same dead provider
+#      dozens of times across a multi-part job.
 #   2. Startup provider log (_log_provider_once): one line at the first call so
 #      the cron log shows where requests actually went (config-drift diagnosis).
 #   3. Routing audit log (_audit_attempt): one JSONL line per HTTP attempt to
 #      cron/logs/provider_attempts_<date>.jsonl, for after-the-fact stats on the
 #      429/402 share, latency per provider and how often the fallback fired.
 #
-# The breaker is now PERSISTENT as well as per-process. wiki-pipeline.py runs
-# each phase as its own subprocess, so a provider that answered 402 at 02:30 was
+# The breaker is PERSISTENT as well as per-process. wiki-pipeline.py runs each
+# phase as its own subprocess, so a provider that answered 402 at 02:30 was
 # tried again from scratch — with the full backoff — at 04:00 and at 04:30. The
-# state lives in cron/state/depleted.json with a TTL, so the whole night learns
-# from the first refusal.
-_DEPLETED_TTL_SECONDS = 6 * 3600
-# Why a provider went dark, in LLMResult terms: a spent balance or a shut door
-# is a CONFIG problem the night cannot fix, exhausted 429 retries are transient.
-_DEPLETED_KIND = {"402": "config", "403": "config",
+# state lives in cron/state/depleted.json, so the whole night learns from the
+# first refusal.
+#
+# HOW LONG depends on WHY. A spent balance or a refused key (`config`) will not
+# change tonight: six hours. Exhausted 429/5xx retries (`transient`) are exactly
+# what waiting fixes: thirty minutes, after which the provider is tried again —
+# inside a running process too, since a compile can outlast the latch. Both used
+# to be six hours, so one overloaded gateway at 01:00 handed the rest of the
+# night's payloads to the next provider in the chain, which is a second bill.
+#
+# A row can lower that with `depleted_ttl`, and a provider that never leaves the
+# machine (`offbox: False`) is not written to depleted.json at all: its outage
+# is a restart, the backoff the file saves the next process is five seconds,
+# and a ten-second Ollama restart must not silence it for every task that night.
+_DEPLETED_TTL_BY_KIND = {"config": 6 * 3600, "transient": 30 * 60}
+# Why a provider went dark, in LLMResult terms: a spent balance, a refused key
+# or a shut door is a CONFIG problem the night cannot fix, exhausted 429/5xx
+# retries are transient.
+_DEPLETED_KIND = {"401": "config", "402": "config", "403": "config",
                   "429": "transient", "529": "transient",
                   "500": "transient", "502": "transient",
                   "503": "transient", "504": "transient"}
@@ -1927,10 +1947,53 @@ _DEPLETED_PATH = BUNDLE_ROOT / "cron" / "state" / "depleted.json"
 # minute answers it once. Only the former should latch — see the 403 branch in
 # _llm_openai_compat. Any successful call clears the count.
 _FORBIDDEN_STREAK: dict[str, int] = {}
-_DEPLETED_PROVIDERS: dict[str, str] = {}   # provider → why (402/403/429)
+_DEPLETED_PROVIDERS: dict[str, str] = {}   # provider → why (401/402/403/429/5xx)
+_DEPLETED_UNTIL: dict[str, float] = {}     # provider → when its latch ends (epoch s)
 _DEPLETED_SKIPS: dict[str, int] = {}       # calls skipped because of depletion
 _depleted_loaded = False
 _provider_logged = False
+
+
+def _depleted_ttl(provider: str, reason: str) -> int:
+    """Seconds a latch for `reason` keeps `provider` out of service."""
+    ttl = _DEPLETED_TTL_BY_KIND[_DEPLETED_KIND.get(reason, "transient")]
+    cap = PROVIDERS.get(provider, {}).get("depleted_ttl")
+    return min(ttl, cap) if cap else ttl
+
+
+def _depleted_rows() -> dict[str, dict]:
+    """The rows of depleted.json still in force → {provider: {ts, reason, until}}.
+
+    Read from disk on every call, so mark_depleted() merges into what the file
+    holds NOW rather than into what this process saw when it started — a row
+    another task wrote in the meantime survives the rewrite.
+
+    The file keeps the shape it has always had, `{provider: {"ts", "reason"}}`,
+    and the expiry is derived from the reason here: a depleted.json left by an
+    older version is read exactly like a new one, under the new TTLs.
+    """
+    try:
+        raw = json.loads(_DEPLETED_PATH.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    now = time.time()
+    rows = {}
+    for provider, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        ts = entry.get("ts")
+        # Not in the past means not a refusal this machine saw: a clock set
+        # back, or a corrupt value (json reads `Infinity`), which would
+        # otherwise keep a provider out for good.
+        if not isinstance(ts, (int, float)) or not ts <= now:
+            continue
+        reason = str(entry.get("reason", "?"))
+        until = ts + _depleted_ttl(provider, reason)
+        if until > now:
+            rows[provider] = {"ts": ts, "reason": reason, "until": until}
+    return rows
 
 
 def _load_depleted() -> None:
@@ -1939,29 +2002,30 @@ def _load_depleted() -> None:
     if _depleted_loaded:
         return
     _depleted_loaded = True
-    try:
-        raw = json.loads(_DEPLETED_PATH.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
-        return
-    if not isinstance(raw, dict):
-        return
-    now = time.time()
-    for provider, entry in raw.items():
-        if not isinstance(entry, dict):
-            continue
-        ts = entry.get("ts")
-        if not isinstance(ts, (int, float)) or now - ts > _DEPLETED_TTL_SECONDS:
-            continue
-        _DEPLETED_PROVIDERS.setdefault(provider, str(entry.get("reason", "?")))
+    for provider, row in _depleted_rows().items():
+        if provider not in _DEPLETED_PROVIDERS:
+            _DEPLETED_PROVIDERS[provider] = row["reason"]
+            _DEPLETED_UNTIL[provider] = row["until"]
 
 
 def mark_depleted(provider: str, reason: str) -> None:
-    """Take a provider out of service for this run and the next few hours."""
+    """Take a provider out of service — for how long depends on `reason`.
+
+    Every row of depleted.json keeps its OWN timestamp. The file used to be
+    rewritten with `ts=now` for every provider the process knew about, so each
+    new refusal extended all the others: deepseek/402 at 02:00, opencode/429 at
+    04:00 and deepinfra at 05:00 kept DeepSeek dark until 11:00, not 08:00.
+    """
+    now = time.time()
+    _load_depleted()
     _DEPLETED_PROVIDERS[provider] = reason
+    _DEPLETED_UNTIL[provider] = now + _depleted_ttl(provider, reason)
+    if not PROVIDERS.get(provider, {}).get("offbox", True):
+        return   # local-only: this process only, never the file — see above
     try:
-        _load_depleted()
-        now = time.time()
-        data = {p: {"ts": now, "reason": r} for p, r in _DEPLETED_PROVIDERS.items()}
+        data = {p: {"ts": row["ts"], "reason": row["reason"]}
+                for p, row in _depleted_rows().items()}
+        data[provider] = {"ts": now, "reason": reason}
         _DEPLETED_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = _DEPLETED_PATH.with_name(f"{_DEPLETED_PATH.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -2025,19 +2089,27 @@ def record_chain_dead(kinds: list[str]) -> None:
 def _is_depleted(provider: str) -> bool:
     """True if the provider is out of service (and count the skip)."""
     _load_depleted()
-    if provider in _DEPLETED_PROVIDERS:
-        _DEPLETED_SKIPS[provider] = _DEPLETED_SKIPS.get(provider, 0) + 1
-        return True
-    return False
+    if provider not in _DEPLETED_PROVIDERS:
+        return False
+    if time.time() >= _DEPLETED_UNTIL.get(provider, float("inf")):
+        # The latch ran out while this process was still running: try again.
+        del _DEPLETED_PROVIDERS[provider]
+        _DEPLETED_UNTIL.pop(provider, None)
+        return False
+    _DEPLETED_SKIPS[provider] = _DEPLETED_SKIPS.get(provider, 0) + 1
+    return True
 
 
 def _report_depleted_atexit() -> None:
     """One run-summary line at process exit: which providers went dark and how
     many calls were skipped (provider-outage diagnosis from the cron logs)."""
-    if not _DEPLETED_PROVIDERS:
+    # A latch that ran out mid-run has left _DEPLETED_PROVIDERS, but the calls
+    # it skipped before that still happened.
+    dark = sorted(set(_DEPLETED_PROVIDERS) | set(_DEPLETED_SKIPS))
+    if not dark:
         return
-    parts = [f"{p}/{_DEPLETED_PROVIDERS[p]} (skipped {_DEPLETED_SKIPS.get(p, 0)} calls)"
-             for p in sorted(_DEPLETED_PROVIDERS)]
+    parts = [f"{p}/{_DEPLETED_PROVIDERS.get(p, 'expired')} "
+             f"(skipped {_DEPLETED_SKIPS.get(p, 0)} calls)" for p in dark]
     print(f"  [llm] run summary — depleted this run: {', '.join(parts)}", file=sys.stderr)
 
 
@@ -3389,11 +3461,13 @@ def _llm_queue():
 # and only the dispatcher knows that — so it says so.
 #
 #   ok            — there is text.
-#   transient     — network, 429/529, 5xx. Waiting fixes it; do NOT count it.
+#   transient     — network, 408, 429/529, 5xx. Waiting fixes it; do NOT count it.
 #   deterministic — the answer arrived and is unusable, or the request itself is
-#                   (400/413/422, empty content). Retrying reproduces it: count it.
-#   config        — no key, no model, refused by a DLP gate, 402/403. Nothing
-#                   about tonight will fix this; it is fatal for the run.
+#                   (400/413/415/422, empty content). Retrying reproduces it:
+#                   count it.
+#   config        — no key, no model, refused by a DLP gate, 401/402/403/404 and
+#                   every other 4xx. Nothing about tonight will fix this; it is
+#                   fatal for the run.
 class LLMResult(NamedTuple):
     text: str | None
     kind: str = "ok"
@@ -3665,6 +3739,19 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
                 if streak >= 2:
                     mark_depleted(provider, "403")
                 return LLMResult(None, "config", f"{label} 403 forbidden")
+            if resp.status_code == 401:
+                # The key is wrong, revoked or not sent. That is the same answer
+                # for every request tonight, so it is config: as `deterministic`
+                # (the generic branch below) it counted against WIKI_RETRY_LIMIT,
+                # and after that many nights every source was quarantined and
+                # marked done — still done once the key was fixed. Latched like
+                # a 402, but only for the CONFIGURED model: a gateway can answer
+                # 401 for a model its route does not serve, and a per-call
+                # `model` override must not take the provider from every task.
+                print(f"  {label} 401 unauthorized: {resp.text[:200]}", file=sys.stderr)
+                if model == configured_model:
+                    mark_depleted(provider, "401")
+                return LLMResult(None, "config", f"{label} 401 unauthorized")
             # 5xx joins 429/529 in the backoff. A 502 from a gateway used to fall
             # into the generic branch below and immediately cost a fallback to the
             # next provider — a second bill for something that would have cleared
@@ -3682,13 +3769,23 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
                 time.sleep(wait)
                 continue
             if resp.status_code != 200:
-                # Everything else in the 4xx range is about THIS request — an
-                # oversized payload, a malformed body, a filter. Retrying it
-                # reproduces it exactly, so it is deterministic and the caller
-                # counts it against the ceiling instead of waiting forever.
-                print(f"  {label} API error {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
-                return LLMResult(None, "deterministic",
-                                 f"{label} HTTP {resp.status_code}")
+                # Only a failure about THIS payload is deterministic — 400/413/
+                # 415/422: oversized, malformed, filtered. Retrying reproduces it
+                # exactly, so the caller counts it against the ceiling instead of
+                # waiting forever. Every other 4xx is the same answer for every
+                # request the setup sends (404: a typo in *_MODEL or *_BASE_URL;
+                # 405: a base URL that is not an API), so it is config, like 401:
+                # counting it quarantined every source over a one-line fix. A 408
+                # and a 5xx the backoff above does not cover are the server's.
+                status = resp.status_code
+                if 400 <= status < 500 and status not in (400, 408, 413, 415, 422):
+                    kind = "config"
+                elif status == 408 or status >= 500:
+                    kind = "transient"
+                else:
+                    kind = "deterministic"   # 400/413/415/422, or a 2xx that is not 200
+                print(f"  {label} API error {status}: {resp.text[:200]}", file=sys.stderr)
+                return LLMResult(None, kind, f"{label} HTTP {status}")
             data = resp.json()
             # Defensive .get() chain: a missing choices/message/content means
             # "no answer" (return None) so the fallback fires — an empty string

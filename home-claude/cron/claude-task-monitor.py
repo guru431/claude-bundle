@@ -59,8 +59,9 @@ from utils import find_bash  # noqa: E402
 
 sys.path.insert(0, str(CRON_DIR))
 from runs import terminal_record  # noqa: E402
-# Shared with the Windows monitor (claude-task-monitor.sh): the registry parser
-# and the service port probe. Two copies had already drifted — see its header.
+# Shared with the Windows monitor (claude-task-monitor.sh): the registry parser,
+# the service port probe and the once-per-outage LLM-chain report. Two copies
+# had already drifted — see monitor_checks' header.
 from monitor_checks import (  # noqa: E402
     CHAIN_SEEN_KEY, chain_dead_report, check_health_ports, read_registry)
 

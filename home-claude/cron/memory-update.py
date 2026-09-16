@@ -27,7 +27,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -39,6 +39,7 @@ from utils import (  # noqa: E402
     CLAUDE_HOME,
     PROJECTS_BASE,
     SKIP_DIRS,
+    _state_lock,
     config_report,
     dir_to_project,
     extract_first_json_object,
@@ -46,11 +47,12 @@ from utils import (  # noqa: E402
     is_dry_run,
     is_subagent_jsonl,
     llm_call_ex,
+    load_state,
     masked,
     parse_jsonl_messages,
     policy_summary,
     project_allowed,
-    state_add,
+    save_state,
     state_get,
     worst_kind,
 )
@@ -186,15 +188,78 @@ def collection_window_hours(default_hours: int = 24) -> int:
     return int(max(default_hours, min(age_h + 2, MAX_CATCHUP_DAYS * 24)))
 
 
-def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
-    """Collect user messages from JSONLs modified in the last N hours, by project."""
+# How long the digest of a sent message is remembered, counted from the last
+# night the collector MET it again. A message can only be offered again while its
+# transcript is inside a collection window, and no window reaches back further
+# than MAX_CATCHUP_DAYS; the two extra days are slack for the overlap. Counting
+# from the SEND date instead would resend a long-running session's old messages
+# a week after they went out, because that transcript keeps being re-read.
+SENT_TTL_DAYS = MAX_CATCHUP_DAYS + 2
+
+
+def remember_sent(sent, seen, today: date | None = None) -> None:
+    """Record the digests the provider has now seen; refresh and prune the rest.
+
+    `sent` are new digests that were in the prompt of a night the provider
+    answered usably; `seen` are recorded ones the collector met again. Both get
+    today's date, and entries older than SENT_TTL_DAYS are dropped: the list this
+    replaces only ever grew — one digest per message for the life of the install,
+    loaded in full every night.
+
+    A legacy list is converted in place with every entry dated today. Dropping it
+    instead would resend the whole catch-up window once.
+    """
+    if is_dry_run():
+        return
+    today = today or date.today()
+    stamp = today.isoformat()
+    cutoff = (today - timedelta(days=SENT_TTL_DAYS)).isoformat()
+    with _state_lock() as held:
+        if not held:
+            # Same trade as utils.state_add: an unrecorded digest costs one
+            # resend, an unlocked write costs another phase's update.
+            log("sent digests NOT recorded (state lock busy) — the next run may "
+                "resend this night's messages")
+            return
+        state = load_state()
+        section = state.setdefault("memory", {})
+        book = section.get("sent_hashes")
+        if isinstance(book, list):
+            book = {digest: stamp for digest in book if isinstance(digest, str)}
+        elif not isinstance(book, dict):
+            book = {}
+        for digest in seen:
+            if digest in book:
+                book[digest] = stamp
+        for digest in sent:
+            book[digest] = stamp
+        kept = {d: day for d, day in book.items() if isinstance(day, str) and day >= cutoff}
+        section["sent_hashes"] = kept
+        save_state(state)
+    log(f"sent digests: {len(set(sent))} recorded, {len(book) - len(kept)} expired, "
+        f"{len(kept)} remembered")
+
+
+def collect_today_user_messages(
+        hours: int = 24) -> tuple[dict[str, str], dict[str, str], set[str]]:
+    """Collect user messages from JSONLs modified in the last N hours, by project.
+
+    Returns (messages by project, {digest: text} of the messages not sent
+    before, digests of already-sent messages met again). Nothing is recorded
+    here: this used to add every collected digest to the state BEFORE any
+    provider saw it, so the catch-up after a failed night found them all
+    "already sent" and reported a green night with nothing in it — and the same
+    held for messages a cap cut out of the prompt. main() records them, through
+    remember_sent(), once the provider has answered.
+    """
     cutoff = datetime.now().timestamp() - hours * 3600
     # Accumulate as a list per project and cap once at the end: two dirs can
     # resolve to the same project name, and capping each dir's chunk separately
     # would let the merge order decide what survives.
     proj_bits: dict[str, list[str]] = {}
     already_sent = state_get("memory", "sent_hashes")
-    sent_now: set[str] = set()
+    fresh: dict[str, str] = {}
+    seen: set[str] = set()
 
     # We don't filter by directory name here — every project dir under
     # ~/.claude/projects/ is considered. Customize the glob if you only
@@ -253,8 +318,9 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
                 # this it would be paid for twice and appended to USER.md twice.
                 digest = hashlib.sha256(txt.encode("utf-8", "replace")).hexdigest()[:16]
                 if digest in already_sent:
+                    seen.add(digest)
                     continue
-                sent_now.add(digest)
+                fresh[digest] = txt
                 bits.append(txt)
 
         if bits:
@@ -263,9 +329,8 @@ def collect_today_user_messages(hours: int = 24) -> dict[str, str]:
             # silently drop the first one's messages.
             proj_bits.setdefault(proj_name, []).extend(bits)
 
-    if sent_now and not is_dry_run():
-        state_add("memory", "sent_hashes", sorted(sent_now))
-    return {proj: cap_newest_messages(bits, proj) for proj, bits in proj_bits.items()}
+    capped = {proj: cap_newest_messages(bits, proj) for proj, bits in proj_bits.items()}
+    return capped, fresh, seen
 
 
 def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) -> str:
@@ -323,12 +388,15 @@ def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) ->
     return summary
 
 
-def update_user_md(proj_messages: dict[str, str]) -> tuple[int | None, str]:
+def update_user_md(proj_messages: dict[str, str]) -> tuple[int | None, str, str]:
     """Append newly-learned facts to USER.md.
 
-    Returns (chars appended, kind). 0 = the LLM answered but had nothing new;
-    None = the LLM was never reached at all, and the caller turns that into a
-    non-zero exit.
+    Returns (chars appended, kind, message text the prompt carried). 0 = the LLM
+    answered but had nothing new; None = the LLM was never reached at all, and
+    the caller turns that into a non-zero exit. The third value is what tells the
+    caller which collected messages actually went out — the caps in
+    cap_newest_messages / build_summary drop some — so only those are recorded
+    as sent.
 
     `kind` is the LLMResult taxonomy (ok / transient / deterministic / config).
     This task used to log a bare "llm_call returned empty" for all four, so an
@@ -340,7 +408,7 @@ def update_user_md(proj_messages: dict[str, str]) -> tuple[int | None, str]:
     """
     if not proj_messages:
         log("USER.md: no user messages in the last 24h — skipping")
-        return 0, "ok"
+        return 0, "ok", ""
 
     # errors="replace": a USER.md saved in a legacy codepage (cp1251 from an
     # editor that is not UTF-8 by default) raised UnicodeDecodeError here and
@@ -374,7 +442,7 @@ JSON only, no markdown wrapper, no commentary."""
     res = llm_call_ex(prompt, timeout=600)
     if not res.text:
         log(f"USER.md: no answer ({res.kind}: {res.detail or 'no detail'})")
-        return None, res.kind
+        return None, res.kind, summary
 
     obj = extract_first_json_object(res.text)
     if not obj:
@@ -382,18 +450,18 @@ JSON only, no markdown wrapper, no commentary."""
         # signal as a depleted provider so the monitor/alert path fires. It is
         # deterministic: the same prompt reproduces it.
         log(f"USER.md: JSON not found in response ({res.text[:200]!r})")
-        return None, "deterministic"
+        return None, "deterministic", summary
     try:
         data = json.loads(obj)
     except json.JSONDecodeError as e:
         log(f"USER.md: parse error: {e}")
-        return None, "deterministic"
+        return None, "deterministic", summary
 
     raw_add = data.get("add")
     add = raw_add.strip() if isinstance(raw_add, str) else ""
     if not add:
         log("USER.md: nothing new extracted")
-        return 0, "ok"
+        return 0, "ok", summary
 
     # Masked on the way IN as well as on the way out. USER.md is fed back into
     # every subsequent night's prompt in full, so a credential the model echoed
@@ -404,7 +472,7 @@ JSON only, no markdown wrapper, no commentary."""
     with open(USER_MD, "a", encoding="utf-8") as f:
         f.write(f"\n\n## Auto-extracted {DATE}\n{add}\n")
     log(f"USER.md: appended {len(add)} chars")
-    return len(add), "ok"
+    return len(add), "ok", summary
 
 
 def update_cross_notes(proj_messages: dict[str, str]) -> str:
@@ -533,7 +601,7 @@ def _update(rec: dict) -> int:
     if window > 24:
         log(f"Catch-up window: {window}h (the last green run was longer ago than "
             f"a day — a missed day used to be lost for good)")
-    msgs = collect_today_user_messages(hours=window)
+    msgs, fresh, seen = collect_today_user_messages(hours=window)
     log(f"Collected user messages from {len(msgs)} projects")
 
     if is_dry_run():
@@ -547,7 +615,13 @@ def _update(rec: dict) -> int:
             f"({total} chars across {len(msgs)} project(s)); no memory files written.")
         return 0
 
-    appended, user_kind = update_user_md(msgs)
+    appended, user_kind, carried = update_user_md(msgs)
+    if appended is not None:
+        # Recorded only now that the provider has answered usably, and only for
+        # the messages the prompt carried in full. A message cut mid-text by a
+        # cap is not recorded and may be offered again: a repeated tail is the
+        # cheap side of that trade, a message that never went out is not.
+        remember_sent([d for d, text in fresh.items() if text in carried], seen)
     cross_kind = update_cross_notes(msgs)
     log("=== End Memory Update ===")
     run_incident_extract()

@@ -140,6 +140,18 @@ desktop are still coming up, and a task that needs either will otherwise race
 them. On a calendar trigger the field is meaningless and `check-registry.py`
 says so rather than letting it look effective.
 
+A task that is really a service — started `AtStartup` or `AtLogOn` and meant to
+stay up — can also declare `health_port:`, the loopback port it listens on. No
+scheduler acts on the field; both task monitors do. For such a task the
+scheduler's own answer carries no information: LastRun is the boot, and the
+result stays 0 or "still running" for as long as the process exists, so a
+service that started and then crashed reads as healthy until the next reboot.
+With the field set, `ClaudeTaskMonitor` (and `ClaudeTaskMonitorPosix`) connect to
+`127.0.0.1:<port>` and report a closed port as a failure whatever the exit
+status says — once, and again only if the service came back in between. Leave
+it out on ordinary scheduled tasks: they have a real exit status, and a probe
+would only invent failures.
+
 `repeat_every:` (also ISO-8601, e.g. `PT30M`) turns any of the above into a
 repeating trigger — the task fires, then again every interval. Two things to
 know before using it:

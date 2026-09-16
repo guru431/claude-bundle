@@ -52,14 +52,16 @@ echo "TRACE: BUNDLE_ROOT=$BUNDLE_ROOT" >> "$LOG_FILE"
 # --- Collect task statuses via PowerShell ---
 echo "TRACE: stage=tasks $(date '+%H:%M:%S')" >> "$LOG_FILE"
 TASK_STATUS=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$CRON_DIR" 2>>"$LOG_FILE" <<'PYSCRIPT'
-import subprocess, sys, json, os, re
+import subprocess, sys, json, os
 from datetime import datetime, timedelta
 from pathlib import Path
 
 # argv[1] is $CRON_DIR — that is where schtasks_status (the fallback collection
-# path) is imported from.
+# path) and monitor_checks (what this monitor shares with the POSIX one) are
+# imported from.
 sys.path.insert(0, sys.argv[1])
 import schtasks_status
+import monitor_checks
 
 ps_cmd = r"""
 Get-ScheduledTask | Where-Object {
@@ -121,37 +123,17 @@ OK_CODES = {0, 267009, 267011, 267014}
 RUNNING = 267009
 
 
-def registry_timeouts(cron_dir):
-    """task name -> timeout_hours, from cron/registry.yaml.
-
-    PyYAML when it is installed, else a line parser: this monitor must keep
-    working on a box that never had third-party packages.
-    """
-    reg = Path(cron_dir) / 'registry.yaml'
-    try:
-        text = reg.read_text(encoding='utf-8')
-    except OSError:
-        return {}
-    try:
-        import yaml
-        return {t['name']: t.get('timeout_hours')
-                for t in (yaml.safe_load(text).get('tasks') or [])
-                if isinstance(t, dict) and t.get('name')}
-    except Exception:
-        out, name = {}, None
-        for raw in text.splitlines():
-            m = re.match(r'^\s*-\s+name:\s*(.+?)\s*$', raw)
-            if m:
-                name = m.group(1).strip().strip('\'"')
-                out.setdefault(name, None)
-                continue
-            m = re.match(r'^\s*timeout_hours:\s*(\d+)\s*$', raw)
-            if m and name:
-                out[name] = int(m.group(1))
-        return out
-
-
-TIMEOUTS = registry_timeouts(sys.argv[1])
+# task name -> its registry entry: timeout_hours for the hung check below,
+# health_port for the service probe. Parsed by monitor_checks.read_registry, the
+# parser the POSIX monitor uses too — this monitor used to keep a copy of its
+# own, whose no-PyYAML fallback knew timeout_hours and nothing else.
+try:
+    REGISTRY = {t['name']: t for t in
+                monitor_checks.read_registry(Path(sys.argv[1]) / 'registry.yaml')
+                if t.get('name')}
+except OSError:
+    REGISTRY = {}
+TIMEOUTS = {name: t.get('timeout_hours') for name, t in REGISTRY.items()}
 
 
 def hung_since(task, now):
@@ -202,10 +184,23 @@ for t in tasks:
     # is noise about a decision that has already been made.
     if str(t.get('State', '')).lower() in ('disabled', '3'):
         continue
+    # A service that declares `health_port` is judged by its port, whatever the
+    # scheduler says: an AtStartup/AtLogOn task that crashed after boot keeps a 0
+    # or "still running" result, with the boot as its LastRun, for as long as the
+    # machine stays up (see monitor_checks.check_health_ports).
+    down = (monitor_checks.check_health_ports([REGISTRY[t['Name']]])
+            if t['Name'] in REGISTRY else [])
     stuck = hung_since(t, NOW) if code == RUNNING else None
-    if stuck is not None:
+    if down:
+        t['_port_down'] = down[0][1]
+    elif stuck is not None:
         t['_stuck_hours'] = TIMEOUTS[t['Name']]
     elif code in OK_CODES or t['LastRun'] == 'never':
+        # Healthy now, so an earlier alert is forgotten and the NEXT failure is
+        # news even under the same LastRun. A boot service restarted by hand
+        # keeps its boot-time LastRun: without this, its second crash would only
+        # ever reach the Monday digest.
+        seen.pop(t['Name'], None)
         continue
     if seen.get(t['Name']) == t['LastRun']:
         digest.append(t)          # already reported — weekly digest only
@@ -232,7 +227,9 @@ if failures:
         # candidate to add to registry.yaml, disable, or suppress on purpose).
         managed = 'managed-by-registry' in (f.get('Description') or '')
         tag = 'managed' if managed else 'ORPHAN'
-        if f.get('_stuck_hours'):
+        if f.get('_port_down'):
+            lines.append(f"{f['_port_down']} [{tag}]")
+        elif f.get('_stuck_hours'):
             lines.append(f"{f['Name']}: running since {f['LastRun']}, past its "
                          f"timeout_hours={f['_stuck_hours']} — Task Scheduler "
                          f"should have killed it; every later trigger is being "
@@ -265,11 +262,12 @@ if [ -z "$TASK_STATUS" ] || printf '%s\n' "$TASK_STATUS" | head -1 | grep -q '^E
     ALERTS="task-monitor: task-status collection FAILED (${TASK_STATUS:-python produced no output}) — the monitor itself may be broken, check cron/logs/task-monitor_${DATE}.log"
     MONITOR_RC=1
 elif [ "$TASK_STATUS" != "OK" ]; then
-    # Count only real failure lines (`<name>: exit <code> …` and the hung
-    # `<name>: running since … past its timeout_hours=N`). The block can also
-    # carry the ORPHAN hint and the "collected via the schtasks fallback" note,
-    # and counting those would inflate the header's failed-task count.
-    TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | grep -cE ': exit |: running since ')
+    # Count only real failure lines (`<name>: exit <code> …`, the hung
+    # `<name>: running since … past its timeout_hours=N` and the service probe's
+    # `<name>: nothing listening on port N …`). The block can also carry the
+    # ORPHAN hint and the "collected via the schtasks fallback" note, and
+    # counting those would inflate the header's failed-task count.
+    TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | grep -cE ': exit |: running since |: nothing listening on port ')
     ALERTS="$TASK_STATUS"
 fi
 

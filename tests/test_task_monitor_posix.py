@@ -49,6 +49,7 @@ def _load():
 
 
 monitor = _load()
+import monitor_checks  # noqa: E402  (cron/ is on sys.path once the monitor is loaded)
 
 
 def test_reports_only_enabled_tasks_that_run_on_this_platform(tmp_path, monkeypatch):
@@ -63,6 +64,10 @@ def test_a_missing_registry_is_silent_not_fatal(tmp_path, monkeypatch):
     """No registry means nothing to check — never a traceback in session 0."""
     monkeypatch.setattr(monitor, "REGISTRY", tmp_path / "absent.yaml")
     monkeypatch.setattr(monitor, "LOG_DIR", tmp_path / "logs")
+    # LOG_FILE too: log() appends to it, and it was computed from the REAL
+    # LOG_DIR at import — patching the directory alone wrote this test's line
+    # into the repository's cron/logs/.
+    monkeypatch.setattr(monitor, "LOG_FILE", tmp_path / "logs" / "task-monitor-posix.log")
 
     assert monitor.registry_tasks() == []
 
@@ -96,7 +101,7 @@ def test_launchd_reports_only_the_bundles_own_failing_agents(monkeypatch):
     assert [name for name, _ in found] == ["ClaudeOnPosix"]
 
 
-def test_a_declared_port_that_nobody_listens_on_is_a_failure():
+def test_a_declared_port_that_nobody_listens_on_is_a_failure(monkeypatch):
     """The one task shape where the scheduler's answer carries no information.
 
     An AtStartup unit counts as "running" while its process exists and its last
@@ -104,6 +109,9 @@ def test_a_declared_port_that_nobody_listens_on_is_a_failure():
     forever — and the monitor's own freshness rules, built to stop it crying
     about old runs, bury it further. The port is the only honest question.
     """
+    # A refused loopback connect takes ~2 s on Windows (two SYN retransmits)
+    # under the production timeout; a timeout is just as much "down".
+    monkeypatch.setattr(monitor_checks, "PROBE_TIMEOUT_S", 0.2)
     # Port 1 on loopback: privileged, nothing binds it in a test environment.
     down = monitor.check_health_ports([
         {"name": "ClaudeDaemon", "health_port": 1, "trigger": "AtStartup"}])

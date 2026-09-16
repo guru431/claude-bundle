@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -59,6 +58,9 @@ from utils import find_bash  # noqa: E402
 
 sys.path.insert(0, str(CRON_DIR))
 from runs import terminal_record  # noqa: E402
+# Shared with the Windows monitor (claude-task-monitor.sh): the registry parser
+# and the service port probe. Two copies had already drifted — see its header.
+from monitor_checks import check_health_ports, read_registry  # noqa: E402
 
 DATE = datetime.now().strftime("%Y-%m-%d")
 LOG_FILE = LOG_DIR / f"task-monitor-posix_{DATE}.log"
@@ -84,42 +86,15 @@ def log(msg: str) -> None:
 def registry_tasks() -> list[dict]:
     """Enabled registry tasks that can run on this box.
 
-    PyYAML when available, else a small line parser — the same dual loader the
-    guard scripts use, so a machine without PyYAML still gets a monitor rather
-    than a traceback.
+    Parsed by monitor_checks.read_registry: PyYAML when available, else a line
+    parser that knows every field a monitor reads, so a machine without PyYAML
+    still gets a monitor — and the same checks — rather than a traceback.
     """
     try:
-        text = REGISTRY.read_text(encoding="utf-8")
+        tasks = read_registry(REGISTRY)
     except OSError as exc:
         log(f"registry unreadable ({exc}) — nothing to check")
         return []
-    tasks: list[dict] = []
-    try:
-        import yaml
-        tasks = [t for t in (yaml.safe_load(text).get("tasks") or [])
-                 if isinstance(t, dict)]
-    except Exception:
-        cur: dict | None = None
-        for raw in text.splitlines():
-            stripped = raw.strip()
-            if stripped.startswith("- name:"):
-                cur = {"name": stripped.split(":", 1)[1].strip().strip("'\"")}
-                tasks.append(cur)
-            elif cur is not None and stripped.startswith("enabled:"):
-                cur["enabled"] = stripped.split(":", 1)[1].strip() != "false"
-            elif cur is not None and stripped.startswith("platform:"):
-                cur["platform"] = stripped.split(":", 1)[1].strip()
-            elif cur is not None and stripped.startswith("timeout_hours:"):
-                val = stripped.split(":", 1)[1].strip()
-                cur["timeout_hours"] = int(val) if val.isdigit() else None
-            elif cur is not None and stripped.startswith("health_port:"):
-                # Without this line the port probe would simply not run on a box
-                # that has no PyYAML — a check that is silently absent is worse
-                # than one that is missing loudly.
-                val = stripped.split(":", 1)[1].strip()
-                cur["health_port"] = int(val) if val.isdigit() else None
-            elif cur is not None and stripped.startswith("trigger:"):
-                cur["trigger"] = stripped.split(":", 1)[1].strip().strip("'\"")
     out = []
     for t in tasks:
         if not t.get("name") or t.get("enabled") is False:
@@ -203,38 +178,6 @@ def check_systemd(tasks: list[dict]) -> tuple[list[tuple[str, str]], str | None]
                                    f"timeout_hours={hours} — the unit should "
                                    f"have been killed (RuntimeMaxSec)"))
     return problems, None
-
-
-def check_health_ports(tasks: list[dict]) -> list[tuple[str, str]]:
-    """[(task, line)] for declared services whose port is not listening.
-
-    The one task shape where the scheduler's own answer is worthless. A unit (or
-    a Windows task) triggered at boot counts as "running" for as long as the
-    process exists, and its last exit status stays 0 — so a daemon that started,
-    crashed and never came back reads as healthy indefinitely, and every
-    freshness rule the monitor has (built to stop it crying about old runs)
-    hides it further. Upstream the first run of this probe found an MCP server
-    that had been refusing connections for over a day while the monitor happily
-    reported nothing.
-
-    Only tasks that declare `health_port` are probed; loopback only, because the
-    question is whether THIS machine's service is up, and a short timeout,
-    because a monitor must not hang on a wedged socket.
-    """
-    problems: list[tuple[str, str]] = []
-    for task in tasks:
-        port = task.get("health_port")
-        if not isinstance(port, int) or not 1 <= port <= 65535:
-            continue
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=3):
-                continue
-        except OSError as exc:
-            problems.append((task["name"],
-                             f"{task['name']}: nothing listening on port {port} "
-                             f"({type(exc).__name__}) — the {task.get('trigger', '?')} "
-                             f"service is down, whatever its exit status says"))
-    return problems
 
 
 def check_launchd(tasks: list[dict]) -> tuple[list[tuple[str, str]], str | None]:

@@ -14,6 +14,8 @@ and a dependency on the network being up — none of it visible until you go loo
 // bad — extra process, re-resolve, network access on every start
 { "command": "npx", "args": ["-y", "some-mcp-server"] }
 { "command": "uv",  "args": ["run", "--directory", "/path", "python", "server.py"] }
+// bad — the same wrapper behind a shell (the usual Windows form): one more process
+{ "command": "cmd", "args": ["/c", "npx", "-y", "some-mcp-server"] }
 
 // good — hosted endpoint, zero local processes
 { "type": "http", "url": "https://mcp.example.com/mcp" }

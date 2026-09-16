@@ -131,3 +131,44 @@ def test_a_server_that_dies_at_startup_reports_its_stderr(tmp_path, spawned, cap
     assert _probe_with_watchdog(mod, "crash", _server(tmp_path, "crash", CRASHES), 10.0) is False
     out = capsys.readouterr().out
     assert "FAIL" in out and "boom: missing API key" in out
+
+
+# ── F53: a wrapper behind a shell is still a wrapper ─────────────────────────
+
+@pytest.mark.parametrize("spec", [
+    {"command": "npx", "args": ["-y", "some-mcp-server"]},
+    {"command": "C:\\Program Files\\nodejs\\npx.cmd", "args": ["-y", "some-mcp-server"]},
+    # The form Claude Code's own documentation gives for Windows.
+    {"command": "cmd", "args": ["/c", "npx", "-y", "some-mcp-server"]},
+    {"command": "cmd.exe", "args": ["/s", "/C", "npx -y some-mcp-server"]},
+    {"command": "powershell", "args": ["-NoProfile", "-Command", "npx -y some-mcp-server"]},
+    {"command": "pwsh", "args": ["-c", "& uvx some-mcp-server"]},
+    {"command": "bash", "args": ["-lc", "exec uv run server.py"]},
+    {"command": "/bin/sh", "args": ["-c", "DOTENV_CONFIG_QUIET=true npx some-mcp-server"]},
+])
+def test_a_resolver_wrapper_is_flagged_behind_a_shell(spec):
+    """`is_wrapper` looked at `command` alone, so `cmd /c npx -y pkg` passed as
+    clean and self-test printed "no resolver wrappers" on that basis."""
+    assert _load().is_wrapper(spec)
+
+
+@pytest.mark.parametrize("spec", [
+    {"command": "cmd", "args": ["/c", "C:\\venv\\Scripts\\python.exe", "server.py"]},
+    {"command": "bash", "args": ["-c", "python3 server.py"]},
+    {"command": "bash", "args": ["server.sh"]},          # a script file: nothing inline to read
+    {"command": "/opt/venv/bin/python", "args": ["-c", "npx"]},  # not a shell: -c is Python code
+    {"type": "http", "url": "https://mcp.example.com/mcp"},
+])
+def test_a_direct_interpreter_is_not_flagged(spec):
+    assert _load().is_wrapper(spec) is None
+
+
+def test_the_audit_fails_on_a_cmd_wrapped_npx(tmp_path, monkeypatch, capsys):
+    mod = _load()
+    # Enumerating live processes spawns PowerShell or ps; not what is tested here.
+    monkeypatch.setattr(mod, "running_wrappers", lambda: [])
+    config = tmp_path / ".mcp.json"
+    config.write_text('{"mcpServers": {"docs": {"command": "cmd", '
+                      '"args": ["/c", "npx", "-y", "some-mcp-server"]}}}', encoding="utf-8")
+    assert mod.check_wrappers([config]) == 1
+    assert "WRAPPER  docs" in capsys.readouterr().out

@@ -10,9 +10,10 @@ Probing launches each declared stdio server exactly as configured, sends `initia
 and `tools/list`, and reports stray stdout separately: MCP speaks JSON-RPC over stdout,
 so a single banner line there breaks the session while the process still looks healthy.
 
-`--check-wrappers` launches nothing. It flags resolver wrappers (`npx -y`, `uv run`) in
-every config it can find, including plugin-provided ones, and looks for wrapper
-processes already running. See docs/mcp-servers.md for why those are worth removing.
+`--check-wrappers` launches nothing. It flags resolver wrappers (`npx -y`, `uv run`, also
+behind a shell such as `cmd /c` or `sh -c`) in every config it can find, including
+plugin-provided ones, and looks for wrapper processes already running. See
+docs/mcp-servers.md for why those are worth removing.
 
 Exit code is 1 if anything failed or a wrapper was found, so this can gate a script.
 """
@@ -22,6 +23,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -38,6 +40,8 @@ PLUGIN_CACHE = HOME / ".claude" / "plugins" / "cache"
 
 # A server is "wrapped" when the command resolves the package instead of running it.
 WRAPPERS = ("npx", "npm", "pnpm", "yarn", "bunx", "uv", "uvx", "pipx")
+# Shells that run a command line given to them — so the wrapper can hide one level down.
+SHELLS = ("cmd", "powershell", "pwsh", "sh", "bash", "zsh", "dash")
 HTTP_TYPES = ("http", "sse", "streamable-http")
 
 INITIALIZE = {
@@ -69,15 +73,48 @@ def load_servers(path: Path) -> dict:
     return {}
 
 
+def _stem(token: str) -> str:
+    """`C:\\nodejs\\npx.cmd` -> `npx`, on any OS (Path splits `\\` only on Windows)."""
+    base = re.split(r"[\\/]", token.strip().strip("\"'"))[-1].lower()
+    for suffix in (".exe", ".cmd", ".bat", ".ps1"):
+        base = base.removesuffix(suffix)
+    return base
+
+
+def _shell_run_flag(shell: str, arg: str) -> bool:
+    """True for the flag after which `shell` runs its remaining arguments."""
+    arg = arg.lower()
+    if shell == "cmd":
+        return arg in ("/c", "/k", "/r")
+    if shell in ("powershell", "pwsh"):
+        # PowerShell takes any unambiguous prefix of -Command; -c is the usual one.
+        return len(arg) > 1 and arg[0] in "-/" and "command".startswith(arg[1:])
+    return re.fullmatch(r"-[a-z]*c[a-z]*", arg) is not None      # sh -c, bash -lc
+
+
 def is_wrapper(spec: dict) -> str | None:
     command = (spec.get("command") or "").strip()
     if not command:
         return None
-    base = Path(command).name.lower()
-    for stem in (base, base.removesuffix(".exe").removesuffix(".cmd")):
-        if stem in WRAPPERS:
-            return command
-    return None
+    if _stem(command) in WRAPPERS:
+        return command
+    # A shell that runs the wrapper for you. `cmd /c npx -y pkg` is the form
+    # Claude Code's own docs give for Windows, and looking at `command` alone
+    # called it clean — so `--check-wrappers` (and self-test on top of it)
+    # reported "no resolver wrappers" for exactly the declaration it exists for.
+    shell = _stem(command)
+    if shell not in SHELLS:
+        return None
+    args = [str(a) for a in spec.get("args") or []]
+    run_at = next((i for i, a in enumerate(args) if _shell_run_flag(shell, a)), None)
+    if run_at is None:
+        return None
+    # The program is the first word of the command line, past what may precede
+    # it: `exec`, `call`, PowerShell's `&` and `VAR=value` assignments.
+    words = [w.lstrip("&") for w in " ".join(args[run_at + 1:]).split()]
+    program = next((w for w in words if w and w.lower() not in ("exec", "call")
+                    and not re.match(r"\w+=", w)), "")
+    return f"{command} {args[run_at]} {program}" if _stem(program) in WRAPPERS else None
 
 
 def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:

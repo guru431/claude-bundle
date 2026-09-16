@@ -28,7 +28,8 @@ ROOT = Path(__file__).resolve().parent.parent
 CRON_SRC = ROOT / "home-claude" / "cron"
 
 
-def _run(script: Path, env_extra: dict, cwd: Path) -> subprocess.CompletedProcess:
+def _run(script: Path, env_extra: dict, cwd: Path,
+         args: list[str] | None = None) -> subprocess.CompletedProcess:
     import os
     env = os.environ.copy()
     # Neutralise any real provider config from the developer's shell.
@@ -37,7 +38,7 @@ def _run(script: Path, env_extra: dict, cwd: Path) -> subprocess.CompletedProces
     env.update(env_extra)
     env["WIKI_LLM_PROVIDER"] = "mock"
     return subprocess.run(
-        [sys.executable, str(script)],
+        [sys.executable, str(script), *(args or [])],
         cwd=str(cwd), env=env,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=120,
@@ -957,6 +958,44 @@ def test_nothing_to_compile_is_a_failure_when_pending_is_not_empty(bundle: Path)
         f"a lost night reported green:\n{r.stdout}\n{r.stderr}"
     assert ".pending" in r.stdout, \
         f"the reason must name .pending, or nobody can act on it:\n{r.stdout}"
+
+    # Case 3: a preview. Its flush consumed nothing ON PURPOSE, so the drafts
+    # are no evidence of a lost night — every night of the dry_run_until week
+    # used to exit 1 here and page the owner.
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py", {}, cwd=bundle,
+             args=["--dry-run"])
+    assert r.returncode == 0, f"a preview night reported a failure:\n{r.stdout}\n{r.stderr}"
+
+
+def test_a_draft_written_after_flush_started_is_not_a_lost_night(bundle: Path,
+                                                                 tmp_path: Path):
+    """Only drafts the last flush had its chance at count as stuck.
+
+    A session that ends between one night's flush and its compile leaves a
+    draft flush never saw. Counting it failed a healthy run; a draft OLDER than
+    the flush's start is what a lost night looks like.
+    """
+    import os
+    (bundle / "wiki" / "daily" / "2026-01-01.md").unlink()
+    home = tmp_path / "home_after_flush"
+    (home / ".claude" / "projects").mkdir(parents=True)
+    env = {"USERPROFILE": str(home), "HOME": str(home)}
+
+    r = _run(bundle / "cron" / "wiki" / "wiki-flush-sessions.py", env, cwd=bundle)
+    assert r.returncode == 0, f"idle flush failed:\n{r.stdout}\n{r.stderr}"
+
+    pending = bundle / "wiki" / "daily" / ".pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    draft = pending / "late-session.md"
+    draft.write_text("# Session late-session\nProject: myproject\n\n### USER\nhi\n",
+                     encoding="utf-8")
+    compile_ = bundle / "cron" / "wiki" / "wiki-compile-sessions.py"
+    r = _run(compile_, env, cwd=bundle)
+    assert r.returncode == 0, f"a draft newer than flush failed the run:\n{r.stdout}"
+
+    os.utime(draft, (1_000_000_000, 1_000_000_000))     # long before that flush
+    r = _run(compile_, env, cwd=bundle)
+    assert r.returncode != 0, f"a draft flush left behind reported green:\n{r.stdout}"
 
 
 _WIDGET_PAGE = json.dumps([{

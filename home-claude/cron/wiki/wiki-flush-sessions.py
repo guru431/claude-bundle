@@ -804,6 +804,10 @@ def write_daily(day: str, lines: list[str], log) -> Path:
 
 
 def main():
+    # The ledger turns this into `duration_s`, and compile-sessions reads the
+    # run's START back out of it: a pending draft newer than that start is one
+    # this run never saw, not one it failed to process.
+    started = time.monotonic()
     CRON_LOG_DIR.mkdir(parents=True, exist_ok=True)
     DAILY_DIR.mkdir(parents=True, exist_ok=True)
     log_file = CRON_LOG_DIR / f"wiki-flush-sessions_{DATE}.log"
@@ -1040,7 +1044,7 @@ def main():
         # useful_items=None (not 0) — there was nothing to extract, so this is
         # not the empty-artifact false-green the SLO hunts for.
         record_run(task="ClaudeWikiFlush", process_rc=0, useful_items=None,
-                   delivery="n/a", note="no new sources")
+                   delivery="n/a", note="no new sources", started_ts=started)
         return
 
     if is_dry_run():
@@ -1246,6 +1250,7 @@ def main():
         delivery="n/a",
         note=f"{len(all_projects)} project(s), {len(written_dailies)} daily log(s), "
              f"{len(failed_projects)} failed",
+        started_ts=started,
     )
     # The heartbeat means "the phase ran through", so a project that failed must
     # not leave a green status behind: the scheduler's exit code is the only

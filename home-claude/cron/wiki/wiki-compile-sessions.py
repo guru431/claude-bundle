@@ -24,7 +24,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
@@ -65,7 +65,7 @@ from utils import (  # noqa: E402
 from untrusted import fence  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from runs import record_run  # noqa: E402
+from runs import latest_by_task, read_latest_runs, record_run  # noqa: E402
 
 # Allow nested Claude CLI invocation
 for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
@@ -725,6 +725,38 @@ def record_markers(key: str, items: list[str], log) -> None:
             f"expect them to be compiled, and billed, again next run")
 
 
+def last_flush_start() -> datetime | None:
+    """When the most recent flush run STARTED, from the run ledger, or None.
+
+    The ledger records a run's end (`ts`) and its `duration_s`; flush passes its
+    start for that. A record without a duration counts from its end. None means
+    no flush has recorded a run — nobody is consuming .pending at all.
+    """
+    try:
+        rec = latest_by_task(read_latest_runs()).get("ClaudeWikiFlush")
+        if not rec:
+            return None
+        return (datetime.fromisoformat(rec["ts"])
+                - timedelta(seconds=float(rec.get("duration_s") or 0)))
+    except Exception:   # an unreadable ledger must not decide a verdict either way
+        return None
+
+
+def stuck_pending(flush_started: datetime | None) -> int:
+    """Drafts in .pending that a flush has had its chance at (see main)."""
+    if not PENDING_DIR.is_dir():
+        return 0
+    stuck = 0
+    for f in PENDING_DIR.glob("*.md"):
+        try:
+            written = datetime.fromtimestamp(f.stat().st_mtime)
+        except OSError:
+            continue
+        if flush_started is None or written < flush_started:
+            stuck += 1
+    return stuck
+
+
 def _replay_target(argv: list[str]) -> str | None:
     """`--replay DATE` or `--replay DATE#project` from the command line."""
     for i, a in enumerate(argv):
@@ -801,6 +833,14 @@ def main():
     dailies = find_uncompiled_dailies(compiled)
     log(f"New daily logs: {len(dailies)}")
 
+    if not dailies and is_dry_run():
+        # A preview flush consumes nothing, so the drafts it read are still in
+        # .pending — and the check below read them as a lost night: every run of
+        # the dry_run_until week exited 1 and the pipeline sent a "phase(s)
+        # failed" alert each morning of the week meant to be quiet.
+        log("DRY RUN — nothing to compile.")
+        return
+
     if not dailies:
         # "Nothing to compile" has two shapes and they used to look identical.
         # The honest one: flush ran, there is simply no new daily. The false one:
@@ -808,7 +848,12 @@ def main():
         # while the raw material still sits in .pending — there is nothing to
         # compile precisely because the night was lost. Reporting rc=0 for that
         # tells every health check the pipeline is fine while it is stalled.
-        stuck = len(list(PENDING_DIR.glob("*.md"))) if PENDING_DIR.is_dir() else 0
+        #
+        # Only drafts older than the last flush's START count: that flush saw
+        # them and left them. A draft a session wrote after flush began — the
+        # minutes between flush and compile of one night included — is simply
+        # waiting for tomorrow, and counting it failed a healthy run.
+        stuck = stuck_pending(last_flush_start())
         if stuck:
             note = (f"flush produced no daily: {stuck} file(s) still in .pending "
                     f"(raw material is there, nothing to compile)")

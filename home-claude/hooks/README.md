@@ -284,7 +284,9 @@ full tier (`cron/`); from a source checkout, run `home-claude/cron/bundle-status
   then holds the converter the cron job uses.
 - `CLAUDE_BASH_DENY` points `bash-guard.py` at a different rules file.
 - Every hook reads JSON from stdin per the Claude Code hook protocol and emits
-  JSON to stdout. They never raise on malformed input — they pass through.
-  `tests/test_hooks.py` drives each one with a table of malformed payloads (a
-  bare list, a string where an object was expected, a list where a string was)
-  and asserts exit 0 with no traceback.
+  JSON to stdout — except `cron/hooks/session-start.py`, whose plain text
+  Claude Code adds to the context, as it does for any SessionStart hook. They
+  never raise on malformed input — they pass through. `tests/test_hooks.py`
+  finds every hook file and drives each one with a table of malformed payloads
+  (a bare list, a string where an object was expected, a list where a string
+  was) and asserts exit 0 with no traceback.

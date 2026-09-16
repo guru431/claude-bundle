@@ -967,3 +967,19 @@ def test_flush_carries_an_unreadable_transcript_over_instead_of_filing_it(
     assert not state.get("flush", {}).get("processed_jsonls"), \
         "an unreadable transcript was marked processed"
     assert state["flush"]["seen_unprocessed"] == ["readme/s.jsonl"]
+
+
+def test_a_journaled_compile_kb_failure_is_not_migrated_as_processed(bundle_tree: Path,
+                                                                    monkeypatch):
+    """compile-kb journals a failure as `(ERROR: <kind>)`; the migration skipped
+    only the exact `(ERROR)`, so on a machine with no state file yet the first
+    failed article was rebuilt as processed and never retried."""
+    wiki = bundle_tree / "wiki"
+    wiki.mkdir(parents=True, exist_ok=True)
+    (wiki / "log.md").write_text(
+        "- [compile-kb] processed: articles/bad.md → (ERROR: deterministic)\n"
+        "- [compile-kb] processed: articles/empty.md → (ERROR: 0 applied)\n"
+        "- [compile-kb] processed: articles/ok.md → created: kb/concepts/X.md\n",
+        encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils._migrated_state_from_log()["compile_kb"]["processed"] == ["articles/ok.md"]

@@ -15,6 +15,7 @@ Run: pytest tests/ -q
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -171,6 +172,74 @@ def test_a_source_that_always_fails_is_quarantined_once(bundle: Path):
     after = findings.read_text(encoding="utf-8")
     assert after.count("\n## ") == body.count("\n## "), \
         f"a second finding was filed for an already-quarantined source:\n{r4.stdout}"
+
+
+def test_a_daily_whose_paths_are_always_rejected_reaches_the_ceiling(bundle: Path):
+    """A rejected change is a deterministic failure, and it must count.
+
+    The model answered, so the call's kind was `ok`; the ceiling never counts
+    `ok`; and a daily whose answer always names another project's path failed
+    every night with no end — the loop the ceiling exists for.
+    """
+    resp = bundle / "out_of_scope.json"
+    resp.write_text(json.dumps([{
+        "path": "projects/someotherproject/page.md", "action": "create",
+        "content": "# Page\n\nWritten for the wrong project. [[index]]\n"}]),
+        encoding="utf-8")
+    script = bundle / "cron" / "wiki" / "wiki-compile-sessions.py"
+    for _ in range(3):
+        r = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert "QUARANTINED after 3" in r.stdout, \
+        f"rejected paths never counted towards the ceiling:\n{r.stdout}"
+    r = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0 and "Nothing to compile" in r.stdout, \
+        f"the quarantined daily was sent a fourth time:\n{r.stdout}"
+
+
+def _kb_article(bundle: Path, name: str, data: bytes) -> Path:
+    arts = bundle / "kb_sources" / "articles"
+    arts.mkdir(parents=True, exist_ok=True)
+    path = arts / name
+    path.write_bytes(data)
+    # compile-kb skips a source younger than five minutes (it may still be written).
+    os.utime(path, (1_000_000_000, 1_000_000_000))
+    return path
+
+
+def test_compile_kb_stops_resending_an_article_with_a_rejected_path(bundle: Path):
+    """The partially-rejected article was kept for a retry — with no ceiling."""
+    _kb_article(bundle, "widgets.md", b"Widgets are small parts.\n")
+    resp = bundle / "kb_partial.json"
+    resp.write_text(json.dumps([
+        {"path": "kb/concepts/Widget.md", "action": "create",
+         "content": "# Widget\n\nA small part. See [[index]].\n"},
+        {"path": "projects/elsewhere/leak.md", "action": "create",
+         "content": "# Leak\n\nNot the curator's namespace.\n"}]), encoding="utf-8")
+    script = bundle / "cron" / "wiki" / "wiki-compile-kb.py"
+    for _ in range(3):
+        r = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert "QUARANTINED after 3" in r.stdout, \
+        f"a partially rejected article was retried with no ceiling:\n{r.stdout}"
+    r = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert "Nothing to process" in r.stdout, f"the article was sent again:\n{r.stdout}"
+
+
+def test_compile_kb_survives_a_source_that_is_not_utf8(bundle: Path):
+    """One ANSI-encoded article returned a bare None into a two-value unpack:
+    a TypeError, no ledger record, and every other article left unprocessed."""
+    _kb_article(bundle, "ansi.md", b"caf\xe9 au lait\n")     # Latin-1, not UTF-8
+    _kb_article(bundle, "fine.md", b"A perfectly ordinary article.\n")
+    resp = bundle / "kb_empty.json"
+    resp.write_text("[]", encoding="utf-8")
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-kb.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert "Traceback" not in r.stderr, f"one bad article crashed the run:\n{r.stderr}"
+    assert r.returncode != 0, "the unreadable article must still fail the run"
+    state = json.loads((bundle / "wiki" / ".processed.json").read_text(encoding="utf-8"))
+    assert state["compile_kb"]["processed"] == ["articles/fine.md"]
+    ledger = "".join(p.read_text(encoding="utf-8")
+                     for p in Path(os.environ["CLAUDE_BUNDLE_RUNS_DIR"]).glob("runs-*.jsonl"))
+    assert "ClaudeWikiCompileKB" in ledger, "the crashed run left no ledger record"
 
 
 # A date safely in the past on any machine, so nothing here depends on the

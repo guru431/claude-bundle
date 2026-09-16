@@ -135,17 +135,32 @@ def read_existing_pages() -> dict[str, str]:
 
 def compile_article(article_path: Path,
                     existing_pages: dict[str, str]) -> tuple[list[dict] | None, str]:
-    """Call the LLM to compile one article into wiki pages."""
+    """Call the LLM to compile one article into wiki pages → (changes, kind).
+
+    `changes` is None when the article could not be compiled, and `kind` (an
+    LLMResult kind) says whether a retry can help.
+    """
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
     try:
         article_text = article_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        # OSError: the file vanished between find_new_files() and here (the KB
-        # Update writer at 03:00 may still be mutating kb_news/).
-        # UnicodeDecodeError: a source saved in the system ANSI code page — a
-        # real case on Windows. Uncaught it killed the whole run; here it is one
-        # failed article. Either way: not marked processed, retried next run.
-        return None
+    except OSError as e:
+        # The file vanished between find_new_files() and here (the KB Update
+        # writer may still be mutating the source directory). Not marked
+        # processed, retried next run — and not counted: that clears itself.
+        print(f"  ERROR compile-kb {article_path.name}: cannot read it ({e})",
+              file=sys.stderr)
+        return None, "transient"
+    except UnicodeDecodeError as e:
+        # A source saved in the system ANSI code page — a real case on Windows.
+        # It fails the same way every night, so it counts towards the ceiling.
+        #
+        # This branch returned a bare None into a caller that unpacks two
+        # values, so the "one failed article" the comment promised was a
+        # TypeError that took the whole run down: no ledger record, no
+        # heartbeat, and every other article of the night unprocessed.
+        print(f"  ERROR compile-kb {article_path.name}: not valid UTF-8 ({e}) — "
+              f"re-save it as UTF-8", file=sys.stderr)
+        return None, "deterministic"
 
     existing_list = ", ".join(sorted(existing_pages.keys())[:100])
 
@@ -327,6 +342,25 @@ def main():
 
     total_created = 0
     hard_failure = False
+    def give_up(rel: str, kind: str, payload: str) -> bool:
+        # The bundle's one give-up rule: counts `deterministic` failures, ignores
+        # `transient` and `config` ones.
+        return give_up_after_repeated_failure(
+            section="compile_kb", marker=rel, label=rel, kind=kind,
+            payload=payload,
+            finding_title=f"compile-kb gave up on {rel}",
+            finding_context="`cron/wiki/wiki-compile-kb.py` (retry ceiling, WIKI_RETRY_LIMIT)",
+            finding_what=(f"The KB source `{rel}` failed the same way on every "
+                          f"attempt — it could not be read as UTF-8, the model's "
+                          f"answer could not be used, or a path in it was "
+                          f"rejected. It is now marked processed so the nightly "
+                          f"run stops paying for it."),
+            finding_proposal=("Read the quarantined payload in `cron/logs/rejected/` "
+                              "and the run log. Usually the source is not UTF-8 or "
+                              "too large for the provider, or the prompt asks for a "
+                              "path shape `normalize_wiki_path` refuses."),
+            log=log)
+
     for i, article_path in enumerate(new_files):
         rel = str(article_path.relative_to(KBNEWS_DIR)).replace("\\", "/")
         log(f"[{i+1}/{len(new_files)}] Processing: {rel}")
@@ -361,9 +395,16 @@ def main():
             # so the retry costs one LLM call and can still recover the dropped
             # entity, whereas finalizing here loses it for good. The all-rejected
             # case IS marked — it is deterministic and would loop forever.
+            #
+            # The retry had no ceiling, though: a model that names one bad path
+            # next to good ones does so every night, and the article was re-sent
+            # forever. A rejection is a deterministic failure, and it now counts.
             if applied and rejected:
-                print(f"  compile-kb {rel}: NOT marked processed — retry can still "
-                      f"recover the {len(rejected)} rejected change(s)", file=sys.stderr)
+                if give_up(rel, "deterministic", "\n".join(rejected)):
+                    mark_processed(rel)
+                else:
+                    print(f"  compile-kb {rel}: NOT marked processed — retry can still "
+                          f"recover the {len(rejected)} rejected change(s)", file=sys.stderr)
             else:
                 mark_processed(rel)
             if applied:
@@ -391,20 +432,7 @@ def main():
             hard_failure = True
             log(f"  → ERROR: compile failed ({kind})")
             update_log(rel, [f"(ERROR: {kind})"])
-            if give_up_after_repeated_failure(
-                    section="compile_kb", marker=rel, label=rel, kind=kind,
-                    payload=f"{rel}: the model's answer could not be parsed",
-                    finding_title=f"compile-kb gave up on {rel}",
-                    finding_context="`cron/wiki/wiki-compile-kb.py` (retry ceiling, WIKI_RETRY_LIMIT)",
-                    finding_what=(f"The KB source `{rel}` produced an answer that "
-                                  f"could not be used, the same way, on every "
-                                  f"attempt. It is now marked processed so the "
-                                  f"nightly run stops paying for it."),
-                    finding_proposal=("Read the quarantined payload in "
-                                      "`cron/logs/rejected/`. Usually the source is "
-                                      "too large for the provider, or the prompt asks "
-                                      "for a path shape `normalize_wiki_path` refuses."),
-                    log=log):
+            if give_up(rel, kind, f"{rel}: compile failed ({kind}) — see the run log"):
                 mark_processed(rel)
 
         if i < len(new_files) - 1:

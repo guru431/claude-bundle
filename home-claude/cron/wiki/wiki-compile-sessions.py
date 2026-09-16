@@ -981,7 +981,17 @@ def main():
                 else:
                     # A part failed — the pair stays unmarked, the retry redoes
                     # the whole project (succeeded parts overwrite idempotently).
-                    if not give_up_on_pair(marker, project, daily_path, kind,
+                    #
+                    # A REJECTED change is itself a deterministic failure: the
+                    # answer arrived and was refused, and the same prompt gets
+                    # the same refusal. It used to be passed on as the LLM
+                    # call's kind — `ok` whenever every part answered — and the
+                    # ceiling never counts `ok`, so a daily whose model output
+                    # always names an out-of-scope path failed every night,
+                    # forever: the very loop the ceiling was written to end.
+                    fail_kind = worst_kind([kind if not complete else "",
+                                            "deterministic" if rejected else ""])
+                    if not give_up_on_pair(marker, project, daily_path, fail_kind,
                                            changes, rejected, log,
                                            record=unit.markers):
                         failed += 1

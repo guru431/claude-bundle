@@ -1305,7 +1305,11 @@ def _migrated_state_from_log() -> dict | None:
                for m in re.finditer(r"\[compile-sessions\][^\n]*?(\d{4}-\d{2}-\d{2})\.md", text)]
     kb = []
     for line in text.split("\n"):
-        if "(ERROR)" in line:
+        # "(ERROR", not "(ERROR)": compile-kb journals a failure as `(ERROR:
+        # deterministic)` / `(ERROR: 0 applied)`, and the exact match read those
+        # as processed. The first failure on a machine without a state file (a
+        # fresh install) was migrated as done and never retried.
+        if "(ERROR" in line:
             continue
         m = re.search(r"\[compile-kb\][^\n]*?processed:\s*(.+?)(?:\s*→|$)", line)
         if m:

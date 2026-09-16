@@ -241,7 +241,9 @@ The `local` row deliberately ships **no default model** — an unset
 happens to be named in someone else's default.
 
 If you want claude as a one-off — `WIKI_LLM_PROVIDER=claude python ...`.
-Don't make it the cron default.
+Don't make it the cron default. The CLI is looked up the way a shell would,
+PATHEXT included, so the `claude.cmd` shim of an npm install is found; set
+`CLAUDE_BIN` when it is not on PATH at all.
 
 ### Where the keys come from
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -346,3 +347,27 @@ def test_llm_call_cli_exit_code_says_why(cron_copy: Path, tmp_path: Path,
     assert r.returncode == expected_rc, r.stdout + r.stderr
     if case == "ok":
         assert r.stdout == "the answer\n"
+
+
+# ── The claude CLI is found the way a shell would find it ────────────────────
+
+def test_the_claude_cli_is_resolved_through_pathext(cron_copy: Path, monkeypatch):
+    """subprocess does not apply PATHEXT on Windows — CreateProcess only appends
+    `.exe` — so the `claude.cmd` shim an npm install puts on PATH was "not found"
+    and every call failed as a "Claude CLI error" unless CLAUDE_BIN spelled the
+    full name out."""
+    for name in ("CLAUDE_BIN", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+        monkeypatch.delenv(name, raising=False)
+    u = _load_utils(cron_copy, "utils_claude_bin")
+    shim = str(cron_copy / "npm" / "claude.cmd")
+    monkeypatch.setattr(shutil, "which",
+                        lambda cmd, *a, **kw: shim if cmd == "claude" else None)
+    argvs = []
+
+    def fake_run(argv, **kw):
+        argvs.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="answer\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert u._llm_claude("hi") == "answer"
+    assert argvs[0][0] == shim

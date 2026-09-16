@@ -3633,10 +3633,18 @@ def llm_call(prompt: str, timeout: int = 600, model: str | None = None) -> str |
     model can weigh many times more against a provider quota than the default
     one, so it has no place in a nightly job that makes hundreds of calls.
 
-    Provider chain (NO silent fallback to Claude — it consumes the Max plan):
-      - "deepseek" (default): DeepSeek V4-Flash → OpenCode Go → DeepInfra → None.
-      - any other registry provider: that provider only → None.
-      - "claude":             only when WIKI_LLM_PROVIDER=claude (manual mode).
+    Where the call goes is WIKI_LLM_PROVIDER (NO silent fallback to Claude — it
+    consumes the Max plan):
+      - unset / "chain" (default): DEFAULT_CHAIN, DeepSeek V4-Flash → OpenCode Go
+                             → DeepInfra → None.
+      - a registry provider name ("deepseek", "opencode", "deepinfra", "local"):
+                             that provider only → None. "deepseek" names the
+                             provider, not the chain it used to mean.
+      - "claude":            the claude CLI, only when set explicitly (manual mode).
+      - "mock":              the offline fixture (tests/CI).
+      - anything else:       refused, nothing is sent.
+
+    Returns the text, or None — llm_call_ex says why.
 
     Cron scripts should NOT automatically fall back to Claude — better to skip
     a run than to burn a 5h subscription window.
@@ -3722,10 +3730,11 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
     (OpenCode's 402 once didn't trip the circuit breaker while DeepSeek's did).
     Per-provider differences that actually exist live in the table, not here.
 
-    Returns None on missing key, 402 insufficient_balance, network failure or
-    empty content. Thinking models put the answer in choices[0].message.content;
-    reasoning_content is a separate field and is intentionally ignored, and a
-    <think> block that leaks into content is stripped.
+    Returns an LLMResult; on a failure its `text` is None and its `kind` says
+    why (see LLMResult). Thinking models put the answer in
+    choices[0].message.content; reasoning_content is a separate field and is
+    intentionally ignored, and a <think> block that leaks into content is
+    stripped.
     """
     cfg = PROVIDERS[provider]
     label = cfg["label"]
@@ -3953,6 +3962,12 @@ def _llm_claude(prompt: str, timeout: int = 600) -> str | None:
         os.environ.pop(env_key, None)
 
     claude_bin = os.environ.get("CLAUDE_BIN") or "claude"
+    # Resolved through PATHEXT, which subprocess does not do on Windows:
+    # CreateProcess only ever appends `.exe`, so the `claude.cmd` shim an npm
+    # install puts on PATH was "not found" unless CLAUDE_BIN spelled it out. An
+    # unresolvable name is passed on as it was, and fails as it always did.
+    import shutil
+    claude_bin = shutil.which(claude_bin) or claude_bin
     try:
         result = subprocess.run(
             [claude_bin, "-p", "--model", "sonnet", "--output-format", "text", "-"],

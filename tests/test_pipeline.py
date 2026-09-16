@@ -296,6 +296,81 @@ def test_flush_resends_only_the_tail_of_a_grown_session(bundle: Path, tmp_path: 
         f"{jf.stat().st_size}-byte file):\n{r2.stdout}")
 
 
+def test_a_truncated_transcript_is_read_from_its_own_offset_afterwards(bundle: Path,
+                                                                       tmp_path: Path):
+    """One offset key per JSONL — the stale one goes when the new one is written.
+
+    A file used to gain a key a night and resume_offset took the MAX. After a
+    transcript was truncated or replaced, the higher offset of its earlier
+    incarnation won every night: the file was read whole again, and again, until
+    it outgrew the stale number (and was skipped outright at exactly that size).
+    """
+    home = tmp_path / "home_trunc"
+    proj_dir = home / ".claude" / "projects" / "C--Users-test-projects-trunc"
+    proj_dir.mkdir(parents=True)
+    jf = proj_dir / "s.jsonl"
+    _seed_session_jsonl(jf, 12, SESSION_DAY)
+    size = jf.stat().st_size
+    # The file's earlier, longer incarnation was read further than it now is.
+    (bundle / "wiki" / ".processed.json").write_text(json.dumps(
+        {"flush": {"processed_jsonls": [f"trunc/s.jsonl@{size + 5000}"]}}), encoding="utf-8")
+
+    resp = bundle / "trunc_response.md"
+    resp.write_text("- A durable fact. [[index]]\n", encoding="utf-8")
+    env = {"WIKI_LLM_MOCK_RESPONSE": str(resp), "USERPROFILE": str(home), "HOME": str(home)}
+    flush = bundle / "cron" / "wiki" / "wiki-flush-sessions.py"
+    r = _run(flush, env, cwd=bundle)
+    assert r.returncode == 0, f"flush failed:\n{r.stdout}\n{r.stderr}"
+    state = json.loads((bundle / "wiki" / ".processed.json").read_text(encoding="utf-8"))
+    keys = [k for k in state["flush"]["processed_jsonls"] if k.startswith("trunc/s.jsonl@")]
+    assert keys == [f"trunc/s.jsonl@{size}"], f"the stale offset survived: {keys}"
+
+    # It grows by a couple of exchanges: only those are sent, not the whole file.
+    _seed_session_jsonl(jf, 2, SESSION_DAY, marker="tail", append=True)
+    import os
+    env2 = os.environ.copy()
+    env2.update(env)
+    env2["WIKI_LLM_PROVIDER"] = "mock"
+    r2 = subprocess.run([sys.executable, str(flush), "--dry-run"], cwd=str(bundle), env=env2,
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        timeout=120)
+    sizes = [int(m) for m in re.findall(r"LLM call\(s\), (\d+) chars", r2.stdout)]
+    assert sizes and max(sizes) < size // 2, \
+        f"the grown file was re-read whole:\n{r2.stdout}"
+
+
+def test_flush_does_not_send_a_feedback_file_twice(bundle: Path, tmp_path: Path):
+    """The 48-hour window let the same text out on two nights running.
+
+    A feedback file edited at 10:00 is "fresh" at 02:30 the next night and the
+    night after, so it was sent — and written into a daily — twice. What was
+    sent is recorded now; an edit is new text and goes out again.
+    """
+    home = tmp_path / "home_feedback"
+    mem = home / ".claude" / "projects" / "C--Users-test-projects-rules" / "memory"
+    mem.mkdir(parents=True)
+    fb = mem / "feedback_testing.md"
+    fb.write_text("Always run the fast suite before committing.\n", encoding="utf-8")
+    resp = bundle / "feedback_response.md"
+    resp.write_text("- A durable rule. [[index]]\n", encoding="utf-8")
+    env = {"WIKI_LLM_MOCK_RESPONSE": str(resp), "USERPROFILE": str(home), "HOME": str(home)}
+    flush = bundle / "cron" / "wiki" / "wiki-flush-sessions.py"
+
+    r = _run(flush, env, cwd=bundle)
+    assert r.returncode == 0 and "Source B (feedback): 1 files" in r.stdout, r.stdout
+    r = _run(flush, env, cwd=bundle)
+    assert "Source B (feedback): 0 files" in r.stdout and "Nothing to process" in r.stdout, \
+        f"the same feedback file was sent a second night:\n{r.stdout}"
+
+    fb.write_text("Always run the fast suite and the guards before committing.\n",
+                  encoding="utf-8")
+    r = _run(flush, env, cwd=bundle)
+    assert "Source B (feedback): 1 files" in r.stdout, f"an edited file was not sent:\n{r.stdout}"
+    state = json.loads((bundle / "wiki" / ".processed.json").read_text(encoding="utf-8"))
+    markers = [m for m in state["flush"]["processed_sources"] if "feedback_testing.md" in m]
+    assert len(markers) == 1, f"the edit left the old marker behind: {markers}"
+
+
 def test_compile_honours_skip_projects(bundle: Path):
     """The privacy policy is unified across the pipeline — compile included.
 

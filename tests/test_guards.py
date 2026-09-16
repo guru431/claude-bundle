@@ -874,3 +874,33 @@ def test_the_state_lock_falls_back_where_os_locks_are_unsupported(bundle_tree: P
     assert utils.state_get("compile_sessions", "compiled_pairs") == {"2026-01-01#p@abc"}
     assert not list(utils.STATE_LOCK.parent.glob(f"{utils.STATE_LOCK.name}.excl*")), \
         "the fallback lock was not released"
+
+
+# ── state writes say whether they happened ──────────────────────────────────
+
+def test_state_writes_report_a_marker_they_could_not_record(bundle_tree: Path,
+                                                            monkeypatch):
+    """A skipped write returned None, exactly like a successful one, so a phase
+    logged a source as finished that the next run would pay to send again."""
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.state_add("flush", "processed_jsonls", []) is True
+    assert utils.state_add("flush", "processed_jsonls", ["p/a.jsonl@1"]) is True
+    real_lock = utils._state_lock
+    with real_lock(timeout=0) as held:
+        assert held
+        monkeypatch.setattr(utils, "_state_lock", lambda timeout=60.0: real_lock(timeout=0))
+        assert utils.state_add("flush", "processed_jsonls", ["p/b.jsonl@1"]) is False
+        assert utils.state_replace_prefix("flush", "processed_jsonls", ["p/a.jsonl@"],
+                                          ["p/a.jsonl@2"]) is False
+        assert utils.state_remove("flush", "processed_jsonls", ["p/a.jsonl@1"]) is False
+    assert utils.state_get("flush", "processed_jsonls") == {"p/a.jsonl@1"}
+
+
+def test_state_replace_prefix_keeps_one_key_per_source(bundle_tree: Path, monkeypatch):
+    utils = _import_utils(monkeypatch, bundle_tree)
+    utils.state_add("flush", "processed_jsonls",
+                    ["p/s.jsonl@100", "p/s.jsonl@200", "p/o.jsonl@5", "p/s.jsonl.bak@1"])
+    assert utils.state_replace_prefix("flush", "processed_jsonls", ["p/s.jsonl@"],
+                                      ["p/s.jsonl@300"]) is True
+    assert utils.state_get("flush", "processed_jsonls") == \
+        {"p/o.jsonl@5", "p/s.jsonl.bak@1", "p/s.jsonl@300"}

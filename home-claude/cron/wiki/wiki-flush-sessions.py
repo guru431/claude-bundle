@@ -20,6 +20,7 @@ Schedule: daily at 02:30.
 # enable this task.
 # bundle-io: offbox=session/source text of allowed projects -> LLM provider (plans only with collect_plans) money=tokens writes=wiki/daily/
 
+import hashlib
 import json
 import os
 import re
@@ -44,7 +45,7 @@ from utils import (dir_to_project, parse_jsonl_delta, is_subagent_jsonl,
                    normalize_project_name, KNOWN_PROJECTS, mark_phase_success,
                    state_get, state_add, state_remove, is_dry_run, SKIP_DIRS,
                    project_allowed, slug_collisions, COLLECT_PLANS,
-                   manifest_broken, policy_summary, sub_outside_fences,
+                   manifest_broken, policy_summary, sub_outside_fences, state_replace_prefix,
                    config_report, give_up_after_repeated_failure, masked,
                    RETRY_LIMIT,
                    attempt_reset, DEFAULT_PROJECT as UTILS_DEFAULT_PROJECT,
@@ -72,6 +73,11 @@ DEFAULT_PROJECT = UTILS_DEFAULT_PROJECT
 
 # Sources B/C/E are re-read every night; without an age filter the same text
 # would be fed to the LLM (and land in a new daily) again and again.
+#
+# The window alone did not stop that: a file edited at 10:00 is "fresh" at
+# 02:30 on BOTH of the next two nights, so its text went out twice, into two
+# dailies. What was sent is now recorded (source_marker, a fingerprint of the
+# text), and the window only bounds what gets read at all.
 SOURCE_MAX_AGE_HOURS = 48
 
 # One LLM call's worth of payload. Module-level because --dry-run costs the
@@ -151,6 +157,11 @@ def resume_offset(processed: set[str], project: str, name: str, size: int,
     offset of a fully-read file, so an existing state skips exactly what it used
     to skip and re-reads a grown file only from where it stopped.
 
+    A file used to collect one key per night and the MAX won. Recording now
+    replaces the file's previous keys (processed_key_prefixes), so the max is
+    the one offset; older states still carry several until each file's next
+    recording clears them.
+
     `legacy_project` is the pre-normalization bucket name (see
     find_recent_jsonls): without it, the first run after project names started
     being normalized would re-send every session of a project whose name is not
@@ -194,6 +205,22 @@ def processed_key(project: str, jf: Path, offset: int | None = None) -> str:
         except OSError:
             offset = 0
     return f"{project}/{jf.name}@{offset}"
+
+
+def processed_key_prefixes(project: str, jf: Path) -> list[str]:
+    """Every `@offset` key prefix one JSONL can be recorded under — all of them
+    are replaced when its new offset is recorded. The pre-normalization name
+    counts (see resume_offset's `legacy_project`): a stale offset left under it
+    wins the max just the same."""
+    names = {project, dir_to_project(jf.parent.name)}
+    return sorted(f"{n}/{jf.name}@" for n in names)
+
+
+def source_marker(project: str, rel: str, chunk: str) -> str:
+    """State key for a feedback / plan / incidents source: which file, and a
+    fingerprint of exactly the text sent. See SOURCE_MAX_AGE_HOURS."""
+    fp = hashlib.sha256(chunk.encode("utf-8", "replace")).hexdigest()[:12]
+    return f"{project}/{rel}@{fp}"
 
 
 def session_day(jf: Path, messages: list[dict]) -> str:
@@ -458,9 +485,14 @@ def collect_pending(covered_ids: set[str] | None = None):
     return by_bucket, consumed, skipped, denied
 
 
-def collect_feedback_files() -> dict[str, list[str]]:
-    """Collect recently-modified feedback_*.md files from each project's memory/."""
-    by_project: dict[str, list[str]] = {}
+def collect_feedback_files(sent: set[str] | None = None) -> dict[str, list[tuple[str, str]]]:
+    """Collect recently-modified feedback_*.md files from each project's memory/.
+
+    → {project: [(source_marker, chunk)]}; a chunk whose marker is in `sent`
+    went out on an earlier night and is left out.
+    """
+    sent = sent or set()
+    by_project: dict[str, list[tuple[str, str]]] = {}
     if not PROJECTS_BASE.exists():
         return by_project
 
@@ -483,23 +515,28 @@ def collect_feedback_files() -> dict[str, list[str]]:
             text = _read_text_safe(fb)
             if text is None:
                 continue
-            by_project.setdefault(project, []).append(
-                f"### Feedback: {fb.name}\n{text}"
-            )
+            chunk = f"### Feedback: {fb.name}\n{text}"
+            marker = source_marker(project, f"memory/{fb.name}", chunk)
+            if marker not in sent:
+                by_project.setdefault(project, []).append((marker, chunk))
 
     return by_project
 
 
-def collect_plans() -> list[str]:
+def collect_plans(sent: set[str] | None = None) -> list[tuple[str, str]]:
     """Collect recently-modified plans from ~/.claude/plans/ — opt-in.
 
     Plans carry no project attribution (flat dir, random filenames, no cwd in
     the file), so the per-project privacy policy cannot judge them: a plan
     written during a skip_projects session is indistinguishable from any other.
     Off unless bundle.local.yaml sets `collect_plans: true`. See utils.COLLECT_PLANS.
+
+    → [(source_marker, chunk)], already-sent chunks left out (see
+    collect_feedback_files).
     """
     if not COLLECT_PLANS:
         return []
+    sent = sent or set()
     plans = []
     if PLANS_DIR.exists():
         for f in sorted(PLANS_DIR.glob("*.md")):
@@ -508,13 +545,20 @@ def collect_plans() -> list[str]:
             text = _read_text_safe(f)
             if text is None:
                 continue
-            plans.append(f"### Plan: {f.name}\n{text}")
+            chunk = f"### Plan: {f.name}\n{text}"
+            marker = source_marker(DEFAULT_PROJECT, f"plans/{f.name}", chunk)
+            if marker not in sent:
+                plans.append((marker, chunk))
     return plans
 
 
-def collect_incidents_sessions() -> dict[str, list[str]]:
-    """Collect recently-modified incidents.md and sessions.md per project."""
-    by_project: dict[str, list[str]] = {}
+def collect_incidents_sessions(sent: set[str] | None = None) -> dict[str, list[tuple[str, str]]]:
+    """Collect recently-modified incidents.md and sessions.md per project.
+
+    Same shape as collect_feedback_files.
+    """
+    sent = sent or set()
+    by_project: dict[str, list[tuple[str, str]]] = {}
     if not PROJECTS_BASE.exists():
         return by_project
 
@@ -536,9 +580,10 @@ def collect_incidents_sessions() -> dict[str, list[str]]:
                 if text is None:
                     continue
                 # Take only the last 3000 chars (recent entries at the bottom).
-                by_project.setdefault(project, []).append(
-                    f"### {fname}\n{text[-3000:]}"
-                )
+                chunk = f"### {fname}\n{text[-3000:]}"
+                marker = source_marker(project, f"memory/{fname}", chunk)
+                if marker not in sent:
+                    by_project.setdefault(project, []).append((marker, chunk))
 
     return by_project
 
@@ -824,16 +869,20 @@ def main():
     for project, files in backlog.items():
         jsonls.setdefault(project, []).extend(files)
 
+    # Sources B/C/E, minus what an earlier night already sent (see
+    # SOURCE_MAX_AGE_HOURS).
+    sent_sources = state_get("flush", "processed_sources")
+
     # Source B: feedback
-    feedbacks = collect_feedback_files()
+    feedbacks = collect_feedback_files(sent_sources)
     log(f"Source B (feedback): {sum(len(v) for v in feedbacks.values())} files")
 
     # Source C: plans
-    plans = collect_plans()
+    plans = collect_plans(sent_sources)
     log(f"Source C (plans): {len(plans)} files")
 
     # Source E: incidents/sessions
-    incidents = collect_incidents_sessions()
+    incidents = collect_incidents_sessions(sent_sources)
     log(f"Source E (incidents/sessions): {sum(len(v) for v in incidents.values())} files")
 
     # Material is bucketed by (DAY, project) — the day the material was WRITTEN,
@@ -884,7 +933,12 @@ def main():
     if filtered_out and not is_dry_run():
         filtered_keys = [processed_key(project, jf, read_offsets.get(jf))
                          for project, jf in filtered_out]
-        state_add("flush", "processed_jsonls", filtered_keys)
+        if not state_replace_prefix(
+                "flush", "processed_jsonls",
+                [p for project, jf in filtered_out for p in processed_key_prefixes(project, jf)],
+                filtered_keys):
+            log(f"WARNING: {len(filtered_keys)} filtered JSONL marker(s) NOT recorded "
+                f"(state lock busy) — they are read again tomorrow")
         with open(LOG_MD, "a", encoding="utf-8") as f:
             for key in filtered_keys:
                 project = key.split("/", 1)[0]
@@ -936,18 +990,26 @@ def main():
     for bucket, texts in pending.items():
         buckets.setdefault(bucket, []).extend(texts)
 
-    for project, texts in feedbacks.items():
-        buckets.setdefault((DATE, project), []).extend(texts)
+    # Which source markers each bucket carries — recorded only if it succeeds.
+    source_markers: dict[tuple[str, str], list[str]] = {}
+
+    def add_sources(project: str, items: list[tuple[str, str]]) -> None:
+        for marker, chunk in items:
+            buckets.setdefault((DATE, project), []).append(chunk)
+            source_markers.setdefault((DATE, project), []).append(marker)
+
+    for project, items in feedbacks.items():
+        add_sources(project, items)
 
     # Plans have no project of their own — they bucket under DEFAULT_PROJECT, so
     # honor the policy for that bucket too (an allowlist excluding "main" drops
     # them). collect_plans (checked in collect_plans()) is the real gate: the
     # bucket is a placement decision, not an attribution.
     if plans and project_allowed(DEFAULT_PROJECT):
-        buckets.setdefault((DATE, DEFAULT_PROJECT), []).extend(plans)
+        add_sources(DEFAULT_PROJECT, plans)
 
-    for project, texts in incidents.items():
-        buckets.setdefault((DATE, project), []).extend(texts)
+    for project, items in incidents.items():
+        add_sources(project, items)
 
     all_projects = {p for _day, p in buckets}
 
@@ -987,8 +1049,10 @@ def main():
     # next run re-selects these regardless of the 48-hour window.
     collected_keys = [f"{project}/{jf.name}"
                       for project, files in jsonls.items() for jf in files]
-    if collected_keys:
-        state_add("flush", "seen_unprocessed", collected_keys)
+    if collected_keys and not state_add("flush", "seen_unprocessed", collected_keys):
+        log(f"WARNING: {len(collected_keys)} collected JSONL(s) NOT recorded as "
+            f"carried over (state lock busy) — if tonight fails and they age past "
+            f"48h, nothing re-selects them")
 
     # One list of daily lines per DAY — a backlog sweep or a late-evening session
     # writes several dailies in one run.
@@ -1119,7 +1183,20 @@ def main():
                   if (day, project) not in failed_buckets]
     keys = [processed_key(project, jf, read_offsets.get(jf))
             for project, jf in done_files]
-    state_add("flush", "processed_jsonls", keys)
+    # One key per file: the new offset replaces the file's previous ones.
+    if keys and not state_replace_prefix(
+            "flush", "processed_jsonls",
+            [p for project, jf in done_files for p in processed_key_prefixes(project, jf)],
+            keys):
+        log(f"WARNING: {len(keys)} processed JSONL marker(s) NOT recorded (state "
+            f"lock busy) — expect those sessions to be sent again tomorrow")
+    done_sources = [m for bucket, markers in source_markers.items()
+                    if bucket not in failed_buckets for m in markers]
+    if done_sources and not state_replace_prefix(
+            "flush", "processed_sources",
+            [m.rsplit("@", 1)[0] + "@" for m in done_sources], done_sources):
+        log(f"WARNING: {len(done_sources)} feedback/plan/incidents marker(s) NOT "
+            f"recorded (state lock busy) — expect them to be sent again tomorrow")
     # …and drop them from the carry-over set: they are finished, so they should
     # go back to being selected by age like any other file.
     done_carry = [f"{project}/{jf.name}" for project, jf in done_files]

@@ -709,8 +709,20 @@ def give_up_on_pair(marker: str, project: str, daily_path: Path, kind: str,
                           f"{daily_path.stem}#{project}`."),
         log=log)
     if quarantined:
-        state_add("compile_sessions", "compiled_pairs", record or [marker])
+        record_markers("compiled_pairs", record or [marker], log)
     return quarantined
+
+
+def record_markers(key: str, items: list[str], log) -> None:
+    """state_add for compile_sessions, loud when the marker was NOT written.
+
+    A skipped write used to be one stderr line from the lock ("the phase retries
+    next run") — while this phase logged the pair as done. It is not done: the
+    next run compiles it again and pays for it again.
+    """
+    if not state_add("compile_sessions", key, items):
+        log(f"WARNING: {len(items)} {key} marker(s) NOT recorded (state lock busy) — "
+            f"expect them to be compiled, and billed, again next run")
 
 
 def _replay_target(argv: list[str]) -> str | None:
@@ -912,7 +924,7 @@ def main():
                     # succeeded project is skipped rather than re-compiled.
                     # Anything rejected keeps the pair unmarked (the branches
                     # above), so a drop is never silently finalized here.
-                    state_add("compile_sessions", "compiled_pairs", unit.markers)
+                    record_markers("compiled_pairs", unit.markers, log)
                     compiled_pairs.update(unit.markers)
                     attempt_reset("compile_sessions", marker)
                     # Nothing applied AND nothing rejected means every change was
@@ -934,7 +946,7 @@ def main():
             elif complete:
                 # Empty result, but every part ran (LLM extracted nothing) —
                 # mark the pair so an empty daily is not retried forever.
-                state_add("compile_sessions", "compiled_pairs", unit.markers)
+                record_markers("compiled_pairs", unit.markers, log)
                 compiled_pairs.update(unit.markers)
                 attempt_reset("compile_sessions", marker)
                 log(f"  [{project}] → 0 changes (LLM extracted nothing)")
@@ -957,8 +969,7 @@ def main():
             log(f"  {failed}/{len(units)} project(s) failed — "
                 f"{daily_path.name} left uncompiled for retry")
         else:
-            state_add("compile_sessions", "compiled_dailies",
-                      [f"{daily_path.stem}@{daily_fp}"])
+            record_markers("compiled_dailies", [f"{daily_path.stem}@{daily_fp}"], log)
             with open(LOG_MD, "a", encoding="utf-8") as f:
                 f.write(f"- [compile-sessions] compiled: {daily_path.stem}.md ({len(units)} projects)\n")
 

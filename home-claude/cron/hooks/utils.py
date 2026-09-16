@@ -1040,43 +1040,73 @@ def _state_lock(timeout: float = 60.0):
                       label="state lock", mode="os")
 
 
-def state_add(section: str, key: str, items) -> None:
+def state_add(section: str, key: str, items) -> bool:
     """Append new items to state[section][key] (order-preserving, deduped).
 
     A no-op when the lock can't be taken — re-running the phase is cheaper than
     a lost update, which would silently re-feed processed sources to the LLM.
+
+    Returns whether the items are recorded (True for nothing to record). It
+    returned nothing, so a caller could not tell a recorded marker from a
+    skipped one: the lock timeout said "the phase retries next run", and the
+    phase logged success for a source it would pay to send again tomorrow. The
+    caller knows what an unrecorded marker costs; it has to say so.
+    """
+    return state_replace_prefix(section, key, (), items)
+
+
+def state_replace_prefix(section: str, key: str, prefixes, items) -> bool:
+    """Drop every item of state[section][key] that starts with one of `prefixes`,
+    then append `items` — one read-modify-write under one lock. See state_add
+    for the return value.
+
+    For keys that describe ONE source at a time. Flush recorded a JSONL as
+    `project/name@offset` and never removed the previous offset, so a file grew
+    a key per night, and resume_offset took the MAX of them: once a transcript
+    was truncated or replaced, a stale high offset made it re-read whole every
+    night — or, at exactly that size, skipped for good.
+    """
+    items = list(items)
+    prefixes = tuple(prefixes)
+    if not items and not prefixes:
+        return True
+    with _state_lock() as held:
+        if not held:
+            return False
+        state = load_state()
+        bucket = state.setdefault(section, {}).setdefault(key, [])
+        kept = [it for it in bucket
+                if not (prefixes and isinstance(it, str) and it.startswith(prefixes))]
+        seen = set(kept)
+        for it in items:
+            if it not in seen:
+                kept.append(it)
+                seen.add(it)
+        if kept != bucket:
+            state[section][key] = kept
+            save_state(state)
+        return True
+
+
+def state_remove(section: str, key: str, items) -> bool:
+    """Remove items from state[section][key] (no-op if section/key/item absent).
+
+    Returns False only when the state lock could not be taken (see state_add).
     """
     items = list(items)
     if not items:
-        return
+        return True
     with _state_lock() as held:
         if not held:
-            return
-        state = load_state()
-        bucket = state.setdefault(section, {}).setdefault(key, [])
-        seen = set(bucket)
-        for it in items:
-            if it not in seen:
-                bucket.append(it)
-                seen.add(it)
-        save_state(state)
-
-
-def state_remove(section: str, key: str, items) -> None:
-    """Remove items from state[section][key] (no-op if section/key/item absent)."""
-    items = list(items)
-    if not items:
-        return
-    with _state_lock() as held:
-        if not held:
-            return  # see state_add: never write state we don't hold the lock for
+            return False  # see state_add: never write state we don't hold the lock for
         state = load_state()
         bucket = state.get(section, {}).get(key)
         if not bucket:
-            return
+            return True
         drop = set(items)
         state[section][key] = [it for it in bucket if it not in drop]
         save_state(state)
+        return True
 
 
 # ── Bounded retries for sources that will never succeed ──────────────────────
@@ -1107,10 +1137,13 @@ def attempt_bump(section: str, key: str) -> int:
 
     Returns the count read without the lock when the state lock cannot be
     taken — same trade as state_add: a skipped write costs one retry, a write
-    without the lock costs somebody else's update.
+    without the lock costs somebody else's update. Still an int, not state_add's
+    bool — the retry ceiling reads the number — so the skip is announced here.
     """
     with _state_lock() as held:
         if not held:
+            print(f"WARNING: failure {section}/{key} NOT counted (state lock busy) "
+                  f"— the retry ceiling does not advance tonight", file=sys.stderr)
             return attempt_count(section, key) + 1
         state = load_state()
         attempts = state.setdefault(section, {}).setdefault("attempts", {})

@@ -284,6 +284,12 @@ def main():
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")
 
+    def mark_processed(rel: str) -> None:
+        # state_add reports a marker it could not write (see utils.state_add).
+        if not state_add("compile_kb", "processed", [rel]):
+            log(f"  WARNING: {rel} NOT marked processed (state lock busy) — "
+                f"expect it to be compiled, and billed, again next run")
+
     log(f"=== Wiki Compile KB {DATE} ===")
     for line in config_report():
         log(f"  cfg | {line}")
@@ -330,7 +336,7 @@ def main():
             # Valid empty result: the model read the article and found no entity
             # worth a page. That is a successful no-op — mark it processed so it
             # isn't re-sent every night (the failure path is `changes is None`).
-            state_add("compile_kb", "processed", [rel])
+            mark_processed(rel)
             update_log(rel, ["(no entities)"])
             log("  → 0 entities extracted (valid empty result) — marked processed")
         elif changes:
@@ -359,7 +365,7 @@ def main():
                 print(f"  compile-kb {rel}: NOT marked processed — retry can still "
                       f"recover the {len(rejected)} rejected change(s)", file=sys.stderr)
             else:
-                state_add("compile_kb", "processed", [rel])
+                mark_processed(rel)
             if applied:
                 update_log(rel, applied)
                 total_created += len(applied)
@@ -399,7 +405,7 @@ def main():
                                       "too large for the provider, or the prompt asks "
                                       "for a path shape `normalize_wiki_path` refuses."),
                     log=log):
-                state_add("compile_kb", "processed", [rel])
+                mark_processed(rel)
 
         if i < len(new_files) - 1:
             llm_pace()

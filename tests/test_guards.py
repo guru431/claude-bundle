@@ -692,3 +692,66 @@ def test_state_migration_keeps_jsonl_size(bundle_tree: Path, monkeypatch):
     utils = _import_utils(monkeypatch, bundle_tree)
     migrated = utils._migrated_state_from_log()
     assert migrated["flush"]["processed_jsonls"] == ["proj/abc.jsonl@4096"]
+
+
+# ── integer flags: out of range is an error, not a silent clamp ─────────────
+
+def test_a_negative_integer_flag_keeps_its_default_and_says_so(bundle_tree: Path,
+                                                               monkeypatch):
+    """`minimum` used to CLAMP, and for these two flags the clamp inverted them.
+
+    WIKI_RETRY_LIMIT=-1 became 0, which the code reads as "no ceiling", so a typo
+    meant unbounded retries; WIKI_LLM_LOCK_WAIT=-5 became 0 and switched the
+    provider queue off. config_report then showed a plain `0` as if asked for.
+    """
+    monkeypatch.setenv("WIKI_RETRY_LIMIT", "-1")
+    monkeypatch.setenv("WIKI_LLM_LOCK_WAIT", "-5")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.RETRY_LIMIT == 3, "a negative ceiling was clamped to 'no ceiling'"
+    assert utils.LLM_LOCK_WAIT == 900, "a negative wait switched the queue off"
+    errors = " ".join(utils.config_errors())
+    assert "WIKI_RETRY_LIMIT" in errors and "WIKI_LLM_LOCK_WAIT" in errors
+    assert "INVALID '-1'" in " ".join(utils.config_report())
+
+
+def test_zero_is_still_a_valid_retry_limit(bundle_tree: Path, monkeypatch):
+    """0 is documented ("restores unbounded retries") and is at the minimum."""
+    monkeypatch.setenv("WIKI_RETRY_LIMIT", "0")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.RETRY_LIMIT == 0
+    assert not utils.config_errors()
+
+
+# ── manifest keys: a typo'd policy field must not silently do nothing ──────
+
+@pytest.mark.parametrize("key", ["skip_project", "allow_project", "Skip_Projects",
+                                 "skip-projects", "dry_run_untl"])
+def test_a_near_miss_manifest_key_denies_every_project(bundle_tree: Path, monkeypatch,
+                                                       key: str):
+    """`skip_project: [secret]` used to be a WARNING the launcher discarded.
+
+    Nothing else knew: config_report, policy_summary and bundle-status all
+    carried on as if the key were absent, so the project the user meant to
+    exclude went to the provider — the one fail-open in the manifest block.
+    """
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(f"{key}:\n  - secret\n",
+                                                   encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.manifest_broken() is True
+    assert utils.project_allowed("secret") is False
+    assert "DENIED" in utils.policy_summary()
+    assert any(key in e for e in utils.config_errors())
+
+
+def test_an_unrelated_unknown_manifest_key_is_reported_not_denied(bundle_tree: Path,
+                                                                  monkeypatch):
+    """Not every unknown key is a policy typo — but it must still be visible."""
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(
+        "notes: my own reminder\n1: numeric\n", encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.manifest_broken() is False
+    assert utils.project_allowed("anything") is True
+    assert any("notes" in e for e in utils.config_errors())
+    assert "ERRORS:" in utils.config_report()

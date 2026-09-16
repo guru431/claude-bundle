@@ -120,21 +120,30 @@ def _env_bool(name: str, default: bool, *, on_invalid: bool | None = None) -> bo
 
 
 def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
-    """Read an integer flag; an unparseable value warns and keeps the default."""
+    """Read an integer flag; an unparseable or out-of-range value warns and keeps
+    the default."""
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         _CONFIG_NOTES.append((name, str(default), "default"))
         return default
     try:
         value = int(raw.strip())
+        problem = "" if minimum is None or value >= minimum else \
+            f"is below the minimum {minimum}"
     except ValueError:
-        msg = f"{name}={raw!r} is not an integer — using the default {default}"
+        problem = "is not an integer"
+    if problem:
+        # Below the minimum used to be CLAMPED, silently, and for two flags the
+        # clamp produced the opposite of anything a user could have meant:
+        # WIKI_RETRY_LIMIT=-1 became 0 ("no ceiling" — unbounded retries) and
+        # WIKI_LLM_LOCK_WAIT=-5 became 0, which switches the queue off, while
+        # config_report showed a plain `0` as if that had been asked for. A value
+        # out of range is as unreadable as one that is not a number.
+        msg = f"{name}={raw!r} {problem} — using the default {default}"
         print(f"ERROR: {msg}", file=sys.stderr)
         _CONFIG_ERRORS.append(msg)
         _CONFIG_NOTES.append((name, f"{default} (INVALID {raw!r})", "env/.env"))
         return default
-    if minimum is not None and value < minimum:
-        value = minimum
     _CONFIG_NOTES.append((name, str(value), "env/.env"))
     return value
 
@@ -198,10 +207,39 @@ _MANIFEST_KNOWN_KEYS = {
     "allow_projects", "skip_jsonl_projects", "collect_plans",
     "projects_root", "dry_run_until",
 }
-for _unknown in sorted(set(_MANIFEST) - _MANIFEST_KNOWN_KEYS):
-    print(f"WARNING: bundle.local.yaml has unknown key '{_unknown}' — it is "
-          f"ignored. Known keys: {', '.join(sorted(_MANIFEST_KNOWN_KEYS))}.",
-          file=sys.stderr)
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance — how many single-character edits turn a into b."""
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+# "Reported" used to mean a WARNING on stderr, which the Task Scheduler launcher
+# throws away: no config_report line, no bundle-status line, and the policy line
+# still read `skip_projects=none` — the one fail-OPEN in a block where every other
+# malformed field denies everything. Now every unknown key is a configuration
+# error, and one that is a near miss of a real key (two edits or fewer — a
+# dropped `s`, a hyphen, a capital) is treated as that key being unreadable: the
+# user plainly meant to set it, and nothing can tell what it would have allowed.
+for _unknown in sorted(set(_MANIFEST) - _MANIFEST_KNOWN_KEYS, key=str):
+    _near = sorted(k for k in _MANIFEST_KNOWN_KEYS
+                   if _edit_distance(str(_unknown).lower(), k) <= 2)
+    if _near:
+        _MANIFEST_BROKEN = True
+        _msg = (f"bundle.local.yaml key '{_unknown}' is not a known key but is a "
+                f"near miss of '{_near[0]}' — every project denied until it is "
+                f"fixed")
+    else:
+        _msg = (f"bundle.local.yaml has unknown key '{_unknown}' — it is ignored. "
+                f"Known keys: {', '.join(sorted(_MANIFEST_KNOWN_KEYS))}")
+    print(f"ERROR: {_msg}", file=sys.stderr)
+    _CONFIG_ERRORS.append(_msg)
 
 
 def _manifest_str_list(key: str) -> list:

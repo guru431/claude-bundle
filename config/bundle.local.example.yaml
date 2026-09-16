@@ -11,9 +11,10 @@
 #
 # Read by home-claude/cron/hooks/utils.py, which needs PyYAML. Once this file
 # EXISTS it is a policy, and a policy that cannot be read is never ignored:
-# missing PyYAML, invalid YAML, an unknown-typed field or a non-string
-# project_map all DENY every project until fixed. Unknown keys are reported as
-# probable typos. Delete the file if you want the permissive default back.
+# missing PyYAML, invalid YAML, an unknown-typed field, a non-string
+# project_map and a key one or two letters away from a real one (`skip_project:`)
+# all DENY every project until fixed. Any other unknown key is reported as a
+# configuration error. Delete the file if you want the permissive default back.
 #
 # After editing, preview exactly what each source WOULD send without spending a
 # token or hitting the network:

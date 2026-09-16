@@ -1816,19 +1816,45 @@ def _is_local_endpoint(url: str) -> bool:
     LOCAL_LLM_ALLOWED_HOSTS (comma-separated) is the escape hatch for a
     deliberately non-loopback but still trusted server (an inference box on your
     own LAN): naming it is an explicit decision, unlike a URL nobody re-read.
+    It takes an address as well as a name. An IP literal used to be answered by
+    its loopback check alone, so a LAN box addressed by IP could not be allowed
+    at all — the list was never consulted for it.
+
+    A NAME is only as local as what it resolves to. `localhost` and `*.localhost`
+    were accepted on spelling, but a resolver that does not implement RFC 6761
+    sends `anything.localhost` to DNS, and a hosts-file line can point either
+    name anywhere. So such a name must resolve, and to loopback only; a name
+    that does not resolve is refused. Only those names are looked up: every
+    other one is either on the allow-list (a decision, and a LAN box resolves to
+    a LAN address by design) or refused without a query. What remains is the gap
+    between this lookup and the connection's own, which a resolver that answers
+    differently twice in a row could still use.
     """
     from urllib.parse import urlparse
     import ipaddress
+    import socket
+
+    def loopback(address: str) -> bool:
+        ip = ipaddress.ip_address(address)   # ValueError when it is not one
+        # `::ffff:127.0.0.1` IS loopback, but only Python 3.13+ says so itself.
+        return (getattr(ip, "ipv4_mapped", None) or ip).is_loopback
 
     host = (urlparse(url).hostname or "").strip().lower()
     if not host:
         return False
     if host == "localhost" or host.endswith(".localhost"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        pass
+        try:
+            addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
+            if addresses and all(loopback(a) for a in addresses):
+                return True
+        except (OSError, UnicodeError, ValueError):
+            pass   # does not resolve, or to something unparseable: not local
+    else:
+        try:
+            if loopback(host):
+                return True
+        except ValueError:
+            pass   # a name, not an address
     allowed = {h.strip().lower()
                for h in os.environ.get("LOCAL_LLM_ALLOWED_HOSTS", "").split(",")
                if h.strip()}
@@ -2179,6 +2205,14 @@ def _log_provider_once() -> None:
             extra = (" (local-only, endpoint verified)" if _is_local_endpoint(base)
                      else " (local-only, but the endpoint is NOT local — every call "
                           "will be REFUSED)")
+            # A local-only call bypasses these (see _llm_openai_compat). Someone
+            # who set one for this machine should read that here, not work it
+            # out from a packet capture.
+            proxy_vars = sorted(k for k, v in os.environ.items() if v and k.lower()
+                                in ("http_proxy", "https_proxy", "all_proxy"))
+            if proxy_vars:
+                extra += (f" ({', '.join(proxy_vars)} ignored: a local-only call "
+                          f"never goes through a proxy)")
         # The global gate outranks everything above, so say so on the same line:
         # otherwise a run under WIKI_ALLOW_OFFBOX=0 reads as "provider=deepseek"
         # and every refusal further down looks like an unrelated failure.
@@ -3466,8 +3500,9 @@ def _llm_queue():
 #                   (400/413/415/422, empty content). Retrying reproduces it:
 #                   count it.
 #   config        — no key, no model, refused by a DLP gate, 401/402/403/404 and
-#                   every other 4xx. Nothing about tonight will fix this; it is
-#                   fatal for the run.
+#                   every other 4xx, a redirect a local-only provider will not
+#                   follow. Nothing about tonight will fix this; it is fatal for
+#                   the run.
 class LLMResult(NamedTuple):
     text: str | None
     kind: str = "ok"
@@ -3699,6 +3734,19 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
         "stream": False,
     }
 
+    # The endpoint check above looks at a URL; `requests` then has two ways to
+    # deliver the body somewhere else. It applies HTTP_PROXY/HTTPS_PROXY (and the
+    # Windows proxy settings) to loopback as well, so without a NO_PROXY entry a
+    # POST to localhost went to the proxy host, transcript and all. And it follows
+    # redirects: a 307/308 from a local reverse proxy re-sends the same body to
+    # whatever the Location header names. For a local-only row both are off —
+    # a proxy mapped to None is dropped from whatever the environment supplies,
+    # and a redirect comes back as a response, refused below.
+    local_only = {}
+    if not cfg.get("offbox", True):
+        local_only = {"proxies": {"http": None, "https": None, "all": None},
+                      "allow_redirects": False}
+
     max_retries = cfg["max_retries"]
     for attempt in range(max_retries):
         try:
@@ -3708,6 +3756,7 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
                 headers=headers,
                 json=payload,
                 timeout=timeout,
+                **local_only,
             )
             _audit_attempt(provider, model, resp.status_code,
                            int((time.monotonic() - t0) * 1000), fallback_from)
@@ -3768,6 +3817,17 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
                       f"retry {attempt+1}/{max_retries} in {wait}s", file=sys.stderr)
                 time.sleep(wait)
                 continue
+            if 300 <= resp.status_code < 400:
+                # Not followed (a local-only row sends allow_redirects=False, see
+                # above), so nothing went to the Location. The same URL redirects
+                # every time: config, never the source's fault.
+                where = resp.headers.get("Location", "?")[:200]
+                print(f"  {label} REFUSED: HTTP {resp.status_code} redirect to {where} "
+                      f"not followed — nothing was sent there. Point "
+                      f"{cfg['base_url_env'] or 'the base URL'} at the final address.",
+                      file=sys.stderr)
+                return LLMResult(None, "config",
+                                 f"{label} HTTP {resp.status_code} redirect not followed")
             if resp.status_code != 200:
                 # Only a failure about THIS payload is deterministic — 400/413/
                 # 415/422: oversized, malformed, filtered. Retrying reproduces it

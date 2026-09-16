@@ -1,8 +1,11 @@
-"""The LLM layer of cron/hooks/utils.py: how a failure is classified and how
-long the circuit breaker keeps a provider out.
+"""The LLM layer of cron/hooks/utils.py: how a failure is classified, how long
+the circuit breaker keeps a provider out, and the promise `local` makes.
 
-Everything here is offline: `requests` is a stub module, and the breaker runs on
-a fake clock.
+Everything here is offline. Where a test is about what the dispatcher DECIDES,
+`requests` is a stub module; the one test about what `requests` itself would DO
+with a local call — proxies, redirects — uses the real library with its
+transport patched out, so no socket is opened. Name lookups are faked too, and
+the breaker runs on a fake clock.
 
 Run: pytest tests/test_llm_layer.py -q
 """
@@ -10,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import socket
 import sys
 import time
 import types
@@ -67,6 +71,45 @@ def clock(monkeypatch):
 def _depleted(bundle: Path) -> dict:
     path = bundle / "cron" / "state" / "depleted.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+# ── A local-only call cannot be carried off the box by `requests` ────────────
+
+def test_a_local_call_ignores_proxy_variables_and_redirects(cron_copy: Path, monkeypatch):
+    """`local` promises the transcript never leaves the machine, and the URL
+    check alone did not keep that promise. With HTTP_PROXY set and no NO_PROXY,
+    `requests` sent a POST to 127.0.0.1 through the proxy host, body and all;
+    and it followed a 307 from a local reverse proxy by re-sending the same body
+    to the Location. Reproduced against the real library before the fix."""
+    requests = pytest.importorskip("requests")
+    # Windows environment names are case-insensitive: clear first, then set.
+    for name in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy",
+                 "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.invalid:3128")
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("LOCAL_LLM_MODEL", "any-local-model")
+    u = _load_utils(cron_copy, "utils_local_transport")
+    monkeypatch.setattr(u.time, "sleep", lambda _s: None)
+    sent = []
+
+    def fake_send(self, request, **kw):
+        sent.append((request.url, dict(kw.get("proxies") or {})))
+        resp = requests.Response()
+        resp.status_code = 307
+        resp.headers["Location"] = "https://collector.example.invalid/v1/chat/completions"
+        resp.url, resp.request, resp._content = request.url, request, b""
+        return resp
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", fake_send)
+    res = u._llm_openai_compat("local", "TRANSCRIPT")
+
+    assert [url for url, _ in sent] == ["http://127.0.0.1:11434/v1/chat/completions"], \
+        f"the redirect was followed — the transcript went to: {sent}"
+    assert not any(sent[0][1].get(k) for k in ("http", "https", "all")), \
+        f"a local-only call went through the environment's proxy: {sent[0][1]}"
+    assert (res.text, res.kind) == (None, "config"), \
+        "a redirect the same URL gives every time is configuration"
 
 
 # ── Whose fault a status code is decides whether it ever quarantines ─────────
@@ -194,3 +237,41 @@ def test_a_depleted_file_from_the_previous_version_still_latches(cron_copy: Path
     assert not u._is_depleted("opencode"), "an hour-old 429 is over under the new TTL"
     assert not u._is_depleted("deepinfra")
     assert not u._is_depleted("local"), "a timestamp in the future latched for good"
+
+
+# ── A name is only as local as what it resolves to ───────────────────────────
+
+@pytest.mark.parametrize("url,addresses,allowed,expected", [
+    ("http://localhost:11434/v1", ["127.0.0.1", "::1"], "", True),
+    # A resolver without RFC 6761, or a hosts-file line, sends the name away.
+    ("http://llm.localhost:11434/v1", ["203.0.113.7"], "", False),
+    ("http://localhost:11434/v1", ["127.0.0.1", "203.0.113.7"], "", False),
+    ("http://llm.localhost:11434/v1", None, "", False),          # does not resolve
+    ("http://llm.localhost:11434/v1", ["::ffff:127.0.0.1"], "", True),
+    # A LAN box by IP, allowed on purpose (TEST-NET-2, RFC 5737).
+    ("http://198.51.100.20:11434/v1", None, "198.51.100.20", True),
+    ("https://api.example.com/v1", None, "", False),
+])
+def test_a_local_endpoint_is_checked_by_what_it_resolves_to(cron_copy: Path, monkeypatch,
+                                                            url, addresses, allowed, expected):
+    """`localhost` and `*.localhost` were accepted on spelling. And an IP literal
+    was answered by its loopback check alone, so a LAN box named by address in
+    LOCAL_LLM_ALLOWED_HOSTS was refused all the same. Only the localhost names
+    are looked up: anything else is allowed by name or refused without a query."""
+    monkeypatch.setenv("LOCAL_LLM_ALLOWED_HOSTS", allowed)
+    u = _load_utils(cron_copy, "utils_local_endpoint")
+    lookups = []
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        lookups.append(host)
+        if addresses is None:
+            raise socket.gaierror(socket.EAI_NONAME, "name does not resolve")
+        return [(socket.AF_INET6 if ":" in a else socket.AF_INET, socket.SOCK_STREAM,
+                 6, "", (a, 0, 0, 0) if ":" in a else (a, 0)) for a in addresses]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    assert u._is_local_endpoint(url) is expected
+    host = url.split("//", 1)[1].split(":", 1)[0].split("/", 1)[0]
+    looked_up = host == "localhost" or host.endswith(".localhost")
+    assert lookups == ([host] if looked_up else []), \
+        f"unexpected name lookups: {lookups}"

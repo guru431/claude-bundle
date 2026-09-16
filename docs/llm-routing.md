@@ -182,12 +182,24 @@ Two separate mechanisms, worth not confusing:
 
 - **`local` verifies its own endpoint.** The row is declared `offbox:
   False`, and that promise is checked rather than assumed: the host in
-  `LOCAL_LLM_BASE_URL` must be loopback/`localhost`, or the call is
-  REFUSED and nothing is sent. A typo pointing at a remote host cannot
-  quietly turn "local-only" into "shipped to a stranger". To use a
-  deliberately non-loopback but trusted server (an inference box on your
-  LAN), name its host in `LOCAL_LLM_ALLOWED_HOSTS` (comma-separated) —
+  `LOCAL_LLM_BASE_URL` must be a loopback address, or `localhost` /
+  `*.localhost` resolving to loopback and nothing else — a name is only as
+  local as what it resolves to, and a resolver without RFC 6761 or a
+  hosts-file line can send it anywhere. Otherwise the call is REFUSED and
+  nothing is sent. A typo pointing at a remote host cannot quietly turn
+  "local-only" into "shipped to a stranger". To use a deliberately
+  non-loopback but trusted server (an inference box on your LAN), name its
+  host or its IP address in `LOCAL_LLM_ALLOWED_HOSTS` (comma-separated) —
   making it an explicit decision instead of an unnoticed URL.
+
+  Two things `requests` does on its own are switched off for this provider,
+  because either one delivers the transcript somewhere the URL never named.
+  Proxy settings (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, the Windows proxy
+  configuration) are ignored: they apply to loopback too, so without a
+  NO_PROXY entry a POST to localhost went to the proxy host. And a redirect is
+  never followed — a 307 re-sends the same body to whatever its Location
+  names — but refused as a configuration error: point the base URL at the
+  final address.
 - **`WIKI_OFFBOX_FALLBACK=0` controls the FALLBACK CHAIN, nothing else —
   and is deprecated.** The chain falls back to the OpenCode Go gateway when
   DeepSeek fails, which would push a prompt off-box *because* the primary

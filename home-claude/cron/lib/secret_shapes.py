@@ -3,10 +3,6 @@
 
 Three consumers used to keep their own list and had already drifted apart:
 
-The module is `secret_shapes`, not `secrets`: consumers put `cron/lib` on
-sys.path, and a `secrets.py` there would shadow the stdlib module of that name
-for the whole process.
-
   * `cron/lib/secret-scan.sh`            — blocks a commit / a nightly push
   * `cron/hooks/utils.py::mask_secrets`  — redacts before a log / FINDINGS / Telegram
   * `cron/agents-md-sync-check.py`       — refuses to carry data into a public repo
@@ -18,6 +14,10 @@ prints a JWT, `test-sweep.py` masks the tail (miss), the token lands in a
 project's `FINDINGS.md` and in Telegram — and the nightly `git-push-all.sh`
 then catches it with the pattern this file's shell twin carries, marking the
 repo FAILED every night until a human intervenes.
+
+The module is `secret_shapes`, not `secrets`: consumers put `cron/lib` on
+sys.path, and a `secrets.py` there would shadow the stdlib module of that name
+for the whole process.
 
 Roles decide who uses which pattern:
 
@@ -281,6 +281,52 @@ _GENERIC_KV = re.compile(
     r"(?i)\b([\w-]*(?:key|token|secret|password|passwd|pwd|credential))"
     r"(['\"]?\s*[:=]\s*['\"]?)([^\s'\",]{8,})")
 
+# Names the rule above catches by spelling alone and that never name a
+# credential. Each was rewritten to `[REDACTED]` at every sink, so a FINDINGS
+# entry about a table schema (`sort key: created_at_desc`) or an editor setting
+# (`hotkey=ctrl+shift+p`) came out unreadable.
+#
+# Deliberately a list of NAMES, never a test on the VALUE. "Digits and letters,
+# twelve characters or more" would have spared the same prose — and also
+# `password: correcthorsebatterystaple` and `password=Summer2024`, which are
+# exactly the credentials this fallback exists to catch.
+#
+# The word in front of `key` in a data-model phrase. Two plausible entries are
+# missing on purpose, because each also names a real credential: `primary` (Azure
+# hands out a "Primary key" / "Secondary key" pair for storage, Service Bus and
+# IoT Hub) and `unique` ("your unique key" is how licence keys are sent).
+_DATA_KEY_QUALIFIERS = frozenset({
+    "foreign", "sort", "partition", "composite", "surrogate", "candidate",
+    "compound", "clustering"})
+# Ordinary words that end in "key". Matched as the END of the name's last
+# `_`/`-`-separated segment: `global_hotkey` and `hotKey` are hotkeys, while
+# `MON_KEY` is a key called MON and stays masked.
+_WORDS_ENDING_IN_KEY = ("hotkey", "whiskey", "monkey", "turkey", "hockey",
+                        "jockey", "donkey", "turnkey", "latchkey")
+# A value that is nothing but the marker a NAMED shape above has just written.
+# Masking it again turned `GITHUB_TOKEN=[REDACTED-GITHUB-TOKEN]` into
+# `GITHUB_TOKEN=[REDACTED]` — the ordering comment above says why that matters.
+# Trailing punctuation may follow; anything else may not, because it could be the
+# rest of a secret the named shape did not consume.
+_MARKER_ONLY = re.compile(r"\[REDACTED(?:-[A-Z0-9-]+)?\][.;:!?)\]}>]*")
+
+
+def _mask_generic(m: re.Match) -> str:
+    name, sep, value = m.group(1), m.group(2), m.group(3)
+    if _MARKER_ONLY.fullmatch(value):
+        return m.group(0)
+    if re.split(r"[\W_]+", name)[-1].lower().endswith(_WORDS_ENDING_IN_KEY):
+        return m.group(0)
+    # `sort key` is two words, so the one in front of the match counts too. The
+    # look-back is bounded: a slice of the whole prefix per match is quadratic on
+    # a long log.
+    before = re.search(r"([A-Za-z]+)[ \t]+$", m.string[max(0, m.start() - 32):m.start()])
+    words = re.split(r"[\W_]+", re.sub(r"([a-z0-9])([A-Z])", r"\1 \2",
+                                       (before.group(1) + " " if before else "") + name).lower())
+    if len(words) >= 2 and words[-1] == "key" and words[-2] in _DATA_KEY_QUALIFIERS:
+        return m.group(0)
+    return name + sep + "[REDACTED]"
+
 # A PEM block is masked in full — the header alone is what `scan` looks for, but
 # leaving the body in a log would defeat the point of masking the header.
 _PEM_BLOCK = re.compile(
@@ -327,7 +373,7 @@ def mask(text: str) -> str:
         # scanner does, or `mask("kiosk-mode-launcher-2024")` turns into
         # `kio[REDACTED-API-KEY]` — a redaction that destroys ordinary prose.
         text = re.sub(_bound_py(shape), shape.redaction, text)
-    return _GENERIC_KV.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
+    return _GENERIC_KV.sub(_mask_generic, text)
 
 
 if __name__ == "__main__":  # prints whichever generated table the guard needs

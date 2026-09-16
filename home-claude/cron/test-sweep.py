@@ -110,8 +110,13 @@ CRASH = "crash"
 # recovery meant a broken venv turned `failed` into `no-pytest`, deleted the
 # open finding and announced "Tests recovered" — the loudest possible way to
 # stop looking at a suite that is still red.
+# "env" (a poisoned basetemp — the run says nothing about the tests) belongs here
+# too, and leaving it out failed the other way round: failed → env overwrote the
+# remembered `failed`, so the green run after it compared against `env`, which is
+# not ALERTING. The finding the sweep had filed was never closed and nobody was
+# told the suite had recovered.
 ALERTING = {"failed", "error", "interrupted", "usage", "timeout", CRASH}
-NEUTRAL = {"no-tests", "no-pytest"}
+NEUTRAL = {"no-tests", "no-pytest", "env"}
 # Statuses that mean "the suite really is healthy" — used for the green marker
 # and for closing a finding that this sweep filed earlier.
 RECOVERED = {"ok"}
@@ -756,12 +761,12 @@ def _sweep(args, rec: dict) -> int:
                 except OSError as exc:
                     log(f"     finding not closed in {name}/FINDINGS.md: {exc}")
             if res["status"] in NEUTRAL and previous in ALERTING:
-                # A suite that WAS red and now cannot be run at all is not a
-                # recovery: the previous status is kept so the finding stays
-                # open, and the reason is named in the log rather than being
-                # announced as good news.
-                log(f"     {res['status']} — the suite cannot run, so the earlier "
-                    f"'{previous}' stands; the finding stays open")
+                # A suite that WAS red and now cannot be run at all — or not
+                # reliably — is not a recovery: the previous status is kept so
+                # the finding stays open, and the reason is named in the log
+                # rather than being announced as good news.
+                log(f"     {res['status']} — this run says nothing about the tests, so "
+                    f"the earlier '{previous}' stands; the finding stays open")
                 state[key] = {"status": previous, "seconds": res["seconds"],
                               "date": DATE, "blocked_by": res["status"],
                               **carry_fast(key, res)}

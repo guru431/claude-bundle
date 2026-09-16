@@ -429,6 +429,25 @@ def test_recovery_closes_the_finding_this_sweep_filed(sweep_env, monkeypatch):
     assert body.startswith("# Findings"), "the header must survive the close"
 
 
+def test_recovery_after_an_unreliable_run_still_closes_the_finding(sweep_env, monkeypatch):
+    """failed → env → ok is a recovery: the finding goes and the news is sent.
+
+    `env` (a poisoned basetemp) overwrote the remembered `failed`, so the green
+    run after it compared against `env` — not an alerting status. The finding the
+    sweep had filed stayed open for good in a file that holds open entries only,
+    and "Tests recovered" was never sent.
+    """
+    project, sent = sweep_env
+    states = iter(["failed", "env", "ok"])
+    monkeypatch.setattr(sweep, "run_suite",
+                        lambda suite, key, full: {"status": next(states), "seconds": 1.0,
+                                                  "tail": ""})
+    for _ in range(3):
+        sweep.main([])
+    assert "Tests are failing" not in (project / "FINDINGS.md").read_text(encoding="utf-8")
+    assert sum("Tests recovered" in m for m in sent) == 1
+
+
 def test_two_different_red_statuses_file_one_finding(sweep_env, monkeypatch):
     """failed → timeout → failed is ONE broken suite, not three findings.
 

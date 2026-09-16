@@ -178,11 +178,17 @@ def parse_schtasks_csv(text: str) -> list[dict]:
     rows = list(csv.reader(io.StringIO(text)))
     tasks: list[dict] = []
     seen: set[str] = set()
+    # schtasks repeats the header once per task FOLDER — dozens of times on a
+    # real machine — and in the console's language. Matching the literal
+    # English `TaskName` let every repeated header on a ru-RU box through as a
+    # task with LastResult -1: an ORPHAN alert, then "still failing" weekly.
+    # The first row is the header in whatever language this machine speaks.
+    header = rows[0][:MIN_COLUMNS] if rows else []
     for row in rows[1:]:
         if len(row) < MIN_COLUMNS:
             continue
         full_name = row[COL_NAME]
-        if not full_name or full_name == 'TaskName':      # a repeated header row
+        if not full_name or row[:MIN_COLUMNS] == header:  # a repeated header row
             continue
         if is_system_task(full_name):
             continue

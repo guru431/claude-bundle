@@ -152,6 +152,29 @@ def test_short_and_repeated_header_rows_skipped():
     assert [t["Name"] for t in tasks] == ["ClaudeTaskMonitor"]
 
 
+# The same header on a ru-RU console. Its exact wording is from knowledge of the
+# Windows MUI strings, not captured on a Russian machine — and the parser must
+# not depend on it: whatever the first row says IS the header.
+HEADER_RU = ('"Имя узла","Имя задачи","Время следующего запуска","Состояние",'
+             '"Режим входа в систему","Время прошлого запуска","Прошлый результат",'
+             '"Автор","Задача для выполнения","Рабочая папка","Комментарий",'
+             '"Состояние назначенной задачи","Время простоя","Управление питанием"')
+
+
+def test_a_repeated_header_is_recognised_in_any_language():
+    """schtasks repeats its header once per task FOLDER, in the console's language.
+
+    On a real machine that is dozens of header rows in one output. The skip used
+    to compare the name column with the literal English `TaskName`, so on a
+    Russian locale — the one the fallback's date handling is written for — every
+    repeated header became a "task" named after the column, with LastResult -1
+    and LastRun 'unknown': an ORPHAN alert, then "still failing" every Monday.
+    """
+    text = "\n".join((HEADER_RU, row(), HEADER_RU, row(name="\\Other\\ClaudeX"))) + "\n"
+    tasks = st.parse_schtasks_csv(text)
+    assert [t["Name"] for t in tasks] == ["ClaudeTaskMonitor", "ClaudeX"]
+
+
 def test_collect_raises_when_schtasks_gives_nothing(monkeypatch):
     """An empty result is a failure, not "zero failed tasks".
 

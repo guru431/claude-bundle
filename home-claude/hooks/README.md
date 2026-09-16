@@ -1,9 +1,10 @@
 # User-level hooks
 
-Five optional hooks in this directory, plus three session hooks under
-`cron/hooks/`. **None** of them is wired in `settings.json` by default — if you
-want one, see `home-claude/settings.example-with-hooks.json` and merge the
-entries you need into your `settings.json`.
+Seven optional hooks in this directory (plus `ps1-bom-guard.py`, the old name of
+`text-encoding-guard.py`), and three session hooks under `cron/hooks/`. **None**
+of them is wired in `settings.json` by default — if you want one, see
+`home-claude/settings.example-with-hooks.json` and merge the entries you need
+into your `settings.json`.
 
 > **The example file differs from `settings.json` in exactly ONE block:
 > `hooks`.** Its `permissions` are byte-identical to the default, on purpose.
@@ -22,6 +23,7 @@ entries you need into your `settings.json`.
 > |---|---|---|
 > | `PreToolUse` → `block-iptables-save-to-rules.py` | Tier 1 | a real Python interpreter |
 > | `PreToolUse` → `bash-guard.py` | Tier 1 | a real Python interpreter + PyYAML |
+> | `PreToolUse` → `sensitive-path-guard.py` | **Tier 2 only** | `cron/lib/secret_shapes.py` (full-tier install) |
 > | `PostToolUse` → `md2pdf-on-edit.py` | Tier 1 | a real Python interpreter + `bin/md2pdf.py` (ships full-tier) + markdown-it-py + Edge/Chrome |
 > | `PostToolUse` → `text-encoding-guard.py` | Tier 1 | a real Python interpreter |
 > | `UserPromptSubmit` → `prompt-secret-warn.py` | **Tier 2 only** | `cron/lib/secret_shapes.py` (full-tier install) |
@@ -127,6 +129,22 @@ not matter. It used to: the hook stopped at the first match, and
 
 FAILS OPEN on purpose — a missing rules file, a malformed one, a bad regex or a
 missing PyYAML disables the guard rather than blocking every Bash call.
+
+## sensitive-path-guard.py
+
+**PreToolUse / Read|Write|Edit|MultiEdit.** Asks before a file tool touches a
+credential file — `.env` and its variants, SSH private keys, `*.pem`/`*.key`,
+`credentials.json`, `terraform.tfstate` and the rest of the sensitive-path table
+in `cron/lib/secret_shapes.py`, the same table the commit and push guards use
+(`.env.example` and the other templates pass there, and here).
+
+`bash-guard.py` asks before `cat .env`, but `settings.json` allows `Read` without
+a prompt, so the same credentials reached the transcript through the file tools
+with nobody asked — and from the transcript they go to disk, to the nightly
+flush's LLM provider, and possibly into `USER.md`. `ask`, not `deny`: reading or
+writing a key on purpose is legitimate. Needs a full-tier install for the table;
+without `cron/lib` next to `hooks/` it does nothing. Not a sandbox: `Grep` in
+content mode, or a shell command, can still print the file.
 
 ## text-encoding-guard.py (formerly ps1-bom-guard.py)
 

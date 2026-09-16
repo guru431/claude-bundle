@@ -72,11 +72,11 @@ installer generates the first from the second.
 | `SYNC_CHECK_PRIVATE_HOSTS` | optional (commented) | `home-claude/cron/agents-md-sync-check.py` |
 | `TELEGRAM_BOT_TOKEN` | declared | `home-claude/cron/bundle-status.py`, `home-claude/cron/telegram-send.sh` |
 | `TELEGRAM_CHAT_ID` | declared | `home-claude/cron/bundle-status.py` |
-| `TEST_SWEEP_RUN_BUDGET` | optional (commented) | `home-claude/cron/test-sweep.py` |
+| `TEST_SWEEP_RUN_BUDGET` | optional (commented) | — |
 | `TEST_SWEEP_SKIP` | optional (commented) | `home-claude/cron/test-sweep.py` |
 | `TEST_SWEEP_TELEGRAM` | optional (commented) | `home-claude/cron/test-sweep.py` |
-| `TEST_SWEEP_TIMEOUT` | optional (commented) | `home-claude/cron/test-sweep.py` |
-| `TEST_SWEEP_TIMEOUT_FULL` | optional (commented) | `home-claude/cron/test-sweep.py` |
+| `TEST_SWEEP_TIMEOUT` | optional (commented) | — |
+| `TEST_SWEEP_TIMEOUT_FULL` | optional (commented) | — |
 | `WAIT_FOR_PATTERN` | optional (commented) | `home-claude/cron/git-push-all.sh` |
 | `WARM_MODEL` | optional (commented) | `home-claude/cron/claude-warm-window.sh` |
 | `WIKI_ALLOW_OFFBOX` | optional (commented) | — |

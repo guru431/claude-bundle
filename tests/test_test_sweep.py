@@ -583,6 +583,20 @@ def test_sweep_smoke_help():
     assert "--full" in done.stdout
 
 
+def test_a_malformed_timeout_does_not_kill_the_sweep_at_import():
+    """`TEST_SWEEP_TIMEOUT=10m` raised ValueError while the module was loading.
+
+    That is before main() and its terminal_record, so a typo in .env produced no
+    ledger row at all. The value is now reported and the default used.
+    """
+    env = dict(os.environ, TEST_SWEEP_TIMEOUT="10m", TEST_SWEEP_TIMEOUT_FULL="1h",
+               TEST_SWEEP_RUN_BUDGET="two hours")
+    done = subprocess.run([sys.executable, str(CRON / "test-sweep.py"), "--help"],
+                          capture_output=True, text=True, timeout=60, env=env)
+    assert done.returncode == 0, done.stderr
+    assert "TEST_SWEEP_TIMEOUT" in done.stderr, "a bad value must be named, not swallowed"
+
+
 @pytest.mark.integration
 def test_timeout_kills_grandchildren(tmp_path):
     """Regression: a timeout kills the whole tree, not just the direct child.

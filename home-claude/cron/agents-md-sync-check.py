@@ -21,7 +21,7 @@ Set `projects_root` in bundle.local.yaml to point at your working copies;
 without it the job no-ops. Projects denied by the privacy policy are skipped —
 their CLAUDE.md never reaches the provider.
 
-Writes one terminal record to cron/logs/runs.jsonl (see cron/runs.py), and
+Writes one terminal record to cron/logs/runs-<year>.jsonl (see cron/runs.py), and
 exits 1 when it had projects to check but could not examine a single one —
 "verified nothing" must not be indistinguishable from "everything is in sync"
 for a job that edits files unattended.

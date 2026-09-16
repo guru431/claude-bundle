@@ -65,7 +65,7 @@ sys.path.insert(0, str(CRON_DIR / "hooks"))
 # drifted from the other two copies over where an entry goes when the file's
 # header is non-standard. The helpers below only build the TEXT of a finding;
 # the file handling is utils'.
-from utils import (PROJECTS_ROOT, append_finding as file_finding,  # noqa: E402
+from utils import (PROJECTS_ROOT, _env_int, append_finding as file_finding,  # noqa: E402
                    atomic_write_text, close_finding as drop_finding,
                    find_bash, finding_is_open, mask_secrets)
 
@@ -84,14 +84,17 @@ STATE_PATH = STATE_DIR / "test-sweep.json"
 # timeout is deliberately higher: until a project is inside that budget, the
 # sweep has to finish its suite and show the real duration rather than cut it
 # off at second 60 and report a timeout that says nothing.
-TIMEOUT_FAST = int(os.environ.get("TEST_SWEEP_TIMEOUT", "600"))
-TIMEOUT_FULL = int(os.environ.get("TEST_SWEEP_TIMEOUT_FULL", "3600"))
+# Read through utils._env_int, not int(os.environ.get(...)): `10m` raised
+# ValueError at IMPORT, before main() and its terminal_record, so a typo in .env
+# left the ledger without a row and the task looked uninstrumented.
+TIMEOUT_FAST = _env_int("TEST_SWEEP_TIMEOUT", 600, minimum=1)
+TIMEOUT_FULL = _env_int("TEST_SWEEP_TIMEOUT_FULL", 3600, minimum=1)
 # The whole RUN's budget, five minutes short of the task's `timeout_hours: 2`
 # in registry.yaml. Per-suite timeouts alone do not bound the run: twelve suites
 # at TIMEOUT_FULL is ten hours, and Task Scheduler kills the process long before
 # it reaches the line that writes state — so a long night lost every result it
 # had already collected, red ones included.
-RUN_BUDGET_SECONDS = int(os.environ.get("TEST_SWEEP_RUN_BUDGET", str(2 * 3600 - 300)))
+RUN_BUDGET_SECONDS = _env_int("TEST_SWEEP_RUN_BUDGET", 2 * 3600 - 300, minimum=1)
 TELEGRAM_ENABLED = os.environ.get("TEST_SWEEP_TELEGRAM", "1") != "0"
 # Projects the sweep leaves alone (comma-separated), e.g. a suite that is run
 # by its own host on its own schedule.

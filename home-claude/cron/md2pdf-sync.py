@@ -62,7 +62,7 @@ sys.path.insert(0, str(Path(__file__).parent / "hooks"))
 from utils import _load_dotenv, find_bash  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runs import record_run  # noqa: E402
+from runs import terminal_record  # noqa: E402
 
 _load_dotenv()
 
@@ -139,6 +139,16 @@ def iter_md_files():
 
 
 def main() -> int:
+    # ONE terminal ledger record per run (cron/runs.py), the refusals and the
+    # crash included. `record_run` at the end of the sweep was reached only by a
+    # run that got that far: the ~/.claude guard and a missing converter both
+    # returned 1 with no row, and so did any exception on the way — a task that
+    # failed that way looked exactly like one that was never instrumented.
+    with terminal_record("ClaudeMd2PdfSync", delivery="n/a", artifact_path=LOG_FILE) as rec:
+        return _sync(rec)
+
+
+def _sync(rec: dict) -> int:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     # Guard: when the bundle is deployed to ~/.claude the parent is the USER
@@ -146,6 +156,7 @@ def main() -> int:
     if str(BUNDLE_ROOT).replace("\\", "/").endswith("/.claude") and not os.environ.get("PROJECTS_ROOT"):
         log("ERROR: bundle lives in ~/.claude — refusing to scan the user profile. "
             "Set PROJECTS_ROOT in the bundle .env to your projects directory.")
+        rec.update(process_rc=1, note="refused: PROJECTS_ROOT not set")
         return 1
 
     # Stamp the START of the sweep, not its end: an .md edited while the run is
@@ -156,6 +167,7 @@ def main() -> int:
         f"last_run={'(none — seeding)' if last_run is None else f'{last_run:.0f}'} ===")
     if not MD2PDF.is_file():
         log(f"FATAL: md2pdf not found at {MD2PDF}")
+        rec.update(process_rc=1, note="converter bin/md2pdf.py not found")
         return 1
 
     regenerated: list[Path] = []
@@ -216,13 +228,11 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             log(f"telegram-send failed: {e}")
 
-    # Terminal ledger record (cron/runs.py). useful_items = PDFs regenerated —
-    # normally zero on a quiet night, which is why the note carries the pairs
-    # actually examined: "swept nothing at all" (a wrong projects root) is the
-    # state this is here to make visible.
-    record_run(task="ClaudeMd2PdfSync", process_rc=1 if failed else 0,
-               artifact_path=LOG_FILE, useful_items=len(regenerated),
-               delivery="n/a",
+    # The run's terminal record (written by terminal_record). useful_items = PDFs
+    # regenerated — normally zero on a quiet night, which is why the note carries
+    # the pairs actually examined: "swept nothing at all" (a wrong projects root)
+    # is the state this is here to make visible.
+    rec.update(process_rc=1 if failed else 0, useful_items=len(regenerated),
                note=f"{skipped} up to date, {len(failed)} failed")
 
     # Non-zero so Task Scheduler records the run as failed and task-monitor

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Prune old cron logs so the bundle doesn't teach unbounded log growth.
 
-Deletes *.log and *.jsonl files under cron/logs/ older than the retention window. The
-window defaults to 30 days; override with WIKI_LOG_RETENTION_DAYS. A window of **0
+Deletes *.log, *.jsonl and *.diff files under cron/logs/ older than the retention
+window. The window defaults to 30 days; override with WIKI_LOG_RETENTION_DAYS. A window of **0
 means "keep everything"** — the documented way to switch a class of rotation off, not
 a zero-day cutoff that would delete every file including today's. Cumulative journals
 matched by KEEP_FOREVER_RE (runs.jsonl, runs-<year>.jsonl) are exempt from age-based
@@ -40,7 +40,7 @@ Schedule: weekly (see cron/registry.yaml).
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=nothing money=no writes=DELETES old cron/logs/*.log, cron/logs/*.jsonl, cron/logs/rejected/*.txt and projects/*/memory/handoff-*.md
+# bundle-io: offbox=nothing money=no writes=DELETES old cron/logs/*.log, cron/logs/*.jsonl, cron/logs/*.diff, cron/logs/rejected/*.txt and projects/*/memory/handoff-*.md
 import os
 import re
 import sys
@@ -205,8 +205,12 @@ def _prune_all(rec: dict) -> int:
     swept = 0
 
     if LOG_DIR.exists():
+        # `*.diff`: agents-md-sync-check leaves the diff of every AGENTS.md it
+        # edits here (agents-sync-<project>_<date>.diff). With only *.log and
+        # *.jsonl in the glob it was the one artifact in this directory that
+        # nothing ever rotated.
         deleted, kept, freed = prune(
-            (*LOG_DIR.glob("*.log"), *LOG_DIR.glob("*.jsonl")),
+            (*LOG_DIR.glob("*.log"), *LOG_DIR.glob("*.jsonl"), *LOG_DIR.glob("*.diff")),
             RETENTION_DAYS, "cron/logs",
         )
         log(f"Retention {RETENTION_DAYS}d: {deleted} removed, {kept} kept, {verb} {freed} bytes.")

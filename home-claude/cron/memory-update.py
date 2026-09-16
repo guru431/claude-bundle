@@ -56,7 +56,7 @@ from utils import (  # noqa: E402
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runs import last_known_good, record_run  # noqa: E402
+from runs import last_known_good, terminal_record  # noqa: E402
 
 # From utils, not re-derived here: one definition of "where Claude Code lives"
 # (see utils.CLAUDE_HOME) instead of four copies that can drift apart.
@@ -342,7 +342,11 @@ def update_user_md(proj_messages: dict[str, str]) -> tuple[int | None, str]:
         log("USER.md: no user messages in the last 24h — skipping")
         return 0, "ok"
 
-    user_md = USER_MD.read_text(encoding="utf-8") if USER_MD.exists() else ""
+    # errors="replace": a USER.md saved in a legacy codepage (cp1251 from an
+    # editor that is not UTF-8 by default) raised UnicodeDecodeError here and
+    # killed the night before anything was recorded.
+    user_md = (USER_MD.read_text(encoding="utf-8", errors="replace")
+               if USER_MD.exists() else "")
     summary = build_summary(proj_messages)
 
     prompt = f"""Task: analyze today's user messages and find NEW important
@@ -423,7 +427,8 @@ def update_cross_notes(proj_messages: dict[str, str]) -> str:
         log("cross-notes: fewer than 2 active projects — skipping")
         return "ok"
 
-    cross = CROSS_NOTES.read_text(encoding="utf-8") if CROSS_NOTES.exists() else ""
+    cross = (CROSS_NOTES.read_text(encoding="utf-8", errors="replace")
+             if CROSS_NOTES.exists() else "")
     summary = build_summary(proj_messages, cap=25000)
 
     prompt = f"""Task: find NEW cross-project connections in today's sessions.
@@ -503,12 +508,23 @@ def run_incident_extract() -> None:
 
 
 def main() -> int:
+    # ONE terminal ledger record per run (cron/runs.py), the early exit and the
+    # crash included. `record_run` at the very end was reached only by a night
+    # that got there: "no projects dir" returned 0 with no row, and an exception
+    # anywhere before it (an undecodable USER.md was enough) left a crashed task
+    # indistinguishable from an uninstrumented one.
+    with terminal_record("ClaudeMemoryUpdate", delivery="n/a") as rec:
+        return _update(rec)
+
+
+def _update(rec: dict) -> int:
     log(f"=== Memory Update {DATE} ===")
     log(f"Policy: {policy_summary()}")
     for line in config_report():
         log(f"  cfg | {line}")
     if not PROJECTS_DIR.is_dir():
         log(f"No projects dir at {PROJECTS_DIR} — nothing to process.")
+        rec.update(note="no projects dir")
         return 0
     window = collection_window_hours()
     if window > 24:
@@ -547,15 +563,13 @@ def main() -> int:
         "deterministic": "the provider answered, but not with anything usable",
         "transient": "providers depleted or unreachable — expected to clear",
     }.get(kind, kind)
-    # Terminal ledger record (cron/runs.py). useful_items is the appended size,
-    # or None when the LLM answered with nothing new — that is a normal night,
-    # not the empty-artifact false-green the SLO looks for.
-    record_run(
-        task="ClaudeMemoryUpdate",
+    # The run's terminal record (written by terminal_record). useful_items is the
+    # appended size, or None when the LLM answered with nothing new — that is a
+    # normal night, not the empty-artifact false-green the SLO looks for.
+    rec.update(
         process_rc=1 if failed else 0,
         artifact_path=USER_MD if appended else None,
         useful_items=appended or None,
-        delivery="n/a",
         note=f"{len(msgs)} project(s) with messages"
              + (f"; {kind}" if failed else ""),
     )

@@ -63,6 +63,24 @@ def test_a_real_log_still_counts(retention, tmp_path):
     assert not (tmp_path / "healthcheck_2026-01-01.log").exists()
 
 
+def test_the_agents_md_diffs_are_rotated_with_the_logs(retention, tmp_path, monkeypatch):
+    """agents-md-sync-check leaves a `.diff` of every AGENTS.md it edits in
+    cron/logs/, and the sweep globbed only *.log and *.jsonl — so the one
+    artifact in that directory nothing rotated was the one written per edit."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _touch(logs / "agents-sync-demo_2025-01-01.diff", age_days=400)
+    _touch(logs / "agents-sync-demo_2026-09-01.diff", age_days=1)
+    monkeypatch.setattr(retention, "LOG_DIR", logs)
+    monkeypatch.setattr(retention, "REJECTED_DIR", logs / "rejected")
+    monkeypatch.setattr(retention, "PROJECTS_DIR", tmp_path / "no-projects")
+
+    assert retention._prune_all({}) == 0
+
+    assert not (logs / "agents-sync-demo_2025-01-01.diff").exists()
+    assert (logs / "agents-sync-demo_2026-09-01.diff").exists()
+
+
 def test_a_disabled_window_keeps_everything_but_still_ignores_our_own(retention, tmp_path):
     """days == 0 means "keep everything" — and still counts nothing of ours."""
     _touch(tmp_path / retention.OWN_LOG_NAME)

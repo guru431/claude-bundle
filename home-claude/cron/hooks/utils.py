@@ -1374,7 +1374,10 @@ def slug_collisions() -> dict[str, list[str]]:
 def is_subagent_jsonl(jsonl_path: str) -> bool:
     """Return True if the JSONL is a subagent session (has parentSessionId)."""
     try:
-        with open(jsonl_path, "r", encoding="utf-8") as f:
+        # errors="replace": a strict decoder raised UnicodeDecodeError — not an
+        # OSError — on one bad byte anywhere in the first 8 KB it buffers, and
+        # that took the whole flush (and memory-update) down.
+        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f):
                 if i > 20:
                     break
@@ -1460,21 +1463,24 @@ def parse_jsonl_messages(jsonl_path: str, last_n: int = 30) -> list[dict]:
     """Extract the last N user/assistant messages from a Claude Code JSONL.
 
     Skips tool_use / tool_result blocks. Returns [{'role': ..., 'text': ...}].
+    Undecodable bytes are replaced: strict UTF-8 turned one bad byte into an
+    empty session, with nothing said anywhere.
     """
     messages = []
     try:
-        with open(jsonl_path, "r", encoding="utf-8") as f:
+        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 msg = _jsonl_message(line)
                 if msg is not None:
                     messages.append(msg)
-    except (OSError, UnicodeDecodeError):
+    except OSError:
         return []
 
     return messages[-last_n:] if last_n else messages
 
 
-def parse_jsonl_delta(jsonl_path: str, start_offset: int = 0) -> tuple[list[dict], int]:
+def parse_jsonl_delta(jsonl_path: str,
+                      start_offset: int = 0) -> tuple[list[dict], int | None]:
     """Messages added since `start_offset`, plus the offset to resume from.
 
     A session that is still being written grows between nights. Keyed only by
@@ -1487,27 +1493,41 @@ def parse_jsonl_delta(jsonl_path: str, start_offset: int = 0) -> tuple[list[dict
     offset means nothing: fall back to reading it whole. The returned offset is
     where this read actually stopped, not the file's size at some later moment,
     so a line written during the read is picked up next time rather than lost.
+
+    The offset is None when the file could not be READ. A failure used to come
+    back as no messages at `start_offset` — exactly what "nothing new" looks
+    like — so flush filed the transcript as a trivial session, marked it
+    processed where the read never got past, and read it again as empty every
+    night without a line in any log. Bytes that are not UTF-8 no longer count as
+    a failure at all: they are replaced, as in every other reader here, and the
+    lines they were in are counted in a warning.
     """
     messages: list[dict] = []
+    bad_lines = 0
     try:
         size = os.path.getsize(jsonl_path)
         if start_offset < 0 or start_offset > size:
             start_offset = 0
-        with open(jsonl_path, "r", encoding="utf-8") as f:
+        # Binary, decoded per line: tell() is then an exact byte offset, and a
+        # bad byte costs its own line's accuracy instead of the whole read.
+        with open(jsonl_path, "rb") as f:
             f.seek(start_offset)
-            # readline(), not `for line in f`: iterating a text file disables
-            # tell() ("telling position disabled by next() call"), and the
-            # offset is the whole point of this function.
-            while True:
-                line = f.readline()
-                if not line:
-                    break
+            for raw in iter(f.readline, b""):
+                try:
+                    line = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    line = raw.decode("utf-8", errors="replace")
+                    bad_lines += 1
                 msg = _jsonl_message(line)
                 if msg is not None:
                     messages.append(msg)
             end_offset = f.tell()
-    except (OSError, UnicodeDecodeError, ValueError):
-        return [], start_offset
+    except (OSError, ValueError) as e:
+        print(f"  WARN: cannot read {os.path.basename(jsonl_path)}: {e}", file=sys.stderr)
+        return [], None
+    if bad_lines:
+        print(f"  WARN: {os.path.basename(jsonl_path)}: {bad_lines} line(s) are not "
+              f"valid UTF-8 — undecodable bytes replaced", file=sys.stderr)
     return messages, end_offset
 
 

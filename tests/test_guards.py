@@ -904,3 +904,66 @@ def test_state_replace_prefix_keeps_one_key_per_source(bundle_tree: Path, monkey
                                       ["p/s.jsonl@300"]) is True
     assert utils.state_get("flush", "processed_jsonls") == \
         {"p/o.jsonl@5", "p/s.jsonl.bak@1", "p/s.jsonl@300"}
+
+
+# ── transcripts: one bad byte is not an empty (or fatal) session ────────────
+
+def test_a_non_utf8_byte_does_not_empty_or_crash_a_transcript(bundle_tree: Path,
+                                                              monkeypatch, capsys):
+    """Strict UTF-8 everywhere else in the bundle is `errors="replace"`.
+
+    parse_jsonl_delta returned no messages at the start offset — "nothing new" —
+    so the session was filed as trivial every night without a log line, and
+    is_subagent_jsonl raised UnicodeDecodeError, which is not an OSError, and
+    took the whole flush down.
+    """
+    utils = _import_utils(monkeypatch, bundle_tree)
+    jf = bundle_tree / "s.jsonl"
+    good = b'{"type": "user", "message": {"role": "user", "content": "hello"}}\n'
+    bad = b'{"type": "assistant", "message": {"role": "assistant", "content": "caf\xe9"}}\n'
+    jf.write_bytes(good + bad + good)
+
+    assert utils.is_subagent_jsonl(str(jf)) is False
+    messages, end = utils.parse_jsonl_delta(str(jf), 0)
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert end == jf.stat().st_size
+    assert "not valid UTF-8" in capsys.readouterr().err
+    # Resuming from a byte offset still lands on a line boundary.
+    assert utils.parse_jsonl_delta(str(jf), len(good) + len(bad))[0][0]["text"] == "hello"
+    assert len(utils.parse_jsonl_messages(str(jf), last_n=0)) == 3
+
+
+def test_an_unreadable_transcript_is_a_failure_not_an_empty_delta(bundle_tree: Path,
+                                                                 monkeypatch):
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.parse_jsonl_delta(str(bundle_tree / "missing.jsonl"), 128) == ([], None)
+
+
+def test_flush_carries_an_unreadable_transcript_over_instead_of_filing_it(
+        bundle_tree: Path, monkeypatch):
+    """A failed read was indistinguishable from a trivial session: the file was
+    marked processed at the offset the read never passed."""
+    import json
+    home = bundle_tree / "fake-home"
+    proj = home / "projects" / "C--work-readme"
+    proj.mkdir(parents=True)
+    (proj / "s.jsonl").write_bytes(b"x" * 20000)       # over the 10 KB floor
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.setenv("WIKI_LLM_PROVIDER", "mock")
+    monkeypatch.setattr(sys, "argv", ["wiki-flush-sessions.py"])
+    monkeypatch.syspath_prepend(str(bundle_tree / "cron"))
+    monkeypatch.syspath_prepend(str(bundle_tree / "cron" / "hooks"))
+    for name in ("utils", "untrusted", "runs"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    spec = importlib.util.spec_from_file_location(
+        "wiki_flush_unreadable", bundle_tree / "cron" / "wiki" / "wiki-flush-sessions.py")
+    flush = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(flush)
+    monkeypatch.setattr(flush, "parse_jsonl_delta", lambda path, start=0: ([], None))
+
+    flush.main()
+
+    state = json.loads((bundle_tree / "wiki" / ".processed.json").read_text(encoding="utf-8"))
+    assert not state.get("flush", {}).get("processed_jsonls"), \
+        "an unreadable transcript was marked processed"
+    assert state["flush"]["seen_unprocessed"] == ["readme/s.jsonl"]

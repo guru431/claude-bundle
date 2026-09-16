@@ -896,8 +896,11 @@ def main():
     # JSONL → parse the messages added since the recorded offset (skip subagent
     # and trivial sessions). Filtered-out files are marked processed right away
     # — otherwise they keep occupying backlog-quota slots every night, starving
-    # the real backlog.
-    filtered_out: list[tuple[str, Path]] = []
+    # the real backlog. Each carries the reason it was filtered: the journal
+    # said "subagent/<3 user" for all of them, including a file that could not
+    # even be read.
+    filtered_out: list[tuple[str, Path, str]] = []
+    unreadable: list[tuple[str, Path]] = []
     read_offsets: dict[Path, int] = {}
     for project, files in jsonls.items():
         kept: list[Path] = []
@@ -909,19 +912,24 @@ def main():
                 size = 0
             if is_subagent_jsonl(str(jf)):
                 read_offsets[jf] = size
-                filtered_out.append((project, jf))
+                filtered_out.append((project, jf, "subagent"))
                 continue
             messages, end = parse_jsonl_delta(str(jf), start)
+            if end is None:
+                # NOT "nothing new": a read that failed. Left unmarked and
+                # carried over, so it is retried whatever its age.
+                unreadable.append((project, jf))
+                continue
             read_offsets[jf] = end
             if not messages:
-                filtered_out.append((project, jf))
+                filtered_out.append((project, jf, "no new messages"))
                 continue
             # The "at least 3 user messages" floor judges a SESSION, so it is
             # applied only to a first read. On a delta it would throw away every
             # night's growth of a long-running session one or two messages at a
             # time — and mark it processed while doing so.
             if start == 0 and sum(1 for m in messages if m["role"] == "user") < 3:
-                filtered_out.append((project, jf))
+                filtered_out.append((project, jf, "fewer than 3 user messages"))
                 continue
             text = "\n".join(f"**{m['role']}**: {m['text']}" for m in messages)
             day = session_day(jf, messages)
@@ -930,19 +938,27 @@ def main():
             kept.append(jf)
         jsonls[project] = kept  # filtered-out files must not be marked again below
 
+    if unreadable:
+        log(f"WARNING: {len(unreadable)} JSONL file(s) could not be read and are left "
+            f"unprocessed: {', '.join(sorted(jf.name for _p, jf in unreadable))}")
+        if not is_dry_run() and not state_add(
+                "flush", "seen_unprocessed", [f"{p}/{jf.name}" for p, jf in unreadable]):
+            log("WARNING: the unreadable file(s) NOT recorded as carried over "
+                "(state lock busy)")
+
     if filtered_out and not is_dry_run():
         filtered_keys = [processed_key(project, jf, read_offsets.get(jf))
-                         for project, jf in filtered_out]
+                         for project, jf, _reason in filtered_out]
         if not state_replace_prefix(
                 "flush", "processed_jsonls",
-                [p for project, jf in filtered_out for p in processed_key_prefixes(project, jf)],
+                [p for project, jf, _reason in filtered_out
+                 for p in processed_key_prefixes(project, jf)],
                 filtered_keys):
             log(f"WARNING: {len(filtered_keys)} filtered JSONL marker(s) NOT recorded "
                 f"(state lock busy) — they are read again tomorrow")
         with open(LOG_MD, "a", encoding="utf-8") as f:
-            for key in filtered_keys:
-                project = key.split("/", 1)[0]
-                f.write(f"- [flush] processed: {key} (filtered: subagent/<3 user, project: {project})\n")
+            for key, (project, _jf, reason) in zip(filtered_keys, filtered_out):
+                f.write(f"- [flush] processed: {key} (filtered: {reason}, project: {project})\n")
         log(f"Filtered out and marked processed: {len(filtered_out)} JSONL files")
 
     # Hook-provided pending — collected AFTER the JSONL filter so we know which
@@ -957,7 +973,7 @@ def main():
     # considered covered and went to the LLM on its own — the one copy of a
     # session the phase had just decided was not worth processing.
     covered_ids = ({jf.stem for files in jsonls.values() for jf in files}
-                   | {jf.stem for _project, jf in filtered_out})
+                   | {jf.stem for _project, jf, _reason in filtered_out})
     pending, pending_files, skipped_pending, denied_pending = collect_pending(covered_ids)
     log(f"Pending (hooks): {sum(len(v) for v in pending.values())} files"
         + (f" ({skipped_pending} skipped as already covered by JSONL)" if skipped_pending else ""))

@@ -220,7 +220,12 @@ Two separate mechanisms, worth not confusing:
   and so does the `[llm] provider=…` line of every run.
 
 The active policy and the resolved base URL are printed once per run in
-the `[llm] provider=…` line.
+the `[llm] provider=…` line. `bundle-status.py` and every `--dry-run` go
+further, to answer "why did nothing go out": one `llm <provider>` line for
+each provider the configuration can reach — key set or not (never its value),
+model, endpoint host, and whether the circuit breaker has it out of service
+and until when — and, for the chain, the last time every provider in it
+failed.
 
 The `local` row deliberately ships **no default model** — an unset
 `LOCAL_LLM_MODEL` fails loudly instead of quietly calling whatever

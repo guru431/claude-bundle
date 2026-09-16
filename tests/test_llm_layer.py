@@ -275,3 +275,29 @@ def test_a_local_endpoint_is_checked_by_what_it_resolves_to(cron_copy: Path, mon
     looked_up = host == "localhost" or host.endswith(".localhost")
     assert lookups == ([host] if looked_up else []), \
         f"unexpected name lookups: {lookups}"
+
+
+# ── The report answers "why did nothing go out" ──────────────────────────────
+
+def test_config_report_says_why_each_provider_cannot_answer(cron_copy: Path, monkeypatch,
+                                                            clock):
+    monkeypatch.setenv("DEEPSEEK_KEY", "unit-test-placeholder-value")
+    state = cron_copy / "cron" / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "depleted.json").write_text(json.dumps(
+        {"deepseek": {"ts": clock["t"], "reason": "402"}}), encoding="utf-8")
+    (state / "chain-dead.json").write_text(json.dumps({
+        "first_iso": "2026-01-01T02:10:00", "last_iso": "2026-01-01T05:00:00",
+        "fails": 37, "kinds": ["config"], "depleted": {"deepseek": "402"}}),
+        encoding="utf-8")
+    u = _load_utils(cron_copy, "utils_report")
+
+    lines = u.config_report()
+    by_name = {line.split("=", 1)[0].strip(): line for line in lines}
+    assert "key set" in by_name["llm deepseek"]
+    assert "out of service until" in by_name["llm deepseek"]
+    assert "(402)" in by_name["llm deepseek"]
+    assert "key NOT SET (OPENCODE_GO_API_KEY)" in by_name["llm opencode"]
+    assert "down since 2026-01-01T02:10:00" in by_name["last dead chain"]
+    assert "unit-test-placeholder-value" not in "\n".join(lines), \
+        "a key VALUE reached the report"

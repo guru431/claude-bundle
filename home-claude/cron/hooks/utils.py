@@ -2225,6 +2225,55 @@ def _log_provider_once() -> None:
         print("  [llm] provider=mock (offline fixture responses)", file=sys.stderr)
 
 
+def _provider_readiness(name: str) -> str:
+    """Whether a registry provider can answer at all, as one config_report value.
+
+    The flags alone never answered the question a quiet night leaves behind —
+    why did nothing go out? Every refusal _llm_openai_compat can make before a
+    request is in here: the key, the model, the endpoint and the breaker. The
+    key is reported as set or not, never shown; the endpoint as its host only,
+    because a base URL can carry credentials.
+    """
+    from urllib.parse import urlparse
+
+    cfg = PROVIDERS[name]
+    key, base, model = _provider_cfg(name)
+    if key:
+        parts = ["key set"]
+    elif cfg.get("key_optional"):
+        parts = ["no key (optional)"]
+    else:
+        parts = [f"key NOT SET ({cfg['key_env'][0]})"]
+    parts.append(f"model {model}" if model else f"model NOT SET ({cfg['model_env']})")
+    host = urlparse(base).hostname or base
+    if cfg.get("offbox", True):
+        parts.append(f"{host} (off-box" + ("" if ALLOW_OFFBOX else
+                     ", REFUSED by WIKI_ALLOW_OFFBOX=0") + ")")
+    elif _is_local_endpoint(base):
+        parts.append(f"{host} (local, verified)")
+    else:
+        parts.append(f"{host} (NOT local — every call REFUSED)")
+    _load_depleted()
+    until = _DEPLETED_UNTIL.get(name)
+    if name in _DEPLETED_PROVIDERS and until and until > time.time():
+        parts.append(f"out of service until "
+                     f"{datetime.fromtimestamp(until).isoformat(sep=' ', timespec='minutes')} "
+                     f"({_DEPLETED_PROVIDERS[name]})")
+    return ", ".join(parts)
+
+
+def _chain_dead_summary() -> str:
+    """The last record_chain_dead() note, as one config_report value."""
+    if not CHAIN_DEAD_PATH.is_file():
+        return "none recorded"
+    try:
+        st = json.loads(CHAIN_DEAD_PATH.read_text(encoding="utf-8", errors="replace"))
+        return (f"{st['last_iso']} (down since {st.get('first_iso', '?')}, "
+                f"{st.get('fails', '?')} failed call(s))")
+    except (OSError, ValueError, KeyError, TypeError):
+        return f"unreadable ({CHAIN_DEAD_PATH.name})"
+
+
 def config_report() -> list[str]:
     """The EFFECTIVE configuration, one line per value, with its source.
 
@@ -2237,6 +2286,16 @@ def config_report() -> list[str]:
              f"{'  ← INVALID, every call refused' if LLM_PROVIDER_INVALID else ''}"]
     if LLM_PROVIDER == PROVIDER_CHAIN_NAME:
         lines.append("chain             = " + " → ".join(DEFAULT_CHAIN) + " → None")
+        route = DEFAULT_CHAIN if OFFBOX_FALLBACK else DEFAULT_CHAIN[:1]
+    else:
+        route = [LLM_PROVIDER] if LLM_PROVIDER in PROVIDERS else []
+    # One line per provider a call can actually reach, and the last time the
+    # whole chain failed (only the chain records that): between them, the
+    # reason a night sent nothing.
+    for name in route:
+        lines.append(f"{'llm ' + name:<17} = {_provider_readiness(name)}")
+    if LLM_PROVIDER == PROVIDER_CHAIN_NAME:
+        lines.append(f"{'last dead chain':<17} = {_chain_dead_summary()}")
     seen = set()
     for name, value, source in _CONFIG_NOTES:
         if name in seen:

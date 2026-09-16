@@ -20,6 +20,10 @@
 #   powershell -ExecutionPolicy Bypass -File .\sync-tasks.ps1 -Unregister
 #                                        # remove every registry task that still
 #                                        # carries the marker (uninstall path)
+#   powershell -ExecutionPolicy Bypass -File .\sync-tasks.ps1 -Verify [-Detail]
+#                                        # read-only, no elevation: state + last
+#                                        # result; -Detail adds what Task Scheduler
+#                                        # holds next to what the registry asks for
 #
 # Exit codes: 0 = everything applied, 2 = at least one task FAILED to register,
 #             3 = at least one task was SKIPPED (invalid trigger, missing target,
@@ -31,6 +35,7 @@ param(
     [switch]$Adopt,
     [switch]$Unregister,
     [switch]$Verify,
+    [switch]$Detail,
     [string[]]$Only,
     [string]$RegistryPath,
     [string]$LogPath,
@@ -101,6 +106,7 @@ if ($ArgsFile) {
         elseif ($t -eq '-Adopt')  { $Adopt  = $true }
         elseif ($t -eq '-Unregister') { $Unregister = $true }
         elseif ($t -eq '-Verify') { $Verify = $true }
+        elseif ($t -eq '-Detail') { $Detail = $true }
         elseif ($t -eq '-Only' -or $t -eq '-RegistryPath' -or $t -eq '-LogPath') {
             if ($i -ge $tokens.Count -or $tokens[$i].StartsWith('-')) {
                 Write-Host "ERROR: $t requires a value" -ForegroundColor Red
@@ -113,7 +119,7 @@ if ($ArgsFile) {
         }
         else {
             Write-Host "ERROR: unsupported argument '$t'" -ForegroundColor Red
-            Write-Host "       Allowed: -DryRun -Force -Adopt -Unregister -Verify -Only <names> -RegistryPath <path> -LogPath <path>" -ForegroundColor Red
+            Write-Host "       Allowed: -DryRun -Force -Adopt -Unregister -Verify -Detail -Only <names> -RegistryPath <path> -LogPath <path>" -ForegroundColor Red
             exit 1
         }
     }
@@ -434,6 +440,43 @@ function Get-CurrentSummary([string]$name) {
     }
 }
 
+# ── -Verify -Detail: what Task Scheduler holds, next to what the registry asks ─
+# -Verify alone judges state and last result, and a task passes both while it is
+# registered with the wrong description, action or trigger: `>-` was the
+# description of five tasks for months because nothing ever printed it. Rows are
+# @{ field; want; have; same } — `same` is $null where the two sides are written
+# differently by construction (a trigger comes back as a CIM class, not as the
+# registry's grammar), so only a human can compare them.
+function Get-VerifyDetail([hashtable]$task, [hashtable]$current, [string]$launcher, [string]$marker) {
+    try {
+        $action = Build-Action $task $launcher
+    } catch {
+        $action = @{ execute = "(cannot build: $($_.Exception.Message))"; arguments = '' }
+    }
+    $wantDesc = "$marker | $($task.description)"
+    $wantTrigger = "$($task.trigger)"
+    if ($task.repeat_every) {
+        $for = if ($task.repeat_for) { $task.repeat_for } else { 'P1D' }
+        $wantTrigger += " every $($task.repeat_every) for $for"
+    }
+    if ($task.startup_delay) { $wantTrigger += " delay $($task.startup_delay)" }
+    $haveTrigger = "$($current.triggerType)" -replace '^MSFT_Task', '' -replace 'Trigger$', ''
+    if ($current.startBoundary) {
+        try { $haveTrigger += ' ' + ([datetime]$current.startBoundary).ToString('HH:mm') } catch {}
+    }
+    if ($current.repeatInterval) { $haveTrigger += " every $($current.repeatInterval) for $($current.repeatDuration)" }
+    if ($current.bootDelay) { $haveTrigger += " delay $($current.bootDelay)" }
+    return @(
+        @{ field = 'description'; want = $wantDesc; have = "$($current.description)"
+           same = ($wantDesc -ceq "$($current.description)") },
+        @{ field = 'execute'; want = "$($action.execute)"; have = "$($current.execute)"
+           same = ("$($action.execute)" -eq "$($current.execute)") },
+        @{ field = 'arguments'; want = "$($action.arguments)"; have = "$($current.args)"
+           same = ((Normalize-TaskArgs $action.arguments) -eq (Normalize-TaskArgs $current.args)) },
+        @{ field = 'trigger'; want = $wantTrigger; have = $haveTrigger; same = $null }
+    )
+}
+
 # Task Scheduler can re-emit a registered task's Arguments string with
 # normalized whitespace, so a verbatim compare against the string we built
 # would report a phantom change and re-register the task on every run. Collapse
@@ -623,6 +666,19 @@ if ($Verify) {
         } else {
             Write-Host ("[ok       ] " + $line) -ForegroundColor Green
             $okCount++
+        }
+        # Printed, not judged: a difference here is what `sync` is for, and
+        # -Verify's exit code keeps meaning "is the night working".
+        if ($Detail) {
+            foreach ($row in (Get-VerifyDetail $task (Get-CurrentSummary $task.name) $launcher $marker)) {
+                if ($row.same -eq $true) {
+                    Write-Host ("            {0,-11} {1}" -f $row.field, $row.want) -ForegroundColor DarkGray
+                } else {
+                    $color = if ($row.same -eq $false) { 'Yellow' } else { 'DarkGray' }
+                    Write-Host ("            {0,-11} want: {1}" -f $row.field, $row.want) -ForegroundColor $color
+                    Write-Host ("            {0,-11} have: {1}" -f '', $row.have) -ForegroundColor $color
+                }
+            }
         }
     }
     Write-Host ""

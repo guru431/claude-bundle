@@ -108,6 +108,57 @@ foreach ($lt in @('Password', 'S4U', 'Interactive')) {
     assert r.stdout.split() == ["Password=Password", "S4U=S4U", "Interactive=InteractiveToken"]
 
 
+def test_verify_detail_shows_what_task_scheduler_actually_holds(tmp_path: Path):
+    """I24(e): the `>-` description passed -Verify for months because nothing
+    ever printed a registered task next to its registry entry."""
+    code = define_functions(SYNC, ["Get-VerifyDetail", "Build-Action", "Quote-Arg",
+                                   "Quote-Path", "Normalize-TaskArgs"]) + r"""
+$script:WSCRIPT_FLAGS = '//B //nologo'
+$launcher = 'C:\bundle\bin\_run-hidden.vbs'
+$task = @{ name = 'T'; kind = 'python'; script = 'C:\bundle\cron\job.py'; script_args = @()
+           description = 'Nightly job'; trigger = 'Daily 02:30' }
+$current = @{
+    description = 'managed-by-registry | >-'
+    execute = 'wscript.exe'
+    args = '//B //nologo  "C:\bundle\bin\_run-hidden.vbs" python "C:\bundle\cron\job.py"'
+    triggerType = 'MSFT_TaskDailyTrigger'; startBoundary = '2026-09-17T02:30:00'
+    repeatInterval = ''; repeatDuration = ''; bootDelay = ''
+}
+foreach ($row in (Get-VerifyDetail $task $current $launcher 'managed-by-registry')) {
+    Write-Output ("{0}`t{1}`t{2}`t{3}" -f $row.field, $row.same, $row.want, $row.have)
+}
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    rows = {line.split("\t", 1)[0]: line.split("\t") for line in r.stdout.splitlines() if "\t" in line}
+    assert rows["description"][1:] == ["False", "managed-by-registry | Nightly job",
+                                       "managed-by-registry | >-"], rows
+    assert rows["execute"][1] == "True", rows
+    # Whitespace Task Scheduler re-emits differently is not a difference.
+    assert rows["arguments"][1] == "True", rows
+    assert rows["trigger"][1:] == ["", "Daily 02:30", "Daily 02:30"], rows
+
+
+@windows_only
+@pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
+def test_detail_is_accepted_through_the_args_file(tmp_path: Path):
+    """sync.cmd hands switches over in a file that is checked against an
+    allowlist; a switch missing from it is a hard error, not a no-op."""
+    name = f"ClaudeBundleTest-{uuid.uuid4().hex[:12]}"
+    reg = _deployment(tmp_path, (
+        f"  - name: {name}\n"
+        f"    script: {tmp_path / 'job.sh'}\n"
+        "    trigger: Daily 02:00\n"
+        "    timeout_hours: 1\n"
+        "    enabled: false\n"))
+    args = tmp_path / "args.txt"
+    args.write_text(f'-Verify -Detail -RegistryPath "{reg}"\n', encoding="utf-8")
+    env = dict(os.environ, TEMP=str(tmp_path), TMP=str(tmp_path))
+    r = run_ps_file(SYNC, "-ArgsFile", args, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "-Verify" in r.stdout and name in r.stdout
+
+
 @windows_only
 @pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
 def test_verify_leaves_no_transcript_behind(tmp_path: Path):

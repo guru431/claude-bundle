@@ -8,6 +8,7 @@ of task names that exist nowhere.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import uuid
 from pathlib import Path
@@ -137,6 +138,36 @@ foreach ($row in (Get-VerifyDetail $task $current $launcher 'managed-by-registry
     # Whitespace Task Scheduler re-emits differently is not a difference.
     assert rows["arguments"][1] == "True", rows
     assert rows["trigger"][1:] == ["", "Daily 02:30", "Daily 02:30"], rows
+
+
+@windows_only
+@pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
+def test_a_deployed_syncer_reads_python_exe_from_the_deployed_env(tmp_path: Path):
+    """I24(a): the syncer looked for the .env parser in the CHECKOUT only, so the
+    deployed copy — the one sync.cmd runs — registered python_local tasks with a
+    bare `python.exe`, which session 0 cannot resolve."""
+    root = tmp_path / "deploy"
+    shutil.copytree(SYNC.parent, root / "cron" / "admin")
+    (root / "cron" / "lib").mkdir()
+    shutil.copy(ROOT / "scripts" / "lib" / "dotenv.ps1", root / "cron" / "lib" / "dotenv.ps1")
+    (root / "bin").mkdir()
+    (root / "bin" / "_run-hidden.vbs").write_text("' stub\n", encoding="utf-8")
+    (root / "cron" / "job.py").write_text("# stub\n", encoding="utf-8")
+    (root / ".env").write_text("PYTHON_EXE=C:\\Interpreters\\python-from-env.exe\n", encoding="utf-8")
+    name = f"ClaudeBundleTest-{uuid.uuid4().hex[:12]}"
+    (root / "cron" / "registry.yaml").write_text(
+        "version: 1\n"
+        f"launcher: {root / 'bin' / '_run-hidden.vbs'}\n"
+        "tasks:\n"
+        f"  - name: {name}\n"
+        f"    script: {root / 'cron' / 'job.py'}\n"
+        "    kind: python_local\n"
+        "    trigger: Daily 02:00\n"
+        "    timeout_hours: 1\n", encoding="utf-8")
+    env = dict(os.environ, TEMP=str(tmp_path), TMP=str(tmp_path))
+    r = run_ps_file(root / "cron" / "admin" / "sync-tasks.ps1", "-DryRun", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "wanted exec: C:\\Interpreters\\python-from-env.exe" in r.stdout, r.stdout
 
 
 @windows_only

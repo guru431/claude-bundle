@@ -619,6 +619,16 @@ if ($deployed) {
         }
     }
 
+    # 16a-2. The copy of that parser the DEPLOYED scripts read .env through.
+    # scripts/lib/ is not part of a deployment; install.ps1 places the parser at
+    # cron/lib/dotenv.ps1. A deployment without it still syncs — but its
+    # sync-tasks.ps1 registers python_local tasks with a bare `python.exe` that
+    # session 0 cannot resolve, and get-key.ps1 exits 1.
+    if ((Test-Path (Join-Path $deployRoot 'cron/admin/sync-tasks.ps1')) -and
+        -not (Test-Path (Join-Path $deployRoot 'cron/lib/dotenv.ps1'))) {
+        Warn "cron/lib/dotenv.ps1 missing under $deployRoot — the deployed sync-tasks.ps1 cannot read PYTHON_EXE from .env; re-run install.ps1 (or copy scripts/lib/dotenv.ps1 there)"
+    }
+
     # 16b. The DPAPI credential file that LogonType=Password tasks need. Without
     # it sync-tasks cannot register them, and a task registered before the file
     # was removed simply stops firing.

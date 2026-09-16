@@ -95,10 +95,13 @@ $ErrorActionPreference = "Stop"
 # ones. This file used to carry a FOURTH copy that handled `export `, quoting,
 # a BOM and CRLF differently from all three.
 #
-# The bundle deploys claude-switch.ps1 on its own to ~/.claude/, where lib/ does
-# not follow it, so a self-contained fallback stays for that case.
-$script:_dotEnvLib = Join-Path $PSScriptRoot 'lib/dotenv.ps1'
-if (Test-Path $script:_dotEnvLib) { . $script:_dotEnvLib }
+# In the checkout the library is lib/ next to this script. A deployed copy sits
+# in the pipeline root, where install.ps1 puts the library at cron/lib/. A copy
+# placed anywhere else by hand has neither, so a self-contained fallback stays
+# for that case.
+$script:_dotEnvLib = @((Join-Path $PSScriptRoot 'lib/dotenv.ps1'), (Join-Path $PSScriptRoot 'cron/lib/dotenv.ps1')) |
+    Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if ($script:_dotEnvLib) { . $script:_dotEnvLib }
 
 function Read-DotEnvValue([string]$envFile, [string]$name) {
     if (-not (Test-Path $envFile)) { return $null }

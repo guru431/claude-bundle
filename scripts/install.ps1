@@ -415,6 +415,9 @@ function Get-PlannedFiles {
         foreach ($d in @('wiki', 'bin', 'cron')) {
             Add-PlannedTree $plan (Join-Path $srcHome $d) $d 'pipeline_root'
         }
+        if ($script:haveDotEnv) {
+            $plan.Add(@{ root = 'pipeline_root'; path = 'cron/lib/dotenv.ps1'; src = $script:dotEnvLib })
+        }
     }
     $v = Join-Path $root 'VERSION'
     if (Test-Path $v) { $plan.Add(@{ root = 'pipeline_root'; path = '.bundle-version'; src = $v }) }
@@ -644,6 +647,18 @@ if ($Profile -eq 'full') {
                 Copy-Item $s $PipelineRoot -Recurse -Force
                 Add-Written $s (Join-Path $PipelineRoot $d) 'pipeline_root'
             }
+        }
+        # The one PowerShell .env parser lives in scripts/lib/, which nothing
+        # copied — so the deployed sync-tasks.ps1 (the one sync.cmd runs) never
+        # read PYTHON_EXE from .env, and a deployed get-key.ps1 exited 1. It goes
+        # next to its bash twin cron/lib/dotenv.sh. An installer-made copy keeps
+        # the rule "one implementation": nobody edits it, the next install
+        # replaces it, and the manifest lets uninstall.ps1 remove it.
+        if ($script:haveDotEnv) {
+            $dotEnvDst = Join-Path $PipelineRoot 'cron\lib\dotenv.ps1'
+            New-Item -ItemType Directory -Force -Path (Split-Path $dotEnvDst -Parent) | Out-Null
+            Copy-Item $script:dotEnvLib $dotEnvDst -Force
+            Add-Written $script:dotEnvLib $dotEnvDst 'pipeline_root'
         }
         Good "copied hooks/ -> $ClaudeHome; wiki/, bin/, cron/ (full tier) -> $PipelineRoot"
         foreach ($dst in $preserve.Keys) {
@@ -878,7 +893,16 @@ if ($DryRun) {
     if ((Test-Path $swSrc) -and (AskYN 'Copy claude-switch.ps1 into the deployment (survives deleting the bundle checkout)?' $true)) {
         Copy-Item $swSrc (Join-Path $swRoot 'claude-switch.ps1') -Force
         Add-Written $swSrc (Join-Path $swRoot 'claude-switch.ps1') $swRootName
-        Good "copied claude-switch.ps1 -> $swRoot\claude-switch.ps1"
+        # -KeyHelper writes a command that runs get-key.ps1 from NEXT TO the
+        # switcher. Deployed alone, the switcher wrote a helper that could only
+        # fail. Both find the .env parser at cron/lib/ (copied with cron/ above),
+        # and $swRoot is always the pipeline root that holds it.
+        $gkSrc = Join-Path $root 'scripts/get-key.ps1'
+        if (Test-Path $gkSrc) {
+            Copy-Item $gkSrc (Join-Path $swRoot 'get-key.ps1') -Force
+            Add-Written $gkSrc (Join-Path $swRoot 'get-key.ps1') $swRootName
+        }
+        Good "copied claude-switch.ps1 + get-key.ps1 -> $swRoot"
         $switcherInstalled = $true
     }
     $codexSrc = Join-Path $root 'codex/AGENTS.md'

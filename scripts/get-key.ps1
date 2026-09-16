@@ -30,9 +30,13 @@ if ($Name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
     exit 2
 }
 
-$lib = Join-Path $PSScriptRoot 'lib\dotenv.ps1'
-if (-not (Test-Path $lib)) {
-    [Console]::Error.WriteLine("get-key.ps1: $lib not found - this script needs the bundle's .env parser next to it")
+# The parser sits in lib\ next to this script in the bundle checkout, and in
+# cron\lib\ in a deployment, where install.ps1 copies it together with this
+# script. Looking in lib\ only made a deployed get-key.ps1 exit 1 on every call.
+$lib = @((Join-Path $PSScriptRoot 'lib\dotenv.ps1'), (Join-Path $PSScriptRoot 'cron\lib\dotenv.ps1')) |
+    Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $lib) {
+    [Console]::Error.WriteLine("get-key.ps1: lib\dotenv.ps1 or cron\lib\dotenv.ps1 not found next to $PSScriptRoot - this script needs the bundle's .env parser")
     exit 1
 }
 . $lib

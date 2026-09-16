@@ -46,15 +46,21 @@ $ErrorActionPreference = 'Stop'
 
 # ── the ONE PowerShell .env parser ───────────────────────────────────────────
 # scripts/lib/dotenv.ps1 (see its header). It lives in the bundle CHECKOUT, and
-# this script also runs from a DEPLOYED tree that has no scripts/ — so the
-# dot-source is conditional and every consumer below keeps its previous
-# behaviour when the library is not next to us. What must never happen is a
-# second hand-rolled .env regex in this file.
+# this script mostly runs from a DEPLOYED tree that has no scripts/. Looking
+# only in the checkout meant the deployed syncer — the one sync.cmd actually
+# runs — never read PYTHON_EXE from .env. So install.ps1 now places a copy at
+# cron/lib/dotenv.ps1, next to its bash twin, and that is looked for first.
+# Still conditional: with neither present every consumer below keeps its
+# previous behaviour. What must never happen is a second hand-rolled .env regex
+# in this file.
 #   <bundle root> = two levels up (cron/admin -> cron -> root), the same walk
 #   $masterLauncher does below; the checkout's scripts/ is one level above that.
 $script:_bundleRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$script:_dotEnvLib = Join-Path (Split-Path -Parent $script:_bundleRoot) 'scripts\lib\dotenv.ps1'
-if (Test-Path $script:_dotEnvLib) { . $script:_dotEnvLib }
+$script:_dotEnvLib = @(
+    (Join-Path $script:_bundleRoot 'cron\lib\dotenv.ps1'),
+    (Join-Path (Split-Path -Parent $script:_bundleRoot) 'scripts\lib\dotenv.ps1')
+) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if ($script:_dotEnvLib) { . $script:_dotEnvLib }
 
 # The interpreter a kind=python_local task will be registered with. Session 0
 # has no user PATH and no inherited process env, so the bare name `python.exe`
@@ -937,6 +943,10 @@ foreach ($task in $reg.tasks) {
     }
 
     if ($DryRun) {
+        # The executable too: for python_local it is the interpreter resolved
+        # from PYTHON_EXE, and a bare `python.exe` here is a task session 0
+        # cannot start — invisible in the arguments alone.
+        Write-Host ("   wanted exec: " + $wantedExec) -ForegroundColor DarkGray
         Write-Host ("   wanted args: " + $wantedArgs) -ForegroundColor DarkGray
         if ($current) { Write-Host ("   current args: " + $current.args) -ForegroundColor DarkGray }
         $summary[$verb]++

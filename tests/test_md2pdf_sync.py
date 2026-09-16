@@ -100,6 +100,66 @@ def test_the_converter_gets_its_whole_budget_plus_30_seconds(sync, converter, mo
     assert kwargs["env"]["MD2PDF_TIMEOUT"] == "45"
 
 
+def test_a_project_the_policy_denies_is_never_walked(sync, converter, monkeypatch):
+    """bundle.local.yaml is ONE policy for every source; this task walked everything.
+
+    A denied project's documents were read and re-printed, and on a failure
+    their names went to Telegram. The policy's own rules are pinned with real
+    manifests in test_guards.py; what is pinned here is that this task asks.
+    """
+    asked: list[str] = []
+
+    def gate(name: str) -> bool:
+        asked.append(name)
+        return name != "secretproj"
+
+    # raising=False: a script that never consulted the gate must fail on what
+    # it converts, not on a missing attribute.
+    monkeypatch.setattr(sync, "working_copy_allowed", gate, raising=False)
+    _stale_pair(sync.PROJECTS_ROOT, "secretproj")
+    _stale_pair(sync.PROJECTS_ROOT, "openproj")
+
+    assert sync.main() == 0
+
+    converted = [Path(cmd[-1]).parent.name for cmd, _ in converter.conversions]
+    assert converted == ["openproj"]
+    assert "secretproj" in asked
+
+
+def test_loose_files_at_the_root_need_a_policy_that_denies_nothing(sync, converter, monkeypatch):
+    """A document directly under projects_root belongs to no project, so no rule
+    can name it — under an allowlist it must not be read."""
+    monkeypatch.setattr(sync, "project_allowed", lambda name: False, raising=False)
+    folder = sync.PROJECTS_ROOT
+    md, pdf = folder / "loose.md", folder / "loose.pdf"
+    md.write_text("# loose\n", encoding="utf-8")
+    pdf.write_bytes(b"%PDF-1.4 previous")
+    os.utime(pdf, (1_700_000_000, 1_700_000_000))
+    os.utime(md, (1_700_010_000, 1_700_010_000))
+
+    assert sync.main() == 0
+    assert converter.conversions == []
+
+
+def test_a_failure_alert_names_the_documents_and_nothing_the_browser_printed(
+        sync, converter, monkeypatch):
+    """The alert quoted md2pdf's stderr — browser output, and now the title of
+    whatever page was printed instead: a local file URL with the user name in
+    it. Only the documents' paths, relative to projects_root, leave the machine."""
+    monkeypatch.setattr(sync, "BASH", "bash")          # an alert channel exists
+    converter.converter_rc = 1
+    converter.stderr = (b"chrome.exe: printed a different page, titled "
+                        b"'file:///C:/Users/me/AppData/Local/Temp/tmpk3j9x2.html'")
+    _stale_pair(sync.PROJECTS_ROOT, "openproj", name="itinerary")
+
+    assert sync.main() == 1
+
+    (alert,) = converter.alerts
+    assert "openproj/itinerary.md" in alert
+    assert "file:///" not in alert and "tmpk3j9x2" not in alert
+    assert str(sync.PROJECTS_ROOT) not in alert
+
+
 def _ledger(tmp_path: Path) -> list[dict]:
     rows: list[dict] = []
     for part in sorted((tmp_path / "runs").glob("runs-*.jsonl")):

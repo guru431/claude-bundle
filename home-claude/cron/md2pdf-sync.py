@@ -28,7 +28,12 @@ Suggested schedule: Daily 06:30 — shortly before git-push-all (07:00) so the
 fresh PDFs land in the nightly auto-commit. A Password task starts in session 0
 before logon (no interactive Edge), which suits the headless print md2pdf uses.
 
-Telegram alert only on regeneration errors (convention: alert on exception).
+Telegram alert only on regeneration errors (convention: alert on exception). It
+names the documents that failed, relative to projects_root, and nothing else —
+the converter's error text stays in the log.
+
+Projects are what bundle.local.yaml says they are: a directory directly under
+projects_root that the privacy policy denies is not walked at all.
 
 Requires ~/.claude/bin/md2pdf.py (a small wrapper around any MD->PDF
 converter). If you don't use the md+pdf pairing pattern, just leave this task
@@ -39,7 +44,7 @@ disabled in the registry.
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary -> Telegram Bot API (the render itself is local) money=no writes=regenerates *.pdf under projects_root
+# bundle-io: offbox=on a failure, the paths (relative to projects_root) of the documents that did not convert -> Telegram Bot API; projects the privacy policy denies are not walked; the render is local, but the browser fetches any remote image a document links money=no writes=regenerates *.pdf under projects_root
 from __future__ import annotations
 
 import json
@@ -59,7 +64,15 @@ BUNDLE_ROOT = Path(__file__).resolve().parents[1]
 # A Task Scheduler Password task starts in session 0 with no user env, so the
 # bundle .env must be loaded before any os.environ.get() below is evaluated.
 sys.path.insert(0, str(Path(__file__).parent / "hooks"))
-from utils import _env_int, _load_dotenv, find_bash  # noqa: E402
+from utils import (  # noqa: E402
+    _env_int,
+    _load_dotenv,
+    find_bash,
+    masked,
+    policy_summary,
+    project_allowed,
+    working_copy_allowed,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runs import terminal_record  # noqa: E402
@@ -138,11 +151,37 @@ def save_last_run(ts: float) -> None:
 
 
 def iter_md_files():
-    for dirpath, dirnames, filenames in os.walk(PROJECTS_ROOT):
+    """Every .md under PROJECTS_ROOT that the privacy policy lets this task read.
+
+    The walk used to take the whole tree, so a project denied in
+    bundle.local.yaml still had its documents read and re-printed — and, on a
+    failure, their names sent to Telegram — while the docs promise ONE policy
+    for every source. A project is a directory directly under projects_root,
+    the namespace agents-md-sync-check walks, hence working_copy_allowed.
+    """
+    root = Path(PROJECTS_ROOT)
+    for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+        if Path(dirpath) == root:
+            for denied in [d for d in dirnames if not working_copy_allowed(d)]:
+                log(f"skip {denied} (privacy policy)")
+                dirnames.remove(denied)
+            # Loose files at the root belong to no project, so no rule can name
+            # them: they are read only under a policy that denies nothing by
+            # default (no allowlist, a manifest that parsed).
+            if not project_allowed(""):
+                continue
         for name in filenames:
             if name.lower().endswith(".md"):
                 yield Path(dirpath) / name
+
+
+def _relative(md: Path) -> str:
+    """A document's path as it may leave the machine: relative to projects_root."""
+    try:
+        return md.relative_to(PROJECTS_ROOT).as_posix()
+    except ValueError:
+        return md.name
 
 
 def main() -> int:
@@ -172,6 +211,7 @@ def _sync(rec: dict) -> int:
     last_run = load_last_run()
     log(f"=== md2pdf-sync started; root={PROJECTS_ROOT} threshold={THRESHOLD}s "
         f"last_run={'(none — seeding)' if last_run is None else f'{last_run:.0f}'} ===")
+    log(f"privacy policy: {policy_summary()}")
     if not MD2PDF.is_file():
         log(f"FATAL: md2pdf not found at {MD2PDF}")
         rec.update(process_rc=1, note="converter bin/md2pdf.py not found")
@@ -227,8 +267,13 @@ def _sync(rec: dict) -> int:
     log(f"=== done: regenerated={len(regenerated)} skipped={skipped} failed={len(failed)} ===")
 
     if failed and TELEGRAM.exists() and BASH:
-        lines = "\n".join(f"- {md.name}: {err}" for md, err in failed)
-        msg = f"md2pdf-sync: {len(failed)} PDF(s) not regenerated:\n{lines}"
+        # Which documents failed — not why. The reason is md2pdf's stderr:
+        # browser output and, since md2pdf checks what it printed, the title of
+        # whatever page came out instead, which is a local file URL with the
+        # user name in it. That stays in the log this message points at.
+        lines = "\n".join(f"- {_relative(md)}" for md, _err in failed)
+        msg = masked(f"md2pdf-sync: {len(failed)} PDF(s) not regenerated — the "
+                     f"reasons are in cron/logs/{LOG_FILE.name}:\n{lines}")
         if len(msg) > TG_LIMIT:
             msg = msg[:TG_LIMIT].rsplit("\n", 1)[0] + "\n... (truncated)"
         try:

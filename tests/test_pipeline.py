@@ -1124,6 +1124,65 @@ def _sent_chars(stdout: str, project: str) -> list[int]:
         rf"\[{re.escape(project)}\] existing pages: \d+, data: (\d+) chars", stdout)]
 
 
+def test_compiling_the_same_daily_again_changes_nothing(bundle: Path):
+    """The compile markers are the only thing that makes the chain re-entrant.
+
+    `DATE@fp` and `DATE#project@fp` are what the root CLAUDE.md credits for a
+    safe re-run, and no test ran compile twice: a second run must neither call
+    the provider nor touch a page, a section already compiled must be skipped
+    when its daily gains another project, and an EDITED section is new text.
+    """
+    resp = bundle / "widget.json"
+    resp.write_text(_WIDGET_PAGE, encoding="utf-8")
+    script = bundle / "cron" / "wiki" / "wiki-compile-sessions.py"
+    daily = bundle / "wiki" / "daily" / "2026-01-01.md"
+    page = bundle / "wiki" / "projects" / "myproject" / "widget-parser-fix.md"
+    state_path = bundle / "wiki" / ".processed.json"
+
+    r = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0 and page.is_file(), f"first compile failed:\n{r.stdout}"
+    written = page.read_bytes()
+
+    r = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0 and "Nothing to compile" in r.stdout, r.stdout
+    assert page.read_bytes() == written, "a re-run rewrote a compiled page"
+    pairs = json.loads(state_path.read_text(encoding="utf-8"))["compile_sessions"]["compiled_pairs"]
+    assert len([p for p in pairs if p.startswith("2026-01-01#myproject@")]) == 1, pairs
+
+
+def test_a_compiled_section_is_skipped_until_it_changes(bundle: Path):
+    """The pair marker, as opposed to the daily one: see the test above."""
+    resp = bundle / "widget.json"
+    resp.write_text(_WIDGET_PAGE, encoding="utf-8")
+    script = bundle / "cron" / "wiki" / "wiki-compile-sessions.py"
+    daily = bundle / "wiki" / "daily" / "2026-01-01.md"
+    page = bundle / "wiki" / "projects" / "myproject" / "widget-parser-fix.md"
+    r = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0 and page.is_file(), f"first compile failed:\n{r.stdout}"
+    written = page.read_bytes()
+
+    # Another project joins the daily. The answer below would be REJECTED for
+    # myproject (its path is outside myproject's folder), so a green run proves
+    # myproject was not sent again.
+    other = bundle / "other.json"
+    other.write_text(json.dumps([{"path": "projects/otherproj/note.md", "action": "create",
+                                  "content": "# Note\n\nAbout the other project. [[index]]\n"}]),
+                     encoding="utf-8")
+    with open(daily, "a", encoding="utf-8", newline="\n") as f:
+        f.write("\n## otherproj\nA note about the other project.\n")
+    r = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(other)}, cwd=bundle)
+    assert r.returncode == 0, f"the compiled section was sent again:\n{r.stdout}\n{r.stderr}"
+    assert "[myproject] already compiled (pair marker)" in r.stdout, r.stdout
+    assert page.read_bytes() == written
+
+    # Editing the compiled section makes it new material.
+    daily.write_text(daily.read_text(encoding="utf-8").replace("off by one", "off by two"),
+                     encoding="utf-8", newline="\n")
+    r = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0 and _sent_chars(r.stdout, "myproject"), \
+        f"an edited section was not compiled again:\n{r.stdout}"
+
+
 def test_a_second_section_of_a_compiled_project_is_sent_alone(bundle: Path):
     """The next night's append must not re-send the section already compiled.
 

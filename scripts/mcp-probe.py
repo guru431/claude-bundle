@@ -21,8 +21,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -43,6 +46,12 @@ INITIALIZE = {
                "clientInfo": {"name": "mcp-probe", "version": "1"}},
 }
 TOOLS_LIST = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+
+# How long a server gets to exit by itself once its stdin is closed — the MCP
+# stdio shutdown sequence — before it is killed. Closing stdin first matters for
+# wrapped servers: `npx` does not forward a kill to the node process it started,
+# but that process does see EOF and exit, instead of outliving the probe.
+SHUTDOWN_GRACE = 2.0
 
 
 def load_servers(path: Path) -> dict:
@@ -93,22 +102,54 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
         print(f"{name:<14} warning — launched through '{wrapper}' "
               f"(see docs/mcp-servers.md)")
 
+    # stderr goes to a file, not a pipe. Nothing read the pipe until the
+    # handshake had already failed, so a server that logged more than the pipe
+    # buffer blocked on its own stderr and never answered — a deadlock that no
+    # timeout could break, because the probe was blocked too.
+    errlog = tempfile.TemporaryFile()
     try:
         proc = subprocess.Popen(
             command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, env=env, text=True,
-            encoding="utf-8", errors="replace", bufsize=1)
+            stderr=errlog, env=env)
     except OSError as exc:
+        errlog.close()
         print(f"{name:<14} FAIL — cannot start: {exc}")
         return False
 
+    # readline() has no timeout, and Windows has no select() on a pipe. The
+    # deadline used to be checked only BETWEEN lines, so a server that read
+    # stdin and never wrote a byte hung the probe forever. The blocking read
+    # lives on this thread now, and the deadline is enforced on the queue.
+    lines: queue.Queue = queue.Queue()
+
+    def pump() -> None:
+        for raw in proc.stdout:
+            lines.put(raw.decode("utf-8", errors="replace"))
+        lines.put(None)                    # EOF: the server closed stdout
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+
+    def send(*messages: dict) -> bool:
+        """False when the server is already gone (a broken pipe, or EINVAL on
+        Windows) — which used to escape as an exception and end the whole run."""
+        try:
+            for message in messages:
+                proc.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+            proc.stdin.flush()
+            return True
+        except OSError:
+            return False
+
     def read_reply(want_id: int, deadline: float, junk: list[str]):
-        while time.time() < deadline:
-            line = proc.stdout.readline()
-            if not line:
-                if proc.poll() is not None:
-                    return None
-                continue
+        while True:
+            try:
+                line = lines.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                return None
+            if line is None:
+                lines.put(None)            # stays EOF for the next read too
+                return None
             line = line.strip()
             if not line:
                 continue
@@ -119,32 +160,55 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
                 continue
             if message.get("id") == want_id:
                 return message
-        return None
+
+    def stderr_text() -> str:
+        # Read only after shutdown(): the child writes through a handle that
+        # shares this file's position, so reading while it runs could interleave.
+        errlog.seek(0)
+        return errlog.read().decode("utf-8", errors="replace")[:200].replace("\n", " ")
+
+    def shutdown() -> None:
+        """Stop the server the way an MCP client does, and always reap it."""
+        try:
+            proc.stdin.close()             # EOF is stdio's "please exit"
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=SHUTDOWN_GRACE)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass                       # unkillable; nothing more to do here
+        # A grandchild that inherited stdout can keep the pipe open after its
+        # parent is gone; closing it under a blocked reader would block us too.
+        reader.join(timeout=1)
+        if not reader.is_alive():
+            proc.stdout.close()
 
     ok = False
     try:
         junk: list[str] = []
-        proc.stdin.write(json.dumps(INITIALIZE) + "\n")
-        proc.stdin.flush()
-        reply = read_reply(1, time.time() + timeout, junk)
+        reply = None
+        if send(INITIALIZE):
+            reply = read_reply(1, time.monotonic() + timeout, junk)
 
         if junk:
             print(f"{name:<14} FAIL — {len(junk)} non-JSON line(s) on stdout, "
                   f"this breaks JSON-RPC: {junk[0][:60]!r}")
             return False
         if reply is None:
-            stderr = (proc.stderr.read() or "")[:200].replace("\n", " ")
-            print(f"{name:<14} FAIL — no reply to initialize. stderr: {stderr}")
+            shutdown()
+            print(f"{name:<14} FAIL — no reply to initialize. stderr: {stderr_text()}")
             return False
 
         info = (reply.get("result") or {}).get("serverInfo") or {}
         label = f"{info.get('name', '?')} {info.get('version', '')}".strip()
 
-        proc.stdin.write(json.dumps({"jsonrpc": "2.0",
-                                     "method": "notifications/initialized"}) + "\n")
-        proc.stdin.write(json.dumps(TOOLS_LIST) + "\n")
-        proc.stdin.flush()
-        tools_reply = read_reply(2, time.time() + timeout, junk)
+        tools_reply = None
+        if send({"jsonrpc": "2.0", "method": "notifications/initialized"}, TOOLS_LIST):
+            tools_reply = read_reply(2, time.monotonic() + timeout, junk)
         count = len((tools_reply.get("result") or {}).get("tools") or []) if tools_reply else None
 
         if count is None:
@@ -153,10 +217,9 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
             print(f"{name:<14} OK — {label}, {count} tool(s)")
         ok = True
     finally:
-        try:
-            proc.kill()
-        except OSError:
-            pass
+        if proc.returncode is None:
+            shutdown()
+        errlog.close()
     return ok
 
 

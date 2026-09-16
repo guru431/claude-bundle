@@ -423,7 +423,9 @@ def collect_feedback_files() -> dict[str, list[str]]:
         mem_dir = proj_dir / "memory"
         if not mem_dir.exists():
             continue
-        project = dir_to_project(proj_dir.name)
+        # Normalized, as in find_recent_jsonls: the raw name put a second
+        # `## MyApp` next to the JSONL's `## myapp` in the same daily.
+        project = normalize_project_name(dir_to_project(proj_dir.name))
         # Same privacy gate as the JSONL collectors — an excluded project must
         # not leak in through its memory/feedback files (unified policy).
         if not project_allowed(project):
@@ -475,7 +477,7 @@ def collect_incidents_sessions() -> dict[str, list[str]]:
         mem_dir = proj_dir / "memory"
         if not mem_dir.exists():
             continue
-        project = dir_to_project(proj_dir.name)
+        project = normalize_project_name(dir_to_project(proj_dir.name))
         # Unified privacy gate (see collect_feedback_files) — incidents/sessions
         # of an excluded project must not reach the LLM either.
         if not project_allowed(project):

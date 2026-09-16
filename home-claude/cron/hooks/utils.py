@@ -410,12 +410,25 @@ def project_allowed(project: str) -> bool:
     A manifest that exists but cannot be parsed/typed denies EVERYTHING: the
     alternative is to silently ignore the user's stated policy and ship every
     project to an external provider, which is the worse way to be wrong.
+
+    BOTH sides are compared as NORMALIZED project names — the name of the wiki
+    folder, which is what a user sees and writes into the policy. The strings
+    used to be compared as given, and the collectors did not agree on what they
+    gave: the JSONL collector and compile normalized first, the feedback and
+    incidents collectors, the session hooks and memory-update passed the raw
+    `dir_to_project` result. For a directory ending in `ClaudeBundle`,
+    `skip_projects: [claudebundle]` therefore closed the transcripts while its
+    memory/feedback_*.md, incidents.md and sessions.md still went to the provider
+    — and `[ClaudeBundle]` closed those while the transcripts went. Normalizing
+    in the gate fixes every caller at once, the ones in other files included.
     """
     if _MANIFEST_BROKEN:
         return False
-    if project in SKIP_JSONL_PROJECTS:
+    name = normalize_project_name(project)
+    if name in {normalize_project_name(e) for e in SKIP_JSONL_PROJECTS}:
         return False
-    if ALLOW_PROJECTS and project not in ALLOW_PROJECTS:
+    if ALLOW_PROJECTS and name not in {normalize_project_name(e) for e in ALLOW_PROJECTS
+                                       if not _collapses_to_default(e)}:
         return False
     return True
 
@@ -1171,6 +1184,9 @@ def slug_collisions() -> dict[str, list[str]]:
     bucket, and allow_projects/skip_projects can only speak about the slug —
     so allowing one of them silently allows the other too. Reported by the
     flush policy line and --dry-run; fix by pinning either dir in project_map.
+
+    Grouped by the NORMALIZED name, the one the bucket and the policy use:
+    `…-MyApp` and `…-myapp` are two raw names and one wiki folder.
     """
     by_slug: dict[str, list[str]] = {}
     if not PROJECTS_BASE.exists():
@@ -1178,7 +1194,8 @@ def slug_collisions() -> dict[str, list[str]]:
     for proj_dir in PROJECTS_BASE.iterdir():
         if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
             continue
-        by_slug.setdefault(dir_to_project(proj_dir.name), []).append(proj_dir.name)
+        slug = normalize_project_name(dir_to_project(proj_dir.name))
+        by_slug.setdefault(slug, []).append(proj_dir.name)
     return {slug: dirs for slug, dirs in by_slug.items() if len(dirs) > 1}
 
 
@@ -3201,6 +3218,31 @@ def normalize_project_name(raw: str) -> str:
             return proj
     slug = _slugify_project(raw) or DEFAULT_PROJECT
     return DEFAULT_PROJECT if slug in UNATTRIBUTED_NAMES else slug
+
+
+def _collapses_to_default(entry: str) -> bool:
+    """True for a policy entry that names a project yet normalizes to the
+    unattributed bucket.
+
+    normalize_project_name falls back to DEFAULT_PROJECT when it cannot extract a
+    slug (a name over 40 characters, one with no letters or digits). Since
+    project_allowed compares normalized names, such an entry in allow_projects
+    would quietly allow `main` — every unattributed source — which nobody listed.
+    The allowlist ignores it instead, and the import below reports it.
+    """
+    low = re.sub(r"^project:\s*", "", str(entry).strip().lower()).strip()
+    return (low not in UNATTRIBUTED_NAMES | {DEFAULT_PROJECT}
+            and normalize_project_name(entry) == DEFAULT_PROJECT)
+
+
+for _entry in sorted(SKIP_JSONL_PROJECTS | ALLOW_PROJECTS):
+    if _collapses_to_default(_entry):
+        _msg = (f"bundle.local.yaml policy entry '{_entry}' has no usable project "
+                f"name (it normalizes to the unattributed bucket "
+                f"'{DEFAULT_PROJECT}'): in skip_projects it denies "
+                f"'{DEFAULT_PROJECT}', in allow_projects it allows nothing")
+        print(f"ERROR: {_msg}", file=sys.stderr)
+        _CONFIG_ERRORS.append(_msg)
 
 
 # Names under which a project keeps working files, not wiki pages. A page named

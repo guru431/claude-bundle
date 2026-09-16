@@ -755,3 +755,72 @@ def test_an_unrelated_unknown_manifest_key_is_reported_not_denied(bundle_tree: P
     assert utils.project_allowed("anything") is True
     assert any("notes" in e for e in utils.config_errors())
     assert "ERRORS:" in utils.config_report()
+
+
+# ── the privacy gate speaks ONE namespace: the normalized project name ─────
+
+@pytest.mark.parametrize("policy,raw", [
+    ("skip_projects:\n  - claudebundle\n", "ClaudeBundle"),   # the wiki folder name
+    ("skip_projects:\n  - ClaudeBundle\n", "claudebundle"),   # the directory's spelling
+    ("skip_projects:\n  - my-app\n", "My App"),
+])
+def test_skip_projects_matches_every_spelling_of_the_project(bundle_tree: Path,
+                                                             monkeypatch,
+                                                             policy: str, raw: str):
+    """The JSONL collector normalized before asking, the feedback/incidents
+    collectors and the hooks did not — so one spelling in the policy closed one
+    set of sources and left the other open."""
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(policy, encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.project_allowed(raw) is False
+    assert utils.project_allowed(utils.normalize_project_name(raw)) is False
+    assert utils.project_allowed("other") is True
+
+
+def test_allow_projects_matches_the_raw_directory_name(bundle_tree: Path, monkeypatch):
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(
+        "allow_projects:\n  - claudebundle\n", encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.project_allowed("ClaudeBundle") is True
+    assert utils.project_allowed("Other") is False
+
+
+def test_an_allow_entry_without_a_usable_name_does_not_allow_main(bundle_tree: Path,
+                                                                  monkeypatch):
+    """Normalizing policy entries must not WIDEN the allowlist: an entry the
+    normalizer cannot slug falls into `main`, and `main` is every unattributed
+    source."""
+    pytest.importorskip("yaml")
+    long_name = "x" * 45
+    (bundle_tree / "bundle.local.yaml").write_text(
+        f"allow_projects:\n  - {long_name}\n  - alpha\n", encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.project_allowed("alpha") is True
+    assert utils.project_allowed("main") is False
+    assert any(long_name in e for e in utils.config_errors())
+
+
+def test_feedback_of_a_camelcase_project_is_not_collected_when_skipped(
+        bundle_tree: Path, monkeypatch):
+    """End to end on the collector that leaked: feedback files of `…-ClaudeBundle`
+    went to the provider under `skip_projects: [claudebundle]`."""
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(
+        "skip_projects:\n  - claudebundle\n", encoding="utf-8")
+    home = bundle_tree / "fake-home"
+    mem = home / "projects" / "C--work-ClaudeBundle" / "memory"
+    mem.mkdir(parents=True)
+    (mem / "feedback_rule.md").write_text("never do X\n", encoding="utf-8")
+    (mem / "incidents.md").write_text("an incident\n", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.syspath_prepend(str(bundle_tree / "cron" / "hooks"))
+    for name in ("utils", "untrusted", "runs"):
+        sys.modules.pop(name, None)
+    spec = importlib.util.spec_from_file_location(
+        "wiki_flush_f2", bundle_tree / "cron" / "wiki" / "wiki-flush-sessions.py")
+    flush = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(flush)
+    assert flush.collect_feedback_files() == {}
+    assert flush.collect_incidents_sessions() == {}

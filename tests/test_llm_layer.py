@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -216,6 +217,37 @@ def test_a_chain_with_nothing_set_up_is_still_a_configuration_problem(cron_copy:
     monkeypatch.setattr(u, "OFFBOX_FALLBACK", False)
     assert u._llm_call_unlocked("hi").kind == "config"
     assert not calls, "a provider with no key was called"
+
+
+def test_an_outage_longer_than_a_day_keeps_its_start(cron_copy: Path, monkeypatch):
+    """Whether an outage is over was decided by the age of its FIRST failure, so
+    one that lasted three days restarted every 24 hours: "down for Nh" never
+    passed 24, and a dedup keyed on first_iso alerted again every day. It is
+    over when a day passes with no failure at all."""
+    u = _load_utils(cron_copy, "utils_chain_dead_days")
+    start = datetime(2026, 1, 1, 2, 0, 0)
+    now = {"t": start}
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now["t"]
+
+    monkeypatch.setattr(u, "datetime", _Clock)
+    path = cron_copy / "cron" / "state" / "chain-dead.json"
+
+    for hours in range(0, 73, 8):          # a failing call every 8 h for 3 days
+        now["t"] = start + timedelta(hours=hours)
+        u.record_chain_dead(["transient"])
+    state = json.loads(path.read_text(encoding="utf-8"))
+    assert state["first_iso"] == "2026-01-01T02:00:00", "the outage restarted mid-way"
+    assert (state["last_iso"], state["fails"]) == ("2026-01-04T02:00:00", 10)
+
+    now["t"] = start + timedelta(hours=72 + 25)   # a day and an hour of silence
+    u.record_chain_dead(["transient"])
+    state = json.loads(path.read_text(encoding="utf-8"))
+    assert (state["first_iso"], state["fails"]) == ("2026-01-05T03:00:00", 1), \
+        "a failure after a quiet day is a new outage"
 
 
 # ── How long the circuit breaker keeps a provider out ────────────────────────

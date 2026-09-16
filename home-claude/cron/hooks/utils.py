@@ -2091,13 +2091,19 @@ def record_chain_dead(kinds: list[str]) -> None:
     in docs/cron-architecture.md exists so a reader can tell, per task, what
     leaves the machine.
 
-    So the fact is written down and the one job that already owns the alert
-    channel — claude-healthcheck.sh, daily — reports it. Upstream this state went
-    unnoticed for two full nights: every task logged its own bad night, nothing
-    said "this machine has no LLM at all".
+    So the fact is written down, and the jobs that already own an alert channel
+    say it: the task monitors report it once per outage
+    (monitor_checks.chain_dead_report in cron/monitor_checks.py); the healthcheck
+    only where no monitor runs. Upstream this state went unnoticed for two full
+    nights: every task logged its own bad night, nothing said "this machine has
+    no LLM at all".
 
-    `first_iso` is kept across calls: what matters to a reader is how long the
-    chain has been down, not that it was down a second ago.
+    `first_iso` is kept for as long as the outage lasts: what matters to a
+    reader is how long the chain has been down, not that it was down a second
+    ago, and the once-per-outage report is keyed on it. An outage is over when a
+    day passes with no failure at all — counted from the LAST one. Counted from
+    the first, as it was, a three-day outage restarted every 24 hours: "down for
+    Nh" never passed 24, and the report went out again every day.
     """
     now = datetime.now()
     try:
@@ -2106,17 +2112,18 @@ def record_chain_dead(kinds: list[str]) -> None:
             state = {}
     except (OSError, ValueError):
         state = {}
-    # A previous entry older than a day belongs to an outage that has since
-    # ended; start counting again rather than reporting a stale start date.
     first = state.get("first_iso")
     try:
-        stale = first and (now - datetime.fromisoformat(first)).total_seconds() > 86400
-    except (TypeError, ValueError):
-        stale = True
+        prev = datetime.fromisoformat(state["last_iso"])
+        datetime.fromisoformat(first)   # an unreadable start is no start at all
+        ongoing = (now - prev).total_seconds() <= 86400
+        fails = int(state.get("fails", 0))
+    except (KeyError, TypeError, ValueError):
+        ongoing, fails = False, 0
     state = {
-        "first_iso": now.isoformat(timespec="seconds") if (not first or stale) else first,
+        "first_iso": first if ongoing else now.isoformat(timespec="seconds"),
         "last_iso": now.isoformat(timespec="seconds"),
-        "fails": 1 if (not first or stale) else int(state.get("fails", 0)) + 1,
+        "fails": fails + 1 if ongoing else 1,
         "kinds": sorted(set(kinds)),
         "depleted": {p: r for p, r in sorted(_DEPLETED_PROVIDERS.items())},
     }

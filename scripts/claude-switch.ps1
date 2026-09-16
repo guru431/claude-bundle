@@ -385,14 +385,16 @@ function Format-JsonValue($obj, [int]$depth) {
     return Format-JsonString ($obj.ToString())
 }
 
-function Save-Settings($obj) {
+function Save-Settings($obj, [switch]$NoBackup) {
     $json = Format-JsonValue $obj 0
     $enc  = [System.Text.UTF8Encoding]::new($false)
     # Atomic replace: write a temp file, back up the current file, then move temp
     # into place. A crash mid-write can't leave a half-written settings.local.json.
+    # -NoBackup: the switch to `anthropic` exists to get a provider key OUT of the
+    # project, and the file being replaced is exactly the one that holds it.
     $tmp = $settingsPath + ".tmp"
     [System.IO.File]::WriteAllText($tmp, $json, $enc)
-    if (Test-Path $settingsPath) {
+    if ((Test-Path $settingsPath) -and -not $NoBackup) {
         Copy-Item -LiteralPath $settingsPath -Destination ($settingsPath + ".bak") -Force
     }
     # Move-Item -Force replaces the destination; on failure the temp is cleaned up.
@@ -660,18 +662,21 @@ function Test-TcpPort([string]$targetHost, [int]$port, [int]$timeoutMs = 3000) {
 # ─────────────────────────────────────────────────────────────────────────────
 function Set-Anthropic($obj) {
     $obj = Clear-Env $obj
-    # The `.bak` Save-Settings leaves behind holds the PREVIOUS settings — and
-    # the previous settings are the ones that carried a third-party API key in
-    # plaintext. Switching back to Anthropic looked like "the key is gone from
-    # this project"; the key sat in settings.local.json.bak indefinitely, and
-    # `.bak` is not in anybody's .gitignore.
+    # The `.bak` Save-Settings leaves behind holds EARLIER settings — and those
+    # are the ones that carried a third-party API key in plaintext. Switching
+    # back to Anthropic looked like "the key is gone from this project"; the key
+    # sat in settings.local.json.bak indefinitely, and `.bak` is not in anybody's
+    # .gitignore. The stale backup goes here, and the save for this mode writes
+    # no new one (-NoBackup): it used to copy the key-bearing file straight back
+    # into `.bak` a moment after this removal, right under the message saying
+    # it was gone.
     $bak = $settingsPath + ".bak"
     if (Test-Path $bak) {
         try {
             Remove-Item -LiteralPath $bak -Force
-            Write-Host "Removed: $bak (it still held the previous provider's key)" -ForegroundColor DarkGray
+            Write-Host "Removed: $bak (a backup of earlier settings, which can hold a provider key)" -ForegroundColor DarkGray
         } catch {
-            Write-Host "WARN: could not remove $bak — it still contains the previous key." -ForegroundColor Yellow
+            Write-Host "WARN: could not remove $bak — it may still contain an earlier provider key." -ForegroundColor Yellow
         }
     }
     Write-Host "Mode: Anthropic (Claude default — no env override)" -ForegroundColor Green
@@ -1055,10 +1060,10 @@ if ($null -eq $cfg) { exit 4 }
 
 # A real API key is involved if the NEW env block carries one, or if the file
 # already on disk does — Save-Settings copies that file to settings.local.json.bak
-# before replacing it, so switching a key-based backend to `anthropic` clears the
-# main file but leaves the OLD key sitting in an untracked, unignored backup that
-# `git add .` would happily stage. Both paths are therefore checked, and the
-# check runs BEFORE anything is written.
+# before replacing it (every mode but `anthropic`), so a switch away from a
+# key-based backend can leave the OLD key sitting in an untracked, unignored
+# backup that `git add .` would happily stage. Both paths are therefore checked,
+# and the check runs BEFORE anything is written.
 $hasNewKey = $cfg.PSObject.Properties.Match("env").Count -gt 0 -and
              @($cfg.env.PSObject.Properties).Count -gt 0
 $hasOldKey = $currentMode -notlike "anthropic*"
@@ -1067,7 +1072,7 @@ if ($hasNewKey -or $hasOldKey) {
     Assert-SettingsGitSafe ($settingsPath + ".bak")
 }
 
-Save-Settings $cfg
+Save-Settings $cfg -NoBackup:($Mode -eq "anthropic")
 $after = Get-CurrentMode (Read-Settings)
 Write-Host "After:  $after" -ForegroundColor White
 Write-Host ""

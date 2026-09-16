@@ -76,6 +76,18 @@ for n, chunk in enumerate(chunks, 1):
     with open(os.path.join(out, f"part{n:03d}.json"), "w", encoding="utf-8") as fh:
         fh.write(json.dumps(body))
 PY
+split_rc=$?
+
+# No parts means nothing can be sent — and the loop below would then find no
+# file, keep status=0 and exit 0. Every caller logged "Alert sent" and wrote
+# delivery=ok to the ledger for an alert that never left the machine; an
+# interpreter that could not run (see cron/lib/runtime.sh) got here every time.
+# A splitter that failed part-way is refused too: half a message sent as if it
+# were whole is the truncation the parts exist to prevent.
+if [ "$split_rc" -ne 0 ] || [ ! -f "$PARTS_DIR/part001.json" ]; then
+    echo "telegram-send: splitting the message failed (rc=$split_rc) — nothing sent" >&2
+    exit 1
+fi
 
 status=0
 for part in "$PARTS_DIR"/part*.json; do

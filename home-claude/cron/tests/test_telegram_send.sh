@@ -64,4 +64,24 @@ grep -qF 'TAILMARKER' "$TMP/captured"/part002.json \
 grep -qF '(1/2)' "$TMP/captured"/part001.json \
     || fail "parts are not numbered — a long message is indistinguishable from a lost one"
 
+# --- Case 3: a splitter that leaves no parts is a FAILED send, not exit 0 ---
+# With no part files the send loop had nothing to iterate, `status` stayed 0,
+# and every caller logged "Alert sent" and wrote delivery=ok to the ledger for
+# an alert that never left the machine. Two ways to get there: the program
+# fails, or it "succeeds" without writing. Each stub passes runtime.sh's
+# `-c pass` probe, so it is the splitter run itself that goes wrong.
+for rc in 1 0; do
+    mkdir -p "$TMP/py$rc"
+    printf '#!/bin/bash\n[ "${1:-}" = "-c" ] && exit 0\ncat > /dev/null\nexit %s\n' "$rc" \
+        > "$TMP/py$rc/python"
+    chmod +x "$TMP/py$rc/python"
+    rm -f "$TMP/captured"/part*.json
+    if PYTHON_EXE="$TMP/py$rc/python" bash "$SCRIPT" "an alert nobody will get" \
+            > /dev/null 2>&1; then
+        fail "exit 0 with zero parts (splitter rc=$rc) — an undelivered alert reads as sent"
+    fi
+    parts=$(find "$TMP/captured" -name 'part*.json' | wc -l)
+    [ "$parts" -eq 0 ] || fail "curl was called although the splitter produced nothing"
+done
+
 echo "PASS: test_telegram_send.sh"

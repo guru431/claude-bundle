@@ -15,6 +15,12 @@ project's `FINDINGS.md` and in Telegram — and the nightly `git-push-all.sh`
 then catches it with the pattern this file's shell twin carries, marking the
 repo FAILED every night until a human intervenes.
 
+Two Claude Code hooks read the table as well, so a change here reaches them too:
+
+  * `hooks/prompt-secret-warn.py`    — warns the model when a prompt carries a key
+  * `hooks/sensitive-path-guard.py`  — `is_sensitive_path()`, before a tool call
+                                       touches a file such as `.env`
+
 The module is `secret_shapes`, not `secrets`: consumers put `cron/lib` on
 sys.path, and a `secrets.py` there would shadow the stdlib module of that name
 for the whole process.
@@ -275,11 +281,17 @@ def sensitive_path_allow_ere() -> str:
 
 
 def is_sensitive_path(path: str) -> bool:
-    """True when a repository path must never be committed (templates excepted)."""
+    """True when a repository path must never be committed (templates excepted).
+
+    Case-insensitive, like its shell twin `secret_scan_paths` (`grep -i`). The
+    table is written in lower case, so this answered False for `.ENV` or
+    `Credentials.json` while every git gate refused the same file — and a case-
+    insensitive filesystem (Windows, macOS) opens that file as `.env` all the same.
+    """
     p = path.replace("\\", "/")
-    if re.search(sensitive_path_allow_ere(), p):
+    if re.search(sensitive_path_allow_ere(), p, re.IGNORECASE):
         return False
-    return bool(re.search(sensitive_path_ere(), p))
+    return bool(re.search(sensitive_path_ere(), p, re.IGNORECASE))
 
 # The generic fallback: `API_TOKEN=value`, `{'API_TOKEN': 'value'}`. Mask-only —
 # far too broad to block a commit on, but it is what catches a credential whose

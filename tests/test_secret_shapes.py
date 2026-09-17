@@ -17,6 +17,7 @@ readability, under-masking a password costs the password.
 from __future__ import annotations
 
 import importlib
+import subprocess
 import sys
 from pathlib import Path
 
@@ -109,6 +110,38 @@ def test_prose_that_merely_spells_key_is_left_alone(text: str):
 def test_sensitive_path_table(path: str, sensitive: bool):
     shapes = _shapes()
     assert shapes.is_sensitive_path(path) is sensitive
+
+
+# Mixed case on purpose: the shell guards match the table with `grep -i`, and a
+# Windows or macOS filesystem opens `.ENV` as `.env`.
+_PATH_CASES = {
+    ".ENV": True, "Config/.Env.Production": True, "Credentials.json": True,
+    "ID_RSA": True, "keys/Site.PEM": True, ".NPMRC": True, "Terraform.TFSTATE": True,
+    "Secrets.YAML": True, ".Sanitize-Patterns": True, "ops/Vault.ENV": True,
+    ".env": True, "credentials.json": True,
+    ".Env.Example": False, "KEYS/DEPLOY.PUB": False, "README.md": False,
+    "Config/LLM-Providers.Example.ENV": False,
+}
+
+
+def test_python_and_shell_agree_on_sensitive_paths_in_any_case():
+    """is_sensitive_path() was case-sensitive while secret_scan_paths is not, so
+    a Python consumer — the PreToolUse path guard among them — called `.ENV`
+    harmless while every git gate refused it."""
+    from test_guards import _bash
+    shapes = _shapes()
+    python_says = {p for p in _PATH_CASES if shapes.is_sensitive_path(p)}
+    assert python_says == {p for p, s in _PATH_CASES.items() if s}
+    bash = _bash()
+    if bash is None:
+        pytest.skip("bash not available")
+    script = ". '{}'\nsecret_scan_paths\n".format((LIB / "secret-scan.sh").as_posix())
+    # Bytes, not text: a text-mode pipe on Windows would hand the shell `\r\n`.
+    res = subprocess.run([bash, "-c", script],
+                         input=("\n".join(_PATH_CASES) + "\n").encode("utf-8"),
+                         capture_output=True, timeout=60)
+    shell_says = set(res.stdout.decode("utf-8").split("\n")) - {""}
+    assert shell_says == python_says, (res.stdout, res.stderr)
 
 
 @pytest.mark.parametrize("text,marker", [

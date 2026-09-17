@@ -139,11 +139,12 @@ def test_a_page_aimed_at_another_project_is_quarantined_with_its_payload(bundle:
     """What is kept for inspection is the refused change itself, filed under the
     daily and project it came from. The call passed its arguments in the wrong
     order: the file held the single word "path-outside-project", and the change
-    — sanitised and cut to 80 characters — ended up in the file NAME."""
+    — sanitised and cut to 80 characters — ended up in the file NAME. And it is
+    kept readable: json.dumps escaped every Cyrillic letter as \\uXXXX."""
     resp = bundle / "foreign_response.json"
     resp.write_text(json.dumps(
         [{"path": "projects/otherproject/foreign-page.md", "action": "create",
-          "content": "# Foreign\n\nAimed at another project's pages.\n"}]),
+          "content": "# Foreign\n\nAimed at another project's pages. Чужая страница.\n"}]),
         encoding="utf-8")
 
     r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py",
@@ -156,6 +157,7 @@ def test_a_page_aimed_at_another_project_is_quarantined_with_its_payload(bundle:
     assert kept[0].name.endswith("_2026-01-01_myproject_path-outside-project.txt"), kept[0].name
     body = kept[0].read_text(encoding="utf-8")
     assert "projects/otherproject/foreign-page.md" in body and "Aimed at another project" in body, body
+    assert "Чужая страница." in body, body
 
 
 def test_a_source_that_always_fails_is_quarantined_once(bundle: Path):
@@ -283,6 +285,25 @@ def test_compile_kb_stops_resending_an_article_with_a_rejected_path(bundle: Path
         f"a partially rejected article was retried with no ceiling:\n{r.stdout}"
     r = _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
     assert "Nothing to process" in r.stdout, f"the article was sent again:\n{r.stdout}"
+
+
+def test_compile_kb_keeps_a_refused_change_readable(bundle: Path):
+    """The quarantined copy of a change aimed outside kb/ is for a person to read.
+    json.dumps escaped every non-Latin letter, so a Cyrillic article's payload
+    was a wall of \\uXXXX in cron/logs/rejected/."""
+    _kb_article(bundle, "gears.md", "Шестерни сцепляются друг с другом.\n".encode("utf-8"))
+    resp = bundle / "kb_outside.json"
+    resp.write_text(json.dumps([{"path": "projects/elsewhere/gears.md", "action": "create",
+                                 "content": "# Шестерни\n\nНе пространство имён kb.\n"}]),
+                    encoding="utf-8")
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-kb.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode != 0, f"a refused change did not fail the run:\n{r.stdout}\n{r.stderr}"
+    kept = list((bundle / "cron" / "logs" / "rejected").glob("*_path-outside-kb.txt"))
+    assert len(kept) == 1, sorted(p.name for p in kept)
+    body = kept[0].read_bytes().decode("utf-8")   # strict: the file is UTF-8
+    assert "# Шестерни" in body and "Не пространство имён kb." in body, body
+    assert "\\u04" not in body, body
 
 
 def test_compile_kb_survives_a_source_that_is_not_utf8(bundle: Path):

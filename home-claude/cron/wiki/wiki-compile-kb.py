@@ -230,7 +230,9 @@ def apply_changes(changes: list[dict], existing_pages: dict[str, str],
         # KB curator, so kb/ is the whole of its namespace and anything else
         # (e.g. projects/...) is a model error or an injected instruction.
         if not rel_path.startswith("kb/"):
-            quarantine_raw(article_rel, "path-outside-kb", json.dumps(change))
+            # ensure_ascii=False: the file is for a person to read, and every
+            # non-Latin letter came out as a \uXXXX escape.
+            quarantine_raw(article_rel, "path-outside-kb", json.dumps(change, ensure_ascii=False))
             print(f"  WARN compile-kb: rejected out-of-scope path {rel_path}", file=sys.stderr)
             rejected.append(f"out-of-scope path: {rel_path}")
             continue

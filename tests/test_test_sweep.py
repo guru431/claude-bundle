@@ -37,6 +37,19 @@ def _load():
 
 
 sweep = _load()
+# What the module derives for a real run, before the fixture below redirects it.
+PRODUCTION_RUN_ROOT = sweep.RUN_ROOT
+
+
+@pytest.fixture(autouse=True)
+def _run_root_in_tmp(tmp_path, monkeypatch):
+    """RUN_ROOT is `%TEMP%/sweep-run-<pid>` of the process that imported the sweep.
+
+    Here that process is pytest, and run_suite() creates the directory: every
+    run of this file left one more empty `sweep-run-<pid>` in the machine's real
+    temp directory.
+    """
+    monkeypatch.setattr(sweep, "RUN_ROOT", tmp_path / f"sweep-run-{os.getpid()}")
 
 
 # ── suite discovery ──────────────────────────────────────────────────────────
@@ -281,8 +294,8 @@ def test_basetemp_is_unique_per_suite_and_path_safe():
     # Inside THIS run's tree, not the shared temp: pytest makes a basetemp
     # private, so one that outlives its run stops being removable by the next.
     assert nested.parent == sweep.RUN_ROOT
-    assert sweep.RUN_ROOT.parent == Path(tempfile.gettempdir())
-    assert sweep.RUN_ROOT.name.startswith("sweep-run-")
+    assert PRODUCTION_RUN_ROOT.parent == Path(tempfile.gettempdir())
+    assert PRODUCTION_RUN_ROOT.name.startswith("sweep-run-")
 
 
 def test_basetemp_passed_to_pytest(tmp_path, monkeypatch):

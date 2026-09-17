@@ -17,12 +17,21 @@ repo's own working tree, and passed by coincidence:
   statement of the bundle's cardinal invariant — into silent SKIPs, and `-q`
   showed nothing.
 
+The sandbox was first built per test, and per test is too late for what runs
+before a test: the scripts with a hyphen in their name are imported while pytest
+COLLECTS, and a module-scoped fixture is set up before any function-scoped one.
+`runs` read CLAUDE_BUNDLE_RUNS_DIR at import, before the fixture had set it, so
+every run of the suite still appended its ClaudeTestSweep rows to this
+checkout's ledger, and `utils` resolved CLAUDE_HOME to the real ~/.claude. The
+same sandbox therefore also exists for the whole session, from pytest_configure.
+
 Everything here is autouse, so a new test gets the sandbox without asking.
 """
 from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -42,27 +51,40 @@ _CLEARED_EXACT = (
 )
 
 
-@pytest.fixture(autouse=True)
-def _sandbox(tmp_path_factory, monkeypatch):
-    """Neutralise the environment and redirect every writable path into tmp."""
-    home = tmp_path_factory.mktemp("home")
+def _neutralise(mp: pytest.MonkeyPatch, home: Path) -> None:
+    """Clear the pipeline's variables and root every writable path in `home`."""
     for name in list(os.environ):
         if name.startswith(_CLEARED_PREFIXES) or name in _CLEARED_EXACT:
-            monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
+            mp.delenv(name, raising=False)
+    mp.setenv("HOME", str(home))
+    mp.setenv("USERPROFILE", str(home))
     # CLAUDE_HOME stays UNSET (it is in _CLEARED_EXACT). utils then derives it
     # from Path.home(), which the two lines above now own — so a test that seeds
     # its own fake home still governs where transcripts are read from, and a
     # machine with CLAUDE_HOME exported can no longer point the suite at the
     # developer's real ~/.claude/projects.
     # The run ledger goes to tmp, never to the deployment's own logs.
-    monkeypatch.setenv("CLAUDE_BUNDLE_RUNS_DIR", str(home / "runs"))
+    mp.setenv("CLAUDE_BUNDLE_RUNS_DIR", str(home / "runs"))
     # The 5-second pacing between provider calls is a production courtesy, not a
     # test requirement: it put 30 of the fast suite's 35 seconds inside sleep(),
     # while the bundle's own test policy says a test over a second is either
     # fixed or marked `integration`.
-    monkeypatch.setenv("WIKI_LLM_PACE_SECONDS", "0")
+    mp.setenv("WIKI_LLM_PACE_SECONDS", "0")
+
+
+def pytest_configure(config):
+    """The sandbox for everything that runs before a test: collection, wide fixtures."""
+    home = Path(tempfile.mkdtemp(prefix="bundle-suite-"))
+    mp = pytest.MonkeyPatch()
+    config.add_cleanup(lambda: shutil.rmtree(home, ignore_errors=True))
+    config.add_cleanup(mp.undo)          # cleanups run last-in first-out
+    _neutralise(mp, home)
+
+
+@pytest.fixture(autouse=True)
+def _sandbox(tmp_path_factory, monkeypatch):
+    """The same sandbox again, per test, with a home of the test's own."""
+    _neutralise(monkeypatch, tmp_path_factory.mktemp("home"))
     yield
 
 
@@ -73,8 +95,13 @@ def cron_copy(tmp_path: Path) -> Path:
     Scripts compute every path from `__file__`, so a copy is what keeps a test
     from reading the repo's `.env` / `bundle.local.yaml` and writing into the
     repo's `wiki/`, `logs/` and state.
+
+    Without `logs/` and `state/`: they hold what a pipeline run from this
+    checkout left behind, and a `state/depleted.json` from last night changes
+    which providers the copied utils believes are out of service.
     """
-    shutil.copytree(CRON_SRC, tmp_path / "cron")
+    shutil.copytree(CRON_SRC, tmp_path / "cron",
+                    ignore=shutil.ignore_patterns("logs", "state"))
     return tmp_path
 
 

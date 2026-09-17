@@ -9,6 +9,7 @@ the number was at least 1 on every run, including a run that looked at nothing.
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -20,11 +21,17 @@ CRON = ROOT / "home-claude" / "cron"
 
 
 @pytest.fixture(scope="module")
-def retention():
-    """Import cron/log-retention.py — the hyphen blocks a plain import."""
-    sys.path.insert(0, str(CRON / "hooks"))
+def retention(tmp_path_factory):
+    """Import cron/log-retention.py — the hyphen blocks a plain import.
+
+    From a COPY of `cron/`: LOG_DIR derives from `__file__`, and prune() logs
+    every file it looks at. Imported from the repository, each run of these tests
+    appended to the checkout's own `cron/logs/log-retention_<date>.log`.
+    """
+    root = tmp_path_factory.mktemp("bundle")
+    shutil.copytree(CRON, root / "cron", ignore=shutil.ignore_patterns("logs", "state"))
     spec = importlib.util.spec_from_file_location(
-        "log_retention_under_test", CRON / "log-retention.py")
+        "log_retention_under_test", root / "cron" / "log-retention.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)

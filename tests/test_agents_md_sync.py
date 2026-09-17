@@ -334,7 +334,10 @@ def test_a_run_that_examined_nothing_exits_nonzero(sync, tmp_path, monkeypatch):
     (project / "AGENTS.md").write_text("# Project\n", encoding="utf-8")
     monkeypatch.setattr(sync, "PROJECTS_ROOT", tmp_path)
     monkeypatch.setattr(sync, "llm_call", lambda *a, **k: None)
-    # The ledger record is written by runs.terminal_record now, into the tmp
-    # CLAUDE_BUNDLE_RUNS_DIR the sandbox fixture points it at — nothing to stub.
+    # The ledger record is written by runs.terminal_record, into the RUNS_DIR that
+    # `runs` resolved when it was IMPORTED — during collection, or in the module
+    # fixture above, both before any per-test fixture exists. It lands in tmp
+    # because tests/conftest.py sets CLAUDE_BUNDLE_RUNS_DIR for the whole session
+    # first; the per-test value this comment used to credit never reaches it.
 
     assert sync.main() == 1

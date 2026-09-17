@@ -71,8 +71,17 @@ from monitor_checks import (  # noqa: E402
     CHAIN_SEEN_KEY, chain_dead_report, check_health_ports, read_registry)
 
 DATE = datetime.now().strftime("%Y-%m-%d")
-LOG_FILE = LOG_DIR / f"task-monitor-posix_{DATE}.log"
 LAUNCHD_PREFIX = "com.claude-bundle."
+
+
+def log_file() -> Path:
+    """The day's log, in whatever LOG_DIR is when it is written.
+
+    Derived per call rather than frozen at import: a LOG_FILE constant kept the
+    import-time directory, so pointing LOG_DIR elsewhere redirected nothing and
+    a test that did exactly that still wrote into the repository's cron/logs/.
+    """
+    return LOG_DIR / f"task-monitor-posix_{DATE}.log"
 
 
 def log(msg: str) -> None:
@@ -85,7 +94,7 @@ def log(msg: str) -> None:
     print(line, flush=True)
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with LOG_FILE.open("a", encoding="utf-8") as fh:
+        with log_file().open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except OSError as exc:
         print(f"  (log not written: {exc})", file=sys.stderr)
@@ -252,7 +261,7 @@ def main() -> int:
         return 0
 
     with terminal_record("ClaudeTaskMonitorPosix", delivery="n/a") as rec:
-        rec["artifact_path"] = LOG_FILE
+        rec["artifact_path"] = log_file()
         log(f"=== POSIX task monitor {DATE} ===")
         tasks = registry_tasks()
         log(f"{len(tasks)} enabled task(s) in the registry apply to this platform")

@@ -64,12 +64,21 @@ def test_a_missing_registry_is_silent_not_fatal(tmp_path, monkeypatch):
     """No registry means nothing to check — never a traceback in session 0."""
     monkeypatch.setattr(monitor, "REGISTRY", tmp_path / "absent.yaml")
     monkeypatch.setattr(monitor, "LOG_DIR", tmp_path / "logs")
-    # LOG_FILE too: log() appends to it, and it was computed from the REAL
-    # LOG_DIR at import — patching the directory alone wrote this test's line
-    # into the repository's cron/logs/.
-    monkeypatch.setattr(monitor, "LOG_FILE", tmp_path / "logs" / "task-monitor-posix.log")
 
     assert monitor.registry_tasks() == []
+
+
+def test_pointing_log_dir_elsewhere_moves_the_log(tmp_path, monkeypatch):
+    """The log's path used to be a LOG_FILE constant computed at import.
+
+    Patching LOG_DIR alone then redirected nothing, and a test that did only that
+    wrote its line into the repository's cron/logs/.
+    """
+    monkeypatch.setattr(monitor, "LOG_DIR", tmp_path / "logs")
+
+    monitor.log("a line")
+
+    assert (tmp_path / "logs" / f"task-monitor-posix_{monitor.DATE}.log").is_file()
 
 
 @pytest.mark.parametrize("stamp, expected", [
@@ -201,7 +210,6 @@ def test_the_posix_monitor_reports_a_down_llm_chain_once(tmp_path, monkeypatch):
     monkeypatch.setattr(monitor, "STATE_PATH", state / "task-monitor-posix-seen.json")
     monkeypatch.setattr(monitor, "CHAIN_DEAD_PATH", state / "chain-dead.json")
     monkeypatch.setattr(monitor, "LOG_DIR", tmp_path / "logs")
-    monkeypatch.setattr(monitor, "LOG_FILE", tmp_path / "logs" / "task-monitor-posix.log")
     # No task owes the ledger a run here, so the stale check has nothing to add.
     (tmp_path / "registry.yaml").write_text("version: 1\ntasks: []\n", encoding="utf-8")
     monkeypatch.setattr(monitor, "REGISTRY", tmp_path / "registry.yaml")
@@ -258,7 +266,6 @@ def test_the_posix_monitor_reports_a_silent_task_once_and_again_on_monday(tmp_pa
     monkeypatch.setattr(monitor, "STATE_PATH", tmp_path / "state" / "seen.json")
     monkeypatch.setattr(monitor, "CHAIN_DEAD_PATH", tmp_path / "state" / "chain-dead.json")
     monkeypatch.setattr(monitor, "LOG_DIR", tmp_path / "logs")
-    monkeypatch.setattr(monitor, "LOG_FILE", tmp_path / "logs" / "task-monitor-posix.log")
 
     assert monitor.main() == 0
     assert len(sent) == 1, sent

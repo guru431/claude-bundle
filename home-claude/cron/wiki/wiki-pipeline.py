@@ -23,6 +23,8 @@ non-zero if any phase failed, so Task Scheduler / systemd sees the failure.
 Usage:
   python wiki-pipeline.py            # run flush -> compile -> index in order
   python wiki-pipeline.py --dry-run  # pass --dry-run through to each phase
+  python wiki-pipeline.py --demo     # compile + index docs/examples/ in a sandbox,
+                                     # mock provider (from a bundle checkout)
 """
 
 # Declared I/O for scripts/check-io-matrix.py, which fails when this line and
@@ -31,8 +33,10 @@ Usage:
 # bundle-io: offbox=session/daily-log text of allowed projects -> LLM provider (via the flush and compile phases); a failure alert, and on the last dry_run_until night a preview summary (project names, sizes, provider), -> Telegram money=tokens writes=wiki/daily/, wiki/projects/, wiki/kb/ and the vault indexes
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
 
@@ -141,7 +145,105 @@ def preview_notice(summaries: list[dict], last_night: bool) -> str:
             f"{'1' if utils.ALLOW_OFFBOX else '0'}.{tail}")
 
 
+# ── --demo: the pipeline on the shipped example, in a sandbox ────────────────
+# What a night produces could be seen only by spending tokens on your own
+# sessions, or by reading docs/examples/ and taking its word for it. The demo
+# RUNS compile and index on the example daily, with the offline mock provider, in
+# a throwaway copy of the bundle: its own vault, state, logs and run ledger. The
+# install it is started from is not written, its settings do not reach the
+# phases, and no provider can be reached. The installers do not deploy docs/, so
+# it needs a bundle checkout.
+EXAMPLES = BUNDLE_ROOT.parent / "docs" / "examples"
+DEMO_PHASES = PHASES[1:]            # the example daily IS what flush writes
+
+
+def _skip_runtime(directory: str, names: list[str]) -> list[str]:
+    """What a cron/ collects by running — byte-code, logs, state — left out of the copy."""
+    top = Path(directory) == BUNDLE_ROOT / "cron"
+    return [n for n in names if n == "__pycache__" or (top and n in ("logs", "state"))]
+
+
+def _demo_env(sandbox: Path, answer: Path) -> dict:
+    """A phase environment with nothing in it that routes, alerts or points home.
+
+    Importing utils has already loaded this install's .env into os.environ, so a
+    key, a provider choice or a Telegram token from it would reach the phases.
+    The mock provider sends nothing anyway; stripping them means that stays true
+    even if a phase ever stopped honouring WIKI_LLM_PROVIDER.
+    """
+    routing = {name for row in utils.PROVIDERS.values()
+               for name in (*row["key_env"], row["base_url_env"], row["model_env"]) if name}
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("WIKI_", "LOCAL_LLM_", "CLAUDE_BUNDLE_", "TELEGRAM_"))
+           and k not in routing and k not in ("PROJECTS_ROOT", "CLAUDE_HOME")}
+    env.update(WIKI_LLM_PROVIDER="mock", WIKI_LLM_MOCK_RESPONSE=str(answer),
+               WIKI_LLM_PACE_SECONDS="0", PYTHONIOENCODING="utf-8",
+               CLAUDE_BUNDLE_RUNS_DIR=str(sandbox / "cron" / "logs"),
+               CLAUDE_HOME=str(sandbox / "claude-home"))
+    return env
+
+
+def demo(argv: list[str]) -> int:
+    """`--demo`: compile + index docs/examples/daily in a sandbox, and print the result."""
+    if any(a in ("--dry-run", "--no-llm") for a in argv):
+        # Both would make the phases preview and write nothing, which leaves a
+        # demo with nothing to show — and there is nothing for them to hold back.
+        print("--demo already sends nothing and writes only to a temporary directory; "
+              "run --dry-run on its own to preview a real night", file=sys.stderr)
+        return 2
+    answer = EXAMPLES / "mock-response.json"
+    samples = sorted((EXAMPLES / "daily").glob("????-??-??.md"))
+    if not (answer.is_file() and samples):
+        print(f"--demo runs on docs/examples/ from a bundle CHECKOUT. This copy of "
+              f"wiki-pipeline.py runs from {BUNDLE_ROOT}, which has none: the installers "
+              f"do not deploy docs/. Run it from your checkout:\n"
+              f"  python <checkout>/home-claude/cron/wiki/wiki-pipeline.py --demo",
+              file=sys.stderr)
+        return 2
+    with tempfile.TemporaryDirectory(prefix="wiki-pipeline-demo-",
+                                     ignore_cleanup_errors=True) as tmp:
+        sandbox = Path(tmp)
+        shutil.copytree(BUNDLE_ROOT / "cron", sandbox / "cron", ignore=_skip_runtime)
+        vault = sandbox / "wiki"
+        (vault / "daily").mkdir(parents=True)
+        (vault / "projects").mkdir()
+        for sample in samples:
+            shutil.copy2(sample, vault / "daily" / sample.name)
+        print("=== wiki-pipeline demo: compile -> index, on the shipped example ===")
+        print(f"Input:   {len(samples)} daily log(s) from {EXAMPLES / 'daily'}")
+        print(f"Model:   the offline mock provider, answering with {answer} (no network, no key)")
+        print(f"Sandbox: {sandbox}")
+        print(f"         a copy of cron/ with its own vault, state, logs and no settings, "
+              f"deleted at the end; nothing under {BUNDLE_ROOT} is written")
+        env = _demo_env(sandbox, answer)
+        for name, script in DEMO_PHASES:
+            r = subprocess.run([sys.executable, str(sandbox / "cron" / "wiki" / script.name)],
+                               cwd=sandbox, env=env, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=300)
+            print(f"[{name}] {script.name} -> exit {r.returncode}")
+            if r.returncode != 0:
+                print((r.stdout + r.stderr).strip()[-3000:])
+                return 1
+        pages = sorted(p for p in (vault / "projects").rglob("*.md")
+                       if p.name not in ("index.md", "_log.md"))
+        if not pages:
+            print("both phases exited 0 and no page was written — the demo is broken, "
+                  "please report it")
+            return 1
+        for path in [*pages, vault / "projects" / "index.md"]:
+            print(f"\n----- wiki/{path.relative_to(vault).as_posix()} -----")
+            print(path.read_text(encoding="utf-8").rstrip())
+        print("\nOne daily log, one night: the page compile wrote from it, and the index "
+              "rebuilt around it.\nA real night starts a phase earlier — flush writes the "
+              "daily from your sessions —\nand the answer comes from your provider. The "
+              f"same files, annotated: {EXAMPLES / 'README.md'}")
+    return 0
+
+
 def main() -> int:
+    if "--demo" in sys.argv[1:]:
+        # Before log(): the demo must not write this install's pipeline log either.
+        return demo(sys.argv[1:])
     passthrough = [a for a in sys.argv[1:] if a in ("--dry-run", "--no-llm")]
     preview = is_dry_run()
     log(f"=== Wiki Pipeline {DATE} (ordered flush -> compile -> index) ===")

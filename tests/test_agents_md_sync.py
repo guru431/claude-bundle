@@ -8,7 +8,6 @@ pure invention — including one whole file pair that had nothing wrong with it.
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
 from pathlib import Path
 

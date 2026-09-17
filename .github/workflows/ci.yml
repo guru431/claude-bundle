@@ -46,8 +46,14 @@ jobs:
       - name: Install Python deps (requests + PyYAML)
         run: python -m pip install --quiet -r requirements.txt
 
-      - name: Python compileall
-        run: python -m compileall -q home-claude/cron home-claude/hooks home-claude/bin
+      - name: Python compileall (a SyntaxWarning is an error)
+        # An invalid escape such as "\`" in a docstring compiles with a
+        # SyntaxWarning — printed into every pytest run's output, where nobody
+        # reads it — and is to become a SyntaxError in a later Python. The 3.10
+        # leg does not warn (a DeprecationWarning there); the 3.x one does. -f so
+        # a leftover __pycache__ cannot skip a file; scripts/ and tests/ are code
+        # in this repository too.
+        run: python -W error::SyntaxWarning -m compileall -q -f home-claude/cron home-claude/hooks home-claude/bin scripts tests
 
       - name: JSON validity
         run: |

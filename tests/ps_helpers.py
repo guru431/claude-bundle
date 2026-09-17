@@ -18,7 +18,7 @@ installer actually execute. `pwsh` is the fallback on a Windows machine without
 it.
 
 Windows only. The ubuntu CI runner ships `pwsh` too, but PowerShell 7 on Linux
-is not the runtime these scripts are written for — .NET does not treat `\` as a
+is not the runtime these scripts are written for — .NET does not treat `\\` as a
 path separator there, the User environment scope does not exist, and
 WindowsIdentity throws — so a result there says little about the code as it
 runs. The registry parser comparison reaches CI another way: self-test.ps1 runs

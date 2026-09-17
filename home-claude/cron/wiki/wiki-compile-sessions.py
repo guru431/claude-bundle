@@ -621,7 +621,8 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
         # injected instruction could still aim at another project's page or the
         # global kb/, which the per-project log would then misattribute to us.
         if project and not rel_path.startswith(f"projects/{project}/"):
-            quarantine_raw(json.dumps(change), f"compile-sessions-{project}", "path-outside-project")
+            quarantine_raw(f"{Path(source_daily).stem}#{project}", "path-outside-project",
+                           json.dumps(change))
             print(f"  WARN compile {project}: rejected out-of-scope path {rel_path}", file=sys.stderr)
             rejected.append(f"out-of-scope path: {rel_path}")
             continue

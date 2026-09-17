@@ -135,6 +135,29 @@ def test_compile_rejects_path_escape(bundle: Path):
     assert rejected, f"no quarantine file under cron/logs/rejected/:\n{r.stdout}"
 
 
+def test_a_page_aimed_at_another_project_is_quarantined_with_its_payload(bundle: Path):
+    """What is kept for inspection is the refused change itself, filed under the
+    daily and project it came from. The call passed its arguments in the wrong
+    order: the file held the single word "path-outside-project", and the change
+    — sanitised and cut to 80 characters — ended up in the file NAME."""
+    resp = bundle / "foreign_response.json"
+    resp.write_text(json.dumps(
+        [{"path": "projects/otherproject/foreign-page.md", "action": "create",
+          "content": "# Foreign\n\nAimed at another project's pages.\n"}]),
+        encoding="utf-8")
+
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode != 0, f"a refused change did not fail the run:\n{r.stdout}\n{r.stderr}"
+    assert not (bundle / "wiki" / "projects" / "otherproject").exists()
+    rejected_dir = bundle / "cron" / "logs" / "rejected"
+    kept = list(rejected_dir.glob("*_path-outside-project.txt"))
+    assert len(kept) == 1, sorted(p.name for p in rejected_dir.glob("*"))
+    assert kept[0].name.endswith("_2026-01-01_myproject_path-outside-project.txt"), kept[0].name
+    body = kept[0].read_text(encoding="utf-8")
+    assert "projects/otherproject/foreign-page.md" in body and "Aimed at another project" in body, body
+
+
 def test_a_source_that_always_fails_is_quarantined_once(bundle: Path):
     """The retry ceiling, end to end: three runs, then it stops — once.
 

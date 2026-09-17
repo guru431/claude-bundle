@@ -25,16 +25,24 @@ every run of the suite still appended its ClaudeTestSweep rows to this
 checkout's ledger, and `utils` resolved CLAUDE_HOME to the real ~/.claude. The
 same sandbox therefore also exists for the whole session, from pytest_configure.
 
+Two nets catch what a sandbox cannot foresee: a run that wrote where a nightly
+task keeps its artifacts in this checkout FAILS, and a shared module a test
+evicted from sys.modules is put back after it.
+
 Everything here is autouse, so a new test gets the sandbox without asking.
 """
 from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+# tests/test_suite_sandbox.py runs this very file in sessions of their own.
+pytest_plugins = ["pytester"]
 
 ROOT = Path(__file__).resolve().parent.parent
 CRON_SRC = ROOT / "home-claude" / "cron"
@@ -129,3 +137,99 @@ def pytest_runtest_makereport(item, call):
                 f"{reason}\n\nCI installs requirements.txt, so a missing import "
                 "here means the check did NOT run. Skips are failures on CI."
             )
+
+
+# ── a shared module a test evicts comes back after it ───────────────────────
+# The bundle's scripts import these BY NAME, so every importer is meant to hold
+# the same module object: whatever sits in cron/, cron/hooks/ and cron/lib/.
+_SHARED_MODULES = tuple(sorted(
+    path.stem for folder in (CRON_SRC, CRON_SRC / "hooks", CRON_SRC / "lib")
+    for path in folder.glob("*.py") if path.stem.isidentifier()))
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Put back a shared module a test removed from sys.modules or replaced.
+
+    A bare `sys.modules.pop("runs")` handed the next importer a NEW `runs` while
+    the task monitor, imported during collection, kept the old one — so a patch
+    applied through one never reached the other, and a test two files away failed
+    in the full run and passed on its own. `monkeypatch.delitem` restores what it
+    removes; nothing made a test use it.
+
+    A module a test imports for the FIRST time is left in place: a module-scoped
+    fixture's imports have to outlive the test that happened to set it up.
+    """
+    before = {name: sys.modules[name] for name in _SHARED_MODULES if name in sys.modules}
+    yield
+    for name, module in before.items():
+        if sys.modules.get(name) is not module:
+            sys.modules[name] = module
+
+
+# ── the run leaves no trace in this checkout ────────────────────────────────
+# Where a nightly task keeps what it writes, under the tree its code runs from —
+# and for a module imported straight out of this repository, that tree is the
+# checkout. A path the sandbox did not redirect lands here without a sound: the
+# ledger rows the suite left behind read as real nightly runs to bundle-status.
+_ARTIFACT_PATHS = tuple(ROOT / "home-claude" / rel
+                        for rel in ("cron/logs", "cron/state", "wiki", "FINDINGS.md"))
+_ARTIFACTS_AT_START: dict[str, tuple[int, int]] = {}
+_WRITTEN_BY_THE_RUN: list[str] = []
+
+
+def _artifacts() -> dict[str, tuple[int, int]]:
+    """{path: (mtime_ns, size)} of every file a nightly task could have written."""
+    found: dict[str, tuple[int, int]] = {}
+    for base in _ARTIFACT_PATHS:
+        if base.is_dir():
+            files = [p for p in base.rglob("*") if p.is_file()]
+        else:
+            files = [base] if base.is_file() else []
+        for path in files:
+            try:
+                st = path.stat()
+            except OSError:                   # removed while we looked
+                continue
+            found[path.relative_to(ROOT).as_posix()] = (st.st_mtime_ns, st.st_size)
+    # test-sweep's temp root carries the pid of the process that imported it —
+    # this one, for a sweep loaded in-process — and it is created by run_suite().
+    sweep_root = Path(tempfile.gettempdir()) / f"sweep-run-{os.getpid()}"
+    if sweep_root.exists():
+        found[f"%TEMP%/{sweep_root.name}"] = (0, 0)
+    return found
+
+
+def pytest_sessionstart(session):
+    _ARTIFACTS_AT_START.update(_artifacts())
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session, exitstatus):
+    """Fail the run when it changed anything _artifacts() watches.
+
+    Compared with the state the run started from, never with an empty tree: a
+    developer's checkout legitimately holds the logs of a pipeline run by hand.
+    """
+    before, after = _ARTIFACTS_AT_START, _artifacts()
+    for path in sorted(set(before) | set(after)):
+        if path not in before:
+            _WRITTEN_BY_THE_RUN.append(f"created   {path}")
+        elif path not in after:
+            _WRITTEN_BY_THE_RUN.append(f"deleted   {path}")
+        elif before[path] != after[path]:
+            _WRITTEN_BY_THE_RUN.append(f"modified  {path}")
+    if _WRITTEN_BY_THE_RUN and session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def pytest_terminal_summary(terminalreporter):
+    if not _WRITTEN_BY_THE_RUN:
+        return
+    terminalreporter.section("the run wrote into this checkout", sep="=", red=True)
+    for line in _WRITTEN_BY_THE_RUN:
+        terminalreporter.write_line(line)
+    terminalreporter.write_line(
+        "A path derived from __file__ or read at import was not redirected: load the "
+        "script from `cron_copy`, or patch the path. (A pipeline run from this "
+        "checkout while the suite ran writes here too.)")

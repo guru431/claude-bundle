@@ -93,6 +93,12 @@ _load_dotenv()
 # ERROR the caller decides the direction of — never a silent default.
 _CONFIG_NOTES: list[tuple[str, str, str]] = []   # (name, effective value, source)
 _CONFIG_ERRORS: list[str] = []
+# Settings an upgrade left behind: they still work, but mean something else now
+# or are on their way out. (setting as written, what to do) — appended where the
+# value is read, next to the WARNING the runtime prints, so bundle-status and
+# self-test cannot disagree with it. Every setting named here has its step in
+# UPGRADING.md; tests/test_upgrade_notes.py fails when one does not.
+_CONFIG_DEPRECATIONS: list[tuple[str, str]] = []
 
 _TRUE_WORDS = {"1", "true", "yes", "on", "enabled", "enable"}
 _FALSE_WORDS = {"0", "false", "no", "off", "disabled", "disable"}
@@ -2133,6 +2139,11 @@ if not OFFBOX_FALLBACK:
           f"(one provider, no fallback) — set that instead.", file=sys.stderr)
     _CONFIG_NOTES.append(("WIKI_OFFBOX_FALLBACK", "0",
                           f"DEPRECATED — use WIKI_LLM_PROVIDER={DEFAULT_CHAIN[0]}"))
+    _CONFIG_DEPRECATIONS.append((
+        "WIKI_OFFBOX_FALLBACK=0",
+        f"deprecated since 0.17.0 and will be removed; it means "
+        f"WIKI_LLM_PROVIDER={DEFAULT_CHAIN[0]} (one provider, no fallback) — set "
+        f"that and delete this line"))
 
 # WIKI_ALLOW_OFFBOX=0 — the real thing people believed they were buying above:
 # a gate applied to EVERY call, refusing any provider whose registry row says
@@ -2285,6 +2296,11 @@ elif _raw_provider == "deepseek" and DEFAULT_CHAIN[0] == "deepseek":
           "fallback). Write WIKI_LLM_PROVIDER=chain — or leave it unset — for "
           "the off-box chain it used to mean.", file=sys.stderr)
     LLM_PROVIDER = "deepseek"
+    _CONFIG_DEPRECATIONS.append((
+        "WIKI_LLM_PROVIDER=deepseek",
+        "means DeepSeek ONLY since 0.16.0 — right if that is what you want; for the "
+        "chain it used to mean (" + " → ".join(PROVIDERS[p]["label"] for p in DEFAULT_CHAIN)
+        + ") write WIKI_LLM_PROVIDER=chain or leave it empty"))
 elif _raw_provider in _VALID_PROVIDERS:
     LLM_PROVIDER = _raw_provider
 else:
@@ -2713,6 +2729,11 @@ def config_report() -> list[str]:
 def config_errors() -> list[str]:
     """Configuration values nobody could parse (empty when all of them parsed)."""
     return list(_CONFIG_ERRORS)
+
+
+def config_deprecations() -> list[str]:
+    """Settings that still work but an upgrade left behind, "SETTING — advice"."""
+    return [f"{setting} — {advice}" for setting, advice in _CONFIG_DEPRECATIONS]
 
 
 def _dry_run_until() -> date | None:

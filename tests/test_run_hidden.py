@@ -74,6 +74,20 @@ def test_an_interpreter_from_a_bom_export_quoted_non_ascii_env_line_is_used(tmp_
         f'"{task}" "--full"'
 
 
+def test_a_repeated_interpreter_key_takes_its_first_occurrence_even_when_empty(tmp_path):
+    """The tasks this launcher starts read the same .env with the Python, bash and
+    PowerShell readers, and for those a repeated key keeps its FIRST occurrence,
+    even an empty one. The launcher kept the first NON-EMPTY value instead, so
+    `PYTHON_EXE=` followed by `PYTHON_EXE=C:\\old\\python.exe` launched the old
+    interpreter while every other reader of the file saw no value at all."""
+    bundle = _bundle(tmp_path)
+    second = _recorder(tmp_path / "old" / "python.cmd", exit_code=4)
+    (bundle / ".env").write_text(f"PYTHON_EXE=\nPYTHON_EXE={second}\n", encoding="utf-8")
+    rc = _launch(bundle, "python", str(tmp_path / "task.py"))
+    assert not (second.parent / "received.txt").exists(), "the second PYTHON_EXE line was used"
+    assert rc != 4
+
+
 def test_a_launcher_copied_away_from_the_bundle_still_logs_why_it_failed(tmp_path):
     """`launcher:` pointing at a local copy is the documented way round a bundle
     on a share — and next to that copy there is no cron\\. CreateFolder makes one

@@ -61,6 +61,8 @@ EXPECTED = {
     "EMPTY_QUOTED": "",
     "NON_ASCII": "C:\\Users\\Пользователь\\python.exe",   # UTF-8, not the ANSI codepage
     "AFTER_BAD": "reached",                    # the line after a bad key still loads
+    "DUP_FIRST": "a",                          # a repeated key: the FIRST occurrence wins,
+    "DUP_EMPTY": "",                           # ...even when it is empty
     "LAST_NO_NEWLINE": "end",                  # no final newline
 }
 

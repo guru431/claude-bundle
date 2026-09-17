@@ -152,6 +152,13 @@ function Select-DeploymentTasks($tasks, $names, [string]$marker) {
 # project forbids everywhere else. Worse, leftover tasks then fired scripts that
 # no longer existed, every night, forever.
 $syncTasks = Join-Path $mfPipelineRoot 'cron\admin\sync-tasks.ps1'
+# What this step actually did, for the summary. The summary used to say
+# "unregistered in step 1b" on every full-tier run — on a dry run, and when
+# there was nothing to unregister or no syncer to do it with.
+$taskStep = $null
+if ($mf.tier -eq 'full' -and -not (Test-Path $syncTasks)) {
+    $taskStep = "not checked — $syncTasks is not in the deployment, so nothing here can unregister its tasks"
+}
 if ($mf.tier -eq 'full' -and (Test-Path $syncTasks)) {
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $isAdmin = ([System.Security.Principal.WindowsPrincipal]$me).IsInRole(
@@ -170,12 +177,19 @@ if ($mf.tier -eq 'full' -and (Test-Path $syncTasks)) {
         if ($regData.managed_marker) { $taskMarker = "$($regData.managed_marker)" }
     }
     $managed = @()
+    $listError = $null
     try {
         $managed = @(Select-DeploymentTasks @(Get-ScheduledTask -ErrorAction SilentlyContinue) $taskNames $taskMarker)
-    } catch { $managed = @() }
+    } catch { $managed = @(); $listError = $_.Exception.Message }
+    if ($null -ne $listError) {
+        $taskStep = "could not be listed ($listError) — none were unregistered"
+    } elseif ($managed.Count -eq 0) {
+        $taskStep = "none of this deployment's tasks are registered — nothing to unregister"
+    }
     if ($managed.Count -gt 0) {
         if (-not $apply) {
             Info "[dry-run] would unregister $($managed.Count) registry-managed task(s) first"
+            $taskStep = "$($managed.Count) would be unregistered first (registry-driven, never schtasks /delete)"
         } elseif ($isAdmin) {
             Info "unregistering $($managed.Count) registry-managed task(s)..."
             & powershell -NoProfile -ExecutionPolicy Bypass -File $syncTasks -Unregister
@@ -185,6 +199,7 @@ if ($mf.tier -eq 'full' -and (Test-Path $syncTasks)) {
                 exit 3
             }
             Good "scheduled tasks unregistered"
+            $taskStep = "$($managed.Count) unregistered in step 1b (registry-driven, never schtasks /delete)"
         } else {
             Write-Host "ERROR: $($managed.Count) scheduled task(s) of this deployment are still registered" -ForegroundColor Red
             Write-Host "       ($(@($managed | ForEach-Object { $_.TaskName }) -join ', ')), and removing the files first" -ForegroundColor Red
@@ -297,10 +312,10 @@ if ($mf.tier -eq 'full') {
     # scheduler directly because it drifts from registry.yaml — telling users to
     # do exactly that as the official uninstall step contradicted its own rule
     # and left the registry describing tasks that no longer exist.
-    # Step 1b above already unregistered them (or refused to touch a single file
-    # until they were). This is the closing note, not an instruction to go and
-    # do it now with a tool that no longer exists.
-    Info "scheduled tasks: unregistered in step 1b (registry-driven, never `schtasks /delete`)"
+    # Step 1b above dealt with them (or refused to touch a single file until
+    # they were gone), and $taskStep says which way. This is the closing note,
+    # not an instruction to go and do it now with a tool that no longer exists.
+    Info "scheduled tasks: $taskStep"
     $regLeft = Join-Path $mfPipelineRoot 'cron\registry.yaml'
     if (Test-Path $regLeft) {
         Info "  registry.yaml is KEPT — it carries the paths and the password mode you"

@@ -54,14 +54,15 @@ on a LAN host). The script auto-probes the CCR port and tries to launch
 
 ### Why ANTHROPIC_AUTH_TOKEN, not ANTHROPIC_API_KEY
 
-For DeepSeek and CCR, the bundle sets `ANTHROPIC_AUTH_TOKEN`. The reason
-is subtle: when you're signed in to Anthropic via `claude /login`, your
-OAuth `accessToken` lives in `.credentials.json`. Claude Code **prefers
-OAuth over `ANTHROPIC_API_KEY`**, so setting just `ANTHROPIC_API_KEY` to
-a non-Anthropic key produces 401s — the OAuth token wins and gets sent
-to the wrong endpoint.
+For DeepSeek and CCR, the bundle sets `ANTHROPIC_AUTH_TOKEN`. Of the
+credentials in play here, Claude Code ranks `ANTHROPIC_AUTH_TOKEN` first,
+then `ANTHROPIC_API_KEY`, and the OAuth login from `claude /login` last
+([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
+An interactive session, though, uses an `ANTHROPIC_API_KEY` only once you
+approve it, and remembers the answer: a key declined once is skipped, the
+request carries your Anthropic login instead, and the gateway rejects it.
 
-`ANTHROPIC_AUTH_TOKEN` is the override that wins over OAuth, sent as
+`ANTHROPIC_AUTH_TOKEN` is the override that needs no approval, sent as
 `Authorization: Bearer <key>`. DeepSeek and CCR both accept it.
 OpenCode Go's Anthropic endpoint is an exception — it wants
 `x-api-key`, so the `opencode` mode uses `ANTHROPIC_API_KEY` instead
@@ -253,7 +254,10 @@ happens to be named in someone else's default.
 If you want claude as a one-off — `WIKI_LLM_PROVIDER=claude python ...`.
 Don't make it the cron default. The CLI is looked up the way a shell would,
 PATHEXT included, so the `claude.cmd` shim of an npm install is found; set
-`CLAUDE_BIN` when it is not on PATH at all.
+`CLAUDE_BIN` when it is not on PATH at all. It runs on the subscription you
+signed in to with `claude /login`: every `ANTHROPIC_*` variable is withheld
+from it, because `claude -p` uses an `ANTHROPIC_API_KEY` — the `.env` line
+included — whenever one is set, and bills the API.
 
 ### Where the keys come from
 

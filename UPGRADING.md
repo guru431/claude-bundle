@@ -154,6 +154,10 @@ Then run `sync.cmd` once (step 4 above).
 - **`MD2PDF_TIMEOUT` is a total** across every browser the converter tries
   (default 120). A value raised for one slow browser is now shared: with two
   installed, the first gets about half.
+- **`WIKI_LLM_PROVIDER=claude` runs on your `claude /login` subscription.**
+  Every `ANTHROPIC_*` variable is now withheld from the CLI: `claude -p` used an
+  `ANTHROPIC_API_KEY` from `.env` whenever one was set, and billed the API. The
+  account the task runs as must be signed in.
 - **`WIKI_LLM_PROVIDER=local`** no longer goes through `HTTP_PROXY` /
   `HTTPS_PROXY`, refuses a redirect, and accepts `localhost` or `*.localhost`
   only when the name resolves to loopback. A server on another machine must be

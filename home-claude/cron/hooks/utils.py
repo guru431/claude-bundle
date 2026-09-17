@@ -4489,9 +4489,20 @@ def _llm_claude(prompt: str, timeout: int = 600) -> str | None:
 
     Honors CLAUDE_BIN: a Password-mode task runs in session 0, where the user's
     PATH doesn't exist and a bare `claude` simply isn't found.
+
+    The CLI gets an environment of its own. This provider is the subscription
+    you are signed in to, but Claude Code ranks ANTHROPIC_AUTH_TOKEN and
+    ANTHROPIC_API_KEY above that login and, under `-p`, uses a key without
+    asking — while this module loads .env, whose template has an
+    ANTHROPIC_API_KEY line, into os.environ: the night went to API billing.
+    Every ANTHROPIC_* is left out, as claude-warm-window.sh does, since a base
+    URL or model left behind still steers the call away from the subscription.
+    CLAUDECODE / CLAUDE_CODE_ENTRYPOINT stop a nested CLI from starting; they
+    used to be popped from os.environ, i.e. for the rest of this process.
     """
-    for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
-        os.environ.pop(env_key, None)
+    env = {k: v for k, v in os.environ.items()
+           if not k.upper().startswith("ANTHROPIC_")
+           and k.upper() not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
 
     claude_bin = os.environ.get("CLAUDE_BIN") or "claude"
     # Resolved through PATHEXT, which subprocess does not do on Windows:
@@ -4506,6 +4517,7 @@ def _llm_claude(prompt: str, timeout: int = 600) -> str | None:
             input=prompt,
             capture_output=True,
             text=True,
+            env=env,
             timeout=timeout,
             encoding="utf-8",
             errors="replace",

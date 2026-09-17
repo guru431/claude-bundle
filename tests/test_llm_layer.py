@@ -458,3 +458,50 @@ def test_the_claude_cli_is_resolved_through_pathext(cron_copy: Path, monkeypatch
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert u._llm_claude("hi") == "answer"
     assert argvs[0][0] == shim
+
+
+def _stub_claude(root: Path) -> Path:
+    """A `claude` that saves the environment it was started with, then answers."""
+    record = root / "claude-env.json"
+    script = root / "claude_stub.py"
+    script.write_text(
+        "import json, os, sys\n"
+        "sys.stdin.read()\n"
+        f"open({str(record)!r}, 'w', encoding='utf-8').write(json.dumps(dict(os.environ)))\n"
+        "print('answer')\n", encoding="utf-8")
+    if os.name == "nt":
+        stub = root / "claude.cmd"
+        stub.write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+    else:
+        stub = root / "claude"
+        stub.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
+        stub.chmod(0o755)
+    return stub
+
+
+def test_the_claude_cli_gets_the_subscription_and_the_caller_keeps_its_env(
+        cron_copy: Path, monkeypatch):
+    """Claude Code ranks ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY above the
+    `/login` subscription, and under `-p` uses the key whenever it is set
+    (code.claude.com/docs/en/authentication, "Authentication precedence"). utils
+    loads .env into os.environ, so a key on the template's ANTHROPIC_API_KEY line
+    billed the provider that promises the subscription to the API instead. The
+    nesting guards, meanwhile, were popped from the caller's own environment."""
+    stub = _stub_claude(cron_copy)
+    monkeypatch.setenv("CLAUDE_BIN", str(stub))
+    given = {"ANTHROPIC_API_KEY": "test-api-key", "ANTHROPIC_AUTH_TOKEN": "gateway-token",
+             "ANTHROPIC_BASE_URL": "https://gateway.example.invalid",
+             "CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli",
+             "CLAUDE_CODE_OAUTH_TOKEN": "subscription-token"}
+    for name, value in given.items():
+        monkeypatch.setenv(name, value)
+    u = _load_utils(cron_copy, "utils_claude_env")
+
+    assert u._llm_claude("hi", timeout=60) == "answer"
+
+    child = {k.upper(): v for k, v in json.loads(
+        (cron_copy / "claude-env.json").read_text(encoding="utf-8")).items()}
+    assert not [k for k in child if k.startswith("ANTHROPIC_")], sorted(child)
+    assert "CLAUDECODE" not in child and "CLAUDE_CODE_ENTRYPOINT" not in child
+    assert child.get("CLAUDE_CODE_OAUTH_TOKEN") == "subscription-token"
+    assert {k: os.environ.get(k) for k in given} == given, "the caller's environment changed"

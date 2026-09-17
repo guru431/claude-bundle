@@ -437,7 +437,13 @@ function Read-InstallManifest {
     $p = Join-Path $ClaudeHome '.bundle-manifest.json'
     if (Test-Path $p) {
         try { $script:_manifest = Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json }
-        catch { Warn "could not parse $p ($($_.Exception.Message)) — diffing against the source only" }
+        catch {
+            # -Diff is not the only reader: an install reads it for its upgrade
+            # notes and its registry decision, and there "diffing" said nothing.
+            $consequence = if ($Diff) { 'diffing against the source only' }
+                           else { 'treated as a first install: no upgrade notes, and the install replaces it with a new manifest' }
+            Warn "could not parse $p ($($_.Exception.Message)) — $consequence"
+        }
     }
     return $script:_manifest
 }

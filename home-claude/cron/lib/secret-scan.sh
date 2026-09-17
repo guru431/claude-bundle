@@ -454,13 +454,22 @@ secret_scan_range() {
         # 1 MiB" is a different promise from "scanned everything".
         printf 'note: %s blob(s) over 1 MiB were NOT scanned\n' "$_ssr_over"
     fi
+    # The precise pass below costs about a dozen process spawns per blob, and it
+    # used to run on EVERY blob in the range: a first publication of a large
+    # repository took minutes on Windows. secret_scan_suspects (the fast path
+    # pre-push uses) names, from a few stream passes, every blob the precise pass
+    # could flag, so reading only those loses nothing — see its comment for why.
+    awk -v skip="$_ssr_skip" '$2 == "blob" && $3 <= 1048576 {
+        p = $0; sub(/^[^ ]+ [^ ]+ [^ ]+ /, "", p)
+        if (skip == "" || index(p, skip) != 1) print $1
+    }' "$_ssr_dir/typed" > "$_ssr_dir/blobs"
+    secret_scan_suspects "$_ssr_dir/blobs" "$_ssr_pat" "$_ssr_dir" > "$_ssr_dir/suspects"
+    : > "$_ssr_dir/suspect-typed"
+    if [ -s "$_ssr_dir/suspects" ]; then
+        awk 'NR == FNR { s[$1] = 1; next } ($1 in s)' "$_ssr_dir/suspects" "$_ssr_dir/typed" \
+            > "$_ssr_dir/suspect-typed"
+    fi
     while read -r _ssr_sha _ssr_type _ssr_size _ssr_path; do
-        if [ "$_ssr_type" != blob ] || [ "$_ssr_size" -gt 1048576 ]; then
-            continue
-        fi
-        if [ -n "$_ssr_skip" ]; then
-            case "$_ssr_path" in "$_ssr_skip"*) continue ;; esac
-        fi
         # Read once, scanned by both tables.
         git cat-file blob "$_ssr_sha" > "$_ssr_dir/blob" 2>/dev/null || true
         if ! _ssr_hits=$(secret_scan_text < "$_ssr_dir/blob"); then
@@ -472,7 +481,7 @@ secret_scan_range() {
             _secret_scan_prefix "$_ssr_path (.sanitize-patterns)" "$_ssr_hits"
             _ssr_fail=1
         fi
-    done < "$_ssr_dir/typed"
+    done < "$_ssr_dir/suspect-typed"
 
     rm -rf "$_ssr_dir"
     unset _ssr_range _ssr_skip _ssr_pat _ssr_dir _ssr_over _ssr_sha _ssr_type _ssr_size _ssr_path _ssr_hits

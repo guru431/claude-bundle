@@ -573,6 +573,32 @@ secret_scan_suspects ../list ../pat ../scratch""", env=env)
                          f"{sorted(n for n in order if _blob_id(blobs[n]) in got)}\n{_out(cp)}")
 
 
+@integration
+def test_the_range_scan_reads_only_the_blobs_that_could_hit(tmp_path: Path):
+    """secret_scan_range ran its precise pass — a dozen process spawns per blob —
+    on every blob it was given, so a first publication through github-push.sh
+    took minutes on Windows. It must still report the leak, and read one blob to
+    do so, not thirty-one."""
+    env = _git_env(tmp_path)
+    cp = _lib(tmp_path, f"""
+git init -q repo && cd repo || exit 1
+i=0
+while [ "$i" -lt 30 ]; do printf 'clean file %s\\n' "$i" > "f$i.txt"; i=$((i + 1)); done
+printf "x = '%s'\\n" '{TOKEN}' > leak.py
+git add -A && git commit -qm init || exit 1
+git() {{
+    if [ "$1" = cat-file ] && [ "$2" = blob ]; then echo read >> ../blob-reads; fi
+    command git "$@"
+}}
+: > ../blob-reads
+secret_scan_range HEAD; echo "rc=$?"
+echo "reads=$(wc -l < ../blob-reads | tr -d ' ')"
+""", env=env)
+    out = _out(cp)
+    assert "rc=1" in out and "leak.py" in out, f"the leak was not reported:\n{out}"
+    assert "reads=1" in out, f"the precise pass read more than the one suspect blob:\n{out}"
+
+
 def test_binary_content_is_scanned_not_skipped(tmp_path: Path):
     (tmp_path / "blob").write_bytes(b"\x00\x01head\x00" + f"k={TOKEN}".encode() + b"\x00\n")
     cp = _lib(tmp_path, 'secret_scan_text < blob; echo "rc=$?"')

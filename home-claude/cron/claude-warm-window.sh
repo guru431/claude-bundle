@@ -63,21 +63,35 @@ echo "=== Warm-up $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$LOG_FILE"
 # sets ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN to point the CLI at a third-
 # party gateway — so a warm-up meant to open the Anthropic 5-hour window would
 # have gone to that gateway instead, warming nothing and spending someone else's
-# quota to do it.
+# quota to do it. By the names the shell actually has, not from a list: a list
+# of five let ANTHROPIC_DEFAULT_HAIKU_MODEL (which the switcher also writes)
+# remap the `haiku` this ping asks for, and ANTHROPIC_CUSTOM_HEADERS or
+# ANTHROPIC_PROFILE through. CLAUDECODE and CLAUDE_CODE_ENTRYPOINT go as well, as
+# in utils.py::_llm_claude: run by hand from inside a Claude Code session, they
+# stop the CLI it starts. Called in the ping's subshell, so only the CLI loses
+# them. A function, not a loop inside $( ): bash before 4.0 (macOS ships 3.2) can
+# take the `)` of a case pattern there for the end of the command substitution.
 #
 # WARM_MODEL (default: the `haiku` ALIAS, not a dated snapshot) — a pinned
 # snapshot id stops existing when the model is retired, and then the one task
 # whose job is proving the CLI works fails for a reason that has nothing to do
 # with the CLI.
-OUT=$( cd "$HOME" \
-    && unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
-             ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL \
-    && "$CLAUDE" -p "hi" \
-    --model "${WARM_MODEL:-haiku}" \
-    --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
-    --setting-sources project \
-    --no-session-persistence \
-    --output-format json 2>>"$LOG_FILE" )
+drop_routing_env() {
+    local name
+    for name in $(compgen -e); do
+        case "$name" in
+            ANTHROPIC_*|CLAUDECODE|CLAUDE_CODE_ENTRYPOINT) unset "$name" ;;
+        esac
+    done
+}
+OUT=$( cd "$HOME" || exit
+       drop_routing_env
+       "$CLAUDE" -p "hi" \
+           --model "${WARM_MODEL:-haiku}" \
+           --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+           --setting-sources project \
+           --no-session-persistence \
+           --output-format json 2>>"$LOG_FILE" )
 rc=$?
 
 echo "$OUT" >> "$LOG_FILE"

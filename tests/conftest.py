@@ -25,9 +25,10 @@ every run of the suite still appended its ClaudeTestSweep rows to this
 checkout's ledger, and `utils` resolved CLAUDE_HOME to the real ~/.claude. The
 same sandbox therefore also exists for the whole session, from pytest_configure.
 
-Two nets catch what a sandbox cannot foresee: a run that wrote where a nightly
-task keeps its artifacts in this checkout FAILS, and a shared module a test
-evicted from sys.modules is put back after it.
+Two nets catch what a sandbox cannot foresee: a run that wrote into this
+checkout — where a nightly task keeps its artifacts, or anywhere `git status`
+would show — FAILS, and a shared module a test evicted from sys.modules is put
+back after it.
 
 Everything here is autouse, so a new test gets the sandbox without asking.
 """
@@ -78,6 +79,13 @@ def _neutralise(mp: pytest.MonkeyPatch, home: Path) -> None:
     for name in list(os.environ):
         if name.startswith(_CLEARED_PREFIXES) or name in _CLEARED_EXACT:
             mp.delenv(name, raising=False)
+    # A home Windows can resolve its known folders in. In a bare directory .NET
+    # answers LocalApplicationData with '', and Windows PowerShell then writes
+    # its module and startup caches relative to the working directory — which
+    # for a test is the checkout: an untracked `Microsoft\Windows\PowerShell\`
+    # turned up there.
+    for folder in ("AppData/Local", "AppData/Roaming"):
+        (home / folder).mkdir(parents=True, exist_ok=True)
     mp.setenv("HOME", str(home))
     mp.setenv("USERPROFILE", str(home))
     # CLAUDE_HOME stays UNSET (it is in _CLEARED_EXACT). utils then derives it
@@ -333,16 +341,44 @@ def _artifacts() -> dict[str, tuple[int, int]]:
     return found
 
 
+# Everything else in the checkout, through git: a path nobody thought to watch —
+# PowerShell's caches written relative to the working directory — showed up at
+# its root once. What git ignores is either watched above or not ours to judge;
+# of what it does not ignore, a run may leave only these.
+_RUN_LITTER = (".claude/", ".pytest_cache/")
+_GIT_STATUS_AT_START: set[str] | None = None
+
+
+def _git_status() -> set[str] | None:
+    """The porcelain status lines of the checkout, or None where there is none.
+
+    The shell's environment, not the sandbox's: a checkout owned by another
+    account needs the `safe.directory` of the developer's own git config.
+    """
+    try:
+        done = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                              cwd=ROOT, env=_OUTER_ENV, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:                  # not a checkout: an exported tree
+        return None
+    return {line for line in done.stdout.decode("utf-8", "replace").splitlines()
+            if not (line[3:].strip('"').startswith(_RUN_LITTER) or "__pycache__/" in line)}
+
+
 def pytest_sessionstart(session):
+    global _GIT_STATUS_AT_START
     _ARTIFACTS_AT_START.update(_artifacts())
+    _GIT_STATUS_AT_START = _git_status()
 
 
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session, exitstatus):
-    """Fail the run when it changed anything _artifacts() watches.
+    """Fail the run when it changed anything _artifacts() or `git status` shows.
 
     Compared with the state the run started from, never with an empty tree: a
-    developer's checkout legitimately holds the logs of a pipeline run by hand.
+    developer's checkout legitimately holds the logs of a pipeline run by hand,
+    and uncommitted work.
     """
     before, after = _ARTIFACTS_AT_START, _artifacts()
     for path in sorted(set(before) | set(after)):
@@ -352,6 +388,12 @@ def pytest_sessionfinish(session, exitstatus):
             _WRITTEN_BY_THE_RUN.append(f"deleted   {path}")
         elif before[path] != after[path]:
             _WRITTEN_BY_THE_RUN.append(f"modified  {path}")
+    status = _git_status()
+    if _GIT_STATUS_AT_START is not None and status is not None:
+        _WRITTEN_BY_THE_RUN.extend(f"git       {line}"
+                                   for line in sorted(status - _GIT_STATUS_AT_START))
+        _WRITTEN_BY_THE_RUN.extend(f"git, was  {line}"
+                                   for line in sorted(_GIT_STATUS_AT_START - status))
     if _WRITTEN_BY_THE_RUN and session.exitstatus == pytest.ExitCode.OK:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
@@ -363,6 +405,7 @@ def pytest_terminal_summary(terminalreporter):
     for line in _WRITTEN_BY_THE_RUN:
         terminalreporter.write_line(line)
     terminalreporter.write_line(
-        "A path derived from __file__ or read at import was not redirected: load the "
-        "script from `cron_copy`, or patch the path. (A pipeline run from this "
-        "checkout while the suite ran writes here too.)")
+        "A path derived from __file__, read at import or relative to the working "
+        "directory was not redirected: load the script from `cron_copy`, or give it a "
+        "path under tmp. (A pipeline run, an edit or a commit made in this checkout "
+        "while the suite ran shows up here too.)")

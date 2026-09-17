@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -39,6 +40,24 @@ def test_what_collection_imports_resolves_into_the_sandbox():
     assert ROOT not in runs.RUNS_DIR.resolve().parents, runs.RUNS_DIR
     assert utils.CLAUDE_HOME.parent == runs.RUNS_DIR.parent, \
         f"{utils.CLAUDE_HOME} is not in the session's sandbox home"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="known folders are a Windows notion")
+def test_windows_finds_local_appdata_inside_the_sandbox_home(tmp_path):
+    """The sandbox home has to be a profile Windows can resolve folders in.
+
+    Pointed at a bare directory, .NET answers LocalApplicationData with '', and
+    Windows PowerShell then writes its module and startup caches RELATIVE TO THE
+    WORKING DIRECTORY — for a test, the checkout, where an untracked
+    `Microsoft\\Windows\\PowerShell\\` turned up.
+    """
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    assert powershell, "no PowerShell on this Windows machine"
+    done = subprocess.run([powershell, "-NoProfile", "-NonInteractive", "-Command",
+                           "[Environment]::GetFolderPath('LocalApplicationData')"],
+                          capture_output=True, text=True, cwd=tmp_path, timeout=120)
+    expected = Path(os.environ["USERPROFILE"]) / "AppData" / "Local"
+    assert os.path.normcase(done.stdout.strip()) == os.path.normcase(str(expected)), done
 
 
 def test_a_test_that_evicts_a_shared_module():
@@ -131,6 +150,28 @@ def test_a_run_that_writes_into_the_checkout_fails(pytester, monkeypatch):
     result.assert_outcomes(passed=1)
     assert result.ret == pytest.ExitCode.TESTS_FAILED
     result.stdout.fnmatch_lines(["*created*home-claude/cron/logs/runs-2026.jsonl*"])
+
+
+def test_a_file_left_anywhere_in_the_checkout_fails_the_run(pytester, monkeypatch):
+    """Not only where a nightly task writes: `git status` before and after.
+
+    An untracked `Microsoft\\Windows\\PowerShell\\` once appeared at the root of a
+    checkout — PowerShell caches written relative to a test's working directory —
+    and the run that left it was green.
+    """
+    monkeypatch.delenv("CI", raising=False)
+    subprocess.run(["git", "init", "-q", str(pytester.path)], check=True, capture_output=True)
+    result = _session(pytester, monkeypatch, """
+        from pathlib import Path
+
+        def test_passes_and_leaves_a_cache_at_the_root():
+            stray = Path(__file__).resolve().parents[1] / "Microsoft" / "ModuleAnalysisCache"
+            stray.parent.mkdir()
+            stray.write_bytes(b"x")
+    """)
+    result.assert_outcomes(passed=1)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stdout.fnmatch_lines(["git *Microsoft/ModuleAnalysisCache"])
 
 
 def test_on_ci_a_check_that_did_not_run_or_ran_slow_fails(pytester, monkeypatch):

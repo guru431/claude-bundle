@@ -11,7 +11,7 @@
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=your commits -> your git remotes money=no writes=auto-commits and PUSHES every repo under projects_root
+# bundle-io: offbox=your commits -> your git remotes; the names of the repos it failed or held back, with the paths that held them back (a sensitive file name, a protected file's deletion) -> Telegram Bot API money=no writes=auto-commits and PUSHES every repo under projects_root
 
 # --- Helpers (defined before the main body so the file can be sourced in tests
 #     via GIT_PUSH_ALL_LIB=1 without running a push sweep) ---

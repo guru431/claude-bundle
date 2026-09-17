@@ -20,7 +20,7 @@ Schedule: daily at 02:00.
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=your user messages of allowed projects + a slice of ~/.claude/memory -> LLM provider (a SECOND call with MEMORY_CROSS_NOTES=1) money=tokens writes=~/.claude/memory/*.md
+# bundle-io: offbox=your user messages of allowed projects + a slice of ~/.claude/memory -> LLM provider (a SECOND call with MEMORY_CROSS_NOTES=1); on a night with no extraction, one line saying why -> Telegram Bot API money=tokens writes=~/.claude/memory/*.md
 import hashlib
 import json
 import os

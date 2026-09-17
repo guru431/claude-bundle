@@ -111,6 +111,37 @@ def test_io_matrix_catches_an_undisclosed_offbox_task(repo: Path):
     assert "ClaudeHealthcheck" in r.stdout
 
 
+def test_io_matrix_sees_an_llm_call_behind_offbox_nothing(repo: Path):
+    """The code signals were written with literal backspace bytes where `\\b` was
+    meant, so every one of them but curl and Telegram matched nothing: a script
+    calling the LLM could declare it sends and spends nothing. The healthcheck
+    test above never noticed — that script also calls telegram-send.sh."""
+    target = repo / "home-claude" / "cron" / "wiki" / "wiki-compile-sessions.py"
+    text = target.read_text(encoding="utf-8")
+    line = next(l for l in text.splitlines() if l.startswith("# bundle-io:"))
+    target.write_text(
+        text.replace(line, "# bundle-io: offbox=nothing money=no writes=nothing"),
+        encoding="utf-8")
+    r = _run_guard("check-io-matrix.py", repo)
+    assert r.returncode == 1, f"an LLM call declared as offbox=nothing went unnoticed:\n{r.stdout}"
+    assert "ClaudeWikiCompileSessions" in r.stdout and "metered" in r.stdout
+
+
+def test_io_matrix_wants_telegram_named_in_the_header(repo: Path):
+    """git-push-all.sh declared `offbox=your commits -> your git remotes` while it
+    sent Telegram the repos it failed, with the paths of the files that held them
+    back: not "nothing", so no signal objected."""
+    target = repo / "home-claude" / "cron" / "claude-healthcheck.sh"
+    text = target.read_text(encoding="utf-8")
+    line = next(l for l in text.splitlines() if l.startswith("# bundle-io:"))
+    target.write_text(
+        text.replace(line, "# bundle-io: offbox=host metrics -> LLM provider money=tokens writes=nothing"),
+        encoding="utf-8")
+    r = _run_guard("check-io-matrix.py", repo)
+    assert r.returncode == 1, f"a header hiding Telegram went unnoticed:\n{r.stdout}"
+    assert "ClaudeHealthcheck" in r.stdout and "Telegram" in r.stdout
+
+
 def _edit_matrix_row(repo: Path, task: str, edit) -> None:
     """Apply `edit(line) -> str` to the privacy-matrix row whose Task column names `task`."""
     arch = repo / "docs" / "cron-architecture.md"
@@ -147,6 +178,20 @@ def test_io_matrix_checks_the_default_state_column(repo: Path, task: str, cell: 
     r = _run_guard("check-io-matrix.py", repo)
     assert r.returncode == 1, f"a wrong Default state went unnoticed:\n{r.stdout}"
     assert task in r.stdout and "Default state" in r.stdout
+
+
+def test_io_matrix_wants_telegram_named_in_the_row(repo: Path):
+    """The healthcheck's header named Telegram and its row said only "host
+    metrics → your LLM provider": the alerts were disclosed to nobody who reads
+    the page."""
+    def drop_destination(line: str) -> str:
+        cells = line.split("|")
+        cells[2] = " the paths of the documents that did not convert "
+        return "|".join(cells)
+    _edit_matrix_row(repo, "ClaudeMd2PdfSync", drop_destination)
+    r = _run_guard("check-io-matrix.py", repo)
+    assert r.returncode == 1, f"a row hiding Telegram went unnoticed:\n{r.stdout}"
+    assert "ClaudeMd2PdfSync" in r.stdout and "off-box cell" in r.stdout
 
 
 def test_io_matrix_catches_a_missing_bundle_io_header(repo: Path):

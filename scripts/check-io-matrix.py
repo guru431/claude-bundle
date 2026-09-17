@@ -32,7 +32,9 @@ and this script cross-checks it against the registry and the doc:
      unread, and when the wiki phases moved into ClaudeWikiPipeline and started
      shipping `enabled: false`, their row kept saying "on" — on the page people
      read to decide what to enable. A task named in the table but absent from
-     the registry is reported too.
+     the registry is reported too;
+  5. a script whose code sends to Telegram names Telegram in its header, and
+     then its row's off-box cell names it as well.
 
 Deterministic, stdlib + PyYAML (with the same line-parser fallback as
 check-doc-counts.py). Runs in CI and from scripts/self-test.ps1.
@@ -132,15 +134,21 @@ def _is_nothing(value: str) -> bool:
 # honest answer to "what does this send off my machine" — it has to be checked
 # against the code, not just against the docs.
 _CODE_SIGNALS = (
-    (r"requests\.(?:post|get|put|patch|delete)", "offbox"),
-    (r"urllib\.request|httpx\.|http\.client", "offbox"),
+    (r"\brequests\.(?:post|get|put|patch|delete)\b", "offbox"),
+    (r"\burllib\.request\b|\bhttpx\.|\bhttp\.client\b", "offbox"),
     (r"(?m)^\s*curl\s|[^\w]curl\s+-", "offbox"),
     (r"telegram-send\.sh|send_telegram|api\.telegram\.org", "offbox"),
-    (r"llm_call|llm_call_ex|llm-call\.py", "offbox"),
-    (r"git\s+push|git_push|git_net\s+push", "offbox"),
-    (r"ssh\s+-", "offbox"),
+    (r"\bllm_call\b|\bllm_call_ex\b|llm-call\.py", "offbox"),
+    (r"\bgit\s+push\b|\bgit_push\b|\bgit_net\s+push\b", "offbox"),
+    (r"\bssh\s+-", "offbox"),
 )
-_MONEY_SIGNALS = (r"llm_call|llm_call_ex|llm-call\.py",)
+_MONEY_SIGNALS = (r"\bllm_call\b|\bllm_call_ex\b|llm-call\.py",)
+
+# Telegram must be NAMED, not merely implied by a field that is not "nothing": a
+# signal above proves only that much, so git-push-all.sh could declare
+# `offbox=your commits -> your git remotes` while it sent Telegram the name of
+# every repo it failed or held back, with the paths of the files that did it.
+_TELEGRAM_SIGNAL = r"telegram-send\.sh|send_telegram|api\.telegram\.org"
 
 
 def code_contradicts(path: Path, io: dict[str, str]) -> list[str]:
@@ -157,6 +165,9 @@ def code_contradicts(path: Path, io: dict[str, str]) -> list[str]:
         if re.search(pattern, text) and _is_nothing(io.get("money", "")):
             out.append(f"declares money={io.get('money')!r} but the code calls an "
                        f"LLM — that is metered")
+    if re.search(_TELEGRAM_SIGNAL, text) and "telegram" not in io.get("offbox", "").lower():
+        out.append(f"declares offbox={io.get('offbox')!r} but the code sends to "
+                   f"Telegram — name what goes there")
     return out
 
 
@@ -186,13 +197,13 @@ def matrix_table(section: str) -> tuple[list[str], list[list[str]]]:
                              if not set(r.strip()) <= set("|-: ")]
 
 
-def matrix_rows_by_task(body: list[list[str]], state_col: int | None) -> dict[str, str]:
-    """Task name → the Default state cell of the row whose TASK column names it."""
+def matrix_rows_by_task(body: list[list[str]], col: int | None) -> dict[str, str]:
+    """Task name → the cell in column `col` of the row whose TASK column names it."""
     out: dict[str, str] = {}
     for cells in body:
-        state = cells[state_col] if state_col is not None and state_col < len(cells) else ""
+        cell = cells[col] if col is not None and col < len(cells) else ""
         for name in TASK_NAME_RE.findall(cells[0]):
-            out[name] = state
+            out[name] = cell
     return out
 
 
@@ -226,6 +237,8 @@ def check() -> int:
         problems.append(f"the '{MATRIX_HEADING}' table has no 'Default state' "
                         f"column — nothing checks what it says is on by default")
     rows = matrix_rows_by_task(body, state_col)
+    offbox_col = next((i for i, h in enumerate(lowered) if "off-box" in h), None)
+    offbox_cells = matrix_rows_by_task(body, offbox_col)
 
     tasks = registry_tasks()
     for name in sorted(set(rows) - {t.get("name") for t in tasks}):
@@ -269,7 +282,13 @@ def check() -> int:
                 r"(?i)\s*deletes\s+(old\s+)?(wiki|cron|logs|~/\.claude)", io["writes"])
         for contradiction in code_contradicts(path, io):
             problems.append(f"{name}: {contradiction}")
-        notable = (not _is_nothing(io["offbox"])
+        # The row is what people read. A header that names Telegram while the
+        # row lists only the provider discloses the alerts to nobody.
+        if (in_table and "telegram" in io["offbox"].lower()
+                and "telegram" not in offbox_cells.get(name, "").lower()):
+            problems.append(f"{name}: its bundle-io line sends to Telegram, but its "
+                            f"row's off-box cell never says so")
+        notable =(not _is_nothing(io["offbox"])
                    or not _is_nothing(io["money"])
                    or writes_outward)
 

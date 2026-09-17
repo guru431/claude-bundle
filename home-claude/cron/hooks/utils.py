@@ -3335,23 +3335,39 @@ def source_already_processed(page_frontmatter: dict, src_path: str, src_hash: st
     return False
 
 
-def add_source_to_frontmatter(page_frontmatter: dict, src_path: str, src_hash: str = "", src_mtime: str = "") -> dict:
-    """Add/update a source entry in frontmatter. Returns the updated dict."""
+def add_source_to_frontmatter(page_frontmatter: dict, src_path: str, src_hash: str = "", src_mtime: str = "",
+                              aliases=()) -> dict:
+    """Add/update a source entry in frontmatter. Returns the updated dict.
+
+    `aliases` are earlier spellings of `src_path`. An entry recorded under one of
+    them IS this source: it is renamed to `src_path` instead of being joined by a
+    second entry, and a duplicate that such a second entry already left behind
+    is dropped. compile-kb needs it — it recorded every article as `kb_news/…`,
+    whatever directory it had read.
+    """
     fm = dict(page_frontmatter)
     sources = fm.get("sources") or []
     if not isinstance(sources, list):
         sources = []
     now = datetime.now().isoformat(timespec="seconds")
+    names = {src_path, *aliases}
     updated = False
+    kept = []
     for s in sources:
-        if isinstance(s, dict) and s.get("path") == src_path:
-            if src_hash:
-                s["hash"] = src_hash
-            if src_mtime:
-                s["mtime"] = src_mtime
-            s["processed"] = now
-            updated = True
-            break
+        if not (isinstance(s, dict) and s.get("path") in names):
+            kept.append(s)
+            continue
+        if updated:
+            continue          # a second entry for the same source
+        s["path"] = src_path
+        if src_hash:
+            s["hash"] = src_hash
+        if src_mtime:
+            s["mtime"] = src_mtime
+        s["processed"] = now
+        updated = True
+        kept.append(s)
+    sources = kept
     if not updated:
         entry = {"path": src_path, "processed": now}
         if src_hash:

@@ -287,6 +287,47 @@ def test_compile_kb_records_the_directory_it_read(bundle: Path):
     assert "kb_sources/articles/gears.md" in page and "kb_news" not in page, page
 
 
+def test_compile_kb_renames_the_old_kb_news_entry_instead_of_adding_one(bundle: Path,
+                                                                        monkeypatch):
+    """Pages compiled before provenance named the real directory say `kb_news/…`.
+
+    Recording the same article again added a second entry for one source under
+    the real directory's name.
+    """
+    page = bundle / "wiki" / "kb" / "concepts" / "Gear.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("---\nsources:\n  - path: kb_news/articles/gears.md\n"
+                    "    processed: 2026-01-01T00:00:00\n---\n"
+                    "# Gear\n\nA toothed wheel. See [[index]].\n", encoding="utf-8")
+    _kb_article(bundle, "gears.md", b"Gears mesh; the ratio sets the speed.\n")
+    resp = bundle / "kb_gear_update.json"
+    resp.write_text(json.dumps([{"path": "kb/concepts/Gear.md", "action": "append",
+                                 "content": "The gear ratio sets the output speed.\n"}]),
+                    encoding="utf-8")
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-kb.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    assert r.returncode == 0, f"compile-kb failed:\n{r.stdout}\n{r.stderr}"
+
+    wcs = _load_wiki_script(bundle, monkeypatch, "wcs_provenance", "wiki-compile-sessions.py")
+    sources = wcs.read_page(page)[0]["sources"]
+    assert [s["path"] for s in sources] == ["kb_sources/articles/gears.md"], sources
+
+
+def test_add_source_to_frontmatter_folds_aliases_and_duplicates(bundle: Path, monkeypatch):
+    u = _load_utils(bundle, "utils_aliases")
+    fm = {"sources": [{"path": "kb_news/articles/a.md", "processed": "2026-01-01T00:00:00"},
+                      {"path": "daily/2026-01-02.md", "processed": "2026-01-02T00:00:00"},
+                      {"path": "kb_sources/articles/a.md", "processed": "2026-01-03T00:00:00"}]}
+    out = u.add_source_to_frontmatter(fm, "kb_sources/articles/a.md",
+                                      aliases=("kb_news/articles/a.md",))
+    assert [s["path"] for s in out["sources"]] == ["kb_sources/articles/a.md",
+                                                   "daily/2026-01-02.md"]
+    # Without aliases nothing else changes: an unrelated source gets its own entry.
+    out = u.add_source_to_frontmatter(out, "daily/2026-01-04.md")
+    assert [s["path"] for s in out["sources"]][-1] == "daily/2026-01-04.md"
+    assert len(out["sources"]) == 3
+
+
 # A date safely in the past on any machine, so nothing here depends on the
 # clock (the bundle's own test policy, rule 3): flush clamps a session date to
 # today, and a fixture dated "tomorrow" would be green some days and red others.

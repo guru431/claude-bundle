@@ -268,9 +268,15 @@ def apply_changes(changes: list[dict], existing_pages: dict[str, str],
 
         # src_hash intentionally omitted: the only consumer (source_already_processed)
         # is dead code — dedup is done via state (.processed.json), not per-page hashes.
+        #
+        # Pages compiled before provenance named the real directory carry the
+        # same article as `kb_news/<rel>`, whatever was read. The rel part is the
+        # same, so that entry is renamed rather than joined by a second one.
+        legacy = "kb_news/" + article_rel.split("/", 1)[-1]
         new_fm = add_source_to_frontmatter(
             existing_fm,
             src_path=article_rel,
+            aliases=(legacy,) if legacy != article_rel else (),
         )
         write_page(full_path, new_fm, final_body)
         created.append(f"{label}: {rel_path}")

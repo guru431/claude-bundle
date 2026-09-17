@@ -298,7 +298,7 @@ this table reflects it.
 | `ClaudeMemoryUpdate` | your user messages (up to ~40 KB/night) + a slice of `~/.claude/memory/` → your LLM provider. With `MEMORY_CROSS_NOTES=1`, a **second** call on top of that, carrying messages from two or more projects at once | yes (PAYG tokens) | no | on (cross-notes off) |
 | `ClaudeHealthcheck` | host metrics → your LLM provider (see below) | yes (PAYG tokens) | no | on |
 | `ClaudeGitPushAll` | your git remotes | no | yes (`git push`) | off (opt-in) |
-| `ClaudeTaskMonitor` / alerts | failure summary (failed tasks, down services, a down LLM chain's providers) plus the titles of stale findings from every allowed project → Telegram Bot API | no | no | on |
+| `ClaudeTaskMonitor` / alerts | failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the titles of stale findings from every allowed project → Telegram Bot API | no | no | on |
 | `ClaudeTaskMonitorPosix` | failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers → Telegram Bot API | no | no | off (POSIX only) |
 | `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
 | `ClaudeMd2PdfSync` | on a failure, the paths of the documents that did not convert (relative to `projects_root`) → Telegram Bot API; the reasons stay in the local log. Projects the privacy policy denies are not walked. The render is local, except that the browser fetches any remote image a document links | no | rewrites the paired `*.pdf` in your working copies — which `ClaudeGitPushAll` commits when that task is on | off |

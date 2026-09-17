@@ -207,6 +207,114 @@ def test_the_windows_monitor_puts_a_down_chain_on_top_of_its_alert(run_task_stat
     assert "LLM chain is DOWN (" not in run_task_status(failed), "reported twice"
 
 
+# ── the session-0 path policy (Password and S4U tasks) ───────────────────────
+
+LAUNCHER_ARGS = '//B //nologo "C:\\bundle\\bin\\_run-hidden.vbs" bash '
+
+
+def _policy_task(name: str, logon: str, args: str, execute: str = "wscript.exe") -> dict:
+    """One managed task the way the POLICY_VIOL collection hands it to Python."""
+    return {"Name": name, "LogonType": logon, "Execute": execute, "Args": args}
+
+
+def _flagged(out: str, heading: str) -> list[str]:
+    """Task names listed under the violation heading that contains `heading`."""
+    if heading not in out:
+        return []
+    block = out.split(heading, 1)[1].split("POLICY VIOLATION:", 1)[0]
+    return sorted(ln.strip().split(" ")[0].rstrip(":") for ln in block.splitlines()[1:]
+                  if ln.startswith("  ") and not ln.startswith("  ("))
+
+
+def run_policy(collected: dict, monkeypatch, capsys) -> str:
+    """Run the POLICY_VIOL heredoc on what its PowerShell collection returned."""
+    payload = json.dumps(collected).encode("utf-8")
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: types.SimpleNamespace(
+        returncode=0, stdout=payload, stderr=b""))
+    exec(compile(_heredoc("POLICY_VIOL"), f"{SCRIPT.name}:POLICY_VIOL", "exec"),
+         {"__name__": "__main__"})
+    return capsys.readouterr().out
+
+
+def test_s4u_tasks_are_held_to_the_session_0_path_policy(monkeypatch, capsys):
+    """S4U fires without a logon, like Password — and carries no network credentials.
+
+    A mapped drive is as absent for it as for a Password task, and a UNC path —
+    the very thing the policy recommends to Password tasks — is unreachable: such
+    a task can never run. The runtime refuses both at registration; this backstop
+    is for a registration older than that rule, or one made by hand.
+    """
+    out = run_policy({"Mapped": ["Z"], "Tasks": [
+        _policy_task("S4UMapped", "S4U", LAUNCHER_ARGS + '"Z:\\bundle\\cron\\a.sh"'),
+        _policy_task("S4UShare", "S4U", LAUNCHER_ARGS + '"\\\\host\\share\\cron\\b.sh"'),
+        _policy_task("S4UShareExe", "S4U", "--serve", execute="\\\\host\\share\\daemon.exe"),
+        _policy_task("PasswordMapped", "Password", LAUNCHER_ARGS + '"Z:\\bundle\\cron\\c.sh"'),
+        # Password tasks carry credentials: UNC is the path the policy asks for.
+        _policy_task("PasswordShare", "Password", LAUNCHER_ARGS + '"\\\\host\\share\\cron\\d.sh"'),
+        _policy_task("S4ULocal", "S4U", LAUNCHER_ARGS + '"D:\\bundle\\cron\\e.sh"'),
+        # `\\?\` is the local device namespace, not a share.
+        _policy_task("S4UDevicePath", "S4U", LAUNCHER_ARGS + '"\\\\?\\C:\\bundle\\cron\\f.sh"'),
+    ]}, monkeypatch, capsys)
+
+    assert _flagged(out, "with a mapped-drive path") == ["PasswordMapped", "S4UMapped"], out
+    assert _flagged(out, "S4U task with a UNC path") == ["S4UShare", "S4UShareExe"], out
+
+
+def test_nothing_to_report_prints_nothing(monkeypatch, capsys):
+    out = run_policy({"Mapped": [], "Tasks": [
+        _policy_task("PasswordLocal", "Password", LAUNCHER_ARGS + '"C:\\bundle\\cron\\a.sh"')]},
+        monkeypatch, capsys)
+    assert out.strip() == ""
+
+
+# PowerShell functions outrank cmdlets, so these stand in for the two queries the
+# collection makes: no real task and no real drive is read.
+FAKE_CMDLETS = r"""
+function Get-CimInstance { [PSCustomObject]@{ DeviceID = 'Z:' } }
+function New-FakeTask($name, $logon, $execute, $arguments, $description) {
+    [PSCustomObject]@{
+        TaskName = $name; Description = $description
+        Principal = [PSCustomObject]@{ LogonType = $logon }
+        Actions = @([PSCustomObject]@{ Execute = $execute; Arguments = $arguments })
+    }
+}
+function Get-ScheduledTask {
+    $ours = 'managed-by-registry | test'
+    $vbs = '//B //nologo "C:\b\bin\_run-hidden.vbs" bash '
+    New-FakeTask 'S4UMapped' 'S4U' 'wscript.exe' ($vbs + '"Z:\b\cron\a.sh"') $ours
+    New-FakeTask 'S4UShare' 'S4U' 'wscript.exe' ($vbs + '"\\host\share\cron\b.sh"') $ours
+    New-FakeTask 'PasswordShare' 'Password' 'wscript.exe' ($vbs + '"\\host\share\cron\c.sh"') $ours
+    New-FakeTask 'InteractiveMapped' 'Interactive' 'wscript.exe' ($vbs + '"Z:\b\cron\d.sh"') $ours
+    New-FakeTask 'ForeignS4UShare' 'S4U' 'x.exe' '"\\host\share\e"' 'somebody else'
+}
+"""
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "nt", reason="the collection is Windows PowerShell")
+def test_the_powershell_collection_selects_s4u_tasks(monkeypatch, capsys):
+    """The real PowerShell half, against stand-ins for the two queries it makes.
+
+    Its filter used to be `LogonType -eq 'Password'`, so an S4U task never even
+    reached the check. Only managed Password/S4U tasks may be collected: an
+    Interactive task runs in the user's session, where drives are mapped, and a
+    task without the registry marker is not ours to judge.
+    """
+    real_run = subprocess.run
+
+    def with_fakes(argv, **kwargs):
+        assert argv[:3] == ["powershell", "-NoProfile", "-Command"], argv
+        return real_run(argv[:3] + [FAKE_CMDLETS + argv[3]], **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", with_fakes)
+    exec(compile(_heredoc("POLICY_VIOL"), f"{SCRIPT.name}:POLICY_VIOL", "exec"),
+         {"__name__": "__main__"})
+    out = capsys.readouterr().out
+
+    assert _flagged(out, "with a mapped-drive path") == ["S4UMapped"], out
+    assert _flagged(out, "S4U task with a UNC path") == ["S4UShare"], out
+
+
 # ── findings watch ───────────────────────────────────────────────────────────
 
 STALE_ENTRY = "# Findings — {name}\n\n## 2020-01-01 · {title} [P2]\n**Status:** open\n"

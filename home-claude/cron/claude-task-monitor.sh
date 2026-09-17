@@ -14,7 +14,7 @@
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary (failed tasks, down services, a down LLM chain's providers) plus the TITLES of stale findings from every allowed project -> Telegram Bot API money=no writes=$HOME/task-monitor-fatal.log OUTSIDE the bundle (a start-up failure, or the full text of an alert it could not deliver: task names, Password-task arguments), and cron/state/task-monitor-seen.json
+# bundle-io: offbox=a failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the TITLES of stale findings from every allowed project -> Telegram Bot API money=no writes=$HOME/task-monitor-fatal.log OUTSIDE the bundle (a start-up failure, or the full text of an alert it could not deliver: task names, Password/S4U task command lines), and cron/state/task-monitor-seen.json
 
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -z "$BUNDLE_ROOT" ] || [ ! -d "$BUNDLE_ROOT/cron" ]; then
@@ -280,54 +280,79 @@ elif [ "$TASK_STATUS" != "OK" ]; then
     ALERTS="$TASK_STATUS"
 fi
 
-# --- Policy check (backstop): no Password-task may use a mapped network drive ---
-# Mapped drives don't exist in session 0 (before user logon). A Password task
-# pointing at one can't find its script and exits 127 with no log. PRIMARY
-# enforcement is in cron/admin/sync-tasks.ps1 (it skips such tasks at
-# registration); this check is a daily redundancy backstop. It detects mapped
-# drives by their ACTUAL type (Win32_LogicalDisk DriveType=4 = network) rather
-# than inferring "mapped" from "not C:" — so a valid local D:/E:/... install
-# never trips a false alarm.
+# --- Policy check (backstop): session-0 tasks and the paths they cannot reach ---
+# Password and S4U tasks both fire without an interactive logon — in session 0,
+# where mapped drives do not exist: a task pointing at one can't find its script
+# and exits 127 with no log. S4U has a second blind spot. It carries no network
+# credentials at all, so a UNC path (\\host\share\...) — the path the policy
+# recommends to Password tasks — is just as unreachable, and such a task can
+# never run. PRIMARY enforcement is in cron/admin/sync-tasks.ps1, which refuses
+# both at registration; this check is a daily backstop for a registration older
+# than that rule, or one made by hand. It detects mapped drives by their ACTUAL
+# type (Win32_LogicalDisk DriveType=4 = network) rather than inferring "mapped"
+# from "not C:" — so a valid local D:/E:/... install never trips a false alarm.
+#
+# PowerShell only COLLECTS — the mapped letters, and the logon type, executable
+# and arguments of every managed Password/S4U task — and Python decides. The
+# decision is the part with edge cases, and inside a PowerShell pipeline no test
+# could reach it (tests/test_task_monitor_win.py feeds this heredoc a collection).
 echo "TRACE: stage=policy $(date '+%H:%M:%S')" >> "$LOG_FILE"
 POLICY_VIOL=$("$PYTHON" - 2>>"$LOG_FILE" <<'PYSCRIPT'
-import subprocess, json
+import subprocess, json, re
 
 ps_cmd = r"""
-# Enumerate the drive letters that are actually mapped network drives.
-$mapped = @{}
-Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=4' -ErrorAction SilentlyContinue |
-    ForEach-Object { if ($_.DeviceID) { $mapped[$_.DeviceID.TrimEnd(':').ToUpper()] = $true } }
-Get-ScheduledTask | Where-Object {
+$mapped = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=4' -ErrorAction SilentlyContinue |
+    Where-Object { $_.DeviceID } | ForEach-Object { $_.DeviceID.TrimEnd(':').ToUpper() })
+$tasks = @(Get-ScheduledTask | Where-Object {
     $_.Description -like '*managed-by-registry*' -and
-    $_.Principal.LogonType -eq 'Password'
+    @('Password', 'S4U') -contains "$($_.Principal.LogonType)"
 } | ForEach-Object {
-    $taskArgs = ($_.Actions | Select-Object -First 1).Arguments
-    # Flag only if the args reference a drive letter that is currently a mapped
-    # network drive. UNC paths (\\host\share) and fixed local drives are fine.
-    $hit = $false
-    foreach ($m in [regex]::Matches($taskArgs, '(^|[\s\"])([A-Za-z]):\\')) {
-        if ($mapped.ContainsKey($m.Groups[2].Value.ToUpper())) { $hit = $true; break }
+    $action = $_.Actions | Select-Object -First 1
+    [PSCustomObject]@{
+        Name = $_.TaskName
+        LogonType = "$($_.Principal.LogonType)"
+        Execute = "$($action.Execute)"
+        Args = "$($action.Arguments)"
     }
-    if ($hit) {
-        [PSCustomObject]@{ Name = $_.TaskName; Args = $taskArgs }
-    }
-} | ConvertTo-Json -Compress
+})
+ConvertTo-Json -InputObject ([PSCustomObject]@{ Mapped = $mapped; Tasks = $tasks }) -Depth 4 -Compress
 """
+
+# A drive-letter path, or a UNC path, at the start of the command line or after
+# a space or a quote. `\\?\` and `\\.\` are the local device namespace, not shares.
+DRIVE_RE = re.compile(r'(?:^|[\s"])([A-Za-z]):\\')
+UNC_RE = re.compile(r'(?:^|[\s"])\\\\(?![?.]\\)[^\\\s"]+\\[^\\\s"]')
 
 r = subprocess.run(['powershell', '-NoProfile', '-Command', ps_cmd],
                    capture_output=True, timeout=60)
 out = r.stdout.decode('utf-8', errors='replace').strip()
-if not out or out == 'null':
-    print('')
-else:
-    items = json.loads(out)
-    if isinstance(items, dict):
-        items = [items]
-    lines = ['POLICY VIOLATION: Password-task with mapped-drive path (forbidden — drive not present in session 0):']
-    for item in items:
-        lines.append(f"  {item['Name']}: {item['Args'][:120]}")
-    lines.append('  (primary enforcement is cron/admin/sync-tasks.ps1, which skips such tasks at registration — these slipped past it, likely a hand-edited task)')
-    print('\n'.join(lines))
+collected = json.loads(out) if out and out != 'null' else {}
+mapped = {str(letter).upper() for letter in (collected.get('Mapped') or [])}
+tasks = collected.get('Tasks') or []
+if isinstance(tasks, dict):
+    tasks = [tasks]
+
+on_mapped, s4u_on_share = [], []
+for t in tasks:
+    command = f"{t.get('Execute') or ''} {t.get('Args') or ''}".strip()
+    if any(m.group(1).upper() in mapped for m in DRIVE_RE.finditer(command)):
+        on_mapped.append(f"  {t['Name']} [{t.get('LogonType')}]: {command[:160]}")
+    if t.get('LogonType') == 'S4U' and UNC_RE.search(command):
+        s4u_on_share.append(f"  {t['Name']}: {command[:160]}")
+
+lines = []
+if on_mapped:
+    lines.append('POLICY VIOLATION: Password/S4U task with a mapped-drive path '
+                 '(forbidden — the drive does not exist in session 0):')
+    lines += on_mapped
+if s4u_on_share:
+    lines.append('POLICY VIOLATION: S4U task with a UNC path (S4U carries no network '
+                 'credentials — the share is unreachable, so the task can never run):')
+    lines += s4u_on_share
+if lines:
+    lines.append('  (primary enforcement is cron/admin/sync-tasks.ps1, which refuses these at '
+                 'registration — they slipped past it: an older registration or a hand-edited task)')
+print('\n'.join(lines))
 PYSCRIPT
 )
 

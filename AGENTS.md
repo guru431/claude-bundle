@@ -16,7 +16,7 @@ This file used to be 97 lines — a second copy of `CLAUDE.md`, drifting.
 | Wiki pipeline, cron, LLM routing | [`docs/wiki-method.md`](docs/wiki-method.md), [`docs/cron-architecture.md`](docs/cron-architecture.md), [`docs/llm-routing.md`](docs/llm-routing.md) |
 | MCP servers; why the bundle does NOT do X; every env var | [`docs/mcp-servers.md`](docs/mcp-servers.md), [`docs/decisions.md`](docs/decisions.md), [`docs/config-reference.md`](docs/config-reference.md) (generated) |
 | Scripts | [`scripts/`](scripts/) — `install.ps1` / `uninstall.ps1`, `install.sh` / `uninstall.sh` (+ `install-lite.sh`, and `lib/` for both installers), `claude-switch.ps1`, `self-test.ps1`, `bootstrap-registry.ps1`, `gen-scheduler.py`, `mcp-probe.py`, and five `check-*.py` CI guards |
-| Tests | `pytest tests/ -q` — the fast suite (60s budget). Covers the hooks, the guard scripts and the fail-closed invariants. `pytest.ini` is the reference implementation of the test policy. |
+| Tests | `pytest tests/ -q` — the fast suite (60s budget). Covers the hooks and the fail-closed invariants; the guard scripts' mutation tests run with `-m integration`. `pytest.ini` is the reference implementation of the test policy. |
 
 ## The four things that bite
 

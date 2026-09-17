@@ -377,6 +377,10 @@ days without an LLM provider while this task reported `rc=0`.
   because one test had swapped `runs` under the modules holding it.
 - **Under `CI=1`** a dependency skip in setup or collection is a failure, not
   only in the call phase, and a fast-suite test over 3 s fails.
+- **The fast suite had outgrown its 60 s budget** (it tripled in this release).
+  By measurement, the guard scripts' mutation tests — each copies the tree and
+  runs a guard in a fresh interpreter — and the env guard's staleness test are
+  `integration` now; CI runs them in both jobs.
 - **One `bash` fixture:** tests that need a POSIX shell fail on Windows without
   one; `skipif(bash is None)` turned the git-guard tests into silent passes on
   the platform the bundle is written for.

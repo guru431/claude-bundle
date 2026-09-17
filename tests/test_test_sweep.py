@@ -183,6 +183,7 @@ def test_child_env_strips_bundle_settings_with_no_template_on_disk(tmp_path, mon
     assert env.get("SOME_PROJECT_SETTING") == "kept"
 
 
+@pytest.mark.integration   # 1.2 s measured: two full code scans by the env guard
 def test_env_guard_fails_when_the_shipped_names_go_stale(tmp_path, monkeypatch, capsys):
     """The deployed name list is a COPY of the template, so drift must fail CI.
 

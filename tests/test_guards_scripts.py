@@ -22,6 +22,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# `integration` by measurement, the way pytest.ini asks: every case copies the
+# guarded part of the tree and runs a guard in a fresh interpreter, and at ~30
+# cases this file alone took 14 s of the fast suite's 60 s budget on Windows.
+# CI runs it in the integration step of both jobs; after editing a guard, run
+# `python -m pytest tests/test_guards_scripts.py -m integration -q` locally.
+pytestmark = pytest.mark.integration
+
 
 def _run_guard(script: str, root: Path) -> subprocess.CompletedProcess:
     """Run a guard against a fixture tree by pointing it at that tree's root."""

@@ -161,14 +161,24 @@ def test_the_dry_run_window_opens_only_on_an_empty_key(bi, tmp_path, monkeypatch
             return cls(2026, 3, 30)
 
     monkeypatch.setattr(bi, "date", Today)
+    # The template's shape: an empty key, with commented examples that name
+    # `confirm` as well as a date. Only the empty key gets the date.
+    template = ("projects_root:\r\ndry_run_until:\r\n"
+                "#   dry_run_until: 2026-09-05\r\n#   dry_run_until: confirm\r\n")
     fresh = tmp_path / "fresh.yaml"
-    fresh.write_text("projects_root:\ndry_run_until:\n", encoding="utf-8")
+    fresh.write_bytes(template.encode("utf-8"))
     assert bi.main(["open-dry-run-window", str(fresh), "7"]) == 0
-    assert fresh.read_text(encoding="utf-8") == "projects_root:\ndry_run_until: 2026-04-06\n"
-    set_by_user = tmp_path / "set.yaml"
-    set_by_user.write_text("dry_run_until: 2030-01-01\n", encoding="utf-8")
-    assert bi.main(["open-dry-run-window", str(set_by_user), "7"]) == 0
-    assert set_by_user.read_text(encoding="utf-8") == "dry_run_until: 2030-01-01\n"
+    assert fresh.read_bytes() == template.replace("dry_run_until:\r\n",
+                                                  "dry_run_until: 2026-04-06\r\n", 1).encode("utf-8")
+
+    # A value the user chose is never replaced — a later date, or `confirm`,
+    # which holds the preview until they write a date themselves.
+    for chosen in ("dry_run_until: 2030-01-01\n", "dry_run_until: confirm\n",
+                   "dry_run_until: confirm   # until the policy is reviewed\n"):
+        set_by_user = tmp_path / "set.yaml"
+        set_by_user.write_text(chosen, encoding="utf-8")
+        assert bi.main(["open-dry-run-window", str(set_by_user), "7"]) == 0
+        assert set_by_user.read_text(encoding="utf-8") == chosen
 
 
 def test_a_run_that_installs_no_units_keeps_the_ones_already_recorded(bi, tmp_path):
@@ -354,9 +364,16 @@ def test_full_install_with_units_reinstall_and_uninstall(tmp_path):
     registry.write_text(text[:end].rstrip("\n") + "\n    enabled: false\n\n" + text[end:],
                         encoding="utf-8")
     edited = registry.read_bytes()
+    # `dry_run_until: confirm` holds the preview until the user writes a date
+    # themselves; a reinstall must neither reopen the window nor touch the file.
+    local.write_text(local.read_text(encoding="utf-8").replace(
+        f"dry_run_until: {until}", "dry_run_until: confirm"), encoding="utf-8")
+    held = local.read_bytes()
+    assert b"dry_run_until: confirm" in held
     second = _run(*install, env_extra=env, path_first=stubs)
     assert second.returncode == 0, second.out
     assert registry.read_bytes() == edited
+    assert local.read_bytes() == held, "the reinstall rewrote bundle.local.yaml"
     assert "kept your cron/registry.yaml" in second.out
     assert not (units / "ClaudeLogRetention.timer").exists(), "a disabled task's timer stayed installed"
     assert "systemctl --user disable --now ClaudeLogRetention.timer" in calls.read_text(encoding="utf-8")

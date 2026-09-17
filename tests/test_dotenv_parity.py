@@ -77,14 +77,7 @@ NOT_SET = (
 # value that parser produces today, and why. STRICT — once the parser is fixed,
 # its entry fails the test until it is deleted, so this cannot quietly turn into
 # a list of permanent excuses.
-KNOWN_DIVERGENCES = {
-    "python": {
-        "EMBEDDED_QUOTES": ('say "hi', "value.strip('\"').strip(\"'\") strips every quote "
-                                       "character at either end, not one matching pair"),
-        "UNMATCHED": ("open", "the same strip(): an unmatched quote is removed"),
-        "КЛЮЧ": ("cyrillic key", "str.isalnum() accepts non-ASCII letters in the key"),
-    },
-}
+KNOWN_DIVERGENCES: dict[str, dict[str, tuple[str, str]]] = {}
 
 
 # ── the legs: each returns {key: value} for what that parser set ─────────────
@@ -97,11 +90,10 @@ def _python(tmp_path: Path, monkeypatch) -> dict:
     for name in names:
         monkeypatch.delenv(name, raising=False)   # an inherited value would mask a miss
     monkeypatch.syspath_prepend(str(bundle / "cron" / "hooks"))
-    sys.modules.pop("utils", None)
-    try:
-        importlib.import_module("utils")          # importing it runs _load_dotenv()
-    finally:
-        sys.modules.pop("utils", None)
+    # delitem, not a bare pop: the utils a test module imported earlier comes back
+    # at teardown, so nothing later holds a different module than it imports.
+    monkeypatch.delitem(sys.modules, "utils", raising=False)
+    importlib.import_module("utils")              # importing it runs _load_dotenv()
     return {k: os.environ[k] for k in names if k in os.environ}
 
 

@@ -16,6 +16,8 @@
 #   * a leading UTF-8 BOM stripped, so the FIRST key is not silently lost
 #   * CRLF tolerated
 #   * a key that is not a plain identifier (or starts with a digit) skipped
+#   * a key that appears twice: the FIRST occurrence wins, even an empty one —
+#     utils.py sets a key only while it is absent, dotenv.sh only while unset
 #
 # PRECEDENCE is the caller's job — `Get-DotEnvValue` only reads the file.
 # `claude-switch.ps1` layers it as: process env > user env > <script>/.env >
@@ -58,7 +60,10 @@ function Read-DotEnv {
              ($val[0] -eq "'" -and $val[-1] -eq "'"))) {
             $val = $val.Substring(1, $val.Length - 2)
         }
-        $out[$key] = $val
+        # First occurrence wins. Assigning unconditionally let the LAST one win,
+        # so appending `KEY=new` to a .env changed what the PowerShell scripts
+        # read and nothing else: the Python and bash halves kept the old value.
+        if (-not $out.ContainsKey($key)) { $out[$key] = $val }
     }
     return $out
 }

@@ -45,7 +45,7 @@ preserve that discipline.
 
 ```
 .
-├── README.md, INSTALL.md, AGENT-INSTRUCTIONS.md, CHANGELOG.md, LICENSE
+├── README.md, INSTALL.md, AGENT-INSTRUCTIONS.md, CHANGELOG.md, UPGRADING.md, LICENSE
 ├── home-claude/                       what gets copied into ~/.claude/
 │   ├── CLAUDE.md                       global rules ← edit here for tier-1 rule changes
 │   ├── settings.json                   permissions + plugins
@@ -127,7 +127,9 @@ preserve that discipline.
 │   ├── mcp-servers.md
 │   ├── decisions.md                    ADRs — why the bundle does NOT do X
 │   ├── examples/                       synthetic daily → page → index sample
-│   │                                   (mock-generated; the vault ships empty)
+│   │                                   (mock-generated; the vault ships empty),
+│   │                                   plus mock-response.json — `wiki-pipeline.py
+│   │                                   --demo` runs it
 │   └── config-reference.md             generated index of all three kinds of
 │                                       config: env vars, bundle.local.yaml
 │                                       keys, registry.yaml task fields
@@ -222,6 +224,7 @@ second copy of a rule, generate it or source it; do not paste it.
 | New offline check | Add it to `scripts/self-test.ps1` and, if it runs on Linux, to `.github/workflows/ci.yml`. |
 | New file structure section | Update the layout block in `README.md` AND in this file. |
 | Sanitization rule clarified | Add to "Sanitization checklist" below AND to `CHANGELOG.md`. |
+| A release changes what a re-install leaves alone | a step under `## Unreleased` in UPGRADING.md; a deprecated setting also gets `_CONFIG_DEPRECATIONS.append(("SETTING", advice))` where utils.py reads it, and stale hook wiring a branch in `bundle-status.py::stale_wiring` (`tests/test_upgrade_notes.py` checks both); rename `## Unreleased` when cutting the release |
 
 ## FINDINGS.md / IDEAS.md in this repo
 
@@ -363,6 +366,7 @@ Setup once: `pip install -r requirements.txt -r requirements-dev.txt`
 | Windows offline check (JSON/YAML/hooks/placeholders) | `powershell -File scripts/self-test.ps1` |
 | PowerShell parse-check | see the `powershell` job in `.github/workflows/ci.yml` |
 | Wiki pipeline end-to-end, spends nothing | `WIKI_LLM_PROVIDER=mock python home-claude/cron/wiki/wiki-pipeline.py --dry-run` |
+| The pipeline on the shipped example, spends nothing | `python home-claude/cron/wiki/wiki-pipeline.py --demo` |
 | The shell tests — push guards, `runtime.sh`, `telegram-send.sh` (by hand, as CI runs them) | `for t in home-claude/cron/tests/test_*.sh; do bash "$t"; done` |
 
 `pytest.ini` is deliberately the reference implementation of the test

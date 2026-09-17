@@ -20,6 +20,11 @@ Read it in this order:
 The shipped vault under `home-claude/wiki/` is empty on purpose and stays that
 way; these files live in `docs/` and are never deployed.
 
+`mock-response.json` is the model answer these files were generated from.
+`python home-claude/cron/wiki/wiki-pipeline.py --demo` regenerates them in a
+sandbox and prints them; `tests/test_pipeline_demo.py` fails when they stop
+matching.
+
 ## What to notice
 
 - **The page is not a summary of the session.** It is one durable fact, written

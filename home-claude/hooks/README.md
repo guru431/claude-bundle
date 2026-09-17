@@ -274,6 +274,10 @@ bundle's own is never run — it could do anything with the payload. Exits 1 whe
 anything is broken, so an installer or a CI step can gate on it. It needs the
 full tier (`cron/`); from a source checkout, run `home-claude/cron/bundle-status.py`.
 
+Wiring an older example taught is reported as `[--] … upgrade: …` — advice, not a
+failure. `--settings` and `--smoke` each imply `--hooks`.
+`self-test.ps1 -InstallPath` runs the doctor with `--smoke`.
+
 ## Adjusting
 
 - `CLAUDE_HOOK_PYTHON` chooses the interpreter `md2pdf-on-edit.py` uses to

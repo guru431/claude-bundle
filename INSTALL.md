@@ -652,6 +652,9 @@ says which tasks can spend anything at all — most cannot.
 - `<PipelineRoot>/cron/logs/rejected/` — the payload itself, aged out by
   `ClaudeLogRetention` after 7 days (`WIKI_REJECTED_RETENTION_DAYS`).
 
+`bundle-status.py` ends with **[where to look]**: the log, ledger and state files
+this install actually has.
+
 Re-run one quarantined daily by hand once you have fixed the cause:
 
 ```

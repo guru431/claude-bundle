@@ -259,3 +259,43 @@ $results.recordedWhenKept = "$((Get-Content (Join-Path $ClaudeHome '.bundle-mani
     assert got["unedited"] is False, "the registry the last install bootstrapped was kept"
     assert got["edited"] is True, "an edited registry would be replaced"
     assert got["recordedWhenKept"] == "", "a kept registry must not be recorded as bootstrapped"
+
+
+@requires_powershell   # one PowerShell process, like the tests above
+def test_install_ps1_replaces_only_a_wiki_index_nobody_changed(tmp_path):
+    """install.ps1 kept ANY existing wiki/index.md, while install.sh replaces one
+    that is still what the last install wrote. Now both keep it only once it has
+    changed — by hand, or by the nightly build-index refreshing its Stats table —
+    and a record-less one, as before."""
+    lay = _layout(tmp_path)
+    shipped = lay["src"] / "home-claude" / "wiki" / "index.md"
+    shipped.parent.mkdir(parents=True)
+    shipped.write_text("# Wiki\n\nThe page this bundle ships now.\n", encoding="utf-8")
+    installed = lay["pipe"] / "wiki" / "index.md"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("# Wiki\n\nThe page the last install wrote.\n", encoding="utf-8")
+    refreshed = tmp_path / "refreshed.md"
+    refreshed.write_text(installed.read_text(encoding="utf-8") + "\n## Stats\n\n| projects/ | 3 |\n",
+                         encoding="utf-8")
+    record = {"written": [{"root": "pipeline_root", "path": "wiki/index.md", "sha256": _sha(installed)}]}
+    code = define_functions(ROOT / "scripts" / "install.ps1", ["Test-KeepWikiIndex"]) + f"""
+$srcHome = {ps_quote(lay['src'] / 'home-claude')}
+$results = [ordered]@{{}}
+$script:previousManifest = $null
+$results.missing = Test-KeepWikiIndex {ps_quote(lay['pipe'] / 'wiki' / 'none.md')}
+$results.shipped = Test-KeepWikiIndex {ps_quote(shipped)}
+$results.noRecord = Test-KeepWikiIndex {ps_quote(installed)}
+$script:previousManifest = {ps_quote(json.dumps(record))} | ConvertFrom-Json
+$results.unchanged = Test-KeepWikiIndex {ps_quote(installed)}
+$results.refreshed = Test-KeepWikiIndex {ps_quote(refreshed)}
+[System.IO.File]::WriteAllText({ps_quote(tmp_path / 'index.json')}, ($results | ConvertTo-Json),
+                               (New-Object System.Text.UTF8Encoding($false)))
+"""
+    r = run_ps(code, tmp_path, cwd=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    got = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
+    assert got["missing"] is False
+    assert got["shipped"] is False, "the shipped page holds nothing of the user's"
+    assert got["noRecord"] is True, "no record of what the last install wrote: kept, as before"
+    assert got["unchanged"] is False, "the page the last install wrote, untouched, was kept"
+    assert got["refreshed"] is True, "a page build-index had refreshed would be replaced"

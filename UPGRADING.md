@@ -86,7 +86,9 @@ Then run `sync.cmd` once (step 4 above).
   the manifest records the registry the installer bootstrapped, and a file that
   still matches it gets the new template, bootstrapped again. This upgrade has
   no such record yet, so it keeps yours one last time — if you never edited it,
-  delete it and re-run the installer.
+  delete it and re-run the installer. `wiki/index.md` now follows `install.sh`
+  too: replaced while it is still the page the last install wrote, kept once you
+  or the nightly index build changed it.
 - **Five descriptions.** The 0.17.0 template wrote the descriptions of
   `ClaudeWikiPipeline`, `ClaudeWikiFlush`, `ClaudeWikiCompileSessions`,
   `ClaudeWikiBuildIndex` and `ClaudeTaskMonitorPosix` as `description: >-`.

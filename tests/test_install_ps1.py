@@ -87,6 +87,13 @@ def test_a_first_full_install_writes_a_manifest_uninstall_can_trust(tmp_path: Pa
     assert registry.read_bytes() == bootstrapped, "the shipped template was not bootstrapped again"
     assert list(claude_home.glob(".bundle-backup-*/cron/registry.yaml")), \
         "the replaced registry was not backed up first"
+    # The same for wiki/index.md, which every re-install kept while install.sh
+    # replaced an untouched one: nothing has run build-index here, so it is still
+    # the installer's own page, replaced and recorded as written — not kept.
+    assert "preserved your existing index.md" not in r.stdout, r.stdout
+    again = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    assert "wiki/index.md" in {e["path"] for e in again["written"]}
+    assert "wiki/index.md" not in again["preserved"]
 
 
 @pytest.mark.integration   # a lite install and an uninstall, ~1.5 s

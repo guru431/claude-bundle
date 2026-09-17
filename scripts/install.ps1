@@ -540,7 +540,7 @@ function Invoke-BundleDiff {
     Info ""
     Info "Caveats, so the list is not read as a plain overwrite plan:"
     Info "  settings.json is MERGED (your keys win; only missing template keys are added)."
-    Info "  A cron/registry.yaml edited since it was bootstrapped, and wiki/index.md, are preserved, not replaced."
+    Info "  A cron/registry.yaml edited since it was bootstrapped, and a wiki/index.md changed since the last install, are preserved, not replaced."
     Info "  Anything 'modified' is backed up to .bundle-backup-<stamp>\ by a real install."
     Info "Nothing was written. Drop -Diff to install."
 }
@@ -558,6 +558,24 @@ function Test-KeepRegistry([string]$path) {
     if (Select-String -Path $path -Pattern '<(bundle-install-path|user)>' -Quiet) { return $false }
     $recorded = "$($script:previousManifest.registry_bootstrapped_sha256)"
     return -not ($recorded -and $recorded -eq (Get-FileHash $path -Algorithm SHA256).Hash)
+}
+
+# Whether a re-install keeps the deployed wiki/index.md — install.sh's rule, from
+# the same record: kept once it is neither the shipped page nor what the LAST
+# install wrote (the `written` hash in its manifest), i.e. once you edited it or
+# the nightly build-index refreshed its Stats table. Every existing index.md used
+# to be kept, so a changed shipped page reached no Windows install that had not
+# run yet, while install.sh replaced it. No record (an older installer, or an
+# index a previous run already kept as yours) still keeps it.
+function Test-KeepWikiIndex([string]$path) {
+    if (-not (Test-Path $path)) { return $false }
+    $hash = (Get-FileHash $path -Algorithm SHA256).Hash
+    $shipped = Join-Path $srcHome 'wiki/index.md'
+    if ((Test-Path $shipped) -and (Get-FileHash $shipped -Algorithm SHA256).Hash -eq $hash) { return $false }
+    $was = @($script:previousManifest.written) |
+        Where-Object { "$($_.root)" -eq 'pipeline_root' -and "$($_.path)" -eq 'wiki/index.md' } |
+        Select-Object -First 1
+    return -not ($was -and "$($was.sha256)" -eq $hash)
 }
 
 # ── What an upgrade leaves for you to do ─────────────────────────────────────
@@ -761,13 +779,13 @@ if ($Profile -eq 'full') {
     # scripts just makes them available; see settings.example-with-hooks.json.
     if ($DryRun) {
         Info "[dry-run] would copy hooks/ -> $ClaudeHome and wiki/, bin/, cron/ -> $PipelineRoot (full tier)"
-        Info "[dry-run] would preserve a registry.yaml edited since it was bootstrapped + manual wiki/index.md"
+        Info "[dry-run] would preserve a registry.yaml edited since it was bootstrapped + a wiki/index.md changed since the last install"
     } else {
         # Reinstall-safety (F5): the -Force cron/ + wiki/ copies would reset a
         # user-bootstrapped registry.yaml (back to placeholders, losing manual
         # task edits) and clobber the hand-written wiki/index.md. Snapshot those
-        # two files byte-for-byte first, restore them after the copy. Which
-        # registry counts as yours is Test-KeepRegistry's call.
+        # two files byte-for-byte first, restore them after the copy. Which of
+        # them counts as yours is Test-KeepRegistry's and Test-KeepWikiIndex's call.
         $preserve = @{}
         $regPath = Join-Path $PipelineRoot 'cron/registry.yaml'
         if (Test-KeepRegistry $regPath) {
@@ -775,7 +793,7 @@ if ($Profile -eq 'full') {
             $preserve[$regPath] = $t
         }
         $idxPath = Join-Path $PipelineRoot 'wiki/index.md'
-        if (Test-Path $idxPath) {
+        if (Test-KeepWikiIndex $idxPath) {
             $t = [System.IO.Path]::GetTempFileName(); Copy-Item $idxPath $t -Force
             $preserve[$idxPath] = $t
         }

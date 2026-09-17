@@ -627,6 +627,10 @@ def safe_session_id(raw) -> str:
 # dedup anymore.
 STATE_PATH = WIKI_ROOT / ".processed.json"
 LOG_MD = WIKI_ROOT / "log.md"
+# Raw payloads kept for inspection (quarantine_raw), aged out by log-retention.
+REJECTED_DIR = BUNDLE_ROOT / "cron" / "logs" / "rejected"
+# Problems with the ledger already reported by this process (see load_state).
+_CORRUPT_STATE_WARNED: set[str] = set()
 
 
 def load_state(persist: bool = True) -> dict:
@@ -653,18 +657,20 @@ def load_state(persist: bool = True) -> dict:
             # Corrupt state file — rebuild from the log.md journal instead of
             # silently resetting dedup (which would re-feed the whole backlog
             # to the LLM). Returned in memory; the next state_add persists it.
-            # Copy the bad file aside FIRST: that next state_add overwrites it,
-            # destroying the only evidence of why dedup reset — exactly when
-            # someone needs it. Quarantine shares the rejected/ dir so the
-            # retention sweep ages it out like any other debug artifact.
-            try:
-                quarantine_raw(STATE_PATH.name, "corrupt-state",
-                               STATE_PATH.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                pass  # unreadable on disk too — the warning below is all we have
-            print(f"WARNING: {STATE_PATH.name} unreadable ({exc}), "
-                  f"quarantined to cron/logs/rejected/, rebuilding from log.md",
-                  file=sys.stderr)
+            #
+            # Reading changes nothing on disk. This used to copy the bad file
+            # into cron/logs/rejected/ on EVERY load, and the read-only helpers
+            # (state_get, attempt_count, quarantined, quarantined_count) load it
+            # many times a run: a monitor or a status script polling a broken
+            # ledger left a new time-stamped copy each second it asked. The copy
+            # is taken where the evidence is actually destroyed — save_state,
+            # before the replace — and once per corrupt content.
+            if str(exc) not in _CORRUPT_STATE_WARNED:
+                _CORRUPT_STATE_WARNED.add(str(exc))
+                print(f"WARNING: {STATE_PATH.name} unreadable ({exc}) — rebuilding "
+                      f"from log.md in memory; the file is copied to "
+                      f"cron/logs/rejected/ before anything overwrites it",
+                      file=sys.stderr)
             return _migrated_state_from_log() or {}
     migrated = _migrated_state_from_log()
     if migrated is None:
@@ -675,11 +681,45 @@ def load_state(persist: bool = True) -> dict:
 
 
 def save_state(state: dict) -> None:
-    """Atomically write the processed-state JSON (temp file + replace)."""
+    """Atomically write the processed-state JSON (temp file + replace).
+
+    A ledger on disk that does not parse is copied aside first (see
+    _preserve_corrupt_state): this replace is what destroys it, and with it the
+    only evidence of why dedup reset — exactly when someone needs it.
+    """
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _preserve_corrupt_state()
     tmp = STATE_PATH.with_name(STATE_PATH.name + ".tmp")
     tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_PATH)
+
+
+def _preserve_corrupt_state() -> None:
+    """Copy an unparseable ledger into cron/logs/rejected/ — once per content.
+
+    Judged the way load_state reads it. The copy's name carries a hash of the
+    bytes, so a write that keeps failing, or the same corruption turning up
+    again, does not add a copy per attempt; different corrupt content gets its
+    own. Best-effort, like every quarantine: a copy that cannot be written must
+    not also cost the write.
+    """
+    try:
+        raw = STATE_PATH.read_bytes()
+    except OSError:
+        return                      # absent or unreadable: nothing can be kept
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        if isinstance(json.loads(text), dict):
+            return
+    except ValueError:              # JSONDecodeError is a ValueError
+        pass
+    reason = f"corrupt-state-{hashlib.sha256(raw).hexdigest()[:16]}"
+    try:
+        if any(REJECTED_DIR.glob(f"*_{reason}.txt")):
+            return                  # this exact content is already preserved
+    except OSError:
+        pass
+    quarantine_raw(STATE_PATH.name, reason, text)
 
 
 def quarantine_raw(source_id: str, reason: str, raw: str) -> None:
@@ -693,7 +733,7 @@ def quarantine_raw(source_id: str, reason: str, raw: str) -> None:
     """
     try:
         import re as _re
-        d = BUNDLE_ROOT / "cron" / "logs" / "rejected"
+        d = REJECTED_DIR
         d.mkdir(parents=True, exist_ok=True)
         safe = _re.sub(r"[^A-Za-z0-9._-]", "_", str(source_id))[:80]
         safe_reason = _re.sub(r"[^A-Za-z0-9._-]", "_", str(reason))[:40]

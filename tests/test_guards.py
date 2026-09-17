@@ -1068,3 +1068,56 @@ def test_a_denial_that_covered_a_project_under_its_old_name_keeps_covering_it(
     assert utils.project_allowed("project.alpha") is False
     assert utils.project_allowed("beta") is True
     assert utils.project_allowed("project_beta") is True   # never lost its name
+
+
+# ── a corrupt ledger: reads leave no trace, the overwrite keeps one copy ────
+
+def test_reading_a_corrupt_ledger_writes_nothing_and_its_overwrite_keeps_one_copy(
+        bundle_tree: Path, monkeypatch):
+    """load_state copied a broken .processed.json into cron/logs/rejected/ on
+    every call — including from the READ-ONLY helpers, which a run or a monitor
+    calls again and again — so a broken ledger multiplied into one time-stamped
+    copy per second per caller. The copy exists to survive the overwrite, so it is
+    taken there, once per content."""
+    from datetime import datetime, timedelta
+    utils = _import_utils(monkeypatch, bundle_tree)
+
+    class Ticking(datetime):
+        """Every now() is a second later: each old-style copy got its own name."""
+        at = datetime(2030, 1, 1)
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.at += timedelta(seconds=1)
+            return cls.at
+
+    monkeypatch.setattr(utils, "datetime", Ticking)
+    rejected = bundle_tree / "cron" / "logs" / "rejected"
+
+    def copies() -> list[Path]:
+        return sorted(rejected.glob("*corrupt-state*")) if rejected.is_dir() else []
+
+    utils.STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    broken = '{"flush": {"processed_jsonls": ["p/a.jsonl@1"'       # cut mid-write
+    utils.STATE_PATH.write_text(broken, encoding="utf-8")
+    for _ in range(3):
+        assert utils.state_get("flush", "processed_jsonls") == set()
+        assert utils.attempt_count("flush", "project:x") == 0
+        assert utils.quarantined("flush") == []
+        assert utils.quarantined_count("flush") == 0
+    assert copies() == [], "reading a broken ledger wrote copies of it"
+    assert utils.STATE_PATH.read_text(encoding="utf-8") == broken, "a read touched the ledger"
+
+    # The write that replaces it keeps ONE copy of exactly what it destroys.
+    assert utils.state_add("flush", "processed_jsonls", ["p/b.jsonl@9"]) is True
+    assert len(copies()) == 1
+    assert copies()[0].read_text(encoding="utf-8") == broken
+    assert utils.state_get("flush", "processed_jsonls") == {"p/b.jsonl@9"}
+
+    # The same corruption again is already preserved; a different one is not.
+    utils.STATE_PATH.write_text(broken, encoding="utf-8")
+    utils.state_add("flush", "processed_jsonls", ["p/c.jsonl@1"])
+    assert len(copies()) == 1
+    utils.STATE_PATH.write_text("[]", encoding="utf-8")
+    utils.state_add("flush", "processed_jsonls", ["p/d.jsonl@1"])
+    assert len(copies()) == 2

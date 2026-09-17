@@ -576,6 +576,16 @@ template and your deployed manifest, and fails on such a near miss. Entries in
 `allow_projects` / `skip_projects` are compared as normalized project names —
 the slugs the wiki's project folders carry — on both sides.
 
+**A denial holds back; it does not finish.** Compile never sends the section of
+a denied project, even one flushed into a daily log before you denied it, and
+it no longer marks that daily compiled: the daily is re-read on every run,
+sending nothing, until the policy allows the project — and then its sections
+are compiled. So relaxing the policy compiles what the daily logs already hold
+for that project, and a `bundle.local.yaml` that failed to parse for a night
+(which denies everything) delays that night's compile instead of dropping it.
+Keep a project denied, or delete its sections from `wiki/daily/`, if what was
+written down must never leave the machine.
+
 ### What the policy is NOT
 
 The allowlist gates **which sources are read**. It is not a DLP boundary,

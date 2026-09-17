@@ -177,6 +177,18 @@ def daily_units(daily_stem: str, daily_text: str,
     return units
 
 
+def held_by_policy(units: dict[str, CompileUnit]) -> list[str]:
+    """Projects with a section still to compile that the privacy policy denies.
+
+    Held back means "not tonight", as it does for flush, whose sources stay
+    unread rather than marked. Such a daily is never marked compiled: that marker
+    used to be written all the same, so relaxing the policy compiled nothing —
+    and a bundle.local.yaml that failed to parse for one night, which denies
+    every project, finalized each daily it met with none of it sent.
+    """
+    return sorted(p for p, u in units.items() if u.markers and not project_allowed(p))
+
+
 def get_compiled_dailies() -> set[str]:
     """Return the set of already-compiled daily dates from .processed.json."""
     return state_get("compile_sessions", "compiled_dailies")
@@ -879,8 +891,23 @@ def _compile(rec: dict) -> int:
     compiled_pairs = get_compiled_pairs() - set(replayed.get("compiled_pairs", []))
     log(f"Already compiled: {len(compiled)} daily logs, {len(compiled_pairs)} (daily, project) pairs")
 
-    dailies = find_uncompiled_dailies(compiled)
+    dailies = []
+    waiting: dict[str, list[str]] = {}
+    for daily in find_uncompiled_dailies(compiled):
+        units = daily_units(daily[0].stem, daily[2], compiled_pairs)
+        held = held_by_policy(units)
+        # Nothing it may send tonight, only sections held back: re-read on every
+        # run, but not a daily of this run — or an idle night would stop reading
+        # as idle, and the check for a lost flush below would never run again.
+        if held and not any(u.markers and project_allowed(p) for p, u in units.items()):
+            waiting[daily[0].name] = held
+            continue
+        dailies.append(daily)
     log(f"New daily logs: {len(dailies)}")
+    if waiting:
+        projects = sorted({p for names in waiting.values() for p in names})
+        log(f"Held back, denied by policy until it allows them: {len(waiting)} daily "
+            f"log(s), projects {projects}")
 
     if not dailies and is_dry_run():
         # A preview flush consumes nothing, so the drafts it read are still in
@@ -952,6 +979,7 @@ def _compile(rec: dict) -> int:
             f"{sum(u.total for u in units.values())} sections")
 
         failed = 0
+        held = held_by_policy(units)
         for project, unit in units.items():
             # The privacy policy is unified across the pipeline, and this phase
             # was the hole in it: flush gates every SOURCE, but a project added
@@ -1074,6 +1102,9 @@ def _compile(rec: dict) -> int:
             hard_failure = True
             log(f"  {failed}/{len(units)} project(s) failed — "
                 f"{daily_path.name} left uncompiled for retry")
+        elif held:
+            log(f"  {daily_path.name} not marked compiled: {len(held)} project(s) "
+                f"held back by the privacy policy are compiled once it allows them")
         else:
             record_markers("compiled_dailies", [f"{daily_path.stem}@{daily_fp}"], log)
             with open(LOG_MD, "a", encoding="utf-8") as f:

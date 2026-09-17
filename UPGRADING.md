@@ -212,6 +212,11 @@ Then run `sync.cmd` once (step 4 above).
   `flush.processed_sources`, `memory.deferred`.
 - Compile markers are now kept per section of a daily; markers written by older
   versions are still honoured, so nothing already compiled is sent again.
+- **A daily with a section the privacy policy denies is no longer marked
+  compiled**, so the section is compiled once the policy allows its project.
+  A daily an older version already marked stays marked; to compile a held-back
+  project's sections from it, `python <PipelineRoot>/cron/wiki/wiki-compile-sessions.py
+  --replay DATE#project` (the other projects' sections are not sent again).
 - **`wiki/.processed.json.lock` is now a permanent file** held with an operating
   system lock. An older version reads its mere presence as a lock somebody holds
   and skips its state writes. Do not let a nightly task run the old code while

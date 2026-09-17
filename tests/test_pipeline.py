@@ -650,6 +650,44 @@ def test_compile_honours_skip_projects(bundle: Path):
         "a denied project got a wiki namespace"
 
 
+def test_a_held_back_section_is_compiled_once_the_policy_allows_it(bundle: Path):
+    """A denied section was left unmarked, but its daily was marked compiled all
+    the same, so no later run opened that daily again: relaxing the policy
+    compiled nothing, and a bundle.local.yaml that failed to parse for a night —
+    which denies every project — finalized each daily with none of it sent."""
+    pytest.importorskip("yaml")
+    compile_sessions = bundle / "cron" / "wiki" / "wiki-compile-sessions.py"
+    project_dir = bundle / "wiki" / "projects" / "myproject"
+    with open(bundle / "wiki" / "daily" / "2026-01-01.md", "a", encoding="utf-8") as daily:
+        daily.write("\n## alpha\nMoved the alpha exporter to the new queue; retries now back off.\n")
+    nothing = bundle / "empty_response.json"
+    nothing.write_text("[]", encoding="utf-8")
+    manifest = bundle / "bundle.local.yaml"
+    manifest.write_text("skip_projects:\n  - myproject\n", encoding="utf-8")
+
+    r = _run(compile_sessions, {"WIKI_LLM_MOCK_RESPONSE": str(nothing)}, cwd=bundle)
+    assert r.returncode == 0 and "[alpha] → 0 changes" in r.stdout, f"{r.stdout}\n{r.stderr}"
+    assert not project_dir.exists(), "a held-back section was sent"
+    # The next night has nothing it may send: idle, with alpha not sent again.
+    r = _run(compile_sessions, {"WIKI_LLM_MOCK_RESPONSE": str(nothing)}, cwd=bundle)
+    assert r.returncode == 0 and "Nothing to compile" in r.stdout, r.stdout
+    assert "Held back, denied by policy" in r.stdout and "myproject" in r.stdout, r.stdout
+
+    manifest.unlink()
+    page = bundle / "page_response.json"
+    page.write_text(json.dumps(
+        [{"path": "projects/myproject/boundary-check.md", "action": "create",
+          "content": "# Boundary check\n\nOff by one, fixed and verified. [[index]]\n"}]),
+        encoding="utf-8")
+    r = _run(compile_sessions, {"WIKI_LLM_MOCK_RESPONSE": str(page)}, cwd=bundle)
+    assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+    assert (project_dir / "boundary-check.md").is_file(), \
+        f"the section was not compiled once the policy allowed it:\n{r.stdout}"
+    assert "[alpha] existing pages" not in r.stdout, "alpha's compiled section was sent again"
+    r = _run(compile_sessions, {"WIKI_LLM_MOCK_RESPONSE": str(page)}, cwd=bundle)
+    assert "Nothing to compile" in r.stdout, f"the daily was not finished after that:\n{r.stdout}"
+
+
 def test_flush_dedup(bundle: Path, tmp_path: Path):
     """flush turns a JSONL session into a daily log and records it processed;
     a second run must NOT reprocess it (dedup via .processed.json)."""

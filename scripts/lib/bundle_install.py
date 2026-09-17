@@ -13,6 +13,7 @@ The install manifest is the SAME file install.ps1 writes, so either installer's
      "written":   [{"root": "claude_home" | "pipeline_root", "path", "sha256"}],
      "preserved": ["settings.json", ".env", ...],
      "registry_template_sha256": "...",
+     "registry_bootstrapped_sha256": "...",
      "scheduler": {"target", "units_dir", "units": [{"path", "sha256"}]}}
 
 `scheduler` is the POSIX addition — the units `install.sh --install-units`
@@ -20,7 +21,10 @@ placed, so uninstall.sh disables and removes exactly those. uninstall.ps1 never
 reads it. `registry_template_sha256` (full tier, both installers) is the shipped
 cron/registry.yaml the install came from: an edited registry is kept and carries
 no hash, so the next install needs it to tell whether the task definitions
-changed. Hashes are upper-case hex, as Get-FileHash writes them.
+changed. `registry_bootstrapped_sha256` is the Windows addition — the registry
+install.ps1 bootstrapped, which a re-install replaces while it still matches; on
+POSIX the registry keeps its placeholders and sits in `written` with its own
+hash. Hashes are upper-case hex, as Get-FileHash writes them.
 
 Subcommands (paths absolute):
   merge-settings SRC DST BACKUP  add the template keys DST lacks (yours win);

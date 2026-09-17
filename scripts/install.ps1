@@ -185,6 +185,14 @@ function Write-Manifest($tier) {
     if ($tier -eq 'full' -and (Test-Path $regTemplate)) {
         $mf | Add-Member -NotePropertyName registry_template_sha256 -NotePropertyValue (Get-FileHash $regTemplate -Algorithm SHA256).Hash
     }
+    # And the registry this run BOOTSTRAPPED, so the next install can tell an
+    # untouched one from yours (Test-KeepRegistry). Never for a kept registry:
+    # that is the file you edited, or one no installer recorded.
+    $regDeployed = Join-Path $PipelineRoot 'cron/registry.yaml'
+    if ($tier -eq 'full' -and -not $script:registryKept -and (Test-Path $regDeployed) -and
+        -not (Select-String -Path $regDeployed -Pattern '<(bundle-install-path|user)>' -Quiet)) {
+        $mf | Add-Member -NotePropertyName registry_bootstrapped_sha256 -NotePropertyValue (Get-FileHash $regDeployed -Algorithm SHA256).Hash
+    }
     $json = ($mf | ConvertTo-Json -Depth 4)
     # Manifest lives at ClaudeHome: it is the root that always exists (lite has no
     # pipeline) and the one a user can find without remembering where the pipeline went.
@@ -526,9 +534,24 @@ function Invoke-BundleDiff {
     Info ""
     Info "Caveats, so the list is not read as a plain overwrite plan:"
     Info "  settings.json is MERGED (your keys win; only missing template keys are added)."
-    Info "  A bootstrapped cron/registry.yaml and wiki/index.md are preserved, not replaced."
+    Info "  A cron/registry.yaml edited since it was bootstrapped, and wiki/index.md, are preserved, not replaced."
     Info "  Anything 'modified' is backed up to .bundle-backup-<stamp>\ by a real install."
     Info "Nothing was written. Drop -Diff to install."
+}
+
+# Whether a re-install keeps the deployed cron/registry.yaml. One that still has
+# placeholders is a fresh template, replaced. A bootstrapped one is kept — unless
+# it is byte for byte what the LAST install bootstrapped (its manifest records
+# the hash): nothing of yours is in it but the path and account step 4 fills in
+# again, so the new template replaces it, as install.sh replaces an unedited
+# registry. Every bootstrapped registry used to be kept, so an upgrade's new
+# tasks and defaults reached no Windows install. No recorded hash (an older
+# installer) still keeps it.
+function Test-KeepRegistry([string]$path) {
+    if (-not (Test-Path $path)) { return $false }
+    if (Select-String -Path $path -Pattern '<(bundle-install-path|user)>' -Quiet) { return $false }
+    $recorded = "$($script:previousManifest.registry_bootstrapped_sha256)"
+    return -not ($recorded -and $recorded -eq (Get-FileHash $path -Algorithm SHA256).Hash)
 }
 
 # ── What an upgrade leaves for you to do ─────────────────────────────────────
@@ -584,7 +607,7 @@ function Get-UpgradeNotes($prev, [string]$tier) {
     }
     $sync = Join-Path $PipelineRoot 'cron\admin\sync.cmd'
     if ($regChanged -and $script:registryKept) {
-        $notes += "the shipped registry changed since your last install, and yours was kept (a bootstrapped registry is never replaced): carry the changes over from $template — or, if you never edited $(Join-Path $PipelineRoot 'cron\registry.yaml'), delete it and re-run this installer — then run $sync"
+        $notes += "the shipped registry changed since your last install, and yours was kept (edited since it was bootstrapped, or bootstrapped by an installer that recorded no checksum): carry the changes over from $template — or, if you never edited $(Join-Path $PipelineRoot 'cron\registry.yaml'), delete it and re-run this installer — then run $sync"
     } elseif (($regChanged -or $syncerChanged) -and $syncStatus -ne 'yes') {
         $notes += "the task definitions changed since your last install — run $sync so Task Scheduler matches (it lists each task it changes as updated)"
     }
@@ -732,17 +755,16 @@ if ($Profile -eq 'full') {
     # scripts just makes them available; see settings.example-with-hooks.json.
     if ($DryRun) {
         Info "[dry-run] would copy hooks/ -> $ClaudeHome and wiki/, bin/, cron/ -> $PipelineRoot (full tier)"
-        Info "[dry-run] would preserve an existing bootstrapped registry.yaml + manual wiki/index.md"
+        Info "[dry-run] would preserve a registry.yaml edited since it was bootstrapped + manual wiki/index.md"
     } else {
         # Reinstall-safety (F5): the -Force cron/ + wiki/ copies would reset a
         # user-bootstrapped registry.yaml (back to placeholders, losing manual
         # task edits) and clobber the hand-written wiki/index.md. Snapshot those
-        # two files byte-for-byte first, restore them after the copy. A registry
-        # that still has placeholders is a fresh template — let it be replaced.
+        # two files byte-for-byte first, restore them after the copy. Which
+        # registry counts as yours is Test-KeepRegistry's call.
         $preserve = @{}
         $regPath = Join-Path $PipelineRoot 'cron/registry.yaml'
-        if ((Test-Path $regPath) -and
-            -not (Select-String -Path $regPath -Pattern '<(bundle-install-path|user)>' -Quiet)) {
+        if (Test-KeepRegistry $regPath) {
             $t = [System.IO.Path]::GetTempFileName(); Copy-Item $regPath $t -Force
             $preserve[$regPath] = $t
         }

@@ -26,8 +26,9 @@ pytestmark = [
 ]
 
 
-# ~20 s, nearly all of it the self-test the installer runs at the end. One
-# install, both assertions: a second one would double that, and a module-scoped
+# ~20 s per install, nearly all of it the self-test the installer runs at the
+# end. Two installs, because the second one is itself under test (the registry a
+# re-install replaces); every other assertion shares the first. A module-scoped
 # fixture would run before conftest.py has emptied the environment.
 @pytest.mark.integration
 def test_a_first_full_install_writes_a_manifest_uninstall_can_trust(tmp_path: Path):
@@ -71,6 +72,21 @@ def test_a_first_full_install_writes_a_manifest_uninstall_can_trust(tmp_path: Pa
     # X1, the other side: the full tier does install /wiki — and no `/README`.
     assert "commands/wiki.md" in written
     assert not (claude_home / "commands" / "README.md").exists()
+
+    # A bootstrapped registry was kept by EVERY re-install, edited or not, so no
+    # upgrade's task definitions reached it. The one this install bootstrapped
+    # is recorded, and a re-install that finds it untouched replaces it with the
+    # shipped template, bootstrapped again (an edited one is Test-KeepRegistry's
+    # other answer, tested in test_install_upgrade_notes.py).
+    bootstrapped = registry.read_bytes()
+    assert mf["registry_bootstrapped_sha256"] == hashlib.sha256(bootstrapped).hexdigest().upper()
+    r = run_ps_file(ROOT / "scripts" / "install.ps1", "-Profile", "full", "-NonInteractive", "-Force",
+                    "-ClaudeHome", claude_home, env=env, cwd=tmp_path, timeout=900)
+    assert "wrote .bundle-manifest.json" in r.stdout, r.stdout + r.stderr
+    assert "preserved your existing registry.yaml" not in r.stdout, r.stdout
+    assert registry.read_bytes() == bootstrapped, "the shipped template was not bootstrapped again"
+    assert list(claude_home.glob(".bundle-backup-*/cron/registry.yaml")), \
+        "the replaced registry was not backed up first"
 
 
 @pytest.mark.integration   # a lite install and an uninstall, ~1.5 s

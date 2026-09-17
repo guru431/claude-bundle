@@ -204,3 +204,58 @@ $results.first = @(Get-UpgradeNotes $null 'full')
         "the last install was FULL and this one is lite — cron/, wiki/, bin/ and hooks/ were "
         "NOT updated. Re-run with -Profile full"], got["lite"]
     assert got["first"] == []
+
+
+@requires_powershell   # one PowerShell process, like the test above
+def test_install_ps1_replaces_only_a_registry_it_bootstrapped_and_nobody_edited(tmp_path):
+    """install.ps1 kept EVERY bootstrapped registry, so no upgrade's new tasks or
+    defaults reached a Windows install, while install.sh replaced an unedited one.
+    The manifest now records the registry the installer bootstrapped, and a
+    re-install replaces a file that still matches it — never an edited one, and
+    never one an older installer left without that record."""
+    lay = _layout(tmp_path)
+    (lay["src"] / "home-claude" / "cron" / "registry.yaml").write_text(
+        "tasks:\n  - name: X\n    script: <bundle-install-path>\\cron\\x.py\n    user: <user>\n",
+        encoding="utf-8")
+    reg = lay["pipe"] / "cron" / "registry.yaml"
+    reg.write_text("tasks:\n  - name: X\n    script: C:\\b\\cron\\x.py\n    user: me\n", encoding="utf-8")
+    edited = tmp_path / "edited.yaml"
+    edited.write_text(reg.read_text(encoding="utf-8") + "    enabled: false\n", encoding="utf-8")
+    code = define_functions(ROOT / "scripts" / "install.ps1",
+                            ["Test-KeepRegistry", "Write-Manifest", "Good", "Info"]) + f"""
+$srcHome = {ps_quote(lay['src'] / 'home-claude')}
+$ClaudeHome = {ps_quote(lay['home'])}; $homeFull = $ClaudeHome
+$PipelineRoot = {ps_quote(lay['pipe'])}; $pipeFull = $PipelineRoot
+$DryRun = $false; $bundleVer = '0.18.0'
+$script:written = New-Object System.Collections.Generic.List[object]
+$script:preserved = New-Object System.Collections.Generic.List[string]
+$results = [ordered]@{{}}
+
+$script:previousManifest = $null
+$results.template = Test-KeepRegistry (Join-Path $srcHome 'cron/registry.yaml')
+$results.noManifest = Test-KeepRegistry {ps_quote(reg)}
+$results.missing = Test-KeepRegistry (Join-Path $PipelineRoot 'cron/none.yaml')
+
+# What this run bootstrapped is recorded — and a kept registry is not.
+$script:registryKept = $false
+Write-Manifest 'full'
+$script:previousManifest = Get-Content (Join-Path $ClaudeHome '.bundle-manifest.json') -Raw | ConvertFrom-Json
+$results.recorded = "$($script:previousManifest.registry_bootstrapped_sha256)"
+$results.unedited = Test-KeepRegistry {ps_quote(reg)}
+$results.edited = Test-KeepRegistry {ps_quote(edited)}
+$script:registryKept = $true
+Write-Manifest 'full'
+$results.recordedWhenKept = "$((Get-Content (Join-Path $ClaudeHome '.bundle-manifest.json') -Raw | ConvertFrom-Json).registry_bootstrapped_sha256)"
+[System.IO.File]::WriteAllText({ps_quote(tmp_path / 'keep.json')}, ($results | ConvertTo-Json),
+                               (New-Object System.Text.UTF8Encoding($false)))
+"""
+    r = run_ps(code, tmp_path, cwd=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    got = json.loads((tmp_path / "keep.json").read_text(encoding="utf-8"))
+    assert got["template"] is False, "a template with placeholders is not the user's"
+    assert got["noManifest"] is True, "no record of what was bootstrapped: kept, as before"
+    assert got["missing"] is False
+    assert got["recorded"] == _sha(reg)
+    assert got["unedited"] is False, "the registry the last install bootstrapped was kept"
+    assert got["edited"] is True, "an edited registry would be replaced"
+    assert got["recordedWhenKept"] == "", "a kept registry must not be recorded as bootstrapped"

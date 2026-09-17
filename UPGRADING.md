@@ -22,11 +22,13 @@ explains why things changed; this file says what to do about it.
 3. **Read the end of the installer's output.** It says when the version changed
    (pointing here), when the task definitions changed since your last install,
    and which files an earlier install placed that this one no longer ships.
-4. **Windows, full tier: the task registry.** Your bootstrapped
-   `<PipelineRoot>\cron\registry.yaml` is kept, so new tasks and changed
-   defaults in `home-claude\cron\registry.yaml` reach it only if you carry them
-   over. If you never edited yours, the quick way is to delete it and re-run the
-   installer, which bootstraps the new one. Then run
+4. **Windows, full tier: the task registry.** A
+   `<PipelineRoot>\cron\registry.yaml` you edited since the installer
+   bootstrapped it is kept, so new tasks and changed defaults in
+   `home-claude\cron\registry.yaml` reach it only if you carry them over; one
+   you never edited is replaced and bootstrapped again. An install made before
+   the installer recorded that checksum keeps even an unedited registry once:
+   delete it and re-run the installer. Then run
    `<PipelineRoot>\cron\admin\sync.cmd` — it lists every task it changes as
    `updated`, with the field that differed.
 5. **POSIX, full tier: the units.** An unedited `cron/registry.yaml` is replaced
@@ -80,6 +82,11 @@ form.
 
 Then run `sync.cmd` once (step 4 above).
 
+- **A re-install now replaces a registry nobody edited**, as `install.sh` does:
+  the manifest records the registry the installer bootstrapped, and a file that
+  still matches it gets the new template, bootstrapped again. This upgrade has
+  no such record yet, so it keeps yours one last time — if you never edited it,
+  delete it and re-run the installer.
 - **Five descriptions.** The 0.17.0 template wrote the descriptions of
   `ClaudeWikiPipeline`, `ClaudeWikiFlush`, `ClaudeWikiCompileSessions`,
   `ClaudeWikiBuildIndex` and `ClaudeTaskMonitorPosix` as `description: >-`.

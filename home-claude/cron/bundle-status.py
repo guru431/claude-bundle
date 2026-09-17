@@ -3,8 +3,9 @@
 wired, or did files just get copied?" (IDEAS "full-profile status page").
 
 Prints a read-only snapshot: config + provider keys, the effective privacy
-policy, the Task Scheduler launcher, pipeline state (pending queue, processed
-count, last per-phase success checkpoint, quarantine), and wiki page counts.
+policy, settings an upgrade left behind, the Task Scheduler launcher, pipeline
+state (pending queue, processed count, last per-phase success checkpoint,
+quarantine), wiki page counts, and where this install keeps its logs and state.
 Makes NO network call and changes nothing. Run it any time:
 
   python ~/.claude/cron/bundle-status.py
@@ -17,6 +18,7 @@ for the pass/fail check). Lines are tagged [ok] / [--] / [!!] for quick scanning
 is the hook doctor instead: every command hook in settings.json — does it parse,
 do its interpreter and script exist — and with --smoke, one run of each hook the
 bundle ships, with a payload it ignores. That mode exits 1 when a hook is broken.
+Wiring an older example taught is reported as `upgrade:` advice, never as broken.
 """
 import argparse
 import json
@@ -35,17 +37,17 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
-    config_report, config_errors,
+    config_report, config_errors, config_deprecations,
     PROJECT_MAP, manifest_broken, policy_summary,
     BUNDLE_ROOT, WIKI_ROOT, PENDING_DIR, STATE_PATH, LLM_PROVIDER,
     DEFAULT_CHAIN, PROVIDERS, _env_first, ALLOW_OFFBOX,
     PROJECTS_ROOT, PROJECTS_ROOT_SOURCE, count_wiki_pages,
-    CLAUDE_HOME, find_bash,
+    CLAUDE_HOME, find_bash, CHAIN_DEAD_PATH, _DEPLETED_PATH, _AUDIT_DIR,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runs import (read_latest_runs, latest_by_task,  # noqa: E402
-                  freshness_windows, age_days, never_recorded)
+                  freshness_windows, age_days, never_recorded, runs_logs)
 
 
 def ok(msg):   print(f"  [ok] {msg}")
@@ -122,6 +124,11 @@ def main() -> int:
         print(f"  cfg | {line}")
     for err in config_errors():
         bad(f"config: {err}")
+    # A setting an upgrade left behind still WORKS, so nothing above goes red for
+    # it — which is how `WIKI_LLM_PROVIDER=deepseek` quietly stopped being a
+    # chain on every install that carried it across 0.16.0.
+    for note in config_deprecations():
+        bad(f"deprecated: {note} (see UPGRADING.md)")
     print(f"  project_map entries: {len(PROJECT_MAP)}")
 
     # One value, two historical spellings (bundle.local.yaml::projects_root and
@@ -259,8 +266,60 @@ def main() -> int:
     n_daily = len(list(daily.glob("????-??-??.md"))) if daily.is_dir() else 0
     print(f"  daily logs:      {n_daily}")
 
+    where_to_look()
+
     print(f"\n(status generated {date.today().isoformat()})")
     return 0
+
+
+def _newest(directory: Path, pattern: str) -> Path | None:
+    """The most recently written match of `pattern` in `directory`, or None."""
+    try:
+        return max(directory.glob(pattern), key=lambda p: p.stat().st_mtime, default=None)
+    except OSError:
+        return None
+
+
+def where_to_look() -> None:
+    """The files that answer "what happened last night", for THIS install.
+
+    They were spread across INSTALL.md, the architecture doc, the .env template
+    and the CHANGELOG, so someone new had no way to learn that depleted.json or
+    the launcher's own log existed. Resolved from this install's root, and only
+    what is actually there — a path to a file that was never written sends a
+    reader looking for something that cannot help.
+    """
+    print("\n[where to look]")
+    logs, state = BUNDLE_ROOT / "cron" / "logs", BUNDLE_ROOT / "cron" / "state"
+
+    def existing(path: Path) -> str | None:
+        return str(path) if path.exists() else None
+
+    task_log = _newest(logs, "*_????-??-??.log")
+    attempts = _newest(_AUDIT_DIR, "provider_attempts_????-??-??.jsonl")
+    ledger = runs_logs()
+    places = [
+        ("what each task printed",
+         task_log and f"{logs / '<task>_<date>.log'}   (newest: {task_log.name})"),
+        ("a task the scheduler could not even start", existing(logs / "launcher.log")),
+        ("every provider call: status, latency, whether a fallback fired",
+         attempts and f"{_AUDIT_DIR / 'provider_attempts_<date>.jsonl'}   (newest: {attempts.name})"),
+        ("each task's last verdict, behind [artifact health] above",
+         ledger and str(ledger[-1])),
+        ("providers taken out of service, and why", existing(_DEPLETED_PATH)),
+        ("when every provider last failed at once", existing(CHAIN_DEAD_PATH)),
+        ("failures the task monitor has already alerted on",
+         existing(state / "task-monitor-seen.json")
+         or existing(state / "task-monitor-posix-seen.json")),
+        ("what was sent and compiled: markers, retry counts, quarantine", existing(STATE_PATH)),
+        ("payloads the pipeline gave up on", existing(logs / "rejected")),
+        ("one finding per source it gave up on", existing(BUNDLE_ROOT / "FINDINGS.md")),
+    ]
+    found = [(why, where) for why, where in places if where]
+    if not found:
+        na(f"nothing yet under {BUNDLE_ROOT} — no task has run from this install")
+    for why, where in found:
+        print(f"  {why}:\n      {where}")
 
 
 # ── hook doctor (--hooks) ────────────────────────────────────────────────────
@@ -326,7 +385,44 @@ def _hook_argv(hook: dict) -> tuple[list[str] | None, str]:
         return None, f"does not parse as a shell command ({exc})"
 
 
-def _check_hook(event: str, hook: dict, smoke: bool, scratch: Path) -> bool:
+# The converter budget md2pdf-on-edit.py waits for (MD2PDF_TIMEOUT, default 120)
+# plus the 30 s it adds for the converter's own cleanup. A hook `timeout` below
+# the sum lets Claude Code kill the hook first — the example sets 180.
+MD2PDF_HOOK_MIN_TIMEOUT = 150
+
+
+def stale_wiring(event: str, matcher, hook: dict, script: str) -> str | None:
+    """What an older settings.example-with-hooks.json taught and the bundle no
+    longer recommends for this entry, or None.
+
+    Advice, never a failure: every one of these still runs. But a re-install
+    never touches the hooks in settings.json, so nothing else would ever say so.
+    Each script named here has its step in UPGRADING.md, which
+    tests/test_upgrade_notes.py checks.
+    """
+    if script == "session-telegram.py" and event == "Stop":
+        return ("the example now wires this hook to Notification with the matcher "
+                "idle_prompt|permission_prompt — Stop fires after every answer; keep "
+                "it only for headless `claude -p` runs")
+    if script == "session-telegram.py" and event == "Notification" and not matcher:
+        return ("give this entry the matcher idle_prompt|permission_prompt — the other "
+                "notification types were never worth an alert")
+    if script == "ps1-bom-guard.py":
+        return ("renamed text-encoding-guard.py, which also fixes .sh files; the old "
+                "name keeps working")
+    if script == "block-iptables-save-to-rules.py":
+        return ("bash-guard.py carries the same rule — drop this entry unless PyYAML is "
+                "missing, which makes bash-guard.py inert")
+    timeout = hook.get("timeout")
+    if script == "md2pdf-on-edit.py" and (not isinstance(timeout, (int, float))
+                                          or timeout < MD2PDF_HOOK_MIN_TIMEOUT):
+        return (f"set \"timeout\": 180 — the hook waits up to {MD2PDF_HOOK_MIN_TIMEOUT} s "
+                f"for the converter, and a shorter timeout kills it before its cleanup")
+    return None
+
+
+def _check_hook(event: str, hook: dict, smoke: bool, scratch: Path,
+                matcher=None) -> bool:
     """Print the verdict for one hook entry; True when it is broken."""
     if hook.get("type") != "command":
         na(f"{event}: a `{hook.get('type')}` hook — not checked")
@@ -363,6 +459,9 @@ def _check_hook(event: str, hook: dict, smoke: bool, scratch: Path) -> bool:
         return True
     if event == "SessionEnd" and "timeout" not in hook:
         na(f"{label}: no `timeout` — every SessionEnd hook then shares a 1.5 s budget")
+    advice = stale_wiring(event, matcher, hook, Path(scripts[0]).name if scripts else "")
+    if advice:
+        na(f"{label}: upgrade: {advice}")
 
     if not smoke:
         ok(f"{label}: command resolves")
@@ -429,7 +528,7 @@ def check_hooks(settings_arg: str | None, smoke: bool) -> int:
                     if not isinstance(hook, dict):
                         bad(f"{event}: a hook that is not an object")
                         broken += 1
-                    elif _check_hook(event, hook, smoke, Path(tmp)):
+                    elif _check_hook(event, hook, smoke, Path(tmp), group.get("matcher")):
                         broken += 1
     print(f"\n{broken} broken hook(s)" if broken else "\nall hooks resolve")
     return 1 if broken else 0

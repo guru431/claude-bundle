@@ -35,7 +35,7 @@ explains why things changed; this file says what to do about it.
    `scripts/gen-scheduler.py --check` shows what the installed units lack.
 6. **Check the result.**
    - `powershell -File scripts/self-test.ps1 -InstallPath <PipelineRoot>` —
-     Windows; it runs everything below.
+     Windows; it includes both checks below, with `--smoke`.
    - `python <PipelineRoot>/cron/bundle-status.py` — prints `deprecated:` for a
      setting a release changed the meaning of, and the effective configuration.
    - `python <PipelineRoot>/cron/bundle-status.py --hooks` — the hooks your
@@ -148,10 +148,10 @@ Then run `sync.cmd` once (step 4 above).
 - **`MD2PDF_TIMEOUT` is a total** across every browser the converter tries
   (default 120). A value raised for one slow browser is now shared: with two
   installed, the first gets about half.
-- **`WIKI_LLM_PROVIDER=local`** ignores `HTTP_PROXY`/`HTTPS_PROXY` and refuses a
-  redirect, and `localhost` or `*.localhost` must resolve to loopback. A local
-  server reached any other way is refused; name a LAN machine — by host or by
-  address — in `LOCAL_LLM_ALLOWED_HOSTS`.
+- **`WIKI_LLM_PROVIDER=local`** no longer goes through `HTTP_PROXY` /
+  `HTTPS_PROXY`, refuses a redirect, and accepts `localhost` or `*.localhost`
+  only when the name resolves to loopback. A server on another machine must be
+  named in `LOCAL_LLM_ALLOWED_HOSTS` — by host name or, now also, by address.
 - **The Windows task monitor's findings watch** reads the projects under
   `projects_root` and nothing else. Without it, only the bundle's own
   `FINDINGS.md` is read (it used to scan the directory above the bundle).

@@ -4,15 +4,46 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
-from ps_helpers import ROOT, requires_powershell, run_ps_file
+from ps_helpers import ROOT, define_functions, ps_quote, requires_powershell, run_ps, run_ps_file
 
 pytestmark = requires_powershell
 
 SELF_TEST = ROOT / "scripts" / "self-test.ps1"
+
+
+def test_child_output_keeps_its_characters_and_the_console_its_code_page(tmp_path: Path):
+    """A guard's em dash came back as `Ч` (cp1251 bytes read as cp866), and a
+    `→` killed the Python child outright — it cannot be encoded in cp1251.
+    Checked on the console as it is and on one switched to CP-1251, and the
+    console must keep its code page afterwards. The result is written from
+    PowerShell to a UTF-16 file: no pipe back to this process decides it."""
+    out = tmp_path / "captured.txt"
+    code = define_functions(SELF_TEST, ["Invoke-Checked"]) + f"""
+$script:lastRc = 0
+$lines = @()
+foreach ($cp in @(0, 1251)) {{
+    if ($cp) {{ [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding($cp) }}
+    $before = [Console]::OutputEncoding.CodePage
+    $got = Invoke-Checked {{ & {ps_quote(sys.executable)} -c "print('dash:\\u2014 arrow:\\u2192 cyr:\\u0436')" }}
+    $lines += "cp=$before rc=$script:lastRc text=$got after=$([Console]::OutputEncoding.CodePage) pyenc=[$env:PYTHONIOENCODING]"
+}}
+[System.IO.File]::WriteAllLines({ps_quote(out)}, $lines, [System.Text.Encoding]::Unicode)
+"""
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONIOENCODING"}
+    r = run_ps(code, tmp_path, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    rows = out.read_text(encoding="utf-16").splitlines()
+    assert len(rows) == 2, rows
+    for row in rows:
+        before = row.split()[0].split("=")[1]
+        assert row == (f"cp={before} rc=0 text=dash:— arrow:→ cyr:ж "
+                       f"after={before} pyenc=[]"), row
+    assert rows[1].startswith("cp=1251 ")
 
 
 @pytest.mark.integration   # the whole source-mode self-test, ~10 s

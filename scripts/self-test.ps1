@@ -81,16 +81,40 @@ function Warn($msg) { Write-Host "[WARN] $msg" -ForegroundColor Yellow; $script:
 # child as [FAIL] — without this it would instead kill the whole self-test with
 # an unreadable error, precisely when something is broken. Returns the combined
 # output; the child's exit code lands in $script:lastRc.
+#
+# And it decodes that output as UTF-8. PS 5.1 reads a native child's output in
+# [Console]::OutputEncoding — the console's OEM code page, 866 on a Russian
+# install and 437 on an English one — while Python writes to a pipe in the ANSI
+# code page, 1251 there. Every em dash a guard printed came back as `Ч`, and a
+# `→` (config_report is full of them) is not in 1251 at all: the child died of
+# UnicodeEncodeError and §18 reported "could not read the effective
+# configuration". For the length of the call both ends use UTF-8; the console's
+# own code page is put back afterwards, so a CP-1251 console, and anything the
+# self-test prints itself, is exactly as it was. Where the console encoding
+# cannot be changed (no console attached), nothing is changed at all.
 $script:lastRc = 0
 function Invoke-Checked([scriptblock]$sb, [switch]$AllStreams) {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    $prevConsole = $null
+    $prevPyEnc = $env:PYTHONIOENCODING
+    try {
+        $prevConsole = [Console]::OutputEncoding
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        $env:PYTHONIOENCODING = 'utf-8'
+    } catch { $prevConsole = $null }
     try {
         if ($AllStreams) { $out = (& $sb *>&1 | Out-String).Trim() }
         else             { $out = (& $sb 2>&1 | Out-String).Trim() }
         $script:lastRc = $LASTEXITCODE
         return $out
-    } finally { $ErrorActionPreference = $prev }
+    } finally {
+        $ErrorActionPreference = $prev
+        if ($null -ne $prevConsole) {
+            try { [Console]::OutputEncoding = $prevConsole } catch {}
+            $env:PYTHONIOENCODING = $prevPyEnc
+        }
+    }
 }
 
 # ── locate a Python interpreter ──────────────────────────────────────────────

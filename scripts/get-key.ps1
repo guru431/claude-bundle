@@ -11,7 +11,8 @@
 #
 # Lookup order, identical to claude-switch.ps1 and through the same parser
 # (scripts/lib/dotenv.ps1 - the one PowerShell .env implementation):
-#   process env > user env > <script-dir>/.env > ~/.claude/.env
+#   process env > user env > <script-dir>/.env > <config root>/.env
+# where the config root is CLAUDE_CONFIG_DIR when set, else ~/.claude.
 #
 # Output contract: the raw value on stdout with NO trailing newline and no other
 # output ever. Diagnostics go to stderr, because anything on stdout would be
@@ -41,15 +42,19 @@ if (-not $lib) {
 }
 . $lib
 
+# The config root the installers use: install.ps1, uninstall.ps1 and
+# self-test.ps1 all take CLAUDE_CONFIG_DIR when it is set, and the installer
+# writes .env there. A hard-coded ~/.claude\.env read a file that did not exist.
+$configRoot = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
 $value = [Environment]::GetEnvironmentVariable($Name, 'Process')
 if (-not $value) { $value = [Environment]::GetEnvironmentVariable($Name, 'User') }
-foreach ($f in @((Join-Path $PSScriptRoot '.env'), (Join-Path $HOME '.claude\.env'))) {
+foreach ($f in @((Join-Path $PSScriptRoot '.env'), (Join-Path $configRoot '.env'))) {
     if ($value) { break }
     $value = Get-DotEnvValue -Path $f -Name $Name
 }
 
 if (-not $value) {
-    [Console]::Error.WriteLine("get-key.ps1: $Name is not set (process env, user env, $PSScriptRoot\.env, ~/.claude/.env)")
+    [Console]::Error.WriteLine("get-key.ps1: $Name is not set (process env, user env, $PSScriptRoot\.env, $configRoot\.env)")
     [Console]::Error.WriteLine("get-key.ps1: see config/llm-providers.example.env for the full list of names")
     exit 1
 }

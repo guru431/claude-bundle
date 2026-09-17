@@ -90,3 +90,34 @@ def test_a_deployed_get_key_finds_the_parser_under_cron_lib(tmp_path: Path):
     r = run_ps_file(root / "get-key.ps1", "CLAUDE_BUNDLE_TEST_KEY")
     assert r.returncode == 0, r.stderr
     assert r.stdout == "from-the-deployed-env"
+
+
+def _config_dir_env(tmp_path: Path) -> dict:
+    """An environment whose CLAUDE_CONFIG_DIR holds the only .env with the keys."""
+    config = tmp_path / "config-root"
+    config.mkdir()
+    (config / ".env").write_text(f"CLAUDE_BUNDLE_TEST_KEY=from-the-config-dir\nDEEPSEEK_KEY={FAKE_KEY}\n",
+                                 encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "DEEPSEEK_KEY"}
+    env["CLAUDE_CONFIG_DIR"] = str(config)
+    return env
+
+
+def test_get_key_reads_the_env_under_claude_config_dir(tmp_path: Path):
+    """install.ps1, uninstall.ps1 and self-test.ps1 take CLAUDE_CONFIG_DIR as the
+    config root, and the installer writes .env there. The fallback was a
+    hard-coded ~/.claude/.env, so the key was "not set" for every -KeyHelper call."""
+    r = run_ps_file(ROOT / "scripts" / "get-key.ps1", "CLAUDE_BUNDLE_TEST_KEY",
+                    env=_config_dir_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "from-the-config-dir"
+
+
+def test_the_switcher_reads_the_env_under_claude_config_dir(tmp_path: Path):
+    """The same lookup in claude-switch.ps1, which get-key.ps1 promises to match:
+    the switcher refused a provider whose key the installer's .env held."""
+    project = tmp_path / "project"
+    project.mkdir()
+    r = run_ps_file(SWITCH, "deepseek", "flash", "-ProjectPath", project, env=_config_dir_env(tmp_path))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert FAKE_KEY in (project / ".claude" / "settings.local.json").read_text(encoding="utf-8")

@@ -10,8 +10,9 @@
 # permissions block is stable across modes; only `env` changes.
 #
 # Keys and host:port values are NOT hardcoded — they are read from (in order):
-# process env > user env > a `.env` next to this script > ~/.claude/.env (the
-# canonical bundle .env that the cron pipeline reads too). One .env at
+# process env > user env > a `.env` next to this script > ~/.claude/.env, or
+# $CLAUDE_CONFIG_DIR/.env when that is set (the canonical bundle .env that the
+# cron pipeline reads too). One .env at
 # ~/.claude/.env therefore covers both the cron side and this switcher. That
 # .env is the ONLY difference between the public copy (ships with
 # config/llm-providers.example.env) and a private deployment (real, gitignored
@@ -87,8 +88,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Env loader. Order: process env > user env > <script-dir>/.env > ~/.claude/.env
-# (the canonical bundle .env, shared with the cron pipeline).
+# Env loader. Order: process env > user env > <script-dir>/.env > <config root>/.env
+# (the canonical bundle .env, shared with the cron pipeline). The config root is
+# CLAUDE_CONFIG_DIR when set, else ~/.claude — where the installers put it.
 # ─────────────────────────────────────────────────────────────────────────────
 # The parser lives in scripts/lib/dotenv.ps1 — one implementation shared with
 # every other PowerShell script here, matched to the bash, Python and VBScript
@@ -120,7 +122,10 @@ function Get-EnvVar($name) {
     $v = [Environment]::GetEnvironmentVariable($name, "Process")
     if (-not $v) { $v = [Environment]::GetEnvironmentVariable($name, "User") }
     if (-not $v) { $v = Read-DotEnvValue (Join-Path $PSScriptRoot ".env") $name }
-    if (-not $v) { $v = Read-DotEnvValue (Join-Path $HOME ".claude\.env") $name }
+    if (-not $v) {
+        $configRoot = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
+        $v = Read-DotEnvValue (Join-Path $configRoot ".env") $name
+    }
     return $v
 }
 
@@ -565,7 +570,7 @@ function Require-Key([string[]]$names) {
         if ($k) { return $k }
     }
     Write-Host "ERROR: env var '$($names -join ' / ')' not set." -ForegroundColor Red
-    Write-Host "Set it in your environment, in a .env next to this script, or in ~/.claude/.env" -ForegroundColor DarkYellow
+    Write-Host "Set it in your environment, in a .env next to this script, or in ~/.claude/.env (CLAUDE_CONFIG_DIR/.env when that is set)" -ForegroundColor DarkYellow
     Write-Host "See config/llm-providers.example.env for the full list." -ForegroundColor DarkYellow
     exit 2
 }

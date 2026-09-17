@@ -198,7 +198,7 @@ jobs:
           # EVERY tracked shell script, not just cron/. The uncovered ones were
           # .githooks/pre-push (162 lines of `set -eu`, git rev-list and temp
           # directories — the most fragile shell in the repo), scripts/
-          # install-lite.sh and scripts/enable-guard.sh. The two .githooks files
+          # install-lite.sh and scripts/enable-guard.sh. The .githooks files
           # have no .sh suffix, hence the explicit list next to the find.
           # --severity=warning: gate on real issues (errors + warnings), not
           # style/info notes (SC2016/SC2129 etc.) on these working scripts.
@@ -225,7 +225,7 @@ jobs:
 
       - name: Pipeline smoke test (offline mock LLM provider)
         env:
-          CI: "1"          # tests/conftest.py turns a dependency SKIP into a failure
+          CI: "1"          # tests/conftest.py: a dependency SKIP and a >3 s fast test fail
         run: |
           python -m pip install --quiet -r requirements-dev.txt
           python -m pytest tests/ -q --durations=10
@@ -239,9 +239,10 @@ jobs:
           python -m pytest tests/ -q -m integration
 
   powershell:
-    name: powershell syntax (windows)
+    name: powershell + pytest (windows)
     runs-on: windows-latest
-    timeout-minutes: 20
+    # The integration run below is ~4 minutes on a developer's Windows machine.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
@@ -286,3 +287,25 @@ jobs:
       - name: self-test (offline, source mode)
         shell: pwsh
         run: powershell -File scripts/self-test.ps1
+
+      # The bundle is written for Windows, and until these steps its test suite
+      # ran on Windows only on developers' machines: every `os.name == "nt"`
+      # branch, the PowerShell tests (they skip on ubuntu by design — pwsh 7 on
+      # Linux is not the runtime the scripts run under) and the bash found past
+      # System32's WSL launcher went unexercised by CI. One command per step: a
+      # multi-line pwsh step reports only its LAST command's exit code.
+      - name: Install test deps
+        run: python -m pip install --quiet -r requirements-dev.txt
+
+      - name: pytest, fast suite (windows)
+        env:
+          CI: "1"          # tests/conftest.py: a dependency SKIP and a >3 s fast test fail
+        run: python -m pytest tests/ -q
+
+      - name: pytest, integration (windows)
+        env:
+          CI: "1"
+        # Nothing deselected: real git and Git Bash, the PowerShell 5.1 installers
+        # and syncer, cscript, schtasks, a headless Chromium for md2pdf (those three
+        # tests skip rather than fail where the runner cannot print).
+        run: python -m pytest tests/ -q -m integration

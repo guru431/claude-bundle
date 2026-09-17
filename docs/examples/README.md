@@ -28,9 +28,11 @@ way; these files live in `docs/` and are never deployed.
 - **The name carries the date of the WORK**, not of the nightly run. A session
   on the evening of the 14th belongs in the 14th's daily and in a page dated the
   14th, even though the job that read it ran at 02:30 on the 15th.
-- **`sources:` is how a re-run stays idempotent.** Together with the per-source
-  markers in `.processed.json`, it is why a second night does not write the page
-  twice.
+- **`sources:` is provenance, not the reason a re-run is harmless.** It says
+  which daily the page came from. What keeps a second night from sending the
+  same text again is the markers in `wiki/.processed.json` — a fingerprint of the
+  daily and of each project section in it, so only a section nothing has
+  compiled yet goes to the provider (see `docs/wiki-method.md`, phase 2).
 - **Nothing here is a chat log.** If a page reads like a transcript, the prompt
   drifted — that is worth a finding.
 

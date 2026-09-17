@@ -2,7 +2,8 @@ Analyze the following healthcheck metrics from one or more hosts.
 
 Report:
 - anomalies (unusual load, swapping, runaway processes)
-- low disk space (flag anything above 85% usage explicitly)
+- low disk space (quote the usage of any filesystem that is nearly full; the
+  alert threshold is configured and applied outside this analysis)
 - memory pressure
 - anything that looks misconfigured or missing compared to a healthy host
 

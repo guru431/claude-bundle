@@ -12,4 +12,4 @@ updated: 2026-03-15
 
 **Fix.** The mount check moved above the open, and the exporter now writes a `.part` file that is renamed only after the row count matches. Verified across twenty consecutive runs.
 
-See also [[index]].
+See also [[index]] and the day it was found, [[daily/2026-03-14]].

@@ -1,18 +1,24 @@
-# The vault is its own git repository, and ClaudeGitPushAll commits and pushes
-# it every night. Two things that live here must never be part of that commit:
+# For a vault kept as its own git repository (`wiki/.git`, e.g. for the
+# Obsidian Git plugin). The skeleton ships without one; once there is one and
+# ClaudeGitPushAll is enabled (it ships off), that sweep commits and pushes the
+# vault every night. The pipeline's working files must never be part of that
+# commit:
 #
-#   daily/.pending/   raw session tails dropped by the session-* hooks, waiting
-#                     for a flush that has not run yet. They are UNPROCESSED
-#                     transcript text — the input to the pipeline, not its
-#                     output — so pushing them publishes verbatim session
-#                     content (and, on a repo with a remote, publishes it
-#                     off-box) hours before anything decided what belongs in the
-#                     wiki at all.
+#   daily/.pending/   raw session tails dropped by the session-end and
+#                     pre-compact hooks, waiting for a flush that has not run
+#                     yet. They are UNPROCESSED transcript text — the input to
+#                     the pipeline, not its output — so pushing them publishes
+#                     verbatim session content (and, on a repo with a remote,
+#                     publishes it off-box) hours before anything decided what
+#                     belongs in the wiki at all.
 #   .processed.json   the pipeline's state ledger, plus its lock and temp files.
 #                     Machine-local bookkeeping: committing it means every clone
 #                     of the vault claims to have already processed transcripts
 #                     it has never seen, and two machines fight over the file on
 #                     every pull.
+#   last_success.json when each phase last succeeded on THIS machine (what
+#                     bundle-status.py reports). Rewritten every night, and
+#                     another machine's copy would report its runs as yours.
 #
 # The .gitkeep exception keeps the empty directory in the tree, which is what
 # makes the skeleton deployable.
@@ -20,3 +26,5 @@ daily/.pending/*
 !daily/.pending/.gitkeep
 .processed.json
 .processed.json.*
+last_success.json
+last_success.json.*

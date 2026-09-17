@@ -34,7 +34,10 @@ manifest needs an entry.
 The wiki itself can be a separate git repo if you want a separate history
 or separate remote — this bundle just gives you the directory skeleton.
 If you put `wiki/` under a separate `.git`, add `wiki/` to the bundle's
-`.gitignore` to avoid double-tracking. By default it ships nested.
+`.gitignore` to avoid double-tracking. By default it ships nested, with no
+`.git` of its own. Only a vault that has one is committed and pushed by
+`ClaudeGitPushAll` (off by default), and `wiki/.gitignore` keeps the pipeline's
+working files — `.pending/` drafts, the state ledger — out of that history.
 
 For how the pipeline fills this up — see `docs/wiki-method.md` in the
 bundle repository (the relative link breaks once `wiki/` is copied to

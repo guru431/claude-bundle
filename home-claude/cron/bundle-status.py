@@ -19,6 +19,7 @@ is the hook doctor instead: every command hook in settings.json — does it pars
 do its interpreter and script exist — and with --smoke, one run of each hook the
 bundle ships, with a payload it ignores. That mode exits 1 when a hook is broken.
 Wiring an older example taught is reported as `upgrade:` advice, never as broken.
+--settings and --smoke mean something only to the doctor, so each implies --hooks.
 """
 import argparse
 import json
@@ -541,11 +542,14 @@ if __name__ == "__main__":
                         help="check the command hooks wired in settings.json")
     parser.add_argument("--settings", metavar="PATH",
                         help="settings.json to check (default: $CLAUDE_CONFIG_DIR, "
-                             "else ~/.claude)")
+                             "else ~/.claude); implies --hooks")
     parser.add_argument("--smoke", action="store_true",
-                        help="with --hooks: also run each bundle hook once, with a "
-                             "payload it ignores")
+                        help="also run each bundle hook once, with a payload it "
+                             "ignores; implies --hooks")
     opts = parser.parse_args()
-    if opts.hooks or opts.smoke:
+    # Both options mean something only to the doctor, so either one asks for it.
+    # --smoke alone always ran it while the help said "with --hooks"; --settings
+    # alone printed the status view and ignored the file it was handed.
+    if opts.hooks or opts.smoke or opts.settings:
         sys.exit(check_hooks(opts.settings, opts.smoke))
     sys.exit(main())

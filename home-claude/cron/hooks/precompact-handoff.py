@@ -24,8 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from untrusted import fence  # noqa: E402
-from utils import (dir_to_project, llm_call, parse_jsonl_messages,  # noqa: E402
-                   project_allowed, safe_session_id)
+from utils import (dir_to_project, llm_call, masked,  # noqa: E402
+                   parse_jsonl_messages, project_allowed, safe_session_id)
 
 # Character budget for the transcript tail fed to the LLM. The slice keeps
 # the END of the conversation — the freshest messages matter most for handoff.
@@ -90,16 +90,22 @@ def main(transcript: str | None = None, session_id: str | None = None,
     if not messages:
         return 0
 
-    body = "\n\n".join(
+    # masked(), like every other sink that sends text off-box: WIKI_MASK_SECRETS
+    # promises that credential-shaped strings are redacted before they leave the
+    # machine, and this path shipped a verbatim transcript tail to the provider.
+    # Masked BEFORE the tail is cut, so a cut cannot split a token into a half no
+    # shape recognises.
+    body = masked("\n\n".join(
         f"**{m['role']}**: {m['text']}" for m in messages
-    )[-HANDOFF_MAX_CHARS:]
+    ))[-HANDOFF_MAX_CHARS:]
 
     # The /compact focus is the USER telling the summary what matters — typed
     # into Claude Code like any prompt, so it is trusted and stands OUTSIDE the
-    # fence, as an instruction. The transcript stays inside, as data.
+    # fence, as an instruction. The transcript stays inside, as data. Trusted is
+    # not the same as safe to send: it leaves the machine too, so it is masked.
     focus_note = (
         "The user asked this compaction to focus on the following. Give it "
-        "priority in the handoff:\n" + focus + "\n\n"
+        "priority in the handoff:\n" + masked(focus) + "\n\n"
     ) if focus else ""
     prompt = (
         "You are about to be compacted. Write a handoff document for the "
@@ -128,10 +134,13 @@ def main(transcript: str | None = None, session_id: str | None = None,
     out_path = out_dir / f"handoff-{safe_id}.md"
     tmp_path = out_dir / f".handoff-{safe_id}.md.tmp"
 
+    # The summary is masked too: a model asked to preserve "constraints and
+    # decisions" happily quotes the key it was shown, and this file outlives the
+    # session — SessionStart injects it into the next one.
     tmp_path.write_text(
         f"# Handoff — session {session_id}\n"
         f"_Generated {datetime.now().isoformat(timespec='seconds')}_\n\n"
-        f"{summary}\n",
+        f"{masked(summary)}\n",
         encoding="utf-8",
     )
     tmp_path.replace(out_path)

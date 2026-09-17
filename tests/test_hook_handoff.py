@@ -218,6 +218,47 @@ def test_the_compact_focus_is_an_instruction_outside_the_fence(load, tmp_path, m
     assert (memory / "handoff-sess-3.md").read_text(encoding="utf-8").strip().endswith("ok")
 
 
+# Assembled at run time: a literal token in this file would trip the secret
+# scanners that share the masking table.
+FAKE_TOKEN = "ghp" + "_" + "Q9w8E7r6" * 4
+
+
+@pytest.mark.parametrize("mask_setting,leaks", [(None, False), ("0", True)])
+def test_credentials_are_masked_in_the_prompt_and_in_the_file(load, tmp_path, monkeypatch,
+                                                              mask_setting, leaks):
+    """The handoff sends a transcript tail off-box and writes a file that outlives
+    the session — the two sinks WIKI_MASK_SECRETS promises to cover, and the only
+    ones in the pipeline that skipped masked(). WIKI_MASK_SECRETS=0 still turns it
+    off, exactly as it does for the nightly phases."""
+    if mask_setting is not None:
+        monkeypatch.setenv("WIKI_MASK_SECRETS", mask_setting)     # read when utils loads
+    writer = load("precompact-handoff.py")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    d = tmp_path / ".claude" / "projects" / "C--work-myapp"
+    d.mkdir(parents=True)
+    transcript = d / "sess-m.jsonl"
+    transcript.write_text("\n".join(json.dumps(x) for x in [
+        {"type": "user", "message": {"role": "user", "content": f"deploy with {FAKE_TOKEN}"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": "deployed"}},
+    ]) + "\n", encoding="utf-8")
+    (d / "memory").mkdir()
+    (d / "memory" / ".handoff-sess-m.pending").write_text(
+        json.dumps({"deadline": 0, "focus": f"remember {FAKE_TOKEN}"}), encoding="utf-8")
+    prompts = []
+    monkeypatch.setattr(writer, "llm_call",
+                        lambda prompt, timeout: prompts.append(prompt) or f"key was {FAKE_TOKEN}")
+
+    assert writer.main(str(transcript), "sess-m") == 0
+
+    handoff = (d / "memory" / "handoff-sess-m.md").read_text(encoding="utf-8")
+    assert (FAKE_TOKEN in prompts[0]) is leaks
+    assert (FAKE_TOKEN in handoff) is leaks
+    if not leaks:
+        assert prompts[0].count("[REDACTED-GITHUB-TOKEN]") == 2       # the tail and the focus
+        assert "[REDACTED-GITHUB-TOKEN]" in handoff
+
+
 def test_no_focus_no_focus_paragraph(load, tmp_path, monkeypatch):
     writer = load("precompact-handoff.py")
     monkeypatch.setenv("HOME", str(tmp_path))

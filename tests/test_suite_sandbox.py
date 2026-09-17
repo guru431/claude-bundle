@@ -11,6 +11,7 @@ under a copy of the conftest this suite runs under.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import textwrap
 from pathlib import Path
@@ -55,6 +56,7 @@ def _session(pytester: pytest.Pytester, monkeypatch, tests: str, conftest_tail: 
              *args: str) -> pytest.RunResult:
     """Run `tests` under this suite's conftest, laid out as in the repository:
     the conftest's ROOT, and so the checkout the guard watches, is pytester's.
+    The generated name list the sandbox clears comes along.
 
     Without the plugins this machine happens to have installed: what the inner
     session prints and counts must not depend on the developer's site-packages.
@@ -64,9 +66,37 @@ def _session(pytester: pytest.Pytester, monkeypatch, tests: str, conftest_tail: 
     folder.mkdir(exist_ok=True)
     (folder / "conftest.py").write_text(
         CONFTEST.read_text(encoding="utf-8") + conftest_tail, encoding="utf-8")
+    lib = pytester.path / "home-claude" / "cron" / "lib"
+    lib.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(CRON / "lib" / "env_names.py", lib / "env_names.py")
     (folder / "test_inner.py").write_text(textwrap.dedent(tests), encoding="utf-8")
     pytester.makeini("[pytest]\nmarkers =\n    integration: x\n    manual: x\n")
     return pytester.runpytest("tests", "-p", "no:cacheprovider", *args)
+
+
+def test_a_variable_the_env_template_names_does_not_reach_a_test(pytester, monkeypatch):
+    """The cleared names are the template's, not a hand-kept subset of them.
+
+    Exported in a shell, CCR_HOST failed the switcher's menu test and
+    TEST_SWEEP_SKIP=demo the sweep's alert tests. BASH_EXE is cleared as well,
+    and find_bash() still honours it: it reads the environment from before.
+    """
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_GIT_BASH_PATH", raising=False)
+    monkeypatch.setenv("CCR_HOST", "http://ccr.example.invalid:4000")
+    monkeypatch.setenv("TEST_SWEEP_SKIP", "demo")
+    monkeypatch.setenv("BASH_EXE", sys.executable)
+    result = _session(pytester, monkeypatch, """
+        import os
+        import sys
+
+        import conftest
+
+        def test_the_shell_is_not_the_suites():
+            assert not {"CCR_HOST", "TEST_SWEEP_SKIP", "BASH_EXE"} & set(os.environ)
+            assert conftest.find_bash() == sys.executable
+    """)
+    result.assert_outcomes(passed=1)
 
 
 def test_a_run_that_writes_into_the_checkout_fails(pytester, monkeypatch):

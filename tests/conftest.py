@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import functools
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -51,14 +52,20 @@ CRON_SRC = ROOT / "home-claude" / "cron"
 
 # Every environment variable that can change what the pipeline does. Cleared for
 # every test, so a developer's shell cannot make the suite pass or fail.
+#
+# The names come from the env template as generated into cron/lib/env_names.py.
+# The hand-written list this replaced reached 30 of its 59, and a shell was
+# enough to fail the suite: CCR_HOST exported failed the switcher's menu test,
+# TEST_SWEEP_SKIP=demo the sweep's alert tests. Run, not imported: `env_names`
+# is one of the modules the sweep binds by name (see _SHARED_MODULES).
 _CLEARED_PREFIXES = ("WIKI_", "LOCAL_LLM_", "CLAUDE_BUNDLE_")
-_CLEARED_EXACT = (
-    "DEEPSEEK_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL",
-    "OPENCODE_GO_API_KEY", "OPENCODE_GO_KEY", "OPENCODE_GO_MODEL",
-    "DEEPINFRA_KEY", "DEEPINFRA_BASE_URL", "DEEPINFRA_MODEL",
-    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
-    "PROJECTS_ROOT", "CLAUDE_HOME", "CLAUDE_BIN", "PYTHON_EXE", "BASH_EXE",
-)
+_CLEARED_EXACT = runpy.run_path(str(CRON_SRC / "lib" / "env_names.py"))["TEMPLATE_NAMES"] | {
+    # Read by the code and kept out of the template on purpose
+    # (scripts/check-env-ref.py, DOC_ONLY): the accepted alias of
+    # OPENCODE_GO_API_KEY, the root override CLAUDE_HOME, and Claude Code's own
+    # CLAUDE_CONFIG_DIR, which both installers and the self-test honour.
+    "OPENCODE_GO_KEY", "CLAUDE_HOME", "CLAUDE_CONFIG_DIR",
+}
 
 # The environment as the shell handed it over, before either sandbox touched it.
 # Only find_bash() reads it: BASH_EXE is cleared for the code under test, and a

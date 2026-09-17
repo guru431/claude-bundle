@@ -309,20 +309,19 @@ def test_env_ref_check_table_catches_an_edited_cell(repo: Path):
     The generated reference is only trustworthy while a hand edit of one row —
     the likeliest way it rots — turns the build red.
     """
-    def check_table() -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, str(repo / "scripts" / "check-env-ref.py"), "--check-table"],
-            cwd=str(repo), capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=120)
-
-    before = check_table()
-    assert before.returncode == 0, f"the committed page is already stale:\n{before.stdout}"
     page = repo / "docs" / "config-reference.md"
     text = page.read_text(encoding="utf-8")
+    # The untouched page is the committed one, which CI's own --check-table step
+    # proves current — so the one cell below is the only drift in play. (Running
+    # the guard twice here took the test past the one-second line.)
+    assert text == (ROOT / "docs" / "config-reference.md").read_text(encoding="utf-8")
     row = next(l for l in text.splitlines() if l.startswith("| `WIKI_RETRY_LIMIT` |"))
     page.write_text(text.replace(row, row.replace("optional (commented)", "declared")),
                     encoding="utf-8")
-    r = check_table()
+    r = subprocess.run(
+        [sys.executable, str(repo / "scripts" / "check-env-ref.py"), "--check-table"],
+        cwd=str(repo), capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=120)
     assert r.returncode == 1, f"an edited config-reference cell went unnoticed:\n{r.stdout}"
     assert "config-reference.md" in r.stdout
 

@@ -119,7 +119,7 @@ preserve that discipline.
 ├── .githooks/{pre-commit,pre-merge-commit,commit-msg,pre-push}  secret guards (git config core.hooksPath .githooks)
 ├── .github/workflows/ci.yml            compileall + JSON/YAML + secret-guard + doc/registry/
 │                                       env/mirror/io-matrix guards + shellcheck + pytest
-│                                       + PS parse/self-test CI
+│                                       (Ubuntu and Windows) + PS parse/self-test CI
 ├── docs/                               long-form docs referenced from
 │   ├── wiki-method.md                  rules files and INSTALL
 │   ├── cron-architecture.md
@@ -353,6 +353,7 @@ Setup once: `pip install -r requirements.txt -r requirements-dev.txt`
 | One file | `python -m pytest tests/test_pipeline.py -q` |
 | One test | `python -m pytest tests/test_guards.py::test_valid_manifest_allows -q` |
 | The `integration` tests excluded by default | `python -m pytest tests/ -m integration -q` |
+| As CI runs it (a dependency skip, or a fast test over 3 s, fails) | `CI=1 python -m pytest tests/ -q` |
 | All five CI guards | `python scripts/check-registry.py && python scripts/check-doc-counts.py && python scripts/check-env-ref.py && python scripts/check-io-matrix.py && python scripts/check-agents-sync.py` |
 | Shell lint (CI parity — gates on warnings) | `{ git ls-files '*.sh'; git ls-files '.githooks/*'; } \| xargs shellcheck --severity=warning -e SC1091 -f gcc` |
 | Secret-format scan (same lib as pre-commit) | `. home-claude/cron/lib/secret-scan.sh && git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/'` |
@@ -376,6 +377,17 @@ as config.
 - **Hook smoke test** — `tests/test_hooks.py` drives every hook in the fast
   suite (see below). Against a deployment's real wiring:
   `python ~/.claude/cron/bundle-status.py --hooks --smoke`.
+- **The suite leaves the checkout as it found it.** `tests/conftest.py`
+  sandboxes every run, and a run that created, changed or deleted anything under
+  `home-claude/cron/logs`, `home-claude/cron/state`, `home-claude/wiki` or
+  `home-claude/FINDINGS.md`, or left its `%TEMP%/sweep-run-<pid>` behind, FAILS.
+  It compares with the start of the run, so the logs of a pipeline you ran by
+  hand are fine — but not one run from this checkout while the suite runs.
+- **Bash tests on Windows need Git for Windows.** Every test that runs bash
+  takes it from the one `bash` fixture in `tests/conftest.py`, which FAILS on
+  Windows when no Git Bash is found (`System32\bash.exe`, the WSL launcher,
+  does not count) — a skip there would leave the shell half of a Windows-first
+  bundle unverified on Windows.
 - **`claude-switch.ps1`** — run with `status` (it should not modify any
   file).
 - **PowerShell BOM** — if you edit `scripts/claude-switch.ps1` and it
@@ -400,12 +412,14 @@ validity, YAML parse + `script:` path guard, all five guard scripts, the
 exec-bit and encoding guards, the generated-table checks (secret-scan.sh and
 `docs/config-reference.md` must match their generators), the secret-format
 guard (also scanning `.github/`), shellcheck over every tracked shell script,
-`cron/tests/*.sh`, the offline pipeline suite (`tests/`,
-`WIKI_LLM_PROVIDER=mock`, `CI=1` so a dependency SKIP becomes a failure) and
-`-m integration`. **Windows:** a PowerShell parse-check under BOTH pwsh 7 and
-Windows PowerShell 5.1 — the scripts execute under 5.1, so parsing them only
-with 7 let 7-only syntax through — plus `scripts/self-test.ps1` with
-requirements.txt installed.
+`cron/tests/*.sh`, and pytest — the fast suite and `-m integration`.
+**Windows** (`powershell + pytest (windows)`): a PowerShell parse-check under
+BOTH pwsh 7 and Windows PowerShell 5.1 — the scripts execute under 5.1, so
+parsing them only with 7 let 7-only syntax through — `scripts/self-test.ps1`
+with requirements.txt installed, and the same two pytest runs. Every pytest run
+in CI sets `CI=1`, which `tests/conftest.py` turns into two gates: a skip for a
+missing dependency — at collection, in setup or in the call — is a failure, and
+so is a fast-suite test whose call takes over 3 seconds.
 
 Hook smoke-testing is now `tests/test_hooks.py` (cross-platform, in the fast
 suite), so it is no longer a local-only check; `self-test.ps1` still runs its

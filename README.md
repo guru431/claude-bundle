@@ -143,7 +143,7 @@ claude-bundle/
 ├── VERSION, requirements.txt, requirements-dev.txt
 │
 ├── .githooks/{pre-commit,pre-merge-commit,commit-msg,pre-push}  secret guards (activate: git config core.hooksPath .githooks)
-├── .github/workflows/ci.yml           compileall + JSON/YAML validity + secret-guard + doc-count/registry/env/mirror/io-matrix guards + shellcheck (every shell script) + pytest + PowerShell parse/self-test CI
+├── .github/workflows/ci.yml           compileall + JSON/YAML validity + secret-guard + doc-count/registry/env/mirror/io-matrix guards + shellcheck (every shell script) + pytest (Ubuntu, and Windows pytest) + PowerShell parse/self-test CI
 │
 └── docs/
     ├── wiki-method.md                 how the Karpathy wiki pipeline works

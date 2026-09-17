@@ -152,6 +152,61 @@ def test_python_tasks_run_the_pinned_interpreter(gs, registry, tmp_path):
         "without --python the default must not change"
 
 
+def _task(trigger: str, **fields) -> dict:
+    return {"name": "T", "kind": "python", "script": "<bundle-install-path>/x.py",
+            "trigger": trigger, **fields}
+
+
+def _oncalendar_hours(timer: str) -> set[int]:
+    """The hours an `OnCalendar=*-*-* H...:MM:00` line fires at, whether the
+    field is a list (`01,05`) or a step (`09/4`, which systemd stops at 23)."""
+    field = next(line for line in timer.splitlines()
+                 if line.startswith("OnCalendar=")).split()[1].split(":")[0]
+    hours: set[int] = set()
+    for part in field.split(","):
+        start, _, step = part.partition("/")
+        hours.update(range(int(start), 24, int(step)) if step else {int(start)})
+    return hours
+
+
+@pytest.mark.parametrize("every, expected", [
+    # What Task Scheduler does with `Daily 09:30` + repeat_every + repeat_for P1D:
+    # the repetition carries past midnight until the next day's 09:30.
+    ("PT4H", {9, 13, 17, 21, 1, 5}),
+    ("PT5H", {9, 14, 19, 0, 5}),
+    ("PT24H", {9}),
+])
+def test_a_daily_repetition_carries_past_midnight_on_both_generators(gs, tmp_path, every,
+                                                                     expected):
+    """systemd's `09/4` steps from 09 up to 23 and stops: four runs a day where
+    Task Scheduler makes six. launchd wrapped only when the period divided the day
+    and otherwise fell back to a StartInterval counted from load time."""
+    import plistlib
+    task = _task("Daily 09:30", repeat_every=every)
+    assert gs.emit_systemd(task, "/opt/claude", tmp_path) is None
+    assert _oncalendar_hours((tmp_path / "systemd" / "T.timer").read_text(encoding="utf-8")) \
+        == expected
+    assert gs.emit_launchd(task, "/opt/claude", tmp_path) is None
+    plist = plistlib.loads((tmp_path / "launchd" / "com.claude-bundle.T.plist").read_bytes())
+    assert "StartInterval" not in plist
+    entries = plist["StartCalendarInterval"]
+    entries = entries if isinstance(entries, list) else [entries]
+    assert {e["Hour"] for e in entries} == expected and {e["Minute"] for e in entries} == {30}
+
+
+def test_a_startup_task_that_repeats_gets_a_boot_anchored_timer(gs, tmp_path):
+    """AtStartup + repeat_every was SKIPPED for systemd while the docs promised
+    "a boot-anchored timer": OnBootSec for the first run (the startup delay applies
+    to it only, as on Windows), then OnUnitActiveSec from each run."""
+    task = _task("AtStartup", repeat_every="PT30M", startup_delay="PT2M")
+    assert gs.emit_systemd(task, "/opt/claude", tmp_path) is None
+    timer = (tmp_path / "systemd" / "T.timer").read_text(encoding="utf-8")
+    assert "OnBootSec=120s\n" in timer and "OnUnitActiveSec=1800s\n" in timer
+    plain = _task("AtStartup")
+    assert gs.emit_systemd({**plain, "name": "U"}, "/opt/claude", tmp_path) is None
+    assert "OnUnitActiveSec" not in (tmp_path / "systemd" / "U.timer").read_text(encoding="utf-8")
+
+
 def test_units_dir_is_ambiguous_for_both_targets(gs, registry, tmp_path):
     with pytest.raises(SystemExit) as exc:
         gs.main(["--check", "--target", "both", "--registry", str(registry),

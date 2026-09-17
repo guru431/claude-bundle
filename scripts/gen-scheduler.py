@@ -125,13 +125,30 @@ def systemd_quote(arg: str) -> str:
     return shlex.quote(arg).replace("%", "%%")
 
 
+def repeat_hours(start: int, every: int) -> list[int]:
+    """The hours a `Daily HH:MM` trigger repeating every `every` hours fires at,
+    in firing order — the way Task Scheduler runs it: the repetition carries PAST
+    midnight until the next day's start (repeat_for P1D). Both generators take
+    their hours from here, so systemd and launchd cannot disagree with each other
+    or with Windows."""
+    return [(start + k * every) % 24 for k in range(-(-24 // every))]
+
+
 def systemd_oncalendar(task: dict) -> tuple[str, str] | None:
     """Return (kind, value) where kind is 'OnCalendar' or 'OnBootSec', or None."""
     trig = str(task.get("trigger", ""))
     rep_raw = str(task.get("repeat_every", "") or "")
+    if trig == "AtStartup":
+        # A boot-anchored timer. OnBootSec is the first run; emit_systemd adds
+        # OnUnitActiveSec for repeat_every, which counts seconds — so, unlike the
+        # calendar forms below, a sub-hour period is expressible here.
+        if rep_raw and iso_seconds(rep_raw) is None:
+            return None
+        delay = iso_seconds(task.get("startup_delay", "")) or 60
+        return ("OnBootSec", f"{delay}s")
     rep_h = iso_hours(rep_raw)
     # A repetition this generator cannot express must not be dropped in silence:
-    # the OnCalendar step syntax below only takes whole hours, so PT30M (which
+    # an OnCalendar hour list only takes whole hours, so PT30M (which
     # check-registry.py accepts, validating via iso_seconds) used to produce a
     # plain once-a-day timer — the same registry line running 48x less often on
     # Linux than on Windows, with nothing printed. Return None; emit_systemd
@@ -141,8 +158,12 @@ def systemd_oncalendar(task: dict) -> tuple[str, str] | None:
     m = TRIGGER_DAILY.fullmatch(trig)
     if m:
         h, mi = int(m.group(1)), m.group(2)
-        if rep_h:  # every rep_h hours starting at h (systemd step syntax)
-            return ("OnCalendar", f"*-*-* {h:02d}/{rep_h}:{mi}:00")
+        if rep_h:
+            # An explicit hour list, not the `HH/N` step: systemd's step runs from
+            # HH up to 23 and stops, so `Daily 09:30` every PT4H fired four times
+            # a day here and six under Task Scheduler.
+            hours = ",".join(f"{hour:02d}" for hour in sorted(repeat_hours(h, rep_h)))
+            return ("OnCalendar", f"*-*-* {hours}:{mi}:00")
         return ("OnCalendar", f"*-*-* {h:02d}:{mi}:00")
     # Only the Daily branch can carry the step syntax; a Weekly/Monthly trigger
     # with repeat_every would otherwise lose it just as quietly.
@@ -156,9 +177,6 @@ def systemd_oncalendar(task: dict) -> tuple[str, str] | None:
     m = TRIGGER_MONTHLY.fullmatch(trig)
     if m:
         return ("OnCalendar", f"*-*-{int(m.group(1)):02d} {int(m.group(2)):02d}:{m.group(3)}:00")
-    if trig == "AtStartup":
-        delay = iso_seconds(task.get("startup_delay", "")) or 60
-        return ("OnBootSec", f"{delay}s")
     return None  # AtLogOn and anything else: unsupported here
 
 
@@ -174,7 +192,7 @@ def emit_systemd(task: dict, install_path: str, out: Path,
         if rep:
             return (f"skip {name}: repeat_every={rep} with trigger "
                     f"'{task.get('trigger')}' has no systemd equivalent "
-                    f"(OnCalendar steps take whole hours on a Daily trigger)")
+                    f"(an OnCalendar hour list takes whole hours on a Daily trigger)")
         return f"skip {name}: trigger '{task.get('trigger')}' unsupported for systemd"
     desc = str(task.get("description", "")).replace("\n", " ")
     exec_line = " ".join(systemd_quote(a) for a in argv)
@@ -190,8 +208,13 @@ def emit_systemd(task: dict, install_path: str, out: Path,
     if isinstance(timeout_h, int) and not isinstance(timeout_h, bool) and timeout_h > 0:
         service += f"RuntimeMaxSec={timeout_h * 3600}\n"
     if sched[0] == "OnBootSec":
+        # repeat_every counts from each run, as Task Scheduler's repetition does
+        # from the trigger; startup_delay stays on the first run only.
+        every = iso_seconds(str(task.get("repeat_every", "") or ""))
         timer = (f"[Unit]\nDescription=Timer for {name}\n\n"
-                 f"[Timer]\nOnBootSec={sched[1]}\nPersistent=true\n\n"
+                 f"[Timer]\nOnBootSec={sched[1]}\n"
+                 + (f"OnUnitActiveSec={every}s\n" if every else "")
+                 + f"Persistent=true\n\n"
                  f"[Install]\nWantedBy=timers.target\n")
     else:
         timer = (f"[Unit]\nDescription=Timer for {name}\n\n"
@@ -264,20 +287,20 @@ def emit_launchd(task: dict, install_path: str, out: Path,
         cal = _plist_calendar(task)
         # A registry "Daily 01:00 every PT4H" is an ALIGNED schedule. StartInterval
         # counts from whenever the agent was loaded, so the same declaration drifted
-        # to arbitrary clock times on macOS. When the period divides the day evenly,
-        # expand it into the explicit list of aligned times launchd does support.
-        if cal is not None and "Hour" in cal and rep % 3600 == 0 and 24 % (rep // 3600) == 0:
-            step = rep // 3600
+        # to arbitrary clock times on macOS. Any whole-hour period expands into the
+        # explicit list of aligned times launchd does support — the same hours the
+        # systemd unit gets. (Only periods that divide the day used to: PT5H fell
+        # back to the drifting interval.)
+        if cal is not None and "Hour" in cal and rep % 3600 == 0:
             plist["StartCalendarInterval"] = [
-                {**cal, "Hour": (cal["Hour"] + k) % 24}
-                for k in range(0, 24, step)
+                {**cal, "Hour": hour} for hour in repeat_hours(cal["Hour"], rep // 3600)
             ]
         elif cal is None and trig not in TRIGGER_SIMPLE:
             return (f"skip {name}: repeat_every={task.get('repeat_every')} with "
                     f"trigger '{trig}' has no launchd equivalent")
         else:
-            # No aligned expansion is possible (period does not divide 24h, or the
-            # trigger carries no time of day) — fall back to an interval and SAY so,
+            # No aligned expansion is possible (a sub-hour period, or a trigger
+            # that carries no time of day) — fall back to an interval and SAY so,
             # instead of quietly pretending the alignment survived.
             plist["StartInterval"] = rep
             print(f"  ! {name}: launchd StartInterval={rep}s counts from load time — "

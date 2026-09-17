@@ -66,3 +66,38 @@ def test_a_first_full_install_writes_a_manifest_uninstall_can_trust(tmp_path: Pa
     for rel in ("cron/lib/dotenv.ps1", "get-key.ps1", "claude-switch.ps1"):
         assert (claude_home / rel).is_file(), rel
         assert rel in written, rel
+    # X1, the other side: the full tier does install /wiki.
+    assert "commands/wiki.md" in written
+
+
+@pytest.mark.integration   # a lite install and an uninstall, ~1.5 s
+def test_a_lite_install_keeps_the_users_settings_and_leaves_out_wiki(tmp_path: Path):
+    home = tmp_path / "home"
+    (home / "AppData" / "Local").mkdir(parents=True)   # see the test above
+    claude_home = home / ".claude"
+    claude_home.mkdir()
+    settings = claude_home / "settings.json"
+    settings.write_text('{"myOwnKey": "mine"}', encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+    env.update(USERPROFILE=str(home), HOME=str(home))
+    r = run_ps_file(ROOT / "scripts" / "install.ps1", "-Profile", "lite", "-NonInteractive", "-Force",
+                    "-ClaudeHome", claude_home, env=env, cwd=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    mf = json.loads((claude_home / ".bundle-manifest.json").read_text(encoding="utf-8-sig"))
+    written = {e["path"] for e in mf["written"]}
+
+    # X1: /wiki searches a vault only the full tier builds.
+    assert not (claude_home / "commands" / "wiki.md").exists()
+    assert "commands/wiki.md" not in written
+    assert (claude_home / "commands" / "code-review-ext.md").is_file()
+    assert "skipped commands/wiki.md" in r.stdout and "full tier only" in r.stdout
+
+    # X2: the user's own settings.json was merged, so it is theirs.
+    assert "settings.json" in mf["preserved"]
+    assert "settings.json" not in written
+
+    r = run_ps_file(ROOT / "scripts" / "uninstall.ps1", "-ClaudeHome", claude_home,
+                    "-Confirm", "-Force", env=env, cwd=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (claude_home / "CLAUDE.md").exists()
+    assert json.loads(settings.read_text(encoding="utf-8-sig"))["myOwnKey"] == "mine"

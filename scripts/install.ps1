@@ -85,6 +85,35 @@ function Get-RelPath($full, $base) {
     return [System.IO.Path]::GetFullPath($full).Substring(([System.IO.Path]::GetFullPath($base)).Length).TrimStart('\', '/').Replace('\', '/')
 }
 
+# Files inside a directory every profile installs that work only with the full
+# tier. `/wiki` searches the vault the nightly pipeline builds, through
+# cron/wiki/wiki-grep.py — a lite install has neither, so the command it placed
+# could only fail. Paths relative to home-claude/, forward slashes. Honoured by
+# the copy, the backup, the manifest and the -Diff plan alike.
+$script:fullTierOnly = @('commands/wiki.md')
+function Test-FullTierOnly([string]$label, [string]$rel) {
+    return ($Profile -ne 'full') -and ($script:fullTierOnly -contains ("$label/" + $rel.Replace('\', '/')))
+}
+
+# `Copy-Item -Recurse` of a bundle directory into $dstParent — minus the files
+# Test-FullTierOnly holds back, which a plain recursive copy cannot leave out.
+function Copy-BundleTree($src, $dstParent, $label) {
+    $srcBase = (Get-Item $src).FullName
+    $files = @(Get-ChildItem $src -Recurse -File)
+    $held = @($files | Where-Object { Test-FullTierOnly $label $_.FullName.Substring($srcBase.Length).TrimStart('\', '/') })
+    if ($held.Count -eq 0) { Copy-Item $src $dstParent -Recurse -Force; return }
+    foreach ($f in $files) {
+        $rel = $f.FullName.Substring($srcBase.Length).TrimStart('\', '/')
+        if (Test-FullTierOnly $label $rel) {
+            Info "skipped $label/$($rel.Replace('\', '/')) — full tier only"
+            continue
+        }
+        $to = Join-Path (Join-Path $dstParent $label) $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path $to -Parent) | Out-Null
+        Copy-Item $f.FullName $to -Force
+    }
+}
+
 # Record what a copy wrote. $src is the bundle-side file or directory, $dst its
 # destination: for a directory, every source file maps to one written
 # destination file — which is exactly what `Copy-Item -Recurse -Force` wrote, so
@@ -102,7 +131,11 @@ function Add-Written($src, $dst, $rootName) {
         # recompiles it right after the manifest is written — tracking it would
         # make every uninstall report a phantom "changed since install".
         if ($f.FullName -match '[\\/]__pycache__[\\/]') { continue }
-        $p = Join-Path $dst $f.FullName.Substring($srcBase.Length).TrimStart('\', '/')
+        $rel = $f.FullName.Substring($srcBase.Length).TrimStart('\', '/')
+        # Held back from this profile, so not written by this run — even if an
+        # earlier install left one there.
+        if (Test-FullTierOnly (Split-Path $dst -Leaf) $rel) { continue }
+        $p = Join-Path $dst $rel
         if (Test-Path $p) { $script:written.Add(@{ root = $rootName; path = (Get-RelPath $p $base) }) }
     }
 }
@@ -160,6 +193,7 @@ function Backup-Overwrites($src, $dst, $label) {
     foreach ($f in (Get-ChildItem $src -Recurse -File)) {
         if ($f.FullName -match '[\\/]__pycache__[\\/]') { continue }
         $rel = $f.FullName.Substring($srcBase.Length).TrimStart('\', '/')
+        if (Test-FullTierOnly $label $rel) { continue }   # not copied, so not replaced
         $target = Join-Path $dst $rel
         if (-not (Test-Path $target -PathType Leaf)) { continue }
         if ((Get-FileHash $target -Algorithm SHA256).Hash -eq (Get-FileHash $f.FullName -Algorithm SHA256).Hash) { continue }
@@ -395,6 +429,7 @@ function Add-PlannedTree($plan, $srcDir, $relPrefix, $rootName) {
     foreach ($f in (Get-ChildItem $srcDir -Recurse -File)) {
         if ($f.FullName -match '[\\/]__pycache__[\\/]') { continue }
         $rel = $f.FullName.Substring($base.Length).TrimStart('\', '/').Replace('\', '/')
+        if (Test-FullTierOnly $relPrefix $rel) { continue }
         $plan.Add(@{ root = $rootName; path = "$relPrefix/$rel"; src = $f.FullName })
     }
 }
@@ -592,13 +627,20 @@ if ($DryRun) {
     # instructions silently destroyed the hooks, the permissions, the plugins
     # and the `language` setting. The user's own keys win; keys only the
     # template has are added.
-    Merge-SettingsJson (Join-Path $srcHome 'settings.json') (Join-Path $ClaudeHome 'settings.json')
-    Add-Written (Join-Path $srcHome 'settings.json') (Join-Path $ClaudeHome 'settings.json') 'claude_home'
+    $settingsDst = Join-Path $ClaudeHome 'settings.json'
+    $settingsExisted = Test-Path $settingsDst
+    Merge-SettingsJson (Join-Path $srcHome 'settings.json') $settingsDst
+    # A settings.json that was here before is the user's: the merge added a
+    # missing template key or two, everything else in it is theirs. Recorded as
+    # `written`, uninstall.ps1 deleted it — even without -Force, as long as
+    # nothing had changed it since. Only a file this run created is ours.
+    if ($settingsExisted) { $script:preserved.Add('settings.json') }
+    else { Add-Written (Join-Path $srcHome 'settings.json') $settingsDst 'claude_home' }
     foreach ($d in @('skills', 'commands')) {
         $s = Join-Path $srcHome $d
         if (Test-Path $s) {
             Backup-Overwrites $s (Join-Path $ClaudeHome $d) $d
-            Copy-Item $s $ClaudeHome -Recurse -Force
+            Copy-BundleTree $s $ClaudeHome $d
             Add-Written $s (Join-Path $ClaudeHome $d) 'claude_home'
         }
     }

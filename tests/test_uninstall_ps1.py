@@ -10,11 +10,46 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from ps_helpers import ROOT, define_functions, requires_powershell, run_ps, run_ps_file
 
 pytestmark = requires_powershell
 
 UNINSTALL = ROOT / "scripts" / "uninstall.ps1"
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest().upper()
+
+
+@pytest.mark.integration   # two uninstall runs, ~1 s
+def test_a_merged_settings_json_survives_an_old_manifest_and_force(tmp_path: Path):
+    """X2 for installs made BEFORE the fix: their manifest lists the user's merged
+    settings.json as `written`, with a hash that matches it — so an uninstall
+    deleted it, -Force or not. Only the untouched template is removed now."""
+    template = ROOT / "home-claude" / "settings.json"
+    results = {}
+    for case, content in (("merged", template.read_text(encoding="utf-8").rstrip()[:-1]
+                                     + ',\n  "myOwnKey": "mine"\n}\n'),
+                          ("template", None)):
+        home = tmp_path / case
+        home.mkdir()
+        settings = home / "settings.json"
+        if content is None:
+            settings.write_bytes(template.read_bytes())
+        else:
+            settings.write_text(content, encoding="utf-8")
+        (home / ".bundle-manifest.json").write_text(json.dumps({
+            "bundle_version": "0.0.0", "installed_at": "2026-01-01T00:00:00Z", "tier": "lite",
+            "claude_home": str(home), "pipeline_root": str(home),
+            "written": [{"root": "claude_home", "path": "settings.json", "sha256": _sha256(settings)}],
+            "preserved": []}), encoding="utf-8")
+        r = run_ps_file(UNINSTALL, "-ClaudeHome", home, "-Confirm", "-Force", cwd=tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        results[case] = settings.exists()
+    assert results == {"merged": True, "template": False}
 
 
 def test_uninstall_finds_the_manifest_under_claude_config_dir(tmp_path: Path):

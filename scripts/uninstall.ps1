@@ -212,6 +212,24 @@ foreach ($f in @($mf.written)) {
         continue
     }
     if (-not (Test-Path $full -PathType Leaf)) { $gone++; continue }
+    # Listed as `preserved` too: the manifest itself says the file is yours.
+    if (@($mf.preserved) -contains "$($f.path)") {
+        Info "keeping $($f.path) — the manifest also lists it as preserved"
+        continue
+    }
+    # settings.json is MERGED into, not simply written, and a manifest from
+    # before install.ps1 recorded a pre-existing one as `preserved` lists the
+    # user's own merged file right here — with a hash that matches it, so it was
+    # deleted even without -Force. Only the untouched template this checkout
+    # ships is the installer's to remove, -Force or not.
+    if ("$($f.root)" -ne 'pipeline_root' -and "$($f.path)" -eq 'settings.json') {
+        $settingsTpl = Join-Path (Split-Path -Parent $PSScriptRoot) 'home-claude\settings.json'
+        if (-not (Test-Path $settingsTpl) -or
+            (Get-FileHash $full -Algorithm SHA256).Hash -ne (Get-FileHash $settingsTpl -Algorithm SHA256).Hash) {
+            Info "keeping settings.json — it is not the template the installer copies (your settings, merged or edited); remove it yourself if you mean to"
+            continue
+        }
+    }
     if ($f.sha256 -and (Get-FileHash $full -Algorithm SHA256).Hash -ne $f.sha256 -and -not $Force) {
         Warn "changed since install — keeping $($f.path) (use -Force to delete it anyway)"
         $skipped++

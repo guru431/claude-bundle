@@ -12,6 +12,7 @@
 #   bash scripts/uninstall.sh                     # dry run (default): lists, deletes nothing
 #   bash scripts/uninstall.sh --confirm           # delete
 #   bash scripts/uninstall.sh --confirm --force   # also delete files changed since install
+#   bash scripts/uninstall.sh --dry-run           # deletes nothing, even with --confirm / --force
 #   bash scripts/uninstall.sh --claude-home DIR   # default: $CLAUDE_CONFIG_DIR, else ~/.claude
 #
 # Needs Python 3.9+ (the manifest is JSON).

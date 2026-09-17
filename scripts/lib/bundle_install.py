@@ -12,11 +12,15 @@ The install manifest is the SAME file install.ps1 writes, so either installer's
     {"bundle_version", "installed_at", "tier", "claude_home", "pipeline_root",
      "written":   [{"root": "claude_home" | "pipeline_root", "path", "sha256"}],
      "preserved": ["settings.json", ".env", ...],
+     "registry_template_sha256": "...",
      "scheduler": {"target", "units_dir", "units": [{"path", "sha256"}]}}
 
 `scheduler` is the POSIX addition — the units `install.sh --install-units`
 placed, so uninstall.sh disables and removes exactly those. uninstall.ps1 never
-reads it. Hashes are upper-case hex, as Get-FileHash writes them.
+reads it. `registry_template_sha256` (full tier, both installers) is the shipped
+cron/registry.yaml the install came from: an edited registry is kept and carries
+no hash, so the next install needs it to tell whether the task definitions
+changed. Hashes are upper-case hex, as Get-FileHash writes them.
 
 Subcommands (paths absolute):
   merge-settings SRC DST BACKUP  add the template keys DST lacks (yours win);
@@ -37,6 +41,8 @@ Subcommands (paths absolute):
                                  rest as JSON; nothing when the file won't parse.
   open-dry-run-window YAML DAYS  set an EMPTY `dry_run_until:` to today + DAYS.
   write-manifest ...             see --help of the subcommand.
+  upgrade-notes ...              what a re-install left for the user to do, one
+                                 note per line; run BEFORE write-manifest.
   diff ...                       the per-file preview behind install.sh --diff.
   uninstall ...                  the file half of uninstall.sh.
 """
@@ -289,6 +295,9 @@ def write_manifest(args) -> int:
         "written": written,
         "preserved": preserved,
     }
+    template = Path(args.source) / "home-claude" / "cron" / "registry.yaml" if args.source else None
+    if args.tier == "full" and template and template.is_file():
+        manifest["registry_template_sha256"] = sha256(template)
     if args.units_dir:
         units_dir = Path(args.units_dir)
         manifest["scheduler"] = {
@@ -302,6 +311,74 @@ def write_manifest(args) -> int:
         manifest["scheduler"] = previous["scheduler"]
     write_text(bases["claude_home"] / MANIFEST, json.dumps(manifest, indent=4, ensure_ascii=False) + "\n")
     print(f"wrote {MANIFEST} ({len(written)} files - uninstall with scripts/uninstall.sh)")
+    return 0
+
+
+def upgrade_notes(args) -> int:
+    """What this re-install left for the user to do, one note per line.
+
+    A re-install replaces the bundle's files and, on purpose, nothing of the
+    user's — so an edited registry that no longer matches the shipped one, units
+    generated from an older registry and files this bundle stopped shipping all
+    used to pass without a word. The previous manifest is the only record of what
+    the last install was, which is why install.sh calls this BEFORE
+    write-manifest replaces it. The same notes as install.ps1::Get-UpgradeNotes;
+    UPGRADING.md has the steps behind each. Continuation lines start with spaces.
+    """
+    claude_home = Path(args.claude_home)
+    try:
+        prev = read_manifest(claude_home)
+    except ValueError:
+        prev = None
+    if not prev:
+        return 0                                    # a first install has no past
+    notes = []
+    prev_ver, prev_tier = str(prev.get("bundle_version") or ""), prev.get("tier")
+    if prev_ver and prev_ver != args.version:
+        notes.append(f"upgraded {prev_ver} -> {args.version}: UPGRADING.md lists what a "
+                     f"re-install does not do for you - read every section above {prev_ver}")
+    if prev_tier == "full" and args.tier != "full":
+        notes.append(f"the last install was FULL and this one is {args.tier} - cron/, wiki/, "
+                     f"bin/ and hooks/ were NOT updated. Re-run with --profile full")
+    # Files the last install wrote that this one neither wrote nor kept: the new
+    # manifest does not list them, so uninstall.sh will never see them again.
+    bases = {"claude_home": claude_home, "pipeline_root": Path(args.pipeline_root)}
+    now = {tuple(line.split("\t", 1)) for line in lines_of(args.written)}
+    preserved = set(lines_of(args.preserved))
+    left = []
+    for entry in prev.get("written") or []:
+        if not isinstance(entry, dict):
+            continue
+        root, rel = entry.get("root") or "claude_home", entry.get("path")
+        if (root, rel) in now or rel in preserved or root not in bases:
+            continue
+        full = contained(bases[root], rel)
+        if full is not None and full.is_file():
+            left.append(full)
+    if left:
+        notes.append(f"{len(left)} file(s) an earlier install placed are not part of this one - "
+                     f"left on disk and no longer tracked, so uninstall.sh will not remove "
+                     f"them. Delete them if nothing of yours uses them:")
+        notes.extend(f"    {path}" for path in left[:10])
+        if len(left) > 10:
+            notes.append(f"    ... and {len(left) - 10} more")
+    if prev_tier == "full" and args.tier == "full":
+        template = Path(args.source) / "home-claude" / "cron" / "registry.yaml"
+        recorded = prev.get("registry_template_sha256")
+        # No field: an installer older than this one wrote that manifest, so the
+        # template it came with is older too. Not the version string — a checkout
+        # between releases carries the same VERSION with a different registry.
+        changed = (not recorded or not template.is_file()
+                   or str(recorded).upper() != sha256(template))
+        if changed and "cron/registry.yaml" in preserved:
+            notes.append(f"the shipped registry changed since your last install, and yours was "
+                         f"kept because you edited it: carry the changes over from {template}, "
+                         f"then re-run with --install-units")
+        elif args.units_drift and isinstance(prev.get("scheduler"), dict):
+            notes.append("the installed units no longer match the registry (the preview above "
+                         "lists the difference) - re-run with --install-units")
+    for note in notes:
+        print(note)
     return 0
 
 
@@ -500,8 +577,14 @@ def main(argv: list[str] | None = None) -> int:
     cmd = sub.add_parser("write-manifest")
     for opt in ("--claude-home", "--pipeline-root", "--tier", "--version", "--written"):
         cmd.add_argument(opt, required=True)
-    for opt in ("--preserved", "--scheduler", "--units-dir", "--units"):
+    for opt in ("--preserved", "--scheduler", "--units-dir", "--units", "--source"):
         cmd.add_argument(opt)
+    cmd = sub.add_parser("upgrade-notes")
+    for opt in ("--claude-home", "--pipeline-root", "--source", "--tier", "--version", "--written"):
+        cmd.add_argument(opt, required=True)
+    cmd.add_argument("--preserved")
+    cmd.add_argument("--units-drift", action="store_true",
+                     help="gen-scheduler.py --check found the installed units out of date")
     cmd = sub.add_parser("diff")
     for opt in ("--claude-home", "--pipeline-root", "--source", "--plan", "--profile"):
         cmd.add_argument(opt, required=True)
@@ -530,6 +613,8 @@ def main(argv: list[str] | None = None) -> int:
         return open_dry_run_window(args.path, args.days)
     if args.command == "write-manifest":
         return write_manifest(args)
+    if args.command == "upgrade-notes":
+        return upgrade_notes(args)
     if args.command == "diff":
         return diff(args)
     return uninstall(args)

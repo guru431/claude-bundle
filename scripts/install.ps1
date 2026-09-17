@@ -170,6 +170,13 @@ function Write-Manifest($tier) {
         written        = @($files)
         preserved      = @($script:preserved | Select-Object -Unique)
     }
+    # The registry TEMPLATE this install came with. A bootstrapped registry is
+    # the user's and carries no hash here, so without this the next install could
+    # not tell whether the task definitions changed in between (Get-UpgradeNotes).
+    $regTemplate = Join-Path $srcHome 'cron/registry.yaml'
+    if ($tier -eq 'full' -and (Test-Path $regTemplate)) {
+        $mf | Add-Member -NotePropertyName registry_template_sha256 -NotePropertyValue (Get-FileHash $regTemplate -Algorithm SHA256).Hash
+    }
     $json = ($mf | ConvertTo-Json -Depth 4)
     # Manifest lives at ClaudeHome: it is the root that always exists (lite has no
     # pipeline) and the one a user can find without remembering where the pipeline went.
@@ -516,6 +523,66 @@ function Invoke-BundleDiff {
     Info "Nothing was written. Drop -Diff to install."
 }
 
+# ── What an upgrade leaves for you to do ─────────────────────────────────────
+# A re-install replaces the bundle's files and, on purpose, nothing of yours —
+# so a kept registry that no longer matches the shipped one, tasks registered
+# from an older syncer, and files this bundle stopped shipping all used to pass
+# without a word. $prev is the manifest of the LAST install, read before this
+# run replaced it; it is the only record of what that install was. Returns one
+# string per note (UPGRADING.md has the steps behind each).
+function Get-UpgradeNotes($prev, [string]$tier) {
+    $notes = @()
+    if (-not $prev) { return $notes }                  # a first install has no past
+    $prevVer = "$($prev.bundle_version)"
+    $prevTier = "$($prev.tier)"
+    if ($prevVer -and $prevVer -ne $bundleVer) {
+        $notes += "upgraded $prevVer -> ${bundleVer}: UPGRADING.md lists what a re-install does not do for you — read every section above $prevVer"
+    }
+    if ($prevTier -eq 'full' -and $tier -ne 'full') {
+        $notes += "the last install was FULL and this one is $tier — cron/, wiki/, bin/ and hooks/ were NOT updated. Re-run with -Profile full"
+    }
+    # Files the last install wrote that this one neither wrote nor kept. The new
+    # manifest does not list them, so uninstall.ps1 will never see them again.
+    $now = @{}
+    foreach ($e in $script:written) { $now["$($e.root)|$($e.path)"] = $true }
+    $left = @()
+    foreach ($e in @($prev.written)) {
+        $root = if ($e.root) { "$($e.root)" } else { 'claude_home' }
+        if (-not $e.path -or $now.ContainsKey("$root|$($e.path)") -or ($script:preserved -contains "$($e.path)")) { continue }
+        $full = Join-Path $(if ($root -eq 'pipeline_root') { $PipelineRoot } else { $ClaudeHome }) $e.path
+        if (Test-Path -LiteralPath $full -PathType Leaf) { $left += $full }
+    }
+    if ($left.Count -gt 0) {
+        $shown = ($left | Select-Object -First 10) -join "`n    "
+        $more = if ($left.Count -gt 10) { "`n    ... and $($left.Count - 10) more" } else { '' }
+        $notes += "$($left.Count) file(s) an earlier install placed are not part of this one — left on disk and no longer tracked, so uninstall.ps1 will not remove them. Delete them if nothing of yours uses them:`n    $shown$more"
+    }
+    if ($prevTier -ne 'full' -or $tier -ne 'full') { return $notes }
+
+    # The scheduled tasks: what gets registered is the registry read by the
+    # syncer, so a change to either leaves the registered tasks behind.
+    $template = Join-Path $srcHome 'cron/registry.yaml'
+    $templateHash = if (Test-Path $template) { (Get-FileHash $template -Algorithm SHA256).Hash } else { '' }
+    # No field: an installer older than this one wrote that manifest, so the
+    # template it came with is older too. Not the version string — a checkout
+    # between releases carries the same VERSION with a different registry.
+    $regChanged = if ($prev.registry_template_sha256) { "$($prev.registry_template_sha256)" -ne $templateHash } else { $true }
+    $syncerChanged = $false
+    foreach ($rel in @('cron/admin/sync-tasks.ps1', 'cron/admin/lib/registry-parse.ps1')) {
+        $src = Join-Path $srcHome $rel
+        if (-not (Test-Path $src)) { continue }
+        $was = @($prev.written) | Where-Object { "$($_.path)" -eq $rel } | Select-Object -First 1
+        if (-not $was -or "$($was.sha256)" -ne (Get-FileHash $src -Algorithm SHA256).Hash) { $syncerChanged = $true }
+    }
+    $sync = Join-Path $PipelineRoot 'cron\admin\sync.cmd'
+    if ($regChanged -and $script:registryKept) {
+        $notes += "the shipped registry changed since your last install, and yours was kept (a bootstrapped registry is never replaced): carry the changes over from $template — or, if you never edited $(Join-Path $PipelineRoot 'cron\registry.yaml'), delete it and re-run this installer — then run $sync"
+    } elseif (($regChanged -or $syncerChanged) -and $syncStatus -ne 'yes') {
+        $notes += "the task definitions changed since your last install — run $sync so Task Scheduler matches (it lists each task it changes as updated)"
+    }
+    return $notes
+}
+
 # -Diff describes the deployment you HAVE, so it takes its tier from the
 # manifest instead of prompting for one.
 if ($Diff -and -not $Profile) {
@@ -527,6 +594,11 @@ if ($Profile -notin @('lite', 'full')) {
     Write-Host "ERROR: profile must be 'lite' or 'full'" -ForegroundColor Red; exit 1
 }
 if ($Diff) { Invoke-BundleDiff; exit 0 }
+
+# The LAST install's manifest, read before anything is written: Write-Manifest
+# replaces the file, and Get-UpgradeNotes needs what it recorded.
+$script:previousManifest = Read-InstallManifest
+$script:registryKept = $false
 
 Info ""
 Info "=== claude-bundle installer ==="
@@ -710,6 +782,8 @@ if ($Profile -eq 'full') {
             $script:preserved.Add((Get-RelPath $dst $PipelineRoot))
             Good "preserved your existing $((Split-Path $dst -Leaf)) (reinstall-safe)"
         }
+        # Kept means the new template's task definitions did NOT reach it.
+        $script:registryKept = $preserve.ContainsKey($regPath)
     }
 }
 
@@ -739,6 +813,7 @@ if ($Profile -eq 'lite') {
     Info "  /plugin install context7"
     Info ""
     if ($DryRun) { Info "[dry-run] lite plan complete — no files changed."; exit 0 }
+    foreach ($n in (Get-UpgradeNotes $script:previousManifest 'lite')) { Warn $n }
     # Minimal copied-file check (the full source self-test is not for a lite deploy).
     $liteOk = $true
     foreach ($f in @('CLAUDE.md', 'settings.json')) {
@@ -1034,6 +1109,10 @@ if ($rootsSplit) {
 Info "sync run this session: $syncStatus"
 Info "claude-switch.ps1 in deployment: $(if ($switcherInstalled) { 'yes' } else { 'no (invoke from the bundle checkout)' })"
 Info "codex/AGENTS.md mirrored to ~/.codex: $(if ($codexMirrored) { 'yes' } else { 'no' })"
+# Last in the list, so this run's own sync status is already known.
+if (-not $DryRun) {
+    foreach ($n in (Get-UpgradeNotes $script:previousManifest 'full')) { Warn $n }
+}
 
 # ── 7. Self-test (validates the deployed tree) ───────────────────────────────
 Info ""

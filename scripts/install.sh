@@ -350,6 +350,7 @@ units_dir=""
 units_list="$work/units.txt"
 : > "$units_list"
 units_status="not installed (re-run with --install-units)"
+units_check=0
 if [ "$profile" = full ]; then
     env_dst="$pipeline_root/.env"
     if [ -f "$env_dst" ]; then
@@ -405,7 +406,9 @@ if [ "$profile" = full ]; then
         if [ "$install_units" = 0 ]; then
             say ""
             say "--- $scheduler units (preview; --install-units installs them) ---"
-            "$PY" "$gen" "$@" --check --units-dir "$units_dir" || true
+            # Exit 3 = the installed units differ from this registry; the upgrade
+            # notes at the end say so when a previous install placed units.
+            "$PY" "$gen" "$@" --check --units-dir "$units_dir" || units_check=$?
         else
             "$PY" "$gen" "$@" --out-dir "$work/units" > "$work/gen.log" || {
                 cat "$work/gen.log"; die 1 "gen-scheduler failed - no unit was installed"; }
@@ -482,10 +485,20 @@ if [ "$profile" = full ]; then
     fi
 fi
 
+# ── upgrade notes: read the previous manifest before it is replaced ──────────
+upgrade_notes="$work/upgrade-notes.txt"
+: > "$upgrade_notes"
+if [ -n "$PY" ]; then
+    set -- --claude-home "$claude_home" --pipeline-root "$pipeline_root" --source "$here" \
+           --tier "$profile" --version "$bundle_version" --written "$written" --preserved "$preserved"
+    if [ "$units_check" = 3 ]; then set -- "$@" --units-drift; fi
+    "$PY" "$helper" upgrade-notes "$@" > "$upgrade_notes" || warn "could not compare with the previous install"
+fi
+
 # ── manifest: LAST, so it records everything this run wrote ──────────────────
 if [ -n "$PY" ]; then
     set -- --claude-home "$claude_home" --pipeline-root "$pipeline_root" --tier "$profile" \
-           --version "$bundle_version" --written "$written" --preserved "$preserved"
+           --version "$bundle_version" --written "$written" --preserved "$preserved" --source "$here"
     if [ "$install_units" = 1 ] && [ -n "$units_dir" ]; then
         set -- "$@" --scheduler "$scheduler" --units-dir "$units_dir" --units "$units_list"
     fi
@@ -546,12 +559,28 @@ else
     say "  1. $pipeline_root/.env - a provider key, or WIKI_LLM_PROVIDER=local (docs/llm-routing.md)"
     say "  2. $pipeline_root/bundle.local.yaml - allow_projects empty means ALL projects are read"
     say "  3. preview, spending nothing: \"$PY\" \"$pipeline_root/cron/wiki/wiki-pipeline.py\" --dry-run"
+    # The doctor lives in cron/, which is the PIPELINE root; settings.json is in
+    # the config root. Not run here: a fresh settings.json wires no hooks.
+    say "  4. after merging hooks from home-claude/settings.example-with-hooks.json, check them:"
+    say "     \"$PY\" \"$pipeline_root/cron/bundle-status.py\" --hooks --settings \"$claude_home/settings.json\""
     if [ "$scheduler" != none ]; then
-        say "  4. after editing the registry, see what the installed units still lack:"
+        say "  5. after editing the registry, see what the installed units still lack:"
         say "     \"$PY\" \"$here/scripts/gen-scheduler.py\" --check --target $scheduler --python \"$PY\" \\"
         say "       --install-path \"$pipeline_root\" --registry \"$pipeline_root/cron/registry.yaml\""
         say "     and apply it by re-running this installer with --install-units."
     fi
+fi
+# No hook hint for lite: every hook the example wires is a script under hooks/ or
+# cron/, and a lite install places neither — a lite settings.json has nothing of
+# the bundle's to wire, and the doctor itself ships in cron/.
+if [ -s "$upgrade_notes" ]; then
+    say ""
+    while IFS= read -r note; do
+        case "$note" in
+            " "*) say "      $note" ;;
+            *) warn "$note" ;;
+        esac
+    done < "$upgrade_notes"
 fi
 if [ "$st_ok" -ne 1 ]; then
     say "[FAIL] self-test failed"

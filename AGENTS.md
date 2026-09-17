@@ -15,16 +15,16 @@ This file used to be 97 lines — a second copy of `CLAUDE.md`, drifting.
 | Deploy (user / agent) | [`INSTALL.md`](INSTALL.md), [`AGENT-INSTRUCTIONS.md`](AGENT-INSTRUCTIONS.md) |
 | Wiki pipeline, cron, LLM routing | [`docs/wiki-method.md`](docs/wiki-method.md), [`docs/cron-architecture.md`](docs/cron-architecture.md), [`docs/llm-routing.md`](docs/llm-routing.md) |
 | MCP servers; why the bundle does NOT do X; every env var | [`docs/mcp-servers.md`](docs/mcp-servers.md), [`docs/decisions.md`](docs/decisions.md), [`docs/config-reference.md`](docs/config-reference.md) (generated) |
-| Scripts | [`scripts/`](scripts/) — `install.ps1`, `install-lite.sh`, `claude-switch.ps1`, `self-test.ps1`, `bootstrap-registry.ps1`, `gen-scheduler.py`, `mcp-probe.py`, and five `check-*.py` CI guards |
+| Scripts | [`scripts/`](scripts/) — `install.ps1` / `uninstall.ps1`, `install.sh` / `uninstall.sh` (+ `install-lite.sh`, and `lib/` for both installers), `claude-switch.ps1`, `self-test.ps1`, `bootstrap-registry.ps1`, `gen-scheduler.py`, `mcp-probe.py`, and five `check-*.py` CI guards |
 | Tests | `pytest tests/ -q` — the fast suite (60s budget). Covers the hooks, the guard scripts and the fail-closed invariants. `pytest.ini` is the reference implementation of the test policy. |
 
 ## The four things that bite
 
 1. **This is a PUBLIC repo — nothing personal goes in.** The denylist grep is
-   automated by [`.githooks/pre-commit`](.githooks/pre-commit) plus a
-   `commit-msg` and a `pre-push` hook; activate all three once per clone with
-   [`scripts/enable-guard.sh`](scripts/enable-guard.sh) (or `.ps1`). Details:
-   `CLAUDE.md` § Sanitization checklist.
+   automated by [`.githooks/pre-commit`](.githooks/pre-commit) plus
+   `pre-merge-commit`, `commit-msg` and `pre-push` hooks; activate all four once
+   per clone with [`scripts/enable-guard.sh`](scripts/enable-guard.sh) (or
+   `.ps1`). Details: `CLAUDE.md` § Sanitization checklist.
 2. **Fail-closed is the design, not an accident.** A `bundle.local.yaml` that
    will not parse denies EVERY project; a `local` provider pointed at a
    non-local endpoint refuses; an unrecognised `WIKI_LLM_PROVIDER` sends

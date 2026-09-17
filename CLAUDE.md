@@ -373,9 +373,9 @@ as config.
 ## Local verification
 
 - **Grep sanity** — mandatory, see the table and § Sanitization above.
-- **Hook smoke test** — pipe a sample JSON payload through each hook
-  script and confirm it exits 0 and emits valid JSON. This is the one
-  check CI does not run.
+- **Hook smoke test** — `tests/test_hooks.py` drives every hook in the fast
+  suite (see below). Against a deployment's real wiring:
+  `python ~/.claude/cron/bundle-status.py --hooks --smoke`.
 - **`claude-switch.ps1`** — run with `status` (it should not modify any
   file).
 - **PowerShell BOM** — if you edit `scripts/claude-switch.ps1` and it

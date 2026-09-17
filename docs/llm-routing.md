@@ -41,8 +41,8 @@ the low tens of cents per M input tokens).
 | `ccr` | routing many models through one proxy | depends on the underlying provider | needs the [Claude Code Router](https://github.com/musistudio/claude-code-router) running |
 
 Each mode reads its credential from `.env` (see
-`config/llm-providers.example.env`): `anthropic` → `ANTHROPIC_API_KEY`
-(optional — OAuth usually suffices), `deepseek` → `DEEPSEEK_KEY`,
+`config/llm-providers.example.env`): `anthropic` → none (it removes the
+switcher's env override, so Claude Code uses your own login), `deepseek` → `DEEPSEEK_KEY`,
 `minimax` → `MINIMAX_API_KEY`, `opencode` → `OPENCODE_GO_API_KEY`,
 `ollama` → `OLLAMA_HOST` (no key), `ccr` → `CCR_API_KEY` plus an optional
 `CCR_HOST` (default `127.0.0.1:3456`).
@@ -180,6 +180,16 @@ a function per provider, and the 402/429/529 contract drifted between the
 copies. To add a provider for cron use: add a row to `PROVIDERS`, add the
 key name to `config/llm-providers.example.env`, and add a row here — no
 new caller unless the provider speaks a different protocol.
+
+One row carries a field the others do not. The OpenCode Go gateway answers
+`400 MissingSessionID` to any request without a conversation id, so `opencode`
+declares `session_header` and every request to it carries
+`x-opencode-session: bundle-<script name>-<12 random hex digits>`. The id is made
+once per PROCESS: all calls of one phase share it, the next phase — its own
+process, also inside `ClaudeWikiPipeline` — gets a new one, and so does every
+`llm-call.py` invocation. Besides the prompt, that gateway therefore learns the
+name of the script that called it (`wiki-compile-sessions`, `llm-call`);
+nothing else about the machine is in the id.
 
 ### Local-only runs
 

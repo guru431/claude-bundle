@@ -60,10 +60,11 @@ rather than skipping the run.
 
 ## Pathing policy (critical — silent failures lurk here)
 
-For `logon_type: password` tasks, **never use a mapped drive in
-`script:`**. Use UNC (`\\<host>\<share>\...`) or local `C:\...` paths.
+For `logon_type: password` and `s4u` tasks, **never use a mapped drive in
+`script:`**. Use UNC (`\\<host>\<share>\...`) or local `C:\...` paths — and
+for `s4u`, local paths only.
 
-The reason: mapped drives live inside a user session. A Password-mode
+The reason: mapped drives live inside a user session. A Password-mode or S4U
 task fires in session 0 (before any user logs in) — the mapped drive
 **doesn't exist yet**. The script file isn't found, exit 127, no log,
 no diagnostics. Hours of debugging guaranteed.
@@ -72,6 +73,13 @@ UNC works in both session 0 and user sessions. Local `C:\` works
 everywhere. Mapped drives only work in interactive sessions. An `s4u` task
 is the exception to the UNC rule: it has no credentials to open a share
 with, so it needs local paths throughout.
+
+Two things hold the rule. `sync-tasks.ps1` refuses at registration a Password or
+S4U task whose script, executable or launcher sits on a mapped drive, and an S4U
+task with a UNC path. `ClaudeTaskMonitor` checks again every morning, against
+what Task Scheduler actually holds — a registration older than that refusal, or
+one made by hand — and reports each such task as a POLICY VIOLATION, with its
+command line (script paths and share host names included) in the alert.
 
 The bundle ships an example `registry.yaml` with placeholders
 (`<bundle-install-path>`). When you adapt it, use UNC or `C:\` —
@@ -124,11 +132,11 @@ Two rules follow:
 
 | kind          | What it does |
 |---------------|--------------|
-| `bash`        | wraps `bash <script>` via a hidden VBS launcher |
-| `python`      | wraps `python <script>` via the same launcher |
-| `cmd`         | wraps `cmd /c <script>` via the launcher |
+| `bash`        | runs `"<bash>" "<script>" <args>` via a hidden VBS launcher — `BASH_EXE` from the environment or `.env`, else Git for Windows' bash |
+| `python`      | the same with `PYTHON_EXE`, else `python.exe` |
+| `cmd`         | runs `cmd /s /c ""<script>" <args>"` via the launcher — the outer pair of quotes keeps a quoted path and quoted arguments intact |
 | `vbs`         | direct `wscript.exe <script.vbs>` (VBS is always hidden) |
-| `python_local`| direct `python.exe <script>` for local `C:\` scripts (logon-time bootstrap) |
+| `python_local`| direct Python (`PYTHON_EXE`, else `python.exe`) for local `C:\` scripts (logon-time bootstrap) |
 | `exec`        | arbitrary executable + args (service-style tasks like long-running daemons) |
 
 The launcher (`bin/_run-hidden.vbs`, shipped in the bundle) calls
@@ -234,11 +242,13 @@ host options itself, so `WScript.Arguments` still starts at `<kind>`.
 The syncer marks every task it manages with
 `Description: managed-by-registry | <your description>`. Sync matches
 existing tasks by their registry **name** (`Get-ScheduledTask -TaskName`);
-the marker is informational only and is **not** used to re-discover a
-renamed task — rename a managed task and the next sync simply recreates
-it under the registry name. Tasks not in the registry are left alone —
-the syncer is **additive within its own namespace**, not destructive
-across the whole Task Scheduler.
+the marker is **not** used to re-discover a renamed task — rename a managed
+task and the next sync simply recreates it under the registry name. What the
+marker does decide is ownership: a same-named task WITHOUT it is somebody
+else's, and sync skips it rather than overwrite it (`-Adopt` takes it over),
+and `-Unregister` removes only tasks that carry it. Tasks not in the registry
+are left alone — the syncer is **additive within its own namespace**, not
+destructive across the whole Task Scheduler.
 
 Sync is idempotent — running `sync.cmd` twice in a row produces no
 changes the second time.
@@ -261,19 +271,22 @@ Edit `registry.yaml` to disable any others you don't want before running
 | `ClaudeWikiCompileSessions` | Daily 04:00 | compile sessions → `projects/<slug>/*` (off by default — a phase of the pipeline above) |
 | `ClaudeWikiBuildIndex` | Daily 04:05 | rebuild `projects/index.md` + `kb/index.md`, refresh stats in `wiki/index.md` (off by default — a phase of the pipeline above) |
 | `ClaudeWikiLint` | Weekly Sun 02:00 | broken-link / orphan / project-collapse check |
-| `ClaudeLogRetention` | Weekly Sun 03:00 | prune `cron/logs/*.{log,jsonl}` older than 30 days |
+| `ClaudeLogRetention` | Weekly Sun 03:00 | prune `cron/logs/*.{log,jsonl,diff}` older than 30 days |
 | `ClaudeAgentsMdSyncCheck` | Weekly Sun 07:30 | reconcile each project's `AGENTS.md` with its `CLAUDE.md` (off by default; needs `projects_root`) |
 | `ClaudeMd2PdfSync` | Daily 06:30 | regenerate any PDF whose paired `.md` is newer (off by default; needs `PROJECTS_ROOT`, markdown-it-py and a Chromium-family browser for `bin/md2pdf.py`) |
 | `ClaudeMemoryUpdate` | Daily 02:00 | JSONL → memory MD |
 | `ClaudeGitPushAll` | Daily 07:00 | auto-push your project repos (off by default — opt-in) |
 | `ClaudeHealthcheck` | Daily 09:00 | morning self-check |
 | `ClaudeTaskMonitor` | Daily 09:30 | alert on failed Task Scheduler jobs, and on one still running past its own `timeout_hours` (Windows only) |
-| `ClaudeTaskMonitorPosix` | Daily 09:30 | the same alert on Linux/macOS, from failed `systemd --user` units / launchd agents (off by default — enable it on a POSIX box) |
+| `ClaudeTaskMonitorPosix` | Daily 09:30 | the same alert on Linux/macOS, from failed `systemd --user` units / launchd agents and tasks gone silent in the run ledger (off by default — enable it on a POSIX box) |
 | `ClaudeTestSweep` | Daily 05:15 | run every project's fast test suite; file a finding when one turns red (off by default; needs `projects_root`) |
 | `ClaudeTestSweepFull` | Weekly Sat 07:00 | the same sweep including `integration` tests (off by default; needs `projects_root`) |
 | `ClaudeWarmWindow` | Daily 01:00 /4h | ping the Claude 5h window (off by default — read the billing note in the script; set `CLAUDE_BIN` in `.env` if the `claude` CLI isn't on PATH in session 0) |
 
-The pipeline writes to Telegram only on failure (no spam on success).
+Alerts go to Telegram when something is wrong, not as a success report — with
+two deliberate exceptions: `ClaudeWikiPipeline` sends one summary on the last
+night of a dated `dry_run_until` window (what the preview would have sent), and
+the test sweep says when a broken suite has recovered.
 Configure `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in your `.env` to
 receive alerts — leave those two vars unset to silence every alert (the
 scripts self-guard on their presence).
@@ -304,14 +317,20 @@ this table reflects it.
 | `ClaudeWikiCompileKB` | the text of your KB sources (`kb_sources/`, or `KB_SOURCE_DIR`) → your LLM provider. They belong to no project, so the project policy does not apply to them | yes (PAYG tokens) | no | off (opt-in) |
 | `ClaudeMemoryUpdate` | your user messages (up to ~40 KB/night) + a slice of `~/.claude/memory/` → your LLM provider. With `MEMORY_CROSS_NOTES=1`, a **second** call on top of that, carrying messages from two or more projects at once | yes (PAYG tokens) | no | on (cross-notes off) |
 | `ClaudeHealthcheck` | host metrics → your LLM provider (see below) | yes (PAYG tokens) | no | on |
-| `ClaudeGitPushAll` | your git remotes | no | yes (`git push`) | off (opt-in) |
+| `ClaudeGitPushAll` | your commits → your git remotes, and a Telegram alert naming the repos that failed or were held back. Before a push, what the remote does not have yet is scanned: a token-shaped secret, or a sensitive file name (`.env`, private keys, credential files — the table the git hooks use), holds that repo back, and it fails every night until the file is out of its history or pushed once by hand. A blob over 1 MiB is noted in the log, not scanned | no | yes — auto-commits and `git push`es every repo under `projects_root` (the vault too, when `wiki/` has a `.git` of its own) | off (opt-in) |
 | `ClaudeTaskMonitor` / alerts | failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the titles of stale findings from every allowed project → Telegram Bot API | no | no | on |
 | `ClaudeTaskMonitorPosix` | failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers → Telegram Bot API | no | no | off (POSIX only) |
 | `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
 | `ClaudeMd2PdfSync` | on a failure, the paths of the documents that did not convert (relative to `projects_root`) → Telegram Bot API; the reasons stay in the local log. Projects the privacy policy denies are not walked. The render is local, except that the browser fetches any remote image a document links | no | rewrites the paired `*.pdf` in your working copies — which `ClaudeGitPushAll` commits when that task is on | off |
 | `ClaudeWikiLint` | a lint summary → Telegram Bot API, only with `WIKI_LINT_TELEGRAM=1` | no | rewrites vault pages, only with `--fix` | on (alerts off) |
 | `ClaudeTestSweep` / `ClaudeTestSweepFull` | a summary of which suites broke → Telegram Bot API. No LLM is involved and no test output goes to a provider; tails are masked for credentials before they are logged or sent | no | writes a finding into each affected project's `FINDINGS.md`, and deletes its own finding again when the suite recovers | off (needs `projects_root`) |
-| `ClaudeAgentsMdSyncCheck` | the **whole** `CLAUDE.md` and `AGENTS.md` of every allowed project → your LLM provider. This is the widest per-project payload in the bundle: not a slice of a transcript but two complete rules files, including whatever hosts, paths and commands they name | yes (PAYG tokens; `AGENTS_SYNC_FIX_MODEL` can point the fix step at a costlier model) | **edits `AGENTS.md` in your working copies** and files a finding in their `FINDINGS.md`. The only task that writes into your repositories | off (needs `projects_root`) |
+| `ClaudeAgentsMdSyncCheck` | the **whole** `CLAUDE.md` and `AGENTS.md` of every allowed project → your LLM provider. This is the widest per-project payload in the bundle: not a slice of a transcript but two complete rules files, including whatever hosts, paths and commands they name | yes (PAYG tokens; `AGENTS_SYNC_FIX_MODEL` can point the fix step at a costlier model) | **edits `AGENTS.md` in your working copies** and files a finding in their `FINDINGS.md` | off (needs `projects_root`) |
+
+Every row above that says "your LLM provider" carries one more thing when that
+provider is OpenCode Go: its gateway refuses a request without a conversation
+id, so the call sends `x-opencode-session: bundle-<script name>-<random>` — the
+name of the script that made it, one id per process (see
+[`docs/llm-routing.md`](llm-routing.md)).
 
 `cron/wiki/wiki-conflict-resolve.py` is not in the table because it is not a
 scheduled task — it is run by hand. When you do run it, it sends a WHOLE vault
@@ -341,20 +360,26 @@ The disk verdict itself is **not** the LLM's to make: severity comes from
 a `df` threshold, and the model only writes the explanation. A depleted
 provider therefore degrades the alert's prose, not the alert.
 
-Three deterministic conditions can raise the alert on their own, each
+Four deterministic conditions can raise the alert on their own, each
 independent of the model:
 
-- **Local disk** over `HEALTHCHECK_DISK_PCT`. Pseudo-filesystems are
+- **Local disk** at or above `HEALTHCHECK_DISK_PCT`. Pseudo-filesystems are
   excluded by mount point (`HEALTHCHECK_DISK_EXCLUDE`) — a `/snap/*`
   squashfs is permanently 100% full and used to page every morning.
-- **Remote disk** over `HEALTHCHECK_REMOTE_DISK_PCT` (defaults to the
+- **Remote disk** at or above `HEALTHCHECK_REMOTE_DISK_PCT` (defaults to the
   local threshold). Before this, a remote host at 98% was only ever text
   inside the prompt, so it could never decide whether to wake anyone.
-- **The monitor stopped running.** A task that stops firing has no failing
-  run to report, and that is as true of `ClaudeTaskMonitor` as of anything
-  it watches — so the healthcheck reads the ledger and alerts when the
-  monitor has not recorded a run in 30 hours. Silent when that task is
-  disabled, absent, or belongs to another platform.
+- **The task monitor stopped running.** A task that stops firing has no
+  failing run to report, and that is as true of the task monitor of this
+  platform (`ClaudeTaskMonitor` on Windows, `ClaudeTaskMonitorPosix`
+  elsewhere) as of anything it watches — so the healthcheck reads the ledger
+  and alerts when the monitor has not recorded a run in 30 hours. Silent when
+  that task is disabled or absent.
+- **The LLM chain is down**: every provider failed within the last day
+  (`cron/state/chain-dead.json`). The analysis is then skipped rather than
+  sent into a known outage, and the alert is left to the task monitor when
+  one runs on this platform — it reports each outage once, not every
+  morning — so the healthcheck raises it itself only where no monitor would.
 
 ### Everything the pipeline sends is attacker-influenced
 
@@ -405,7 +430,7 @@ old behaviour shipped every transcript to three off-box gateways.
 
 | Path | Default window | Override |
 |---|---|---|
-| `cron/logs/*.{log,jsonl}` | 30 days | `WIKI_LOG_RETENTION_DAYS` |
+| `cron/logs/*.{log,jsonl,diff}` | 30 days | `WIKI_LOG_RETENTION_DAYS` |
 | `cron/logs/rejected/*.txt` (raw LLM payloads) | 7 days | `WIKI_REJECTED_RETENTION_DAYS` |
 | `projects/*/memory/handoff-*.md` (LLM session summaries) | 7 days | `WIKI_HANDOFF_RETENTION_DAYS` |
 
@@ -477,13 +502,14 @@ one, and capping it would throw away content over a bad week. Set
 `WIKI_RETRY_LIMIT=0` to restore unbounded retries.
 
 What makes the "never loses it" part true is that compile's markers carry
-a **fingerprint of the daily log as it was read** (`DATE@fp`,
-`DATE#project@fp`). Without it the overlap really could lose a section: a
-compile that read the daily, then a flush that appended a delta and cleared
-the markers, then that same compile writing its marker — and the appended
-text would be recorded as compiled by a process that never saw it. With the
-fingerprint, an append simply stops matching any marker, so the next run
-recompiles and `apply_changes` dedups the overlap.
+a **fingerprint of the text as it was read**: `DATE@fp` over the whole daily,
+`DATE#project@fp` over ONE project section. Without it the overlap really could
+lose a section: a compile that read the daily, then a flush that appended a
+delta and cleared the markers, then that same compile writing its marker — and
+the appended text would be recorded as compiled by a process that never saw it.
+With the fingerprint, an append simply stops matching the daily's marker, and
+because every section carries its own, the next run sends only the sections
+without one — the appended text, not the day again.
 
 To go back to separate timers: set `enabled: false` on `ClaudeWikiPipeline`
 and `enabled: true` on `ClaudeWikiFlush`, `ClaudeWikiCompileSessions` and
@@ -504,7 +530,9 @@ pipeline state (pending queue, processed count, last per-phase success,
 quarantine), and wiki page counts. It makes no network call and changes
 nothing — the quick answer to "is the pipeline actually wired, or did files
 just get copied?" (For the pass/fail deploy check, use
-`scripts/self-test.ps1`.)
+`scripts/self-test.ps1`.) With `--hooks` it is a check instead: every command
+hook in the `settings.json` Claude Code loads is parsed and resolved, exit 1
+when one is broken; `--smoke` also runs each of the bundle's own hooks once.
 
 ## Per-project privacy policy (bundle.local.yaml)
 
@@ -538,10 +566,15 @@ permissive default — a policy you can't read is not a policy you can
 ignore. That covers **every** field, uniformly: invalid YAML, a missing
 PyYAML, a root that isn't a mapping, a string where a list belongs, a
 `project_map` that isn't a string→string mapping, and a non-boolean
-`collect_plans`. An unrecognized key is reported as a probable typo (it is
-ignored, so a misspelled `skip_project:` would otherwise silently allow
-what you meant to exclude). `scripts/self-test.ps1` validates the same
-schema against both the template and your deployed manifest.
+`collect_plans`. An unrecognized key is a configuration error: it is ignored,
+and reported as an ERROR by every run and by `bundle-status.py`. A key within
+two edits of a known one — `skip_project:` for `skip_projects:` — is taken for
+that key misspelled, so the manifest counts as broken and every project is
+denied until it is fixed: a typo must not silently allow what you meant to
+exclude. `scripts/self-test.ps1` validates the same schema against both the
+template and your deployed manifest, and fails on such a near miss. Entries in
+`allow_projects` / `skip_projects` are compared as normalized project names —
+the slugs the wiki's project folders carry — on both sides.
 
 ### What the policy is NOT
 
@@ -558,8 +591,9 @@ and two limits are worth knowing before you rely on it:
 - **Masking, not anonymization.** Key-shaped tokens *are* stripped before
   the text reaches the provider: `WIKI_MASK_SECRETS` is on by default and
   `utils.masked()` runs on every sink — the wiki phases, `.pending/`
-  drafts, quarantined payloads, findings, `USER.md`, the test sweep's
-  output tails, and both rules files `ClaudeAgentsMdSyncCheck` ships.
+  drafts, compaction handoffs, quarantined payloads, findings, `USER.md`,
+  the test sweep's output tails, and both rules files
+  `ClaudeAgentsMdSyncCheck` ships.
   What it masks are credential *shapes* (API keys, tokens, JWTs, PEM
   blocks, `ccr-…`) from the one table in `cron/lib/secret_shapes.py`.
   What it deliberately leaves alone is exactly what makes the notes
@@ -598,7 +632,11 @@ the future, EVERY phase runs in preview mode (no LLM call, no network, no
 writes), and the logs show exactly what each source would have sent, per
 project. The installer sets it a week out. It expires on its own, which is
 the design: a flag you have to remember to remove is a flag that stays on
-for a year. Delete the key to start immediately.
+for a year. Delete the key to start immediately. So that the day the window
+runs out is not a surprise either, `ClaudeWikiPipeline` sends one Telegram
+summary on its last night — the projects, the payload size and the provider the
+preview would have used. `dry_run_until: confirm` is the other way round: the
+preview lasts until you replace the word with a date, and no summary is sent.
 
 ## Adapting for your machine
 
@@ -620,7 +658,8 @@ when you are adapting rather than installing. `INSTALL.md` is the full version.
    unparseable manifest denies every project, by design.
 5. Run `cron/admin/save-cred.cmd` (non-elevated) — it asks for your
    Windows password and DPAPI-encrypts it to
-   `%LOCALAPPDATA%\claude-bundle-cred.dat`
+   `%LOCALAPPDATA%\claude-bundle-cred.dat` (only `password` tasks need it;
+   see [LogonType policy](#logontype-policy) for `interactive` and `s4u`)
 6. Fill the `registry.yaml` placeholders (`<bundle-install-path>`, `<user>`) —
    `scripts/bootstrap-registry.ps1` does it from the manifest, and also
    generates `.env::PROJECTS_ROOT` from `projects_root:`
@@ -631,12 +670,28 @@ when you are adapting rather than installing. `INSTALL.md` is the full version.
    asks Task Scheduler for each task's last result. Then
    `schtasks /query /tn ClaudeTaskMonitor /fo list /v` for the raw view.
 
-## Diagnostics
+## Where to look when something is wrong
 
-- **Operational log** (turn it on once via Event Viewer):
-  `Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 50`
-- **Per-task log** — each script writes its own log to
-  `cron/logs/<name>_$(date +%Y-%m-%d).log`. The hidden launcher does no
-  redirection — it only propagates the child's exit code.
-- **Telegram alerts** — `ClaudeTaskMonitor` runs daily at 09:30 and
-  alerts if any registry task has a non-zero `Last Result`.
+Paths are relative to the pipeline root (`~/.claude` on a default install).
+
+| Where | What it answers |
+|---|---|
+| `cron/logs/<name>_<date>.log` | What one run of a task did, and why it failed. Each script writes its own (`wiki-pipeline_`, `memory-update_`, `healthcheck_`, `task-monitor_`, `git-push-all_`, …); the hidden launcher redirects nothing. Build-index writes none: under the pipeline its output is in `wiki-pipeline_<date>.log`, with every other phase's. |
+| `cron/logs/launcher.log` | Why a task's `Last Result` is **9009** and it left no log: `bin/_run-hidden.vbs` writes a line only when the launch itself failed — a `BASH_EXE` / `PYTHON_EXE` path that does not exist, or a command Windows could not start. |
+| Event Viewer → Task Scheduler → Operational (turn it on once; `Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 50`) | Whether the trigger fired at all, and a logon failure (`0x8007052E`: the stored password is stale) before any script ran. |
+| `%TEMP%\sync-tasks_<timestamp>.log` | Why a task was skipped or failed at registration — the transcript of a registering sync run (`-Verify` and `-DryRun` write none). |
+| `cron/logs/runs-<year>.jsonl` | Whether a task ran at all, when, with what exit code, and whether it produced anything — one record per run. `bundle-status.py`, the task monitors' "gone silent" check and the SessionStart warning all read it. |
+| `cron/logs/provider_attempts_<date>.jsonl` | Which task called which provider and model, the status it got back, how long it took, and whether a fallback fired — one line per HTTP attempt, the basis for "what did it cost". |
+| `cron/state/depleted.json` | Why a provider was skipped: the circuit breaker's entries, each with the answer that latched it (401, 402, 429, …) and when — the latch lasts 6 hours for a configuration answer, 30 minutes for a transient one. `bundle-status.py` prints each one's end. |
+| `cron/state/chain-dead.json` | Whether the machine has any LLM at all: when every provider in the chain last failed, and since when. |
+| `cron/state/task-monitor-seen.json`, `cron/state/task-monitor-posix-seen.json` | Why a failure is not reported again: what the task monitor has already alerted about. |
+| `$HOME/task-monitor-fatal.log` | What `ClaudeTaskMonitor` could not say through Telegram: its own start-up failure, or the full text of an alert it failed to deliver. |
+| `wiki/.processed.json` | Why a source is — or is not — read again: the per-source markers, retry counts and quarantine list (`bundle-status.py` summarizes it). |
+| `FINDINGS.md` (in the pipeline root) and `cron/logs/rejected/` | What the pipeline gave up on: one finding per quarantined source, and the masked payload behind it (kept 7 days). |
+
+`ClaudeTaskMonitor` runs daily at 09:30 and alerts on a task with a non-zero
+`Last Result` (the registry's own, and any other task outside Task Scheduler's
+Microsoft and Windows folders, marked ORPHAN), one still running past its
+`timeout_hours`, a Password/S4U task that
+breaks the path policy, a declared `health_port` that is closed, or a down LLM
+chain.

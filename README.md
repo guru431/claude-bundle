@@ -263,7 +263,8 @@ New-Item -ItemType Directory -Force -Path $dst | Out-Null
 Copy-Item "$src\CLAUDE.md"     $dst -Force
 Copy-Item "$src\settings.json" $dst -Force
 Copy-Item -Recurse "$src\skills"   $dst -Force
-Copy-Item -Recurse "$src\commands" $dst -Force
+New-Item -ItemType Directory -Force -Path "$dst\commands" | Out-Null
+Copy-Item "$src\commands\code-review-ext.md" "$dst\commands" -Force   # /wiki is full tier
 ```
 
 Then in a Claude Code chat:

@@ -67,9 +67,10 @@ DST="$USERPROFILE/.claude"
 mkdir -p "$DST"
 cp "$SRC/CLAUDE.md"     "$DST/CLAUDE.md"
 cp "$SRC/settings.json" "$DST/settings.json"
-# Lite — skills + commands are markdown only, safe with no extra software:
+# Lite — skills + commands are markdown only, safe with no extra software.
+# Only /code-review-ext: /wiki searches the vault the full tier builds (step 5).
 cp -r "$SRC/skills"   "$DST/" 2>/dev/null
-cp -r "$SRC/commands" "$DST/" 2>/dev/null
+mkdir -p "$DST/commands" && cp "$SRC/commands/code-review-ext.md" "$DST/commands/"
 # Full only — hooks are Python scripts; they need a real Python on PATH:
 cp -r "$SRC/hooks"    "$DST/" 2>/dev/null
 ```
@@ -132,6 +133,7 @@ DST="$USERPROFILE/.claude"
 cp -r "$SRC/home-claude/wiki" "$DST/"
 cp -r "$SRC/home-claude/cron" "$DST/"
 cp -r "$SRC/home-claude/bin"  "$DST/"   # launcher + md2pdf — REQUIRED
+cp "$SRC/home-claude/commands/wiki.md" "$DST/commands/"   # /wiki searches this vault
 ```
 
 Do not skip `bin/`: every Password-mode `bash`/`python` task runs through
@@ -198,9 +200,14 @@ You can't bypass that. Tell them:
 > It will ask for your Windows login password and DPAPI-encrypt it
 > for Password-mode scheduled tasks.
 
-If the user wants to skip and use Interactive-mode only — edit
-`cron/registry.yaml` and change every `logon_type: password` to
-`interactive`. Warn them tasks won't run before they log in.
+If the user wants to skip it, there are two ways — edit `cron/registry.yaml`
+and change `logon_type: password` on each task to:
+- `interactive` — warn them tasks won't run before they log in;
+- `s4u` — only for a bundle on a local disk. Tasks still run before logon and
+  no password is stored, but they have no network credentials: no UNC/share
+  paths (the syncer refuses those), no `git push` through Git Credential
+  Manager, no proxy that wants the Windows login. Suggest a test run of each
+  switched task before relying on it.
 
 ### 8. Populate project map + privacy policy
 
@@ -231,7 +238,10 @@ Code uses (they look like `C--Users-user-projects-myapp`). Write into
 EVERY phase in preview mode until that date: sources are collected, what would
 be sent is printed with a token estimate, and nothing is sent, written or
 recorded. `install.ps1` does this automatically; on this path you must. It
-expires on its own, so it needs no follow-up.
+expires on its own, so it needs no follow-up — on its last night
+`ClaudeWikiPipeline` sends one Telegram summary of what the preview would have
+sent. If the user would rather start by hand, write `dry_run_until: confirm`:
+the preview then lasts until a date replaces it.
 
 Before enabling tasks, preview what would be sent without spending a
 token: `python "$DST/cron/wiki/wiki-flush-sessions.py" --dry-run` (prints
@@ -323,8 +333,8 @@ For per-project AGENTS.md, ask the user which projects they want.
 ```
 Profile: <lite | full>
 Lite:   deployed CLAUDE.md, settings.json, skills (templates — paths
-        still need filling), commands (1 wired). Hooks: <skipped / X-of-Y
-        enabled>.
+        still need filling), commands (/code-review-ext; /wiki on full).
+        Hooks: <skipped / X-of-Y enabled>.
 Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/17 tasks
         with Task Scheduler. LLM provider: <provider>. Telegram alerts:
         <yes/no>.   (omit this line for a lite-only deploy)
@@ -346,14 +356,16 @@ Back up first: `cp ~/.claude/CLAUDE.md ~/.claude/CLAUDE.md.bak-YYYY-MM-DD`.
 Tell the user before overwriting.
 
 ### Linux / macOS target
-- Tier 1 works as-is (use `~/.claude/` instead of `$USERPROFILE`).
-- Tier 2: don't hand-translate `registry.yaml` to crontab — generate
-  scheduler units from it with `python scripts/gen-scheduler.py --target
-  systemd|launchd --install-path ~/.claude --out-dir units`, then run the
-  `systemctl --user enable --now` / `launchctl load` commands it prints.
-  Windows-only kinds (`cmd`/`vbs`/`exec`) and `platform: windows` tasks
-  are skipped; DPAPI / `save-cred` isn't needed on POSIX. The Python
-  compilers and Bash hooks are portable.
+- Use the POSIX installer rather than the `cp` steps: `bash scripts/install.sh`
+  for Lite (no `/wiki`), `bash scripts/install.sh --profile full --install-units`
+  for Full. It merges `settings.json`, writes a manifest `scripts/uninstall.sh`
+  can reverse, creates `.env` and `bundle.local.yaml` (with `dry_run_until`) only
+  when absent, and installs + enables systemd user units or launchd agents
+  generated from the deployed `registry.yaml` — don't hand-translate the registry
+  to crontab. Add `--enable-linger` on Linux so timers fire without a login.
+  Windows-only kinds (`cmd`/`vbs`/`exec`) and `platform: windows` tasks are
+  skipped; DPAPI / `save-cred` isn't needed on POSIX. The Python compilers and
+  Bash hooks are portable.
 
 ### Remote deployment via SSH/WinRM
 Push the bundle (`scp` / `Copy-Item -ToSession`), then run steps 1–11

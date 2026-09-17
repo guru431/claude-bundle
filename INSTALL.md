@@ -8,7 +8,7 @@ macOS notes at the bottom.
 
 > **Working on the bundle itself (not just deploying it)?** Run
 > `scripts/enable-guard.sh` (or `scripts/enable-guard.ps1`) once after
-> cloning — it activates the pre-commit secret-guard so nothing private
+> cloning — it activates the git secret guards so nothing private
 > can leak into a commit to this public repo.
 
 ---
@@ -21,7 +21,7 @@ agent instructions.
 
 | Profile | What you get | Extra software needed | Maps to |
 |---|---|---|---|
-| **Lite** | `CLAUDE.md`, `settings.json`, skill templates, slash command — config only | **None** beyond VS Code + the Claude Code extension | Tier 1 *minus* the optional Python hooks |
+| **Lite** | `CLAUDE.md`, `settings.json`, skill templates, the `/code-review-ext` slash command — config only (`/wiki` comes with Full) | **None** beyond VS Code + the Claude Code extension | Tier 1 *minus* the optional Python hooks |
 | **Full** | Lite + Python hooks + Karpathy wiki vault + cron pipeline + `claude-switch.ps1` + Codex `AGENTS.md` mirror | Python 3.10+, Git for Windows, an LLM backend (see below), (optional) Telegram bot + your Windows password | Tier 1 + Tier 2 |
 
 ### What Full actually requires
@@ -30,7 +30,7 @@ agent instructions.
 |---|---|---|
 | Python 3.10+, Git for Windows | **yes** | the pipeline and the syncer are Python + Bash |
 | An LLM backend | **yes** — but a key is not the only option | a **key** for DeepSeek or OpenCode Go; **or** `WIKI_LLM_PROVIDER=local` against your own OpenAI-compatible server (Ollama, llama.cpp, LM Studio, vLLM) — no key, no cost, and nothing leaves the machine; **or** `WIKI_LLM_PROVIDER=claude`, which shells out to the `claude` CLI you already signed in to in step 1 — no key, but it spends your Claude subscription |
-| Windows password (DPAPI, step 10) | only for Password-mode tasks | switch every task to `logon_type: interactive` to skip it (they then run only while you're logged in) |
+| Windows password (DPAPI, step 10) | only for Password-mode tasks | to skip it, switch tasks to `logon_type: interactive` (they then run only while you're logged in) or, on a local install, `logon_type: s4u` (still before logon, no stored password — but no network credentials: no share paths, no Git Credential Manager push, no authenticating proxy) |
 | Telegram bot + chat_id | **no** | alerts only; without it failures just land in `cron/logs/` |
 | `claude-switch.ps1`, Codex `AGENTS.md` mirror | **no** | optional companions (steps 15–16) |
 
@@ -38,8 +38,8 @@ agent instructions.
 
 | Path | What's copied | Prerequisites | Verification run |
 |---|---|---|---|
-| Lite — automated (`install.ps1 -Profile lite`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/`, `.bundle-version` stamp (no `.env`) | Windows PowerShell, VS Code + Claude Code ext | built-in check: the copied files exist and `settings.json` parses (the full `self-test.ps1` is for the full tier — it checks Python, YAML, hooks and the registry, none of which a lite install has) |
-| Lite — manual (Copy-Item snippet) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/` | Windows PowerShell | manual: `/help`, `/skills` in chat |
+| Lite — automated (`install.ps1 -Profile lite`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/` without the full-tier `wiki.md`, `.bundle-version` stamp (no `.env`) | Windows PowerShell, VS Code + Claude Code ext | built-in check: the copied files exist and `settings.json` parses (the full `self-test.ps1` is for the full tier — it checks Python, YAML, hooks and the registry, none of which a lite install has) |
+| Lite — manual (Copy-Item snippet) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/` without `wiki.md` | Windows PowerShell | manual: `/help`, `/skills` in chat |
 | Full — automated (`install.ps1 -Profile full`) | Lite set + `hooks/`, `wiki/`, `bin/`, `cron/` + `.env` from template + registry bootstrap (optional `save-cred`/`sync`) | Python 3.10+, Git for Windows, an LLM backend | runs `self-test.ps1` automatically |
 | POSIX — lite (`bash scripts/install.sh`) | `CLAUDE.md`, `settings.json` (merged), `skills/`, `commands/` without the full-tier `wiki.md`, `.bundle-version` stamp, `.bundle-manifest.json` | bash; a Python 3.9+ for the merge and the manifest | built-in check: the files exist and `settings.json` parses |
 | POSIX — full (`bash scripts/install.sh --profile full`) | Lite set + `hooks/`, `wiki/`, `bin/`, `cron/` + `.env` + `bundle.local.yaml`; systemd/launchd units with `--install-units` | Python 3.10+ with requests + PyYAML, bash, systemd or launchd, an LLM backend | built-in: the deployed registry passes `check-registry.py` and `cron/` compiles; `gen-scheduler.py --check` for the units |
@@ -103,7 +103,8 @@ Copy-Item "$src\settings.json" $dst -Force
 # Optional sub-folders
 Copy-Item -Recurse "$src\hooks"    $dst -Force
 Copy-Item -Recurse "$src\skills"   $dst -Force
-Copy-Item -Recurse "$src\commands" $dst -Force
+New-Item -ItemType Directory -Force -Path "$dst\commands" | Out-Null
+Copy-Item "$src\commands\code-review-ext.md" "$dst\commands" -Force   # /wiki comes in step 8
 ```
 
 ### 3. Install plugins
@@ -312,6 +313,7 @@ somebody else created is left alone. Add `-DryRun` to see the list first.
 Copy-Item -Recurse "$src\wiki" $dst -Force
 Copy-Item -Recurse "$src\cron" $dst -Force
 Copy-Item -Recurse "$src\bin"  $dst -Force
+Copy-Item "$src\commands\wiki.md" "$dst\commands" -Force   # /wiki <words> searches this vault
 ```
 
 This puts `~/.claude/wiki/` (empty vault skeleton), `~/.claude/cron/`
@@ -400,11 +402,13 @@ It prompts for your Windows password, encrypts it, writes to
 `%LOCALAPPDATA%\claude-bundle-cred.dat`. **Without this step,
 Password-mode tasks won't register** — the syncer will error out.
 
-If you'd rather use only Interactive-mode tasks (no password
-required, but tasks won't run before you log in), edit
-`cron/registry.yaml` and change `logon_type: password` → `interactive`
-on each task. See [`docs/cron-architecture.md`](docs/cron-architecture.md)
-for the trade-offs.
+If you'd rather not store the password, edit `cron/registry.yaml` and change
+`logon_type: password` on each task to either `interactive` (no password, but
+tasks won't run before you log in) or — on a local install — `s4u` (runs before
+logon with no stored password, but without network credentials: no share
+paths, no Git Credential Manager push, no authenticating proxy). See
+[`docs/cron-architecture.md`](docs/cron-architecture.md#logontype-policy) for
+the trade-offs.
 
 ### 11. Edit `registry.yaml` placeholders
 
@@ -459,7 +463,11 @@ dry_run_until: 2026-09-11   # today + 7. Every phase previews only until then.
 While the window is open every phase collects its sources, prints what it WOULD
 send (with a character/token estimate) and writes nothing — no LLM call, no
 state, no ledger row. It expires by itself, which is the point: a flag you have
-to remember to remove is a flag that stays on for a year.
+to remember to remove is a flag that stays on for a year. On its last night
+`ClaudeWikiPipeline` sends one Telegram summary of what the preview would have
+sent (projects, size, provider), so the day it ends does not pass unnoticed.
+Prefer to decide the day yourself? `dry_run_until: confirm` keeps the preview
+on until you replace it with a date.
 
 It lives next to `.env` and is **reinstall-safe** — unlike editing
 `cron/hooks/utils.py`, a later reinstall won't wipe it:
@@ -506,7 +514,8 @@ placeholders you just filled in in step 11.
 
 This auto-elevates to UAC once for the whole batch, then idempotently
 registers (or updates) all 17 tasks from `registry.yaml`. Output goes
-to `%TEMP%\sync-tasks_<timestamp>.log`.
+to `%TEMP%\sync-tasks_<timestamp>.log` (a registering run writes one; `-Verify`
+and `-DryRun` do not).
 
 ### 14. Verify
 
@@ -524,7 +533,17 @@ schtasks /query /tn ClaudeWikiFlush /fo list /v
 ```
 
 Each should report `Status: Ready` and a `Next Run Time` in the
-future. To force a test run:
+future. For every task at once, compared with what `registry.yaml` asks for
+(no elevation needed):
+
+```powershell
+powershell -File "$env:USERPROFILE\.claude\cron\admin\sync-tasks.ps1" -Verify -Detail
+```
+
+`-Verify` prints each task's state and last result; `-Detail` adds the
+registered description, action and trigger next to the registry's version.
+
+To force a test run:
 ```cmd
 schtasks /run /tn ClaudeTaskMonitor
 ```
@@ -561,7 +580,8 @@ Claude Code runs that command and uses its stdout as the credential, so the
 secret stays in the one `.env` and never lands in a file inside the project
 working tree. `scripts/get-key.ps1` prints one value and nothing else,
 reading it through the same parser and the same order (env, then `.env`);
-it must sit next to `scripts/lib/dotenv.ps1`.
+it looks for that parser in `lib\dotenv.ps1` next to itself, then in
+`cron\lib\dotenv.ps1`, where the full-tier installer deploys it.
 
 ### 16. (Optional) Codex CLI mirror
 
@@ -587,15 +607,18 @@ them is a failure.
 **"What is this supposed to produce?"** [`docs/examples/`](docs/examples/) is a
 worked sample — a synthetic daily log, the page compiled from it, and the index
 entry. It is generated with the offline `mock` provider, so it costs nothing and
-shows the real shapes: the frontmatter, the naming, the wikilinks.
+shows the real shapes: the frontmatter, the naming, the wikilinks. A key-less
+demo run on that synthetic sample: `python home-claude/cron/wiki/wiki-pipeline.py --demo`
+from a bundle checkout.
 
 **"It ran overnight and the wiki is still empty."** Three normal causes, in the
 order to check them:
 
-1. **`dry_run_until` is still in the future.** That is the point — every phase
-   collects sources, prints what it WOULD send, and writes nothing. The log
-   says so on its first line. Delete the key in `~/.claude/bundle.local.yaml`
-   to start early; it expires on its own.
+1. **`dry_run_until` is still in the future** (or reads `confirm`). That is the
+   point — every phase collects sources, prints what it WOULD send, and writes
+   nothing. The log says so on its first line. Delete the key in
+   `~/.claude/bundle.local.yaml` to start early; a date expires on its own,
+   `confirm` only when you replace it with one.
 2. **There was nothing new.** `WIKI_BACKLOG_MAX=0` is the shipped default:
    only sessions from the last 48 hours are read, and your archive is left
    alone until you opt in. Set `WIKI_BACKLOG_MAX=20` to backfill 20 older
@@ -626,7 +649,7 @@ says which tasks can spend anything at all — most cannot.
   install, NOT your project's. One entry per quarantined source, deduped on the
   title.
 - `<PipelineRoot>/cron/logs/rejected/` — the payload itself, aged out by
-  `ClaudeLogRetention` after 14 days.
+  `ClaudeLogRetention` after 7 days (`WIKI_REJECTED_RETENTION_DAYS`).
 
 Re-run one quarantined daily by hand once you have fixed the cause:
 
@@ -649,7 +672,11 @@ The last line is the belt to the first one's braces: it refuses every provider
 whose registry row says `offbox: true`, whichever one is selected. And a
 `local` provider whose URL is not actually loopback is refused too — the
 endpoint is verified, not assumed, so a copied config cannot quietly turn
-"local" into "somebody else's server".
+"local" into "somebody else's server". `localhost` counts only when it
+resolves to loopback and nothing else; proxy variables are ignored for this
+provider and a redirect is refused, since either would carry the transcript to
+a host the URL never named. A trusted server on your LAN is allowed by naming
+its host or IP address in `LOCAL_LLM_ALLOWED_HOSTS`.
 
 **"How do I search what it has learned?"** `/wiki <words>` in a Claude Code
 session, or `python ~/.claude/cron/wiki/wiki-grep.py <words>` directly. Local
@@ -862,4 +889,5 @@ update a deployment, re-run the installer — it re-stamps, merges your
 On Linux / macOS the merge needs a Python 3.9+: without one `install.sh`
 replaces `settings.json`, keeps your version as `settings.json.bak-<stamp>`,
 and says so at the end. `install.ps1 -Diff` / `install.sh --diff` show the
-per-file changes first.
+per-file changes first. What to check before and after an update:
+[UPGRADING.md](UPGRADING.md).

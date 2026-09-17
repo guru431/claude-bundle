@@ -47,8 +47,9 @@
 #   or a LOCAL drive (C:\...). NEVER use a mapped drive (S:\, M:\, etc.).
 #   Mapped drives only exist inside a user session; Password tasks fire in
 #   session 0 (before logon), so a mapped-drive path resolves to nothing and
-#   the launcher exits 127 with NO log file. (ClaudeTaskMonitor enforces this
-#   by alerting if any Password task has a mapped-drive path in its Action.)
+#   the launcher exits 127 with NO log file. (sync-tasks.ps1 refuses such a
+#   registration, and ClaudeTaskMonitor alerts on any Password or S4U task whose
+#   action still has a mapped-drive path — or, for S4U, a UNC path.)
 #
 #   Mapped-drive paths are only acceptable for logon_type: interactive +
 #   trigger: AtLogOn (the drive is mapped by the time the task fires).
@@ -270,7 +271,7 @@ tasks:
 
   - name: ClaudeHealthcheck
     project: main
-    description: Daily Claude Code healthcheck — LLM-based analysis of disk/memory/services.
+    description: Daily healthcheck — alerts on a local or remote disk at its threshold or above, a silent task monitor and a down LLM chain, with an LLM analysis of disk/memory/services attached.
     script: <bundle-install-path>\cron\claude-healthcheck.sh
     kind: bash
     trigger: Daily 09:00
@@ -284,7 +285,7 @@ tasks:
 
   - name: ClaudeTaskMonitor
     project: main
-    description: Check all managed tasks for failures + Password+mapped-drive policy violations; alerts to Telegram.
+    description: Check scheduled tasks for failures and hangs past timeout_hours, Password/S4U tasks on a path session 0 cannot reach (a mapped drive, or UNC for S4U), closed health ports, a down LLM chain and stale findings; alerts to Telegram.
     script: <bundle-install-path>\cron\claude-task-monitor.sh
     kind: bash
     platform: windows
@@ -300,7 +301,7 @@ tasks:
 
   - name: ClaudeTaskMonitorPosix
     project: main
-    description: POSIX counterpart of ClaudeTaskMonitor — reports FAILED systemd --user units (Linux) or launchd agents with a non-zero last exit (macOS) that belong to the bundle, to Telegram. Disabled by default; enable it on Linux/macOS after generating the units with scripts/gen-scheduler.py.
+    description: POSIX counterpart of ClaudeTaskMonitor — reports to Telegram the bundle's FAILED systemd --user units (Linux) or launchd agents with a non-zero last exit (macOS), units still running past timeout_hours (Linux), closed health ports, a down LLM chain, and tasks gone silent in the run ledger. Disabled by default; enable it on Linux/macOS after generating the units with scripts/gen-scheduler.py.
     script: <bundle-install-path>\cron\claude-task-monitor.py
     kind: python
     platform: posix
@@ -370,7 +371,7 @@ tasks:
 
   - name: ClaudeLogRetention
     project: main
-    description: Weekly prune of cron/logs/*.log older than WIKI_LOG_RETENTION_DAYS (default 30).
+    description: Weekly prune of cron/logs/*.log, *.jsonl and *.diff older than WIKI_LOG_RETENTION_DAYS (default 30), and of quarantined payloads and session handoffs after 7 days.
     script: <bundle-install-path>\cron\log-retention.py
     kind: python
     trigger: Weekly Sunday 03:00

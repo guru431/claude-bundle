@@ -27,8 +27,12 @@ Three directions, all checked:
 Extraction differs per direction on purpose. (1) searches the raw doc text, so
 a var mentioned outside backticks still counts (no false failures). (2) only
 looks at backticked tokens, since scanning prose for ALL-CAPS words would flag
-every acronym. (3) reads Python env lookups verbatim and, for shell, only names
-the script never assigns itself — that is what separates a knob from a local.
+every acronym. (3) reads Python env lookups verbatim — plus calls to any helper
+whose first parameter is the name it looks up (`_env_int("X", …)`), found by
+parsing, not by a list — and, for shell, only names the script never assigns
+itself (`X="${X:-default}"` is a read, not an assignment), including the
+`os.environ` lookups of Python embedded in a shell heredoc. That is what
+separates a knob from a local.
 
 Runs in the ubuntu CI job and from scripts/self-test.ps1. Stdlib only.
 
@@ -116,6 +120,18 @@ CODE_ONLY = {
     # Test seam only: redirects the run ledger so pytest cannot write into a
     # real deployment's cron/logs/runs-<year>.jsonl (see tests/conftest.py).
     "CLAUDE_BUNDLE_RUNS_DIR",
+    # git's own variable. git-push-all.sh only supplies a non-interactive
+    # default (BatchMode, ConnectTimeout) when the environment has none; the
+    # place to change how git reaches a remote is git's config, not this .env.
+    "GIT_SSH_COMMAND",
+    # git-push-all.sh resolves it (default 300 s) at the top of the script,
+    # BEFORE it loads .env — and dotenv_load never overrides a variable that is
+    # already set, so a .env line would be silently ignored. Honoured only when
+    # exported for the run, like the switches above.
+    "GIT_NET_TIMEOUT",
+    # Test seam: cron/tests/*.sh export it to point github-push.sh at a scratch
+    # tree. The script derives it from its own location otherwise.
+    "BUNDLE_ROOT",
 }
 
 # Provided by the OS / the shell, not by the bundle.
@@ -138,9 +154,17 @@ CODE_SUFFIXES = (".py", ".sh")
 # claude-switch.ps1 — was invisible to the guard and reached the template only
 # because somebody noticed by hand.
 PS_ROOTS = (ROOT / "scripts", ROOT / "home-claude")
+# The readers: Get-EnvVar and Require-Key (claude-switch.ps1 — the second takes
+# one name or an @("A", "B") alias list, and it is how every provider key there
+# is read, so leaving it out showed MINIMAX_API_KEY and CCR_API_KEY as read by
+# nobody), Get-DotEnvValue (lib/dotenv.ps1, whose -Path is often a parenthesised
+# Join-Path) and Read-DotEnvValue.
+_PS_ARG = r"(?:\([^)]*\)|\S+)"
 PS_ENV_RE = re.compile(
-    r"(?:Get-EnvVar|Get-DotEnvValue\s+-Path\s+\S+\s+-Name|Read-DotEnvValue\s+\S+)"
-    r"\s+[\"']([A-Z][A-Z0-9_]*)[\"']")
+    rf"(?:Get-EnvVar|Require-Key|Get-DotEnvValue\s+-Path\s+{_PS_ARG}\s+-Name"
+    rf"|Read-DotEnvValue\s+{_PS_ARG})"
+    r"\s+(@\([^)]*\)|[\"'][A-Z][A-Z0-9_]*[\"'])")
+PS_NAME_RE = re.compile(r"[\"']([A-Z][A-Z0-9_]*)[\"']")
 
 PY_ENV_RE = re.compile(
     r"os\.(?:environ\.get|getenv)\(\s*[\"']([A-Z][A-Z0-9_]*)[\"']"
@@ -152,6 +176,75 @@ SH_ASSIGN_RE = re.compile(
     r"^\s*(?:export\s+|local\s+|declare\s+(?:-\w+\s+)?)?([A-Z][A-Z0-9_]*)="
     r"|^\s*read\s+(?:-\w+\s+)*([A-Z][A-Z0-9_]*)\b",
     re.MULTILINE)
+# ...except an assignment that DEFAULTS a name from itself — `X="${X:-85}"`,
+# `export X=${X-…}`, `X="${X:=…}"` — or passes it straight through (`X="$X" cmd`).
+# The value comes from the environment, so the script is reading a knob, not
+# setting a local. Counting these as assignments hid HEALTHCHECK_DISK_EXCLUDE,
+# which the guard then reported as read by nobody. An APPEND (`X="$X more"`,
+# `X="${X:+$X…}"`) or a substitution (`X="${X//a/b}"`) stays a local.
+SH_SELF_ASSIGN_RE = re.compile(
+    r"^\s*(?:export\s+|local\s+|readonly\s+|declare\s+(?:-\w+\s+)?)?"
+    r"([A-Z][A-Z0-9_]*)=(?:\"?\$\{\1:?[-=]|\"\$(?:\1|\{\1\})\"(?:\s|$))",
+    re.MULTILINE)
+
+
+def _is_environ(node: ast.AST) -> bool:
+    """`os.environ` as an expression."""
+    return (isinstance(node, ast.Attribute) and node.attr == "environ"
+            and isinstance(node.value, ast.Name) and node.value.id == "os")
+
+
+def _env_lookup_arg(node: ast.AST) -> ast.AST | None:
+    """The key expression of `os.environ.get(k…)`, `os.getenv(k…)` or `os.environ[k]`."""
+    if isinstance(node, ast.Call) and node.args:
+        func = node.func
+        if isinstance(func, ast.Attribute) and (
+                (func.attr == "get" and _is_environ(func.value))
+                or (func.attr == "getenv" and isinstance(func.value, ast.Name)
+                    and func.value.id == "os")):
+            return node.args[0]
+    if isinstance(node, ast.Subscript) and _is_environ(node.value):
+        return node.slice
+    return None
+
+
+def env_helpers(trees: list[ast.AST]) -> set[str]:
+    """Names of functions that look up the env var NAMED by their first parameter.
+
+    `_env_int("WIKI_LLM_PACE_SECONDS", 5)` reads the environment exactly as
+    surely as `os.environ.get("WIKI_LLM_PACE_SECONDS")`, but the literal-argument
+    regex cannot see it: the lookup inside the helper takes a variable. That hid
+    every flag utils.py reads through `_env_bool`/`_env_int` and every retention
+    window log-retention.py reads through `_window` — two of them missing from
+    the template entirely. Found by parsing rather than listed by name, so the
+    next such helper is covered the day it is written.
+    """
+    helpers: set[str] = set()
+    for tree in trees:
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or not fn.args.args:
+                continue
+            first = fn.args.args[0].arg
+            if any(isinstance(arg, ast.Name) and arg.id == first
+                   for arg in map(_env_lookup_arg, ast.walk(fn))):
+                helpers.add(fn.name)
+    return helpers
+
+
+def helper_reads(tree: ast.AST, helpers: set[str]) -> set[str]:
+    """Env var names passed as a string literal to one of `helpers`."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        called = func.id if isinstance(func, ast.Name) else \
+            func.attr if isinstance(func, ast.Attribute) else None
+        arg = node.args[0]
+        if called in helpers and isinstance(arg, ast.Constant) \
+                and isinstance(arg.value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]*", arg.value):
+            names.add(arg.value)
+    return names
 
 
 def provider_table_vars() -> set[str]:
@@ -194,17 +287,28 @@ def code_env_vars() -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
     for name in provider_table_vars():
         out.setdefault(name, set()).add("home-claude/cron/hooks/utils.py (PROVIDERS)")
-    for path in sorted(CODE_ROOT.rglob("*")):
-        if path.suffix not in CODE_SUFFIXES or not path.is_file():
-            continue
-        rel = path.relative_to(ROOT).as_posix()
-        text = path.read_text(encoding="utf-8", errors="replace")
-        names: set[str] = set()
+    sources = [(p, p.read_text(encoding="utf-8", errors="replace"))
+               for p in sorted(CODE_ROOT.rglob("*"))
+               if p.suffix in CODE_SUFFIXES and p.is_file()]
+    trees: dict[Path, ast.AST] = {}
+    for path, text in sources:
         if path.suffix == ".py":
-            for m in PY_ENV_RE.finditer(text):
-                names.add(m.group(1) or m.group(2))
-        else:
+            try:
+                trees[path] = ast.parse(text)
+            except SyntaxError:
+                pass  # the regex pass below still reads it
+    helpers = env_helpers(list(trees.values()))
+    for path, text in sources:
+        rel = path.relative_to(ROOT).as_posix()
+        # A literal `os.environ.get("X")` — in a .sh file that is Python embedded
+        # in a heredoc, which reads the environment the shell passes it.
+        names = {m.group(1) or m.group(2) for m in PY_ENV_RE.finditer(text)}
+        if path in trees:
+            names |= helper_reads(trees[path], helpers)
+        if path.suffix == ".sh":
             assigned = {m.group(1) or m.group(2) for m in SH_ASSIGN_RE.finditer(text)}
+            assigned -= {m.group(1) for m in SH_SELF_ASSIGN_RE.finditer(text)}
+            names = {n for n in names if n not in assigned}
             for m in SH_REF_RE.finditer(text):
                 name = m.group(1) or m.group(2)
                 if name not in assigned:
@@ -218,7 +322,8 @@ def code_env_vars() -> dict[str, set[str]]:
             rel = path.relative_to(ROOT).as_posix()
             text = path.read_text(encoding="utf-8", errors="replace")
             for m in PS_ENV_RE.finditer(text):
-                out.setdefault(m.group(1), set()).add(rel)
+                for name in PS_NAME_RE.findall(m.group(1)):
+                    out.setdefault(name, set()).add(rel)
     return out
 
 

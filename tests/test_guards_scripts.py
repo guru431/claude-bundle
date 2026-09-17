@@ -211,6 +211,84 @@ def test_env_ref_sees_a_variable_only_powershell_reads(repo: Path):
     assert "API_TIMEOUT_MS" in r.stdout
 
 
+@pytest.mark.parametrize("rel, addition, name", [
+    # A helper the guard has never heard of: found by parsing, not by a list.
+    ("home-claude/cron/log-retention.py",
+     '\n\ndef _knob(var, default):\n    return os.environ.get(var) or default\n\n\n'
+     '_NEW = _knob("WIKI_HELPER_ONLY_KNOB", "1")\n',
+     "WIKI_HELPER_ONLY_KNOB"),
+    # The shipped helpers themselves.
+    ("home-claude/cron/md2pdf-sync.py",
+     '\n_NEW = _env_int("MD2PDF_NEW_INT_KNOB", 3, minimum=1)\n',
+     "MD2PDF_NEW_INT_KNOB"),
+    # `X="${X:-default}"` assigns the name, but from the environment.
+    ("home-claude/cron/claude-healthcheck.sh",
+     '\nHEALTHCHECK_SELF_DEFAULT_KNOB="${HEALTHCHECK_SELF_DEFAULT_KNOB:-7}"\n',
+     "HEALTHCHECK_SELF_DEFAULT_KNOB"),
+    # Python embedded in a shell heredoc reads the environment the shell passes.
+    ("home-claude/cron/claude-task-monitor.sh",
+     "\n\"$PYTHON\" - <<'PY'\nimport os\nprint(os.environ.get('MONITOR_HEREDOC_KNOB', ''))\nPY\n",
+     "MONITOR_HEREDOC_KNOB"),
+    # claude-switch.ps1 reads every provider key through Require-Key.
+    ("scripts/claude-switch.ps1",
+     '\n$k = Require-Key @("SWITCH_NEW_KEY", "SWITCH_NEW_KEY_ALIAS")\n',
+     "SWITCH_NEW_KEY_ALIAS"),
+])
+def test_env_ref_sees_a_read_hidden_behind_a_helper(repo: Path, rel: str,
+                                                     addition: str, name: str):
+    """Every form in which the shipped code reads a knob without a literal
+    `os.environ.get("X")` at the call site.
+
+    Each one was invisible: docs/config-reference.md listed the flag as read by
+    nobody (`—`) — WIKI_ALLOW_OFFBOX and WIKI_MASK_SECRETS among them — and
+    WIKI_LLM_PACE_SECONDS / WIKI_PROJECT_LOG_MAX_LINES were missing from the
+    template while nothing failed.
+    """
+    target = repo / rel
+    target.write_text(target.read_text(encoding="utf-8") + addition, encoding="utf-8")
+    r = _run_guard("check-env-ref.py", repo)
+    assert r.returncode == 1, f"a read of {name} went unnoticed:\n{r.stdout}"
+    assert name in r.stdout
+
+
+def test_env_ref_does_not_mistake_a_shell_append_for_a_knob(repo: Path):
+    """The other side of the self-default rule: `X="$X more"` and
+    `X="${X:+$X, }y"` build a local from itself and must stay locals — the
+    alert accumulators in the monitors are written exactly that way."""
+    target = repo / "home-claude" / "cron" / "claude-healthcheck.sh"
+    target.write_text(
+        target.read_text(encoding="utf-8")
+        + '\nLOCAL_ACCUMULATOR=""\nLOCAL_ACCUMULATOR="$LOCAL_ACCUMULATOR more"\n'
+          'LOCAL_ACCUMULATOR="${LOCAL_ACCUMULATOR:+$LOCAL_ACCUMULATOR, }x"\n',
+        encoding="utf-8")
+    r = _run_guard("check-env-ref.py", repo)
+    assert r.returncode == 0, f"a shell local was reported as a knob:\n{r.stdout}"
+
+
+def test_env_ref_check_table_catches_an_edited_cell(repo: Path):
+    """`--check-table` has to fail on the page's CONTENT, not only its header.
+
+    The generated reference is only trustworthy while a hand edit of one row —
+    the likeliest way it rots — turns the build red.
+    """
+    def check_table() -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(repo / "scripts" / "check-env-ref.py"), "--check-table"],
+            cwd=str(repo), capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=120)
+
+    before = check_table()
+    assert before.returncode == 0, f"the committed page is already stale:\n{before.stdout}"
+    page = repo / "docs" / "config-reference.md"
+    text = page.read_text(encoding="utf-8")
+    row = next(l for l in text.splitlines() if l.startswith("| `WIKI_RETRY_LIMIT` |"))
+    page.write_text(text.replace(row, row.replace("optional (commented)", "declared")),
+                    encoding="utf-8")
+    r = check_table()
+    assert r.returncode == 1, f"an edited config-reference cell went unnoticed:\n{r.stdout}"
+    assert "config-reference.md" in r.stdout
+
+
 def test_doc_counts_catches_a_task_count_that_drifted(repo: Path):
     pytest.importorskip("yaml")
     reg = repo / "home-claude" / "cron" / "registry.yaml"

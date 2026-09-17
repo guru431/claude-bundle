@@ -26,7 +26,8 @@ installer generates the first from the second.
 | `API_TIMEOUT_MS` | optional (commented) | `scripts/claude-switch.ps1` |
 | `BASH_BIN` | not in .env (internal) | `home-claude/cron/claude-healthcheck.sh`, `home-claude/cron/claude-task-monitor.sh`, `home-claude/cron/git-push-all.sh` |
 | `BASH_EXE` | declared | `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh` |
-| `CCR_API_KEY` | declared | — |
+| `BUNDLE_ROOT` | not in .env (internal) | `home-claude/cron/github-push.sh` |
+| `CCR_API_KEY` | declared | `scripts/claude-switch.ps1` |
 | `CCR_HOST` | declared | `scripts/claude-switch.ps1` |
 | `CLAUDE_BASH_DENY` | not in .env (internal) | `home-claude/hooks/bash-guard.py` |
 | `CLAUDE_BIN` | declared | `home-claude/cron/claude-warm-window.sh`, `home-claude/cron/hooks/utils.py` |
@@ -41,13 +42,15 @@ installer generates the first from the second.
 | `DEEPINFRA_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `DEEPINFRA_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `DEEPSEEK_BASE_URL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
-| `DEEPSEEK_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
+| `DEEPSEEK_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)`, `scripts/claude-switch.ps1` |
 | `DEEPSEEK_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `GITHUB_PUSH_FORCE` | not in .env (internal) | `home-claude/cron/github-push.sh` |
+| `GIT_NET_TIMEOUT` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
 | `GIT_PUSH_ALL_DRY_RUN` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
 | `GIT_PUSH_ALL_LIB` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
+| `GIT_SSH_COMMAND` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
 | `HANDOFF_WAIT_SECONDS` | optional (commented) | `home-claude/cron/hooks/session-start.py` |
-| `HEALTHCHECK_DISK_EXCLUDE` | optional (commented) | — |
+| `HEALTHCHECK_DISK_EXCLUDE` | optional (commented) | `home-claude/cron/claude-healthcheck.sh` |
 | `HEALTHCHECK_DISK_PCT` | optional (commented) | `home-claude/cron/claude-healthcheck.sh` |
 | `HEALTHCHECK_REMOTE_DISK_PCT` | optional (commented) | `home-claude/cron/claude-healthcheck.sh` |
 | `KB_SOURCE_DIR` | optional (commented) | `home-claude/cron/wiki/wiki-compile-kb.py`, `home-claude/cron/wiki/wiki-lint.py` |
@@ -56,45 +59,47 @@ installer generates the first from the second.
 | `LOCAL_LLM_KEY` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `LOCAL_LLM_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `MD2PDF_BROWSER` | optional (commented) | `home-claude/bin/md2pdf.py` |
-| `MD2PDF_TIMEOUT` | optional (commented) | `home-claude/bin/md2pdf.py`, `home-claude/hooks/md2pdf-on-edit.py` |
+| `MD2PDF_TIMEOUT` | optional (commented) | `home-claude/bin/md2pdf.py`, `home-claude/cron/md2pdf-sync.py`, `home-claude/hooks/md2pdf-on-edit.py` |
 | `MEMORY_CROSS_NOTES` | optional (commented) | `home-claude/cron/memory-update.py` |
-| `MINIMAX_API_KEY` | declared | — |
-| `MONITOR_EXCLUDE_TASKS` | optional (commented) | — |
+| `MINIMAX_API_KEY` | declared | `scripts/claude-switch.ps1` |
+| `MONITOR_EXCLUDE_TASKS` | optional (commented) | `home-claude/cron/claude-task-monitor.sh` |
 | `OLLAMA_HOST` | declared | `scripts/claude-switch.ps1` |
-| `OPENCODE_GO_API_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
-| `OPENCODE_GO_KEY` | — | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
+| `OPENCODE_GO_API_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)`, `scripts/claude-switch.ps1` |
+| `OPENCODE_GO_KEY` | — | `home-claude/cron/hooks/utils.py (PROVIDERS)`, `scripts/claude-switch.ps1` |
 | `OPENCODE_GO_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
-| `PROJECTS_ROOT` | declared | `home-claude/cron/git-push-all.sh`, `home-claude/cron/hooks/utils.py`, `home-claude/cron/md2pdf-sync.py` |
+| `PROJECTS_ROOT` | declared | `home-claude/cron/git-push-all.sh`, `home-claude/cron/github-push.sh`, `home-claude/cron/hooks/utils.py`, `home-claude/cron/md2pdf-sync.py` |
 | `PYTHON` | not in .env (internal) | `home-claude/cron/claude-healthcheck.sh`, `home-claude/cron/claude-task-monitor.sh`, `home-claude/cron/claude-warm-window.sh`, `home-claude/cron/git-push-all.sh`, `home-claude/cron/telegram-send.sh` |
-| `PYTHON_EXE` | declared | `home-claude/cron/hooks/pre-compact.py`, `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh`, `home-claude/cron/md2pdf-sync.py` |
+| `PYTHON_EXE` | declared | `home-claude/cron/admin/sync-tasks.ps1`, `home-claude/cron/hooks/pre-compact.py`, `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh`, `home-claude/cron/md2pdf-sync.py`, `scripts/install.ps1` |
 | `REMOTE_SSH_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 | `SESSION_START_MAX_CHARS` | optional (commented) | `home-claude/cron/hooks/session-start.py` |
 | `SYNC_CHECK_PRIVATE_HOSTS` | optional (commented) | `home-claude/cron/agents-md-sync-check.py` |
 | `TELEGRAM_BOT_TOKEN` | declared | `home-claude/cron/bundle-status.py`, `home-claude/cron/telegram-send.sh` |
-| `TELEGRAM_CHAT_ID` | declared | `home-claude/cron/bundle-status.py` |
-| `TEST_SWEEP_RUN_BUDGET` | optional (commented) | — |
+| `TELEGRAM_CHAT_ID` | declared | `home-claude/cron/bundle-status.py`, `home-claude/cron/telegram-send.sh` |
+| `TEST_SWEEP_RUN_BUDGET` | optional (commented) | `home-claude/cron/test-sweep.py` |
 | `TEST_SWEEP_SKIP` | optional (commented) | `home-claude/cron/test-sweep.py` |
 | `TEST_SWEEP_TELEGRAM` | optional (commented) | `home-claude/cron/test-sweep.py` |
-| `TEST_SWEEP_TIMEOUT` | optional (commented) | — |
-| `TEST_SWEEP_TIMEOUT_FULL` | optional (commented) | — |
+| `TEST_SWEEP_TIMEOUT` | optional (commented) | `home-claude/cron/test-sweep.py` |
+| `TEST_SWEEP_TIMEOUT_FULL` | optional (commented) | `home-claude/cron/test-sweep.py` |
 | `WAIT_FOR_PATTERN` | optional (commented) | `home-claude/cron/git-push-all.sh` |
 | `WARM_MODEL` | optional (commented) | `home-claude/cron/claude-warm-window.sh` |
-| `WIKI_ALLOW_OFFBOX` | optional (commented) | — |
+| `WIKI_ALLOW_OFFBOX` | optional (commented) | `home-claude/cron/hooks/utils.py` |
 | `WIKI_BACKLOG_MAX` | optional (commented) | `home-claude/cron/wiki/wiki-flush-sessions.py` |
-| `WIKI_HANDOFF_RETENTION_DAYS` | optional (commented) | — |
+| `WIKI_HANDOFF_RETENTION_DAYS` | optional (commented) | `home-claude/cron/log-retention.py` |
 | `WIKI_LINT_TELEGRAM` | optional (commented) | `home-claude/cron/wiki/wiki-lint.py` |
-| `WIKI_LLM_LOCK_STALE` | optional (commented) | — |
-| `WIKI_LLM_LOCK_WAIT` | optional (commented) | — |
+| `WIKI_LLM_LOCK_STALE` | optional (commented) | `home-claude/cron/hooks/utils.py` |
+| `WIKI_LLM_LOCK_WAIT` | optional (commented) | `home-claude/cron/hooks/utils.py` |
 | `WIKI_LLM_MOCK_RESPONSE` | — | `home-claude/cron/hooks/utils.py` |
+| `WIKI_LLM_PACE_SECONDS` | optional (commented) | `home-claude/cron/hooks/utils.py` |
 | `WIKI_LLM_PROVIDER` | declared | `home-claude/cron/hooks/utils.py` |
-| `WIKI_LOG_RETENTION_DAYS` | optional (commented) | — |
-| `WIKI_MASK_SECRETS` | optional (commented) | — |
-| `WIKI_OFFBOX_FALLBACK` | optional (commented) | — |
-| `WIKI_REJECTED_RETENTION_DAYS` | optional (commented) | — |
-| `WIKI_RETRY_LIMIT` | optional (commented) | — |
+| `WIKI_LOG_RETENTION_DAYS` | optional (commented) | `home-claude/cron/log-retention.py` |
+| `WIKI_MASK_SECRETS` | optional (commented) | `home-claude/cron/hooks/utils.py` |
+| `WIKI_OFFBOX_FALLBACK` | optional (commented) | `home-claude/cron/hooks/utils.py` |
+| `WIKI_PROJECT_LOG_MAX_LINES` | optional (commented) | `home-claude/cron/hooks/utils.py` |
+| `WIKI_REJECTED_RETENTION_DAYS` | optional (commented) | `home-claude/cron/log-retention.py` |
+| `WIKI_RETRY_LIMIT` | optional (commented) | `home-claude/cron/hooks/utils.py` |
 | `WIN_REMOTE_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 
-_72 variables._
+_77 variables._
 
 ## `bundle.local.yaml` keys
 

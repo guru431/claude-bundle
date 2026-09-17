@@ -3,12 +3,14 @@
 Each of these once failed in silence. The ledger rows the suite wrote into the
 checkout read as nightly runs; a module evicted from sys.modules broke a test two
 files away, and only in the full run; a dependency skipped inside a fixture was
-a green dot on CI; `--durations` measured slow tests and nothing acted on it. A
-gate that stops working says nothing either, so the gates run here in sessions
-of their own, under a copy of the conftest this suite runs under.
+a green dot on CI, and so was every shell test on a Windows box without bash;
+`--durations` measured slow tests and nothing acted on it. A gate that stops
+working says nothing either, so the gates run here in sessions of their own,
+under a copy of the conftest this suite runs under.
 """
 from __future__ import annotations
 
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -109,3 +111,16 @@ def test_on_ci_a_check_that_did_not_run_or_ran_slow_fails(pytester, monkeypatch)
     result.assert_outcomes(passed=1, failed=1, errors=2)
     result.stdout.fnmatch_lines(["*Skips are failures on CI*"])
     result.stdout.fnmatch_lines(["*over the 0.05s*"])
+
+
+def test_without_bash_a_shell_test_fails_on_windows(pytester, monkeypatch):
+    monkeypatch.delenv("CI", raising=False)
+    result = _session(pytester, monkeypatch, """
+        def test_shell(bash):
+            pass
+    """, "\nfind_bash = lambda: None\n")
+    if os.name == "nt":
+        result.assert_outcomes(errors=1)
+        result.stdout.fnmatch_lines(["*CLAUDE_CODE_GIT_BASH_PATH*"])
+    else:
+        result.assert_outcomes(skipped=1)

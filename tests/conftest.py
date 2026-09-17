@@ -33,8 +33,10 @@ Everything here is autouse, so a new test gets the sandbox without asking.
 """
 from __future__ import annotations
 
+import functools
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -57,6 +59,11 @@ _CLEARED_EXACT = (
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
     "PROJECTS_ROOT", "CLAUDE_HOME", "CLAUDE_BIN", "PYTHON_EXE", "BASH_EXE",
 )
+
+# The environment as the shell handed it over, before either sandbox touched it.
+# Only find_bash() reads it: BASH_EXE is cleared for the code under test, and a
+# developer who points it at their Git Bash still means it for the suite.
+_OUTER_ENV = dict(os.environ)
 
 
 def _neutralise(mp: pytest.MonkeyPatch, home: Path) -> None:
@@ -111,6 +118,67 @@ def cron_copy(tmp_path: Path) -> Path:
     shutil.copytree(CRON_SRC, tmp_path / "cron",
                     ignore=shutil.ignore_patterns("logs", "state"))
     return tmp_path
+
+
+# ── bash ─────────────────────────────────────────────────────────────────────
+
+@functools.lru_cache(maxsize=None)
+def find_bash() -> str | None:
+    """A bash that understands the paths we hand it — not merely the first in PATH.
+
+    Windows ships `C:\\Windows\\System32\\bash.exe`, the WSL launcher. It is a
+    `bash` by name only: given a Windows-shaped script path it prints nothing and
+    exits, so a test failed under the nightly sweep while passing by hand from
+    Git Bash. Task Scheduler's session 0 has System32 in PATH and Git\\bin not.
+
+    Cached: the answer belongs to the machine, not to the test that asks.
+    """
+    # An EXPLICIT override first, then git's own answer, then PATH, and only
+    # then the two hardcoded Program Files locations. The hardcoded pair used to
+    # come first and was the only real path: on a scoop/portable/D:-drive Git
+    # this returned None, the test SKIPPED, and the invariant it protects —
+    # env > dotenv, in the shell parser — vanished with no signal at all.
+    candidates = [_OUTER_ENV[name] for name in ("CLAUDE_CODE_GIT_BASH_PATH", "BASH_EXE")
+                  if _OUTER_ENV.get(name)]
+    try:
+        exec_path = subprocess.run(["git", "--exec-path"], capture_output=True,
+                                   text=True, timeout=15).stdout.strip()
+        if exec_path:
+            # <git>/mingw64/libexec/git-core → <git>/usr/bin/bash.exe
+            git_root = Path(exec_path)
+            for _ in range(3):
+                git_root = git_root.parent
+            candidates += [str(git_root / "usr" / "bin" / "bash.exe"),
+                           str(git_root / "bin" / "bash.exe")]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    found = shutil.which("bash")
+    if found and Path(found).parent.name.lower() != "system32":
+        candidates.append(found)         # System32\bash.exe is the WSL launcher
+    # `usr\bin` before `bin`: the latter prepends /mingw64/bin:/usr/bin to any
+    # PATH handed to it, which quietly outranks a caller's own entries.
+    candidates += [r"C:\Program Files\Git\usr\bin\bash.exe",
+                   r"C:\Program Files\Git\bin\bash.exe"]
+    return next((c for c in candidates if Path(c).is_file()), None)
+
+
+@pytest.fixture(scope="session")
+def bash() -> str:
+    """The bash a shell test runs under. Without one: a FAILURE on Windows.
+
+    `skipif(_bash() is None)` was the pattern, and on Windows it rendered the
+    shell half of a Windows-first bundle as a row of dots — unverified on the
+    platform it is written for. Only a POSIX box without bash is "not applicable".
+    """
+    found = find_bash()
+    if found:
+        return found
+    if os.name == "nt":
+        pytest.fail("no usable bash on this Windows machine: install Git for Windows, "
+                    "or point CLAUDE_CODE_GIT_BASH_PATH (or BASH_EXE) at its "
+                    "usr\\bin\\bash.exe. System32\\bash.exe is the WSL launcher and "
+                    "does not count.", pytrace=False)
+    pytest.skip("bash not available")
 
 
 # ── CI: a check that did not run, or ran too slowly, is a failure ───────────

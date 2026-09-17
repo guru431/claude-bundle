@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -98,24 +97,13 @@ def test_the_dead_man_switch_watches_the_monitor_of_this_platform(monitor_check)
 
 # ── the morning of an outage, end to end ─────────────────────────────────────
 
-def _bash() -> str | None:
-    found = shutil.which("bash")
-    if found and Path(found).parent.name.lower() != "system32":   # WSL launcher
-        return found
-    for cand in (r"C:\Program Files\Git\usr\bin\bash.exe",
-                 r"C:\Program Files\Git\bin\bash.exe"):
-        if Path(cand).is_file():
-            return cand
-    return None
-
-
 def _stub(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8", newline="\n")
     path.chmod(0o755)
 
 
-def run_healthcheck(cron: Path, tmp_path: Path) -> tuple[subprocess.CompletedProcess,
-                                                         list[str], str]:
+def run_healthcheck(cron: Path, tmp_path: Path,
+                    bash: str) -> tuple[subprocess.CompletedProcess, list[str], str]:
     """Run the copied claude-healthcheck.sh; (result, Telegram messages, its log).
 
     llm-call.py and telegram-send.sh in `cron` are expected to be stubs already;
@@ -127,11 +115,11 @@ def run_healthcheck(cron: Path, tmp_path: Path) -> tuple[subprocess.CompletedPro
     for tool in ("uptime", "free", "ps"):
         _stub(fake_bin / tool, "#!/bin/bash\nexit 0\n")
     _stub(cron / "telegram-send.sh", '#!/bin/bash\nprintf "%s\\n---\\n" "$1" >> "$SENT_FILE"\n')
-    env = dict(os.environ, PYTHON_EXE=sys.executable, BASH_EXE=_bash(),
+    env = dict(os.environ, PYTHON_EXE=sys.executable, BASH_EXE=bash,
                SENT_FILE=sent.as_posix(), HEALTHCHECK_DISK_PCT="100",
                REMOTE_SSH_HOST="", WIN_REMOTE_HOST="",
                PATH=os.pathsep.join([str(fake_bin), os.environ.get("PATH", "")]))
-    res = subprocess.run([_bash(), (cron / "claude-healthcheck.sh").as_posix()],
+    res = subprocess.run([bash, (cron / "claude-healthcheck.sh").as_posix()],
                          capture_output=True, text=True, env=env, timeout=120)
     log = "\n".join(p.read_text(encoding="utf-8", errors="replace")
                     for p in (cron / "logs").glob("healthcheck_*.log"))
@@ -140,10 +128,9 @@ def run_healthcheck(cron: Path, tmp_path: Path) -> tuple[subprocess.CompletedPro
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(_bash() is None, reason="bash not available")
 @pytest.mark.parametrize("llm_rc, kind", [(3, "transient"), (4, "configuration")])
 def test_a_failed_analysis_says_what_kind_of_failure_it_was(cron_copy: Path, tmp_path: Path,
-                                                             llm_rc: int, kind: str):
+                                                             bash: str, llm_rc: int, kind: str):
     """Transient and configuration failures need opposite responses.
 
     llm-call.py exits 3 when the provider did not answer — wait, it passes — and 4
@@ -154,7 +141,7 @@ def test_a_failed_analysis_says_what_kind_of_failure_it_was(cron_copy: Path, tmp
     _stub(cron / "llm-call.py", f"import sys\nsys.stdin.read()\nsys.exit({llm_rc})\n")
     (cron / "registry.yaml").write_text(registry(True, True), encoding="utf-8")
 
-    res, messages, log = run_healthcheck(cron, tmp_path)
+    res, messages, log = run_healthcheck(cron, tmp_path, bash)
 
     assert res.returncode == 1, log
     assert len(messages) == 1 and "LLM analysis failed" in messages[0], messages
@@ -162,9 +149,8 @@ def test_a_failed_analysis_says_what_kind_of_failure_it_was(cron_copy: Path, tmp
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(_bash() is None, reason="bash not available")
 @pytest.mark.parametrize("chain_down, monitor_on", [(True, False), (True, True), (False, True)])
-def test_an_llm_outage_morning_says_it_once(cron_copy: Path, tmp_path: Path,
+def test_an_llm_outage_morning_says_it_once(cron_copy: Path, tmp_path: Path, bash: str,
                                             chain_down: bool, monitor_on: bool):
     """With the chain known to be down the analysis is not attempted, and the
     outage is reported by exactly one job.
@@ -188,7 +174,7 @@ def test_an_llm_outage_morning_says_it_once(cron_copy: Path, tmp_path: Path,
             "last_iso": (now - timedelta(hours=5)).isoformat(timespec="seconds"),
             "fails": 40, "depleted": {"deepseek": "403"}}), encoding="utf-8")
 
-    res, messages, log = run_healthcheck(cron, tmp_path)
+    res, messages, log = run_healthcheck(cron, tmp_path, bash)
 
     assert res.returncode == 0, f"{res.stderr}\n{log}"
     assert llm_mark.exists() == (not chain_down), \

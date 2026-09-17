@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from test_guards import _bash as find_bash
+from conftest import find_bash
 
 ROOT = Path(__file__).resolve().parent.parent
 BASH = find_bash()
@@ -263,7 +263,9 @@ def _stubs(tmp_path: Path, *names: str, exit_code: int = 0) -> tuple[Path, Path]
     return stubs, log
 
 
-needs_bash = pytest.mark.skipif(BASH is None, reason="bash not available")
+# The fixture rather than `skipif(BASH is None)`: without a bash these FAIL on
+# Windows (tests/conftest.py), and _run() spawns the same find_bash() answer.
+needs_bash = pytest.mark.usefixtures("bash")
 
 
 @needs_bash

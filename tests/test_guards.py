@@ -341,55 +341,13 @@ def test_private_addresses_are_leak_only():
 
 # ── .env parsing: env wins over the file, in BOTH implementations ───────────
 
-def _bash():
-    """A bash that understands the paths we hand it — not merely the first in PATH.
-
-    Windows ships `C:\\Windows\\System32\\bash.exe`, the WSL launcher. It is a
-    `bash` by name only: given a Windows-shaped script path it prints nothing and
-    exits, so this test failed while passing by hand from Git Bash. Task
-    Scheduler's session 0 has System32 in PATH and Git\\bin not, which is exactly
-    where the nightly sweep runs.
-    """
-    import os
-    import shutil
-    import subprocess
-
-    # An EXPLICIT override first, then git's own answer, then PATH, and only
-    # then the two hardcoded Program Files locations. The hardcoded pair used to
-    # come first and was the only real path: on a scoop/portable/D:-drive Git
-    # this returned None, the test SKIPPED, and the invariant it protects —
-    # env > dotenv, in the shell parser — vanished with no signal at all.
-    candidates = []
-    for env_name in ("CLAUDE_CODE_GIT_BASH_PATH", "BASH_EXE"):
-        if os.environ.get(env_name):
-            candidates.append(os.environ[env_name])
-    try:
-        exec_path = subprocess.run(["git", "--exec-path"], capture_output=True,
-                                   text=True, timeout=15).stdout.strip()
-        if exec_path:
-            # <git>/mingw64/libexec/git-core → <git>/usr/bin/bash.exe
-            git_root = Path(exec_path)
-            for _ in range(3):
-                git_root = git_root.parent
-            candidates += [str(git_root / "usr" / "bin" / "bash.exe"),
-                           str(git_root / "bin" / "bash.exe")]
-    except (OSError, subprocess.SubprocessError):
-        pass
-    found = shutil.which("bash")
-    if found and Path(found).parent.name.lower() != "system32":
-        candidates.append(found)         # System32\bash.exe is the WSL launcher
-    # `usr\bin` before `bin`: the latter prepends /mingw64/bin:/usr/bin to any
-    # PATH handed to it, which quietly outranks a caller's own entries.
-    candidates += [r"C:\Program Files\Git\usr\bin\bash.exe",
-                   r"C:\Program Files\Git\bin\bash.exe"]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            return candidate
-    return None
+# The resolver is tests/conftest.py::find_bash now, behind a `bash` fixture that
+# FAILS on Windows where `skipif(_bash() is None)` skipped. The old name stays
+# for the modules that still import it from here.
+from conftest import find_bash as _bash  # noqa: E402,F401
 
 
-@pytest.mark.skipif(_bash() is None, reason="bash not available")
-def test_shell_dotenv_does_not_override_the_environment(tmp_path: Path):
+def test_shell_dotenv_does_not_override_the_environment(tmp_path: Path, bash: str):
     """`export "$key=$val"` was unconditional in all five shell copies.
 
     So .env beat the real environment — the opposite of the Python loader and
@@ -408,7 +366,7 @@ def test_shell_dotenv_does_not_override_the_environment(tmp_path: Path):
         'printf "%s|%s\\n" "$ALREADY_SET" "$ONLY_IN_FILE"\n',
         encoding="utf-8", newline="\n")
     env = dict(os.environ, ALREADY_SET="from-environment")
-    out = subprocess.run([_bash(), str(script)], capture_output=True, text=True,
+    out = subprocess.run([bash, str(script)], capture_output=True, text=True,
                          env=env, timeout=60).stdout.strip()
     assert out == "from-environment|from-dotenv"
 
@@ -443,8 +401,7 @@ def _utf16_blob(tmp_path: Path) -> Path:
     return path
 
 
-@pytest.mark.skipif(_bash() is None, reason="bash not available")
-def test_secret_scan_reads_utf16(tmp_path: Path):
+def test_secret_scan_reads_utf16(tmp_path: Path, bash: str):
     """secret_scan_text transcodes before grepping; the raw bytes match nothing."""
     blob = _utf16_blob(tmp_path)
     lib = (CRON / "lib" / "secret-scan.sh").as_posix()
@@ -454,14 +411,13 @@ def test_secret_scan_reads_utf16(tmp_path: Path):
         f"if secret_scan_text < '{blob.as_posix()}'; then echo MISSED; "
         f"else echo CAUGHT; fi\n",
         encoding="utf-8", newline="\n")
-    res = subprocess.run([_bash(), str(script)], capture_output=True, text=True,
+    res = subprocess.run([bash, str(script)], capture_output=True, text=True,
                          timeout=60)
     assert "CAUGHT" in res.stdout, \
         f"a UTF-16 file with a token scanned clean:\n{res.stdout}\n{res.stderr}"
 
 
-@pytest.mark.skipif(_bash() is None, reason="bash not available")
-def test_secret_scan_diff_names_the_file(tmp_path: Path):
+def test_secret_scan_diff_names_the_file(tmp_path: Path, bash: str):
     """A hit has to say WHICH file. `grep -n` numbered the already-filtered
     stream, so the report was an ordinal matching nothing the author could open.
     """
@@ -478,7 +434,7 @@ def test_secret_scan_diff_names_the_file(tmp_path: Path):
         f". '{lib}'\n"
         f"secret_scan_diff < '{diff.as_posix()}' || true\n",
         encoding="utf-8", newline="\n")
-    res = subprocess.run([_bash(), str(script)], capture_output=True, text=True,
+    res = subprocess.run([bash, str(script)], capture_output=True, text=True,
                          timeout=60)
     assert "src/app.py" in res.stdout, \
         f"the hit did not name the file:\n{res.stdout}\n{res.stderr}"

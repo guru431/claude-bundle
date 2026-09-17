@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from test_guards import _bash as find_bash
+from conftest import find_bash
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "dotenv-parity.env"
@@ -200,8 +200,7 @@ def _describe(key: str, want, got) -> str:
 
 @pytest.mark.parametrize("parser", [
     "python",
-    pytest.param("bash", marks=pytest.mark.skipif(find_bash() is None,
-                                                  reason="bash not available")),
+    "bash",
     pytest.param("powershell", marks=[
         pytest.mark.integration,
         pytest.mark.skipif(POWERSHELL is None, reason="no PowerShell host")]),
@@ -209,7 +208,10 @@ def _describe(key: str, want, got) -> str:
         pytest.mark.integration,
         pytest.mark.skipif(CSCRIPT is None, reason="no cscript (Windows Script Host)")]),
 ])
-def test_every_parser_reads_the_fixture_the_same_way(parser, tmp_path, monkeypatch):
+def test_every_parser_reads_the_fixture_the_same_way(parser, tmp_path, monkeypatch, request):
+    if parser == "bash":
+        # The fixture, not a skipif: without a bash this FAILS on Windows.
+        request.getfixturevalue("bash")
     got = LEGS[parser](tmp_path, monkeypatch)
     probed = set(EXPECTED) | set(NOT_SET) | set(got)
     if parser == "bash":

@@ -1012,8 +1012,9 @@ if ($DryRun) {
         Add-Written $swSrc (Join-Path $swRoot 'claude-switch.ps1') $swRootName
         # -KeyHelper writes a command that runs get-key.ps1 from NEXT TO the
         # switcher. Deployed alone, the switcher wrote a helper that could only
-        # fail. Both find the .env parser at cron/lib/ (copied with cron/ above),
-        # and $swRoot is always the pipeline root that holds it.
+        # fail. Both find the .env parser at cron/lib/dotenv.ps1 — not part of
+        # home-claude/cron: step 1 copies it there from scripts/lib/ on its own
+        # — and $swRoot is always the pipeline root that holds it.
         $gkSrc = Join-Path $root 'scripts/get-key.ps1'
         if (Test-Path $gkSrc) {
             Copy-Item $gkSrc (Join-Path $swRoot 'get-key.ps1') -Force

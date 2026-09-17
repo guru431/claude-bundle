@@ -92,10 +92,11 @@ CONTEXT_FOOTER = "=== END INJECTED CONTEXT ==="
 def detect_from_stdin() -> tuple[str, str, str, str]:
     """Return (project_name, transcript_dir, session_id, source). Any may be empty.
 
-    Attribution is `utils.project_from_payload` — ONE implementation, and `cwd`
-    first. This hook used to carry its own copy of the cwd encoder and reach for
-    it only when `transcript_path` was missing, so the two could drift and a
-    payload with an empty transcript path injected nothing at all.
+    Attribution is `utils.project_from_payload` — ONE implementation: the
+    transcript's directory first, `cwd` only for a payload without a transcript
+    path. This hook used to carry its own copy of the cwd encoder, so the two
+    could drift, and a payload with an empty transcript path injected nothing at
+    all.
     """
     try:
         raw = sys.stdin.read()

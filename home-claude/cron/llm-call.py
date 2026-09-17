@@ -12,10 +12,11 @@ Usage:
 Exit codes — the LLMResult kind, so a shell task can tell "no LLM tonight" from
 "your key is wrong" without parsing stderr, where the reason is printed:
   0 — success (answer printed to stdout)
-  1 — deterministic: an empty or unusable answer, or a 400/413/422
+  1 — deterministic: an empty or unusable answer, or a 400/413/415/422
   2 — usage: empty stdin, or a timeout that is not a positive whole number
-  3 — transient: network, 429, 5xx — waiting fixes it
-  4 — config: no key or model, a refusal, 401/402/403/404 — it will not fix itself
+  3 — transient: network, 408, 429/529, 5xx — waiting fixes it
+  4 — config: no key or model, a refusal by a gate, a redirect not followed,
+      401/402/403/404 and every other 4xx — it will not fix itself
 """
 import sys
 from pathlib import Path

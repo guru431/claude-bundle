@@ -12,9 +12,10 @@ is reported twice so the issue is not silently swallowed: systemMessage is
 shown to the user, additionalContext reaches the model (systemMessage alone
 never did — the model went on believing the PDF was current).
 
-Requires bin/md2pdf.py (a small wrapper around any MD->PDF converter —
-pandoc, weasyprint, mdpdf, etc.). If you don't use the md+pdf pairing
-pattern, you can simply delete this hook from settings.json.
+Requires bin/md2pdf.py, which the bundle ships: markdown-it-py renders the HTML
+and a Chromium-family browser (Edge, Chrome, Chromium) prints it — no pandoc,
+no LaTeX. If you don't use the md+pdf pairing pattern, you can simply delete
+this hook from settings.json.
 """
 from __future__ import annotations
 

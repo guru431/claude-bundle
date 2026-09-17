@@ -1702,8 +1702,10 @@ def save_session_tail(data: dict, last_n: int = 30) -> tuple[str, str] | None:
     """Save the session tail into .pending/ (shared PreCompact/SessionEnd logic).
 
     Takes the already-parsed stdin JSON (dict). Returns (transcript_path,
-    session_id) on a successful save, otherwise None (no transcript_path / file
-    missing / no messages / the project is denied by the privacy policy).
+    session_id) once the transcript exists and its project may be collected —
+    also when it holds no messages, so nothing was written. None otherwise: no
+    transcript_path, the file missing, its directory in skip_dirs, or the project
+    denied by the privacy policy.
 
     The gate matters here and was missing: `skip_projects: [secret]` is supposed
     to be honored by EVERY source collector, and this one wrote the tail of a

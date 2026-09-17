@@ -67,7 +67,7 @@ from utils import (  # noqa: E402
 from untrusted import fence  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from runs import latest_by_task, read_latest_runs, record_run  # noqa: E402
+from runs import latest_by_task, read_latest_runs, terminal_record  # noqa: E402
 
 # Allow nested Claude CLI invocation
 for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
@@ -834,7 +834,14 @@ def clear_markers(target: str) -> int:
     return sum(len(items) for items in found.values())
 
 
-def main():
+def main() -> int:
+    # ONE terminal ledger record per run (cron/runs.py), a crash included — a
+    # record written at the end was never written by a run that raised first.
+    with terminal_record("ClaudeWikiCompileSessions", delivery="n/a") as rec:
+        return _compile(rec)
+
+
+def _compile(rec: dict) -> int:
     CRON_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_file = CRON_LOG_DIR / f"wiki-compile-sessions_{DATE}.log"
 
@@ -880,7 +887,7 @@ def main():
         # the dry_run_until week exited 1 and the pipeline sent a "phase(s)
         # failed" alert each morning of the week meant to be quiet.
         log("DRY RUN — nothing to compile.")
-        return
+        return 0
 
     if not dailies:
         # "Nothing to compile" has two shapes and they used to look identical.
@@ -899,18 +906,15 @@ def main():
             note = (f"flush produced no daily: {stuck} file(s) still in .pending "
                     f"(raw material is there, nothing to compile)")
             log(f"FAILED: {note}")
-            record_run(task="ClaudeWikiCompileSessions", process_rc=1,
-                       useful_items=0, delivery="n/a", note=note)
-            sys.exit(1)
+            rec.update(process_rc=1, useful_items=0, note=note)
+            return 1
 
         log("Nothing to compile. Exiting.")
-        # Terminal ledger record for the idle run too (see cron/runs.py): the
-        # contract is one record per run, and this branch used to return before
-        # reaching it — so a healthy no-op looked identical to a task that never
-        # reported at all.
-        record_run(task="ClaudeWikiCompileSessions", process_rc=0,
-                   useful_items=None, delivery="n/a", note="no uncompiled dailies")
-        return
+        # A terminal record for the idle run too (see cron/runs.py): the contract
+        # is one record per run, and a healthy no-op must not look identical to
+        # a task that never reported at all.
+        rec.update(useful_items=None, note="no uncompiled dailies")
+        return 0
 
     if is_dry_run():
         # What WOULD be sent, and nothing else: sections already compiled and
@@ -934,7 +938,7 @@ def main():
         log("DRY-RUN-SUMMARY " + json.dumps({"phase": "compile", "chars": grand,
                                              "projects": sorted(sending)}))
         log("DRY RUN — no pages written, no state changes.")
-        return
+        return 0
 
     total_changes = 0
     hard_failure = False
@@ -1083,21 +1087,17 @@ def main():
     if not hard_failure:
         mark_phase_success("compile")
 
-    # Terminal record for the artifact ledger (cron/runs.py). useful_items =
+    # The run's terminal record (written by terminal_record). useful_items =
     # pages actually changed, so a run that exits 0 having written nothing is
     # recorded as empty-artifact instead of passing for healthy.
     # delivery="n/a": this task writes to the vault, it delivers no message.
-    record_run(
-        task="ClaudeWikiCompileSessions",
+    rec.update(
         process_rc=1 if hard_failure else 0,
         useful_items=total_changes,
-        delivery="n/a",
         note=f"{len(dailies)} daily log(s)",
     )
-
-    if hard_failure:
-        sys.exit(1)
+    return 1 if hard_failure else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

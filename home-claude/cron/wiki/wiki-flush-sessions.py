@@ -54,7 +54,7 @@ from utils import (dir_to_project, parse_jsonl_delta, is_subagent_jsonl,
 from untrusted import fence
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from runs import record_run  # noqa: E402
+from runs import terminal_record  # noqa: E402
 
 # CLAUDE_HOME, not a local Path.home() copy — these belong to Claude Code, not
 # to the pipeline, and stay under ~/.claude wherever the pipeline is deployed.
@@ -820,11 +820,18 @@ def write_daily(day: str, lines: list[str], log) -> Path:
     return path
 
 
-def main():
-    # The ledger turns this into `duration_s`, and compile-sessions reads the
-    # run's START back out of it: a pending draft newer than that start is one
-    # this run never saw, not one it failed to process.
-    started = time.monotonic()
+def main() -> int:
+    # ONE terminal ledger record per run (cron/runs.py), a crash included. It used
+    # to be written at the end of the run, so an exception anywhere before it — a
+    # missing prompt file, an unreadable directory — left no row, and a crashed
+    # night looked like a task that never ran. The record's `duration_s` matters
+    # too: compile-sessions reads this run's START back out of it (a pending draft
+    # newer than that start is one this run never saw, not one it failed to take).
+    with terminal_record("ClaudeWikiFlush", delivery="n/a") as rec:
+        return _flush(rec)
+
+
+def _flush(rec: dict) -> int:
     CRON_LOG_DIR.mkdir(parents=True, exist_ok=True)
     DAILY_DIR.mkdir(parents=True, exist_ok=True)
     log_file = CRON_LOG_DIR / f"wiki-flush-sessions_{DATE}.log"
@@ -854,7 +861,8 @@ def main():
         log("FATAL: bundle.local.yaml is present but unreadable — refusing to "
             "run with every project denied. Fix the manifest (or remove it) "
             "and re-run.")
-        sys.exit(1)
+        rec.update(process_rc=1, note="bundle.local.yaml unreadable")
+        return 1
     # A slug claimed by two cwds makes the policy ambiguous: it can only name the
     # slug, so allowing one directory quietly allows the other as well.
     for slug, dirs in sorted(slug_collisions().items()):
@@ -1060,9 +1068,8 @@ def main():
         # distinguishable from "the task reported having nothing to do".
         # useful_items=None (not 0) — there was nothing to extract, so this is
         # not the empty-artifact false-green the SLO hunts for.
-        record_run(task="ClaudeWikiFlush", process_rc=0, useful_items=None,
-                   delivery="n/a", note="no new sources", started_ts=started)
-        return
+        rec.update(useful_items=None, note="no new sources")
+        return 0
 
     if is_dry_run():
         # A COST preview, not just a count. The whole point of the dry-run window
@@ -1085,7 +1092,7 @@ def main():
             "phase": "flush", "calls": grand_parts, "chars": grand_chars,
             "projects": sorted({project for _day, project in buckets})}))
         log("DRY RUN — no daily log written, no state changes.")
-        return
+        return 0
 
     # Record what has been COLLECTED before any LLM call. If tonight fails, the
     # next run re-selects these regardless of the 48-hour window.
@@ -1262,27 +1269,26 @@ def main():
 
     log(f"=== Flush complete: {len(all_projects)} projects, "
         f"{len(written_dailies)} daily log(s) ===")
-    # Terminal ledger record (cron/runs.py): useful_items = project sections
-    # actually written to the daily, so a run that reached the LLM and produced
-    # no section is recorded as empty-artifact rather than passing for healthy.
-    record_run(
-        task="ClaudeWikiFlush",
+    # The run's terminal record (written by terminal_record): useful_items =
+    # project sections actually written to the daily, so a run that reached the
+    # LLM and produced no section is recorded as empty-artifact rather than
+    # passing for healthy.
+    rec.update(
         process_rc=1 if failed_projects else 0,
         artifact_path=written_dailies[0] if written_dailies else None,
         useful_items=ok_sections,
-        delivery="n/a",
         note=f"{len(all_projects)} project(s), {len(written_dailies)} daily log(s), "
              f"{len(failed_projects)} failed",
-        started_ts=started,
     )
     # The heartbeat means "the phase ran through", so a project that failed must
     # not leave a green status behind: the scheduler's exit code is the only
     # signal the monitor sees.
     if failed_projects:
         log(f"Exiting non-zero: {len(failed_projects)} project(s) unfinished.")
-        sys.exit(1)
+        return 1
     mark_phase_success("flush")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

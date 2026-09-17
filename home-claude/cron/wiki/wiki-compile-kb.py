@@ -54,7 +54,7 @@ from utils import (  # noqa: E402
 from untrusted import fence  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from runs import record_run  # noqa: E402
+from runs import terminal_record  # noqa: E402
 
 # Allow nested Claude CLI invocation
 for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
@@ -294,7 +294,14 @@ def update_log(article_rel: str, changes: list[str]):
         f.write(entry)
 
 
-def main():
+def main() -> int:
+    # ONE terminal ledger record per run (cron/runs.py), a crash included — a
+    # record written at the end was never written by a run that raised first.
+    with terminal_record("ClaudeWikiCompileKB", delivery="n/a") as rec:
+        return _compile_kb(rec)
+
+
+def _compile_kb(rec: dict) -> int:
     CRON_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_file = CRON_LOG_DIR / f"wiki-compile-kb_{DATE}.log"
 
@@ -320,9 +327,8 @@ def main():
     # wire up your own source, just keep this task disabled in registry.yaml.
     if not KBNEWS_DIR.exists():
         log(f"No source directory at {KBNEWS_DIR} — nothing to compile, exiting.")
-        record_run(task="ClaudeWikiCompileKB", process_rc=0, useful_items=None,
-                   delivery="n/a", note="no KB source dir")
-        return
+        rec.update(useful_items=None, note="no KB source dir")
+        return 0
 
     processed = get_processed_files()
     log(f"Already processed: {len(processed)} files")
@@ -332,16 +338,15 @@ def main():
 
     if not new_files:
         log("Nothing to process. Exiting.")
-        record_run(task="ClaudeWikiCompileKB", process_rc=0, useful_items=None,
-                   delivery="n/a", note="no new source files")
-        return
+        rec.update(useful_items=None, note="no new source files")
+        return 0
 
     if is_dry_run():
         log("DRY RUN — files that WOULD be compiled (no LLM, no writes):")
         for f in new_files:
             log(f"  {str(f.relative_to(KBNEWS_DIR)).replace(chr(92), '/')}")
         log(f"DRY RUN — {len(new_files)} file(s), no state changes.")
-        return
+        return 0
 
     existing_pages = read_existing_pages()
     log(f"Existing wiki pages: {len(existing_pages)}")
@@ -457,19 +462,16 @@ def main():
     if not hard_failure:
         mark_phase_success("compile-kb")
 
-    # Terminal ledger record (cron/runs.py): useful_items = pages actually
-    # written, so a run that burned LLM calls and changed nothing is recorded as
-    # empty-artifact instead of passing for healthy.
-    record_run(
-        task="ClaudeWikiCompileKB",
+    # The run's terminal record (written by terminal_record): useful_items =
+    # pages actually written, so a run that burned LLM calls and changed nothing
+    # is recorded as empty-artifact instead of passing for healthy.
+    rec.update(
         process_rc=1 if hard_failure else 0,
         useful_items=total_created,
-        delivery="n/a",
         note=f"{len(new_files)} source file(s)",
     )
-    if hard_failure:
-        sys.exit(1)
+    return 1 if hard_failure else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -206,6 +206,44 @@ def _kb_article(bundle: Path, name: str, data: bytes) -> Path:
     return path
 
 
+def _ledger_rows(task: str) -> list[dict]:
+    """This test's run-ledger records for `task` (conftest points the ledger at tmp)."""
+    rows = []
+    for path in Path(os.environ["CLAUDE_BUNDLE_RUNS_DIR"]).glob("runs-*.jsonl"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            rec = json.loads(line) if line.strip() else {}
+            if rec.get("task") == task:
+                rows.append(rec)
+    return rows
+
+
+@pytest.mark.parametrize("script,task,prompt", [
+    ("wiki-flush-sessions.py", "ClaudeWikiFlush", "wiki-flush-sessions.md"),
+    ("wiki-compile-sessions.py", "ClaudeWikiCompileSessions", "wiki-compile-sessions.md"),
+    ("wiki-compile-kb.py", "ClaudeWikiCompileKB", "wiki-compile-kb.md"),
+])
+def test_a_phase_that_crashes_still_leaves_its_ledger_record(bundle: Path, tmp_path: Path,
+                                                             script: str, task: str,
+                                                             prompt: str):
+    """The record was written at the END of main(), so an exception before it left
+    no row, and a crashed night looked exactly like a task that never ran. A
+    missing prompt file — a partial deploy — is the crash here."""
+    home = tmp_path / "home_crash"
+    proj_dir = home / ".claude" / "projects" / "C--Users-test-projects-crash"
+    proj_dir.mkdir(parents=True)
+    _seed_session_jsonl(proj_dir / "s.jsonl", 12, SESSION_DAY)           # flush: a bucket
+    _kb_article(bundle, "crash.md", b"An article nobody will compile.\n")  # compile-kb: a file
+    (bundle / "cron" / "prompts" / prompt).unlink()
+
+    r = _run(bundle / "cron" / "wiki" / script,
+             {"USERPROFILE": str(home), "HOME": str(home)}, cwd=bundle)
+    assert r.returncode != 0 and "FileNotFoundError" in r.stderr, r.stderr
+    rows = _ledger_rows(task)
+    assert len(rows) == 1, f"the crashed run left no ledger record:\n{r.stderr}"
+    assert rows[0]["process_rc"] == 1, rows[0]
+    assert "crashed: FileNotFoundError" in rows[0]["note"], rows[0]
+
+
 def test_compile_kb_stops_resending_an_article_with_a_rejected_path(bundle: Path):
     """The partially-rejected article was kept for a retry — with no ceiling."""
     _kb_article(bundle, "widgets.md", b"Widgets are small parts.\n")
@@ -1193,6 +1231,9 @@ def test_nothing_to_compile_is_a_failure_when_pending_is_not_empty(bundle: Path)
         f"a lost night reported green:\n{r.stdout}\n{r.stderr}"
     assert ".pending" in r.stdout, \
         f"the reason must name .pending, or nobody can act on it:\n{r.stdout}"
+    # A verdict, not a crash: the ledger says why, and does not say "crashed".
+    last = _ledger_rows("ClaudeWikiCompileSessions")[-1]
+    assert last["process_rc"] == 1 and "crashed" not in last["note"], last
 
     # Case 3: a preview. Its flush consumed nothing ON PURPOSE, so the drafts
     # are no evidence of a lost night — every night of the dry_run_until week

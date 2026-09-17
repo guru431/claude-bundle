@@ -127,15 +127,30 @@ def test_repeat_for_must_be_a_day_where_the_posix_generator_runs(repeat_for, pla
     assert (not [p for p in problems if "repeat_for" in p]) is ok, problems
 
 
-@pytest.mark.parametrize("start, ok", [("01:00", True), ("03:30", True),
-                                       ("04:00", False), ("09:30", False)])
-def test_a_repetition_systemd_would_cut_at_midnight_is_rejected(start, ok):
-    """Task Scheduler carries `Daily 09:30` every PT4H through 01:30 and 05:30;
-    systemd's `09/4` stops at 21:30. Compared on the unit the generator writes."""
+@pytest.mark.parametrize("start", ["01:00", "03:30", "04:00", "09:30"])
+def test_a_daily_repetition_keeps_its_hours_under_systemd(start):
+    """Task Scheduler carries `Daily 09:30` every PT4H through 01:30 and 05:30.
+    gen-scheduler.py used to write systemd's `09/4`, which stops at 21:30; it now
+    writes the wrapped hour list, and the comparison on its output agrees."""
     problems = check_registry.check_task(_task(trigger=f"Daily {start}", repeat_every="PT4H"))
-    assert (not [p for p in problems if "fires at hours" in p]) is ok, problems
+    assert not [p for p in problems if "fires at hours" in p], problems
     assert check_registry.check_task(
         _task(trigger=f"Daily {start}", repeat_every="PT4H", platform="windows")) == []
+
+
+@pytest.mark.parametrize("start, caught", [("01:00", False), ("03:30", False),
+                                           ("04:00", True), ("09:30", True)])
+def test_a_generator_that_cuts_the_day_at_midnight_is_caught(monkeypatch, start, caught):
+    """The guard compares Task Scheduler's hours with the unit the generator
+    writes, so it must fail again the moment the old `HH/N` form comes back —
+    for exactly the starts whose repetition crosses midnight early."""
+    def midnight_cutting(task):
+        h, mi = (int(x) for x in task["trigger"].split()[1].split(":"))
+        return ("OnCalendar", f"*-*-* {h:02d}/4:{mi:02d}:00")
+
+    monkeypatch.setattr(check_registry.gen, "systemd_oncalendar", midnight_cutting)
+    problems = check_registry.check_task(_task(trigger=f"Daily {start}", repeat_every="PT4H"))
+    assert bool([p for p in problems if "fires at hours" in p]) is caught, problems
 
 
 def test_s4u_is_a_logon_type():

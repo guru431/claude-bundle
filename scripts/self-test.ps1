@@ -5,6 +5,11 @@
 #   2. Python compileall  — every .py under home-claude/
 #   3. YAML parse         — cron/registry.yaml (best-effort; needs PyYAML)
 #   4. Hook smoke test    — pipe sample payloads through each hook, expect exit 0
+#  4b. Hook doctor        — cron/bundle-status.py --hooks: every hook the shipped
+#                           example wires resolves (source tree); with
+#                           -InstallPath, the deployed settings.json, plus one
+#                           --smoke run of each hook the BUNDLE ships (a hook of
+#                           your own is resolved, never run); `upgrade:` = WARN
 #   5. claude-switch      — `status` runs and is side-effect free
 #   6. sync-tasks -DryRun — runs without a parser crash (placeholder guard OK)
 #   7. Placeholders       — report unsubstituted <bundle-install-path>/<user>
@@ -20,7 +25,9 @@
 #  15. Encodings          — BOM on .ps1 with non-ASCII, none on .sh, LF in .sh
 #  17. Shellcheck         — CI parity over every .sh + .githooks/* (WARN if the
 #                           binary is not installed)
-#  18. Effective config   — with -InstallPath, print utils.py::config_report()
+#  18. Effective config   — with -InstallPath, print utils.py::config_report();
+#                           a setting an upgrade left behind is a WARN
+#                           (utils.py::config_deprecations, UPGRADING.md)
 #  19. bash-deny.yaml     — every rule compiles (the hook itself fails OPEN)
 #
 # Exit code: 0 if all checks pass, 1 if any FAIL. Placeholder/skip = WARN (not a
@@ -294,6 +301,56 @@ if ($py) {
         $hooks[$h] | & $py $hp | Out-Null
         if ($LASTEXITCODE -eq 0) { Ok "hook smoke: $h (exit 0)" }
         else { Bad "hook $h exited $LASTEXITCODE" }
+    }
+
+    # ── 4b. The hook doctor, over what a settings.json actually wires ────────
+    # The loop above runs two fixed paths; a hook entry pointing at a script
+    # that is not there, or at a placeholder nobody replaced, fails at every
+    # session start and was checked by nothing here.
+    #
+    # Which settings.json depends on the mode. A deployment's own, with --smoke:
+    # the user asked this run to validate that deployment, and the doctor runs
+    # only the hooks the bundle ships, each once with a payload it ignores. A
+    # source checkout's settings.json wires NO hooks by design, so checking it
+    # says nothing; the example people copy from is checked instead, with the
+    # placeholders filled from this checkout — resolve only, because running
+    # hooks out of a source tree is the pytest suite's job, in a copy. The
+    # doctor never reads the ~/.claude of whoever runs a source self-test.
+    $doctor = Join-Path $home_claude 'cron/bundle-status.py'
+    $example = Join-Path $home_claude 'settings.example-with-hooks.json'
+    $doctorLabel = $null
+    $null = Invoke-Checked { & $py -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" }
+    if (-not (Test-Path $doctor)) {
+        # a lite deployment: no cron/, and nothing of the bundle's to wire
+    } elseif ($script:lastRc -ne 0) {
+        Warn "hook doctor skipped — cron/bundle-status.py needs Python 3.10+"
+    } elseif ($deployed -and (Test-Path (Join-Path $configRoot 'settings.json'))) {
+        $doctorLabel = Join-Path $configRoot 'settings.json'
+        $out = Invoke-Checked { & $py $doctor --hooks --smoke --settings $doctorLabel }
+        $doctorRc = $script:lastRc
+    } elseif (-not $deployed -and (Test-Path $example)) {
+        $doctorLabel = 'settings.example-with-hooks.json'
+        $doctorTmp = Join-Path ([System.IO.Path]::GetTempPath()) ("selftest-hooks-" + [guid]::NewGuid().ToString('N') + '.json')
+        # Forward slashes: the paths land inside JSON strings, where a backslash
+        # is an escape character.
+        $filled = (Get-Content $example -Raw -Encoding UTF8).Replace('<python-exe>', $py.Replace('\', '/')).Replace('<claude-home>', $home_claude.Replace('\', '/'))
+        try {
+            [System.IO.File]::WriteAllText($doctorTmp, $filled, (New-Object System.Text.UTF8Encoding($false)))
+            $out = Invoke-Checked { & $py $doctor --hooks --settings $doctorTmp }
+            $doctorRc = $script:lastRc
+        } finally {
+            Remove-Item -LiteralPath $doctorTmp -ErrorAction SilentlyContinue
+        }
+    }
+    if ($doctorLabel) {
+        if ($doctorRc -ne 0) { Bad "hook doctor ($doctorLabel):`n$out" }
+        elseif ($out -match 'no hooks configured') { Ok "hook doctor: $doctorLabel wires no hooks" }
+        else { Ok ("hook doctor: every hook in $doctorLabel resolves" + $(if ($deployed) { ", and the bundle's own ran clean" } else { "" })) }
+        # Wiring an older example taught still runs, so it is advice, not a
+        # failure: a settings.json that worked yesterday must not FAIL today.
+        foreach ($l in ($out -split "`r?`n")) {
+            if ($l -match '^\s*\[--\]\s*(.*: upgrade: .*)$') { Warn "hook doctor: $($Matches[1])" }
+        }
     }
 }
 
@@ -762,13 +819,23 @@ if ($deployed) {
     } elseif (-not (Test-Path (Join-Path $utilsDir 'utils.py'))) {
         Warn "cron/hooks/utils.py not found under $deployRoot — skipped the effective-configuration report"
     } else {
-        $ccode = "import sys; sys.path.insert(0, sys.argv[1]); from utils import config_report; print('\n'.join(config_report()))"
+        # config_deprecations: the settings an upgrade left behind. They still
+        # work, which is why nothing else here would ever flag them. getattr, so a
+        # deployment older than the list reports none instead of failing.
+        # errors='replace': a pipe gets the ANSI code page, which has no `→` —
+        # and the report's chain line has three, so on the default provider this
+        # step died with UnicodeEncodeError and reported it as unreadable config.
+        $ccode = "import sys; sys.stdout.reconfigure(errors='replace'); sys.path.insert(0, sys.argv[1]); import utils; print('\n'.join(utils.config_report())); print('\n'.join('DEPRECATED ' + d for d in getattr(utils, 'config_deprecations', list)()))"
         $out = Invoke-Checked { & $py -c $ccode $utilsDir }
         if ($script:lastRc -ne 0) { Warn "could not read the effective configuration:`n$out" }
         else {
             Ok "effective configuration (cron/hooks/utils.py::config_report)"
             foreach ($l in ($out -split "`r?`n")) {
+                if ($l -match '^DEPRECATED (.*)$') { continue }
                 if ($l.Trim()) { Write-Host "       $l" -ForegroundColor DarkGray }
+            }
+            foreach ($l in ($out -split "`r?`n")) {
+                if ($l -match '^DEPRECATED (.*)$') { Warn "deprecated: $($Matches[1]) (see UPGRADING.md)" }
             }
         }
     }

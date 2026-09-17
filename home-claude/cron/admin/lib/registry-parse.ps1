@@ -13,8 +13,11 @@
 # else here. `description: >-` reached Task Scheduler as the literal two
 # characters `>-` on five shipped tasks while every check was green. So:
 #   * scripts/check-registry.py rejects a line outside this subset;
-#   * tests/test_registry_parse.py runs THIS file and PyYAML over the same
-#     registry and compares every field they produce.
+#   * ConvertTo-RegistryJson below dumps what THIS file read, and
+#     `check-registry.py --ps-parsed <dump>` compares every field with PyYAML's
+#     reading of the same registry. scripts/self-test.ps1 does that for the
+#     registry it checks (a deployment's, with -InstallPath), and
+#     tests/test_registry_parse.py for the shipped one and a fixture.
 # sync-tasks.ps1 registers from it; uninstall.ps1 and self-test.ps1 read a
 # deployed registry through it. A change to the subset here needs the matching
 # change in check-registry.py.
@@ -129,4 +132,13 @@ function Parse-RegistryYaml([string]$path) {
     }
     if ($currentTask) { $result.tasks += $currentTask }
     return $result
+}
+
+# What Parse-RegistryYaml read, as JSON: the input of
+# `scripts/check-registry.py --ps-parsed`. One serialization for every caller,
+# so the comparison cannot differ between the self-test and the test suite.
+function ConvertTo-RegistryJson([hashtable]$parsed) {
+    $top = @{}
+    foreach ($k in $parsed.Keys) { if ($k -ne 'tasks') { $top[$k] = $parsed[$k] } }
+    return (ConvertTo-Json @{ top = $top; tasks = @($parsed.tasks) } -Depth 8)
 }

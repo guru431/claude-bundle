@@ -9,13 +9,16 @@ pass every guard, and still register something else: five shipped tasks used
 stored as the two characters `>-`. That is what Task Scheduler showed, for
 months, with every check green.
 
-These tests run the real PowerShell parser and `yaml.safe_load` over the same
-file and compare every field both produce: the shipped registry, a fixture that
-uses every construct the subset promises, and — so the comparison itself is
-known to bite — a registry with the construct that caused the bug.
+The comparison itself lives in check-registry.py (compare_parsers, reached with
+`--ps-parsed`), because scripts/self-test.ps1 runs it on every registry it
+checks. These tests feed it the real PowerShell parser's dump: of the shipped
+registry, of a fixture that uses every construct the subset promises, and — so
+the comparison is known to bite — of a registry with the construct that caused
+the bug.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
@@ -30,24 +33,15 @@ pytestmark = requires_powershell
 PARSER = ROOT / "home-claude" / "cron" / "admin" / "lib" / "registry-parse.ps1"
 REGISTRY = ROOT / "home-claude" / "cron" / "registry.yaml"
 
-# Fields the PowerShell parser fills in by itself when the registry leaves them
-# out. Present on its side only, by design — they are what sync-tasks.ps1
-# registers for an omitted field, not something it misread.
-PS_DEFAULTS = {"kind", "user", "runlevel", "logon_type", "hidden",
-               "timeout_hours", "enabled", "script_args"}
-TOP_DEFAULTS = {"launcher", "managed_marker"}
-# The parser returns a one-element inline list as a bare value and an empty one
-# as nothing (PowerShell unrolls function output, and ConvertTo-Json writes that
-# nothing as `{}`); every consumer treats those the same as a list, so the
-# comparison does too.
-LIST_FIELDS = {"script_args"}
-
-_MISSING = object()
+_spec = importlib.util.spec_from_file_location(
+    "check_registry", ROOT / "scripts" / "check-registry.py")
+check_registry = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(check_registry)
 
 
-def ps_parse(paths: list[Path], tmp_path: Path) -> list[dict]:
-    """Parse every registry in ONE PowerShell process; JSON goes through a
-    UTF-8 file rather than the console, whose codepage would mangle `—`."""
+def ps_dump(paths: list[Path], tmp_path: Path) -> list[Path]:
+    """ConvertTo-RegistryJson for every registry, in ONE PowerShell process.
+    Written to UTF-8 files rather than the console, whose codepage mangles `—`."""
     outs = [tmp_path / f"parsed-{i}.json" for i in range(len(paths))]
     pairs = "\n".join(f"@({ps_quote(p)}, {ps_quote(o)})," for p, o in zip(paths, outs))
     code = f"""
@@ -58,58 +52,17 @@ foreach ($pair in @(
 {pairs}
     $null)) {{
     if (-not $pair) {{ continue }}
-    $reg = Parse-RegistryYaml $pair[0]
-    $top = @{{}}
-    foreach ($k in $reg.Keys) {{ if ($k -ne 'tasks') {{ $top[$k] = $reg[$k] }} }}
-    $doc = @{{ top = $top; tasks = @($reg.tasks) }}
-    [System.IO.File]::WriteAllText($pair[1], (ConvertTo-Json $doc -Depth 8), $utf8)
+    [System.IO.File]::WriteAllText($pair[1], (ConvertTo-RegistryJson (Parse-RegistryYaml $pair[0])), $utf8)
 }}
 """
     r = run_ps(code, tmp_path)
     assert r.returncode == 0, f"PowerShell parser failed:\n{r.stdout}\n{r.stderr}"
-    return [json.loads(o.read_text(encoding="utf-8")) for o in outs]
+    return outs
 
 
-def _norm(key: str, value):
-    if key in LIST_FIELDS and value is not _MISSING:
-        if value is None or value == {}:
-            return []
-        return value if isinstance(value, list) else [value]
-    return value
-
-
-def _same(a, b) -> bool:
-    # bool is an int in Python (True == 1); a registry where one parser reads a
-    # boolean and the other a number must not compare equal.
-    if isinstance(a, list) and isinstance(b, list):
-        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
-    return type(a) is type(b) and a == b
-
-
-def differences(ps_doc: dict, yaml_doc: dict) -> list[str]:
-    diffs: list[str] = []
-    top = ps_doc["top"]
-    for key, want in yaml_doc.items():
-        if key == "tasks":
-            continue
-        if not _same(top.get(key, _MISSING), want):
-            diffs.append(f"top-level {key}: yaml {want!r}, powershell {top.get(key)!r}")
-    for key in sorted(set(top) - set(yaml_doc) - TOP_DEFAULTS):
-        diffs.append(f"top-level {key}: only the PowerShell parser sees it ({top[key]!r})")
-
-    ps_tasks, y_tasks = ps_doc["tasks"], yaml_doc.get("tasks") or []
-    if len(ps_tasks) != len(y_tasks):
-        diffs.append(f"task count: yaml {len(y_tasks)}, powershell {len(ps_tasks)}")
-    for ps, y in zip(ps_tasks, y_tasks):
-        name = y.get("name")
-        for key, want in y.items():
-            have = ps.get(key, _MISSING)
-            if not _same(_norm(key, have), _norm(key, want)):
-                shown = "(absent)" if have is _MISSING else repr(have)
-                diffs.append(f"{name}.{key}: yaml {want!r}, powershell {shown}")
-        for key in sorted(set(ps) - set(y) - PS_DEFAULTS):
-            diffs.append(f"{name}.{key}: only the PowerShell parser sees it ({ps[key]!r})")
-    return diffs
+def differences(dump: Path, text: str) -> list[str]:
+    return check_registry.compare_parsers(
+        json.loads(dump.read_text(encoding="utf-8")), yaml.safe_load(text))
 
 
 # Every construct registry-parse.ps1 claims to read, each written the way a
@@ -175,27 +128,28 @@ extra_top_level: after-the-list
 
 
 def test_shipped_registry_reads_the_same_in_powershell(tmp_path: Path):
-    ps_doc, = ps_parse([REGISTRY], tmp_path)
-    diffs = differences(ps_doc, yaml.safe_load(REGISTRY.read_text(encoding="utf-8")))
+    dump, = ps_dump([REGISTRY], tmp_path)
+    diffs = differences(dump, REGISTRY.read_text(encoding="utf-8"))
     assert not diffs, "sync-tasks.ps1 would register a different registry:\n  " + "\n  ".join(diffs)
 
 
 def test_every_subset_construct_reads_the_same(tmp_path: Path):
     fixture = tmp_path / "subset.yaml"
     fixture.write_text(SUBSET_FIXTURE, encoding="utf-8")
-    ps_doc, = ps_parse([fixture], tmp_path)
-    diffs = differences(ps_doc, yaml.safe_load(SUBSET_FIXTURE))
+    dump, = ps_dump([fixture], tmp_path)
+    diffs = differences(dump, SUBSET_FIXTURE)
     assert not diffs, "the subset parser disagrees with YAML:\n  " + "\n  ".join(diffs)
 
 
-def test_the_comparison_catches_a_block_scalar(tmp_path: Path):
-    """The F29 construct itself. If this passes silently, the two tests above
-    prove nothing."""
+def test_the_comparison_catches_a_block_scalar(tmp_path: Path, capsys):
+    """The F29 construct itself, through the same `--ps-parsed` path the
+    self-test takes. If this passes silently, the two tests above prove nothing."""
     text = SUBSET_FIXTURE.replace(
         "    description: \"double-quoted\"\n",
         "    description: >-\n      folded over\n      two lines\n")
     fixture = tmp_path / "folded.yaml"
     fixture.write_text(text, encoding="utf-8")
-    ps_doc, = ps_parse([fixture], tmp_path)
-    diffs = differences(ps_doc, yaml.safe_load(text))
-    assert any("Words.description" in d and ">-" in d for d in diffs), diffs
+    dump, = ps_dump([fixture], tmp_path)
+    assert check_registry.check(fixture, dump) == 1
+    out = capsys.readouterr().out
+    assert "Words.description: YAML reads 'folded over two lines', sync-tasks.ps1 reads '>-'" in out, out

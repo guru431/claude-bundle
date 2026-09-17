@@ -30,7 +30,12 @@ pytestmark = [
 @pytest.mark.integration
 def test_a_first_full_install_writes_a_manifest_uninstall_can_trust(tmp_path: Path):
     home = tmp_path / "home"
-    home.mkdir()
+    # AppData\Local must exist in the fake profile: without it .NET resolves
+    # LocalApplicationData to '' and PowerShell writes its module analysis cache
+    # to Microsoft\Windows\PowerShell\ relative to the working directory — which
+    # was the repository root. The run is also started from tmp for the same
+    # reason.
+    (home / "AppData" / "Local").mkdir(parents=True)
     (tmp_path / "temp").mkdir()
     stub = tmp_path / "python-stub.cmd"
     stub.write_text("@echo off\r\necho 3.12\r\nexit /b 0\r\n", encoding="ascii")
@@ -39,7 +44,7 @@ def test_a_first_full_install_writes_a_manifest_uninstall_can_trust(tmp_path: Pa
     env.update(USERPROFILE=str(home), HOME=str(home), PYTHON_EXE=str(stub),
                TEMP=str(tmp_path / "temp"), TMP=str(tmp_path / "temp"))
     r = run_ps_file(ROOT / "scripts" / "install.ps1", "-Profile", "full", "-NonInteractive",
-                    "-ClaudeHome", claude_home, env=env, timeout=900)
+                    "-ClaudeHome", claude_home, env=env, cwd=tmp_path, timeout=900)
     # The exit code is the closing self-test's, which FAILs on a machine that
     # never ran save-cred — not what this test is about.
     manifest = claude_home / ".bundle-manifest.json"

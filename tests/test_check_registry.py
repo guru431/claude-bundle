@@ -8,6 +8,7 @@ subset parser sync-tasks.ps1 registers from.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -143,6 +144,31 @@ def test_s4u_is_a_logon_type():
     assert not [p for p in check_registry.check_task(task) if "logon_type" in p]
     task["logon_type"] = "s4y"
     assert [p for p in check_registry.check_task(task) if "logon_type" in p]
+
+
+def test_a_parser_dump_that_disagrees_with_yaml_fails_the_check(tmp_path: Path, capsys):
+    """`--ps-parsed`, without PowerShell: the dump the parser used to produce
+    for `enabled: no` — the truthy string, where YAML reads a boolean."""
+    pytest.importorskip("yaml")
+    reg = tmp_path / "registry.yaml"
+    reg.write_text(HEAD + "    trigger: Daily 02:00\n    timeout_hours: 1\n"
+                          "    enabled: no\n", encoding="utf-8")
+    dump = tmp_path / "dump.json"
+    task = {"name": "One", "script": "C:\\b\\cron\\one.py", "trigger": "Daily 02:00",
+            "timeout_hours": 1, "enabled": "no", "kind": "bash", "script_args": {}}
+    dump.write_text(json.dumps({
+        "top": {"version": 1, "managed_marker": "managed-by-registry",
+                "launcher": "C:\\b\\bin\\_run-hidden.vbs"},
+        "tasks": [task]}), encoding="utf-8")
+    assert check_registry.check(reg, dump) == 1
+    assert "One.enabled: YAML reads False, sync-tasks.ps1 reads 'no'" in capsys.readouterr().out
+
+    task["enabled"] = False
+    dump.write_text(json.dumps({"top": {"version": 1, "managed_marker": "managed-by-registry",
+                                        "launcher": "C:\\b\\bin\\_run-hidden.vbs"},
+                                "tasks": [task]}), encoding="utf-8")
+    assert check_registry.check(reg, dump) == 0
+    assert "reads every field as YAML does" in capsys.readouterr().out
 
 
 def test_check_reports_a_block_scalar_in_a_registry_file(tmp_path: Path, capsys):

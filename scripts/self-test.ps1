@@ -147,10 +147,16 @@ foreach ($rel in @('settings.json', 'settings.example-with-hooks.json')) {
 if ($py) {
     # Only the trees that exist: a lite deployment has no cron/ or bin/, and
     # compileall fails on a missing directory (a FAIL for a correct install).
-    $targets = @('cron', 'hooks', 'bin') |
+    #
+    # @(...) is load-bearing. When exactly ONE of the three exists (cron/
+    # without bin/, the step INSTALL.md warns people skip), the pipeline yields
+    # a bare string, and splatting a string passes its CHARACTERS: compileall got
+    # `C` `:` `\` `U` ... — and `\` is the root of the drive, so the self-test
+    # byte-compiled every .py on it, writing __pycache__ wherever it could.
+    $targets = @(@('cron', 'hooks', 'bin') |
         ForEach-Object { Join-Path $home_claude $_ } |
-        Where-Object { Test-Path $_ }
-    if (-not $targets) {
+        Where-Object { Test-Path $_ })
+    if ($targets.Count -eq 0) {
         # Bare `compileall -q` with no path compiles all of sys.path — never run it.
         Warn "no cron/, hooks/ or bin/ under $home_claude — skipped compileall"
     } else {
@@ -431,14 +437,43 @@ if ($py -and -not $deployed) {
 # script lives in the bundle checkout, but the file that actually drives the
 # scheduler is the deployed one — checking only the pristine template said
 # nothing about the registry a user had edited.
+#
+# And it is handed what the Windows syncer makes of that same file: the parser
+# in the tree under test dumps its reading (ConvertTo-RegistryJson) and the
+# guard compares it with PyYAML's, field by field. Every check here used to read
+# the registry through PyYAML only, which is how `description: >-` was
+# registered as `>-` on five tasks while this step said PASS. A tree without the
+# parser library (a deployment older than it) gets the schema check alone.
 if ($py) {
     $cr = Join-Path $root 'scripts/check-registry.py'
     $crTarget = if ($deployed) { Join-Path $home_claude 'cron/registry.yaml' } else { $null }
     if ((Test-Path $cr) -and (-not $deployed -or (Test-Path $crTarget))) {
-        if ($crTarget) { $out = Invoke-Checked { & $py $cr $crTarget } }
-        else           { $out = Invoke-Checked { & $py $cr } }
-        $rc = $script:lastRc
-        if ($rc -eq 0) { Ok "registry.yaml schema valid" }
+        $crArgs = @()
+        if ($crTarget) { $crArgs += $crTarget }
+        $regParser = Join-Path $home_claude 'cron/admin/lib/registry-parse.ps1'
+        $regUnderTest = Join-Path $home_claude 'cron/registry.yaml'
+        $psDump = $null
+        if ((Test-Path $regParser) -and (Test-Path $regUnderTest)) {
+            try {
+                . $regParser
+                $psDump = Join-Path ([System.IO.Path]::GetTempPath()) ("selftest-regparse-" + [guid]::NewGuid().ToString('N') + '.json')
+                [System.IO.File]::WriteAllText($psDump, (ConvertTo-RegistryJson (Parse-RegistryYaml $regUnderTest)),
+                                               (New-Object System.Text.UTF8Encoding($false)))
+                $crArgs += @('--ps-parsed', $psDump)
+            } catch {
+                Bad "sync-tasks.ps1's registry parser failed on ${regUnderTest}: $($_.Exception.Message)"
+                $psDump = $null
+            }
+        }
+        try {
+            $out = Invoke-Checked { & $py $cr @crArgs }
+            $rc = $script:lastRc
+        } finally {
+            if ($psDump) { Remove-Item -LiteralPath $psDump -ErrorAction SilentlyContinue }
+        }
+        if ($rc -eq 0) {
+            Ok ("registry.yaml schema valid" + $(if ($psDump) { "; sync-tasks.ps1's parser reads every field as YAML does" } else { "" }))
+        }
         elseif ($rc -eq 2) { Warn "PyYAML not installed — skipped registry schema check" }
         else { Bad "registry.yaml schema errors:`n$out" }
     }

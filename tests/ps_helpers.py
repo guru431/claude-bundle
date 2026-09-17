@@ -14,14 +14,22 @@ Two ways in:
   tasks.
 
 Windows PowerShell 5.1 is preferred: it is what Task Scheduler, sync.cmd and the
-installer actually execute. `pwsh` is the fallback, so a runner that has only
-PowerShell 7 still exercises the logic.
+installer actually execute. `pwsh` is the fallback on a Windows machine without
+it.
+
+Windows only. The ubuntu CI runner ships `pwsh` too, but PowerShell 7 on Linux
+is not the runtime these scripts are written for — .NET does not treat `\` as a
+path separator there, the User environment scope does not exist, and
+WindowsIdentity throws — so a result there says little about the code as it
+runs. The registry parser comparison reaches CI another way: self-test.ps1 runs
+it, and the Windows CI job runs the self-test.
 """
 from __future__ import annotations
 
 import os
 import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -31,11 +39,13 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def powershell() -> str | None:
+    if sys.platform != "win32":
+        return None
     return shutil.which("powershell") or shutil.which("pwsh")
 
 
 requires_powershell = pytest.mark.skipif(
-    powershell() is None, reason="needs Windows PowerShell 5.1 or pwsh on PATH")
+    powershell() is None, reason="Windows only: needs Windows PowerShell 5.1 (or pwsh) on PATH")
 
 
 def ps_quote(value: object) -> str:

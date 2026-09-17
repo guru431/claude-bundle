@@ -15,9 +15,12 @@ scripts/gen-scheduler.py (TRIGGER_* regexes), so this validator and the unit
 generator can never disagree about what a valid trigger is.
 
 Everything above is checked on what PyYAML reads — and the Windows syncer does
-not read YAML. check_subset() covers that gap; see its comment.
+not read YAML. check_subset() and compare_parsers() cover that gap; see their
+comments.
 
 Runs in the ubuntu CI job and from scripts/self-test.ps1.
+
+Usage: check-registry.py [registry.yaml] [--ps-parsed <dump.json>]
 
 Exit 0 = registry is valid; 1 = at least one problem (all are printed, with the
 task name); 2 = PyYAML missing, check skipped (self-test downgrades this to a
@@ -26,6 +29,7 @@ WARN, same as its other PyYAML-dependent steps).
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -247,9 +251,10 @@ def check_task(task: dict) -> list[str]:
 # in this file passed while Task Scheduler got something else — five shipped
 # tasks used `description: >-` and were registered with the description `>-`.
 # Widening the PowerShell parser was rejected (it has to run on a bare PS 5.1),
-# so a line it cannot read fails here. tests/test_registry_parse.py holds the two
-# parsers against each other on the shipped file; this covers the one a user
-# edits. The patterns mirror registry-parse.ps1 — change them together.
+# so a line it cannot read fails here — on the line, before anything is parsed.
+# compare_parsers() below catches the other half: a construct inside the subset
+# that the parser nonetheless reads differently. The patterns mirror
+# registry-parse.ps1 — change them together.
 _TOP_KEY = re.compile(r"^[A-Za-z_]+:(?:\s|$)")
 _TASK_ITEM = re.compile(r"^\s*-\s+name:\s*\S")
 _TASK_FIELD = re.compile(r"^\s+[A-Za-z0-9_]+:(?:\s|$)")
@@ -263,7 +268,7 @@ def check_subset(text: str) -> list[str]:
     in_tasks = False
     block_indent = None      # inside a block scalar's body: already reported
     prev_reported = False    # one report per run of unreadable lines
-    for no, raw in enumerate(text.lstrip("﻿").splitlines(), 1):
+    for no, raw in enumerate(text.lstrip("\ufeff").splitlines(), 1):
         line = raw.rstrip()
         body = line.strip()
         if not body or body.startswith("#"):
@@ -312,7 +317,74 @@ def check_subset(text: str) -> list[str]:
     return problems
 
 
-def check(registry: Path = REGISTRY) -> int:
+# The other half: what registry-parse.ps1 actually made of the file. Its
+# ConvertTo-RegistryJson dump, compared field by field with yaml.safe_load of the
+# same file. `enabled: no` was the case in point — a boolean to PyYAML, so this
+# guard and gen-scheduler.py read the task as disabled, while the parser kept the
+# truthy STRING 'no' and registered it enabled. scripts/self-test.ps1 passes the
+# dump in for the registry it checks, so a user's own registry is compared too.
+#
+# Fields the parser fills in by itself when a task leaves them out: present on
+# its side only, by design — they are what sync-tasks.ps1 registers for an
+# omitted field, not something it misread.
+PS_TASK_DEFAULTS = {"kind", "user", "runlevel", "logon_type", "hidden",
+                    "timeout_hours", "enabled", "script_args"}
+PS_TOP_DEFAULTS = {"launcher", "managed_marker"}
+# PowerShell unrolls a one-element list to its element and an empty one to
+# nothing, which ConvertTo-Json writes as `{}`. Every consumer of the parser
+# treats both as a list, so the comparison does too.
+PS_LIST_FIELDS = {"script_args"}
+_MISSING = object()
+
+
+def _as_list(value):
+    if value is None or value == {}:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def _same(a, b) -> bool:
+    # Type-strict: bool is an int in Python (True == 1), and a field one parser
+    # reads as a boolean and the other as a number is exactly a disagreement.
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    return type(a) is type(b) and a == b
+
+
+def compare_parsers(ps_doc: dict, yaml_doc: dict) -> list[str]:
+    """Every field on which the PowerShell parser's dump and PyYAML disagree."""
+    diffs: list[str] = []
+    top = ps_doc.get("top") or {}
+    for key, want in yaml_doc.items():
+        if key != "tasks" and not _same(top.get(key, _MISSING), want):
+            diffs.append(f"top-level {key}: YAML reads {want!r}, sync-tasks.ps1 "
+                         f"reads {top.get(key)!r}")
+    for key in sorted(set(top) - set(yaml_doc) - PS_TOP_DEFAULTS):
+        diffs.append(f"top-level {key}: only sync-tasks.ps1 sees it ({top[key]!r})")
+
+    ps_tasks = ps_doc.get("tasks") or []
+    y_tasks = yaml_doc.get("tasks") or []
+    if len(ps_tasks) != len(y_tasks):
+        diffs.append(f"task count: YAML reads {len(y_tasks)}, sync-tasks.ps1 "
+                     f"reads {len(ps_tasks)}")
+    for ps, y in zip(ps_tasks, y_tasks):
+        if not isinstance(y, dict):
+            continue    # reported by check() as "not a YAML mapping"
+        name = y.get("name")
+        for key, want in y.items():
+            have = ps.get(key, _MISSING)
+            if key in PS_LIST_FIELDS and have is not _MISSING:
+                have, want = _as_list(have), _as_list(want)
+            if not _same(have, want):
+                shown = "nothing" if have is _MISSING else repr(have)
+                diffs.append(f"{name}.{key}: YAML reads {want!r}, sync-tasks.ps1 "
+                             f"reads {shown}")
+        for key in sorted(set(ps) - set(y) - PS_TASK_DEFAULTS):
+            diffs.append(f"{name}.{key}: only sync-tasks.ps1 sees it ({ps[key]!r})")
+    return diffs
+
+
+def check(registry: Path = REGISTRY, ps_parsed: Path | None = None) -> int:
     try:
         import yaml
     except ImportError:
@@ -342,20 +414,35 @@ def check(registry: Path = REGISTRY) -> int:
                 seen[task["name"]] = i + 1
         problems += [f"{name}: {p}" for p in check_task(task)]
 
+    if ps_parsed is not None:
+        ps_doc = json.loads(ps_parsed.read_text(encoding="utf-8-sig"))
+        problems += compare_parsers(ps_doc, data)
+
     if problems:
         print(f"REGISTRY SCHEMA ERRORS — fix {registry}:")
         for p in problems:
             print("  " + p)
         return 1
-    print(f"registry schema: {len(tasks)} tasks valid")
+    print(f"registry schema: {len(tasks)} tasks valid"
+          + ("; sync-tasks.ps1's parser reads every field as YAML does"
+             if ps_parsed is not None else ""))
     return 0
 
 
 if __name__ == "__main__":
     # Optional path argument, so the same guard can validate a DEPLOYED
     # registry.yaml (self-test -InstallPath) and not just the source template.
-    target = Path(sys.argv[1]) if len(sys.argv) > 1 else REGISTRY
+    args = sys.argv[1:]
+    dump = None
+    if "--ps-parsed" in args:
+        i = args.index("--ps-parsed")
+        if i + 1 >= len(args):
+            print("--ps-parsed needs the path of a ConvertTo-RegistryJson dump")
+            sys.exit(1)
+        dump = Path(args[i + 1])
+        del args[i:i + 2]
+    target = Path(args[0]) if args else REGISTRY
     if not target.is_file():
         print(f"registry not found: {target}")
         sys.exit(1)
-    sys.exit(check(target))
+    sys.exit(check(target, dump))

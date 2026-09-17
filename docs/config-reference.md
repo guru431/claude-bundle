@@ -45,7 +45,7 @@ installer generates the first from the second.
 | `DEEPSEEK_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)`, `scripts/claude-switch.ps1` |
 | `DEEPSEEK_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `GITHUB_PUSH_FORCE` | not in .env (internal) | `home-claude/cron/github-push.sh` |
-| `GIT_NET_TIMEOUT` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
+| `GIT_NET_TIMEOUT` | optional (commented) | `home-claude/cron/git-push-all.sh` |
 | `GIT_PUSH_ALL_DRY_RUN` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
 | `GIT_PUSH_ALL_LIB` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
 | `GIT_SSH_COMMAND` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |

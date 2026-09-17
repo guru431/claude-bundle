@@ -161,6 +161,10 @@ Then run `sync.cmd` once (step 4 above).
 - **The Windows task monitor's findings watch** reads the projects under
   `projects_root` and nothing else. Without it, only the bundle's own
   `FINDINGS.md` is read (it used to scan the directory above the bundle).
+- **`git-push-all.sh` reads `PYTHON_EXE`, `BASH_EXE` and `GIT_NET_TIMEOUT`
+  from `.env`.** It settled all three before loading the file, so a value there
+  was ignored. With no Python that runs, `ClaudeGitPushAll` now exits 1 before
+  pushing, as the other shell tasks do; it used to push and leave no run record.
 
 ### POSIX (macOS / Linux)
 

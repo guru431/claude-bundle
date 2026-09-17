@@ -35,10 +35,12 @@ export SSH_ASKPASS=echo
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15}"
 
 # Wrap a network git call in a hard timeout when `timeout` is available.
-GIT_NET_TIMEOUT="${GIT_NET_TIMEOUT:-300}"
+# The default is taken at CALL time, not assigned up here: this part runs before
+# the main body loads .env, and dotenv_load never overrides a variable that is
+# already set — so a GIT_NET_TIMEOUT line in .env used to be silently ignored.
 git_net() {
     if command -v timeout >/dev/null 2>&1; then
-        timeout "$GIT_NET_TIMEOUT" git "$@"
+        timeout "${GIT_NET_TIMEOUT:-300}" git "$@"
     else
         git "$@"
     fi
@@ -453,6 +455,14 @@ if [ -f "$SCRIPT_DIR/lib/dotenv.sh" ]; then
     # shellcheck source=lib/dotenv.sh
     . "$SCRIPT_DIR/lib/dotenv.sh"
     dotenv_load "$BUNDLE_ROOT/.env"
+fi
+# Resolved AGAIN, now that .env is loaded. The copy sourced next to the helpers
+# ran before it, so the PYTHON_EXE / BASH_EXE that have_python tells a session-0
+# install to set in .env never reached this script — and the fallback defaults
+# after that copy made the checks below pass on a python that did not exist.
+if [ -f "$SCRIPT_DIR/lib/runtime.sh" ]; then
+    # shellcheck source=lib/runtime.sh
+    . "$SCRIPT_DIR/lib/runtime.sh"
 fi
 have_python || exit 1
 have_bash || exit 1

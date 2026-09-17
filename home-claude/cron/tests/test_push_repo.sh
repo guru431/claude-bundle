@@ -278,4 +278,30 @@ reset_counters; push_repo "$R19" "r19" "Auto-commit: test"
 [ "$pushed" = "1" ] || fail "T19: a clean repository with one large blob was not pushed (failed=$failed)"
 grep -q "NOT scanned" "$LOG_FILE" || fail "T19: the note about the unscanned blob is missing from the log"
 
-echo "PASS: push_repo (19 scenarios)"
+# === Test 20: what .env sets reaches the sweep — a whole run, not the lib ===
+# The helpers resolve their settings when the script starts, and the main body
+# loads .env only after them — while dotenv_load never overrides a variable that
+# is already set. GIT_NET_TIMEOUT got its default first, so a .env line was
+# ignored; PYTHON was resolved before the PYTHON_EXE that have_python tells a
+# session-0 install to put in .env. Stubs record what the run actually used.
+B="$TMP/deployed"
+P="$TMP/projects"
+S="$TMP/stubs"
+mkdir -p "$B/cron" "$P" "$S"
+cp "$SCRIPT" "$B/cron/"; cp -r "$(dirname "$SCRIPT")/lib" "$B/cron/"
+mkrepo "$P/app"; echo more >> "$P/app/app.py"
+printf '#!/bin/bash\necho "timeout $1" >> "$STUB_LOG"\nshift\nexec "$@"\n' > "$S/timeout"
+printf '#!/bin/bash\n[ "${1:-}" = "-c" ] && exit 0\necho "python $*" >> "$STUB_LOG"\n' > "$S/python-stub"
+chmod +x "$S/timeout" "$S/python-stub"
+printf 'PROJECTS_ROOT=%s\nGIT_NET_TIMEOUT=77\nPYTHON_EXE=%s\n' "$P" "$S/python-stub" > "$B/.env"
+( unset GIT_NET_TIMEOUT PYTHON_EXE
+  export STUB_LOG="$TMP/stubs.log" PATH="$S:$PATH"
+  bash "$B/cron/git-push-all.sh" ) || fail "T20: the sweep failed ($(cat "$B"/cron/logs/git-push-all_*.log 2>/dev/null))"
+grep -qx "timeout 77" "$TMP/stubs.log" \
+    || fail "T20: GIT_NET_TIMEOUT from .env did not reach git ($(cat "$TMP/stubs.log" 2>/dev/null))"
+grep -q "^python .*runs\.py record" "$TMP/stubs.log" \
+    || fail "T20: PYTHON_EXE from .env was not the python the run used ($(cat "$TMP/stubs.log" 2>/dev/null))"
+[ "$(git -C "$P/app" rev-parse HEAD)" = "$(git -C "$P/app" rev-parse "origin/$(br "$P/app")")" ] \
+    || fail "T20: the change was not pushed"
+
+echo "PASS: push_repo (20 scenarios)"

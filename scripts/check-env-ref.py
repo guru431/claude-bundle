@@ -124,11 +124,6 @@ CODE_ONLY = {
     # default (BatchMode, ConnectTimeout) when the environment has none; the
     # place to change how git reaches a remote is git's config, not this .env.
     "GIT_SSH_COMMAND",
-    # git-push-all.sh resolves it (default 300 s) at the top of the script,
-    # BEFORE it loads .env — and dotenv_load never overrides a variable that is
-    # already set, so a .env line would be silently ignored. Honoured only when
-    # exported for the run, like the switches above.
-    "GIT_NET_TIMEOUT",
     # Test seam: cron/tests/*.sh export it to point github-push.sh at a scratch
     # tree. The script derives it from its own location otherwise.
     "BUNDLE_ROOT",

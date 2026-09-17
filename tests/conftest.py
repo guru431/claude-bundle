@@ -34,6 +34,7 @@ Everything here is autouse, so a new test gets the sandbox without asking.
 """
 from __future__ import annotations
 
+import atexit
 import functools
 import os
 import runpy
@@ -125,6 +126,28 @@ def pytest_configure(config):
     config.add_cleanup(lambda: shutil.rmtree(home, ignore_errors=True))
     config.add_cleanup(mp.undo)          # cleanups run last-in first-out
     _neutralise(mp, home)
+    _drop_exit_summaries(config, mp)
+
+
+def _drop_exit_summaries(config, mp: pytest.MonkeyPatch) -> None:
+    """No "[llm] run summary" lines once the session is over.
+
+    utils registers `_report_depleted_atexit` when it is imported, and the
+    breaker tests load a fresh copy for every scenario they latch: a full run
+    ended with eleven "depleted this run" lines on stderr, printed after pytest's
+    own summary, about stub providers no pipeline run ever called. Each copy's
+    hook is recorded as it registers and unregistered when the session ends.
+    """
+    hooks = []
+    register = atexit.register
+
+    def recording(func, *args, **kwargs):
+        if getattr(func, "__name__", "") == "_report_depleted_atexit":
+            hooks.append(func)
+        return register(func, *args, **kwargs)
+
+    mp.setattr(atexit, "register", recording)
+    config.add_cleanup(lambda: [atexit.unregister(func) for func in hooks])
 
 
 @pytest.fixture(autouse=True)

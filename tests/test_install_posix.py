@@ -294,6 +294,7 @@ def test_lite_merges_settings_leaves_out_wiki_and_uninstalls_cleanly(tmp_path):
     assert "permissions" in settings, "the template keys were not merged in"
     assert (home / "commands" / "code-review-ext.md").is_file()
     assert not (home / "commands" / "wiki.md").exists(), "/wiki needs cron/, which lite has none of"
+    assert not (home / "commands" / "README.md").exists(), "every .md in commands/ is a command"
     assert "full tier only" in res.out
     manifest = json.loads((home / ".bundle-manifest.json").read_text(encoding="utf-8"))
     assert manifest["tier"] == "lite" and "settings.json" in manifest["preserved"]
@@ -306,6 +307,29 @@ def test_lite_merges_settings_leaves_out_wiki_and_uninstalls_cleanly(tmp_path):
     left = sorted(p.relative_to(home).as_posix() for p in home.rglob("*")
                   if p.is_file() and not p.name.startswith("settings.json.bak-"))
     assert left == ["settings.json", "skills/mine.md"], "uninstall took something of yours, or left its own"
+
+
+@pytest.mark.integration
+@needs_bash
+def test_an_older_installs_commands_readme_is_reported_and_no_longer_tracked(tmp_path):
+    """Claude Code makes a slash command of every .md in commands/, so the README
+    the installer copied there showed up as `/README`. A re-install no longer
+    writes it; the copy an older install placed stays on disk (it may be yours
+    by now), is named at the end, and leaves the manifest."""
+    home = tmp_path / "home"
+    (home / "commands").mkdir(parents=True)
+    old = home / "commands" / "README.md"
+    old.write_bytes((ROOT / "home-claude" / "commands" / "README.md").read_bytes())
+    _manifest(home, ["commands/README.md"])
+    res = _run("install.sh", "--claude-home", _sh(home))
+    assert res.returncode == 0, res.out
+
+    manifest = json.loads((home / ".bundle-manifest.json").read_text(encoding="utf-8"))
+    assert "commands/README.md" not in {e["path"] for e in manifest["written"]}
+    assert (home / "commands" / "code-review-ext.md").is_file()
+    assert old.is_file()
+    _, _, notes = res.out.partition("not part of this one")
+    assert "README.md" in notes, res.out
 
 
 @pytest.mark.integration

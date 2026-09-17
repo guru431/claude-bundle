@@ -191,6 +191,10 @@ Then run `sync.cmd` once (step 4 above).
   full tier builds; a lite install no longer places the command, and an upgrade
   does not remove the old copy. Delete `~/.claude/commands/wiki.md` by hand. The
   installer lists every such file at the end of a re-install.
+- **`commands/README.md`, every install.** Claude Code makes a slash command of
+  every `.md` in `commands/`, so the bundle's README there showed up as
+  `/README`. No install places it any more, and an upgrade does not remove the
+  old copy: delete `~/.claude/commands/README.md` by hand.
 - **`.claude/settings.local.json.bak` in a project you switched to `anthropic`**
   with `claude-switch.ps1`: the switch deleted the old backup and then wrote a
   new one from the file that still held the provider's key. Delete it, or run

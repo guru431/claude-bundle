@@ -94,18 +94,26 @@ $script:fullTierOnly = @('commands/wiki.md')
 function Test-FullTierOnly([string]$label, [string]$rel) {
     return ($Profile -ne 'full') -and ($script:fullTierOnly -contains ("$label/" + $rel.Replace('\', '/')))
 }
+# And files NO profile installs. Claude Code makes a slash command of every .md
+# in commands/, so the directory's own README.md became `/README` — in the `/`
+# picker and in the skill list every session hands the model. Honoured in the
+# same four places.
+$script:notDeployed = @('commands/README.md')
+function Test-HeldBack([string]$label, [string]$rel) {
+    return ($script:notDeployed -contains ("$label/" + $rel.Replace('\', '/'))) -or (Test-FullTierOnly $label $rel)
+}
 
 # `Copy-Item -Recurse` of a bundle directory into $dstParent — minus the files
-# Test-FullTierOnly holds back, which a plain recursive copy cannot leave out.
+# Test-HeldBack holds back, which a plain recursive copy cannot leave out.
 function Copy-BundleTree($src, $dstParent, $label) {
     $srcBase = (Get-Item $src).FullName
     $files = @(Get-ChildItem $src -Recurse -File)
-    $held = @($files | Where-Object { Test-FullTierOnly $label $_.FullName.Substring($srcBase.Length).TrimStart('\', '/') })
+    $held = @($files | Where-Object { Test-HeldBack $label $_.FullName.Substring($srcBase.Length).TrimStart('\', '/') })
     if ($held.Count -eq 0) { Copy-Item $src $dstParent -Recurse -Force; return }
     foreach ($f in $files) {
         $rel = $f.FullName.Substring($srcBase.Length).TrimStart('\', '/')
-        if (Test-FullTierOnly $label $rel) {
-            Info "skipped $label/$($rel.Replace('\', '/')) — full tier only"
+        if (Test-HeldBack $label $rel) {
+            if (Test-FullTierOnly $label $rel) { Info "skipped $label/$($rel.Replace('\', '/')) — full tier only" }
             continue
         }
         $to = Join-Path (Join-Path $dstParent $label) $rel
@@ -134,7 +142,7 @@ function Add-Written($src, $dst, $rootName) {
         $rel = $f.FullName.Substring($srcBase.Length).TrimStart('\', '/')
         # Held back from this profile, so not written by this run — even if an
         # earlier install left one there.
-        if (Test-FullTierOnly (Split-Path $dst -Leaf) $rel) { continue }
+        if (Test-HeldBack (Split-Path $dst -Leaf) $rel) { continue }
         $p = Join-Path $dst $rel
         if (Test-Path $p) { $script:written.Add(@{ root = $rootName; path = (Get-RelPath $p $base) }) }
     }
@@ -200,7 +208,7 @@ function Backup-Overwrites($src, $dst, $label) {
     foreach ($f in (Get-ChildItem $src -Recurse -File)) {
         if ($f.FullName -match '[\\/]__pycache__[\\/]') { continue }
         $rel = $f.FullName.Substring($srcBase.Length).TrimStart('\', '/')
-        if (Test-FullTierOnly $label $rel) { continue }   # not copied, so not replaced
+        if (Test-HeldBack $label $rel) { continue }   # not copied, so not replaced
         $target = Join-Path $dst $rel
         if (-not (Test-Path $target -PathType Leaf)) { continue }
         if ((Get-FileHash $target -Algorithm SHA256).Hash -eq (Get-FileHash $f.FullName -Algorithm SHA256).Hash) { continue }
@@ -436,7 +444,7 @@ function Add-PlannedTree($plan, $srcDir, $relPrefix, $rootName) {
     foreach ($f in (Get-ChildItem $srcDir -Recurse -File)) {
         if ($f.FullName -match '[\\/]__pycache__[\\/]') { continue }
         $rel = $f.FullName.Substring($base.Length).TrimStart('\', '/').Replace('\', '/')
-        if (Test-FullTierOnly $relPrefix $rel) { continue }
+        if (Test-HeldBack $relPrefix $rel) { continue }
         $plan.Add(@{ root = $rootName; path = "$relPrefix/$rel"; src = $f.FullName })
     }
 }

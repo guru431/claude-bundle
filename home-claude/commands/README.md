@@ -13,3 +13,6 @@ network, nothing written. Full tier only (a lite install has no `cron/`).
 User-level slash commands live in `~/.claude/commands/<name>.md`. The
 front-matter `description` and `argument-hint` show up in the `/` picker.
 `allowed-tools` is the safety boundary — keep it minimal.
+
+This README stays in the bundle: Claude Code makes a command of every `.md` in
+that directory, so the installers do not copy it there.

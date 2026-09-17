@@ -152,6 +152,10 @@ plan="$work/plan.tsv"
 # commands/README.md: /wiki searches the vault the nightly pipeline builds, and
 # a lite install has no cron/ — shipping it there only adds a command that fails.
 FULL_ONLY=" commands/wiki.md "
+# No profile installs these. Claude Code makes a slash command of every .md in
+# commands/, so the directory's own README.md became `/README` — in the `/`
+# picker and in the skill list every session hands the model.
+NOT_DEPLOYED=" commands/README.md "
 plan_tree() {  # $1 = root name, $2 = directory under home-claude/
     [ -d "$src/$2" ] || return 0
     # Skipped: byte-code, and the runtime state a checkout that has run the
@@ -160,6 +164,7 @@ plan_tree() {  # $1 = root name, $2 = directory under home-claude/
          -o -type f ! -name '.processed.json*' -print | LC_ALL=C sort > "$work/tree.txt"
     while IFS= read -r f; do
         rel="${f#"$src"/}"
+        case "$NOT_DEPLOYED" in *" $rel "*) continue ;; esac
         if [ "$profile" = lite ]; then
             case "$FULL_ONLY" in *" $rel "*) continue ;; esac
         fi

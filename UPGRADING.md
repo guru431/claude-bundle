@@ -167,6 +167,12 @@ Then run `sync.cmd` once (step 4 above).
   `CLAUDE_CONFIG_DIR`** when that variable is set, as the installers do. They
   used to fall back to `~/.claude/.env` regardless; a `.env` left there while
   `CLAUDE_CONFIG_DIR` points elsewhere is no longer read.
+- **`WIKI_LLM_PROVIDER=deepseek` is flagged for the last time.** It has meant
+  DeepSeek alone since 0.16.0, and the warning printed then never reached a
+  scheduled run, so `bundle-status.py` and the self-test name it as
+  `deprecated:` in this release. If DeepSeek alone is what you want, the setting
+  is right: ignore the line — the next release drops it, and the per-run warning
+  with it. For the chain, write `WIKI_LLM_PROVIDER=chain` or leave it empty.
 - **`WIKI_LLM_PROVIDER=claude` runs on your `claude /login` subscription.**
   Every `ANTHROPIC_*` variable is now withheld from the CLI: `claude -p` used an
   `ANTHROPIC_API_KEY` from `.env` whenever one was set, and billed the API. The

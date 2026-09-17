@@ -121,7 +121,8 @@ alone — a value that names one provider and means three. That is the defect
 class this bundle keeps finding in its own configuration, so the chain now has
 a name of its own (`chain`) and a provider name means the provider. A `deepseek`
 left over from an older install still selects DeepSeek — which is what it reads
-as — and prints one deprecation warning per process.
+as — and prints one deprecation warning per process; this release is the last
+to print it, or to name it in `bundle-status.py`.
 
 To run DeepSeek and *nothing else*: `WIKI_LLM_PROVIDER=deepseek`. The older
 `WIKI_OFFBOX_FALLBACK=0` says the same thing in two variables that only make

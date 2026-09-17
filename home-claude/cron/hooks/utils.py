@@ -2306,14 +2306,22 @@ LLM_PROVIDER_INVALID = False
 if not _raw_provider:
     LLM_PROVIDER = PROVIDER_CHAIN_NAME
 elif _raw_provider == "deepseek" and DEFAULT_CHAIN[0] == "deepseek":
+    # TRANSITIONAL, and this release is its last: delete the WARNING and the
+    # deprecation entry in the next one (UPGRADING.md promises it). `deepseek` is
+    # the documented way to pin DeepSeek alone, and nobody who means that can
+    # silence either. The bundle keeps a transitional warning one release; this
+    # one's stderr line reached no scheduled run in 0.16.0 or 0.17.0 (the
+    # launcher discards stderr), so the `deprecated:` line of bundle-status and
+    # the self-test, new in this release, is the one release it gets.
     print("WARNING: WIKI_LLM_PROVIDER=deepseek now means DeepSeek ONLY (no "
           "fallback). Write WIKI_LLM_PROVIDER=chain — or leave it unset — for "
           "the off-box chain it used to mean.", file=sys.stderr)
     LLM_PROVIDER = "deepseek"
     _CONFIG_DEPRECATIONS.append((
         "WIKI_LLM_PROVIDER=deepseek",
-        "means DeepSeek ONLY since 0.16.0 — right if that is what you want; for the "
-        "chain it used to mean (" + " → ".join(PROVIDERS[p]["label"] for p in DEFAULT_CHAIN)
+        "means DeepSeek ONLY since 0.16.0 — right if that is what you want (this "
+        "reminder goes away in the next release); for the chain it used to mean ("
+        + " → ".join(PROVIDERS[p]["label"] for p in DEFAULT_CHAIN)
         + ") write WIKI_LLM_PROVIDER=chain or leave it empty"))
 elif _raw_provider in _VALID_PROVIDERS:
     LLM_PROVIDER = _raw_provider

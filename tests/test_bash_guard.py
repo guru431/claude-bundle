@@ -77,6 +77,16 @@ TABLE = [
     ("git push -f origin main-v2", PASS),
     ("git push origin main", PASS),
     ("git push --force origin feature && git checkout main", PASS),
+    # ... and the force carried by the refspec, main/master as the destination
+    ("git push origin +main", ASK),
+    ("git push origin +main:main", ASK),
+    ("git push origin +HEAD:main", ASK),
+    ("git push origin +feature:master", ASK),
+    ("git -C /work/repo push origin +refs/heads/main", ASK),
+    ("git push origin +feature", PASS),
+    ("git push origin +main:feature", PASS),          # main pushed ONTO feature
+    ("git push origin +feature/main-fix", PASS),
+    ("git push -n origin main", PASS),                # -n is --dry-run for push
     # rm -rf aimed at a root or a home directory
     ("rm -rf /", DENY),
     ("rm -rf /*", DENY),
@@ -97,12 +107,22 @@ TABLE = [
     ("rm -rf /c/", DENY),
     ("rm -rfv /; echo done", DENY),
     ("\\rm -rf /", DENY),
+    ("rm -rf /tmp/x /", DENY),                        # the root as a later target
+    ("rm -rf / /tmp/x", DENY),
+    ("rm -rf ./build ~/", DENY),
+    ('rm -rf /tmp/x "$HOME"', DENY),
+    ("rm -rf -- ./a /c/", DENY),
     ("rm -rf ./build", PASS),
     ("rm -rf /tmp/build", PASS),
     ("rm -rf ~/projects/old", PASS),
     ('rm -rf "$HOME/.cache/pip"', PASS),
     ("rm -r build/", PASS),
     ("rm -rf '~'", PASS),                    # a directory literally named ~
+    ("rm -rf /tmp/x /tmp/y", PASS),
+    ("rm -rf ~/projects/a ~/projects/b", PASS),
+    ("rm -rf build > /dev/null", PASS),
+    ("rm -rf build && cd /", PASS),
+    ("rm -r ./a /", PASS),                   # no -f: not the rule's command
     # printing a .env
     ("cat .env", ASK),
     ("cat ./.env", ASK),
@@ -123,6 +143,16 @@ TABLE = [
     ("git commit --no-verify -m wip", ASK),
     ("git -C /work/repo push --no-verify", ASK),
     ("git commit -m wip", PASS),
+    # ... and `-n`, its short form for commit
+    ("git commit -n -m wip", ASK),
+    ("git commit -anm wip", ASK),
+    ("git commit -nmwip", ASK),
+    ("git commit --amend -n", ASK),
+    ("git -C /work/repo commit -n", ASK),
+    ('git commit -m "head -n 5 in the script"', PASS),
+    ("git commit -uno -m wip", PASS),                 # -u takes "no" as its value
+    ("git commit -mnew", PASS),                       # -m takes "new" as its value
+    ("git commit --author=nobody -m wip", PASS),
     # several rules on one line: the strictest one decides
     ("git push --force origin main && rm -rf /", DENY),
     ("cat .env; rm -rf ~/", DENY),

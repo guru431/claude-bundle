@@ -135,11 +135,13 @@ and a `severity` of `deny` (refuse) or `ask` (make the user confirm).
 
 Ships with the iptables rule plus five more: a PowerShell here-string in a
 `git commit`, a force-push to `main`/`master` (flag and branch in either order,
-`git -C <dir>` included), an `rm -rf` aimed at a filesystem root or a home
-directory (`rm -r -f`, `rm --recursive --force` and `rm -rf -- /` are the same
-command), printing a `.env` (templates like `.env.example` excepted), and
-`git commit/push --no-verify`. Edit the YAML to add your own, and add its
-must-match / must-pass cases to `tests/test_bash_guard.py`.
+a `+main` refspec, `git -C <dir>` included), an `rm -rf` aimed at a filesystem
+root or a home directory (`rm -r -f`, `rm --recursive --force` and `rm -rf -- /`
+are the same command, and so is `rm -rf /tmp/x /` — the root as any of the
+targets), printing a `.env` (templates like `.env.example` excepted), and
+`git commit/push --no-verify` (`git commit -n` included — for commit it is the
+same flag). Edit the YAML to add your own, and add its must-match / must-pass
+cases to `tests/test_bash_guard.py`.
 
 Every rule is evaluated and `deny` beats `ask`, so the order of the file does
 not matter. It used to: the hook stopped at the first match, and

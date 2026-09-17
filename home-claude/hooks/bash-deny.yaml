@@ -54,19 +54,22 @@ rules:
   # options are allowed before `push`. `--force` must be the whole option:
   # `--force-with-lease` and `--force-if-includes` are the SAFE spellings. The
   # branch must be a whole ref name: `feature/main-fix` is not main.
-  - pattern: '\bgit(?:\s+-[Cc]\s+(?:"[^"]*"|''[^'']*''|\S+)|\s+--[\w-]+(?:=\S+)?)*\s+push\b(?=[^;&|\n]*(?:--force(?![\w-])|(?<![\w-])-[A-Za-z]*f[A-Za-z]*(?![\w-])))(?=[^;&|\n]*(?:(?<![\w./-])|(?<=heads/))(?:main|master)(?![\w./-]))'
+  # OR the force is in the refspec: `+main`, `+HEAD:main`, `+feature:master` —
+  # main/master as the DESTINATION. `+feature` and `+main:feature` push elsewhere.
+  - pattern: '\bgit(?:\s+-[Cc]\s+(?:"[^"]*"|''[^'']*''|\S+)|\s+--[\w-]+(?:=\S+)?)*\s+push\b(?:(?=[^;&|\n]*(?:--force(?![\w-])|(?<![\w-])-[A-Za-z]*f[A-Za-z]*(?![\w-])))(?=[^;&|\n]*(?:(?<![\w./-])|(?<=heads/))(?:main|master)(?![\w./-]))|(?=[^;&|\n]*(?<![\w-])\+(?:[^\s:;&|]*:)?(?:refs/heads/)?(?:main|master)(?![\w./:-])))'
     severity: ask
     reason: >-
       A force-push to main/master rewrites published history for everyone who
       has cloned it. Use `--force-with-lease` (which refuses if the remote moved
       under you), or push to a branch and open a PR.
 
-  # The two lookaheads find "recursive" and "force" anywhere in the run of
+  # The first two lookaheads find "recursive" and "force" anywhere in the run of
   # options, so `rm -r -f /`, `rm --recursive --force /` and `rm -rf -- /` are
-  # the same command as `rm -rf /` — they used to pass. The target is a bare
-  # root only: `/`, a Git Bash drive (`/c/`), `C:\`, `~` or `$HOME`, with an
-  # optional trailing `/` or `*` (`rm -rf ~/` used to pass too).
-  - pattern: '\brm(?=(?:\s+-[\w-]*)*?\s+(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s))(?=(?:\s+-[\w-]*)*?\s+(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s))(?:\s+-[\w-]*)+\s+"?(?:/\*?|/[A-Za-z]/?\*?|~/?\*?|\$HOME/?\*?|\$\{HOME\}/?\*?|[A-Za-z]:[\\/]\*?)"?(?:\s+-[\w-]+)*[ \t]*(?:$|[;&|)\n])'
+  # the same command as `rm -rf /` — they used to pass. The third finds a bare
+  # root among ANY of the targets, as a whole word: `/`, a Git Bash drive
+  # (`/c/`), `C:\`, `~` or `$HOME`, with an optional trailing `/` or `*`.
+  # `rm -rf /tmp/x /` deletes the root as surely as `rm -rf /`, and used to pass.
+  - pattern: '\brm(?=(?:\s+-[\w-]*)*?\s+(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s))(?=(?:\s+-[\w-]*)*?\s+(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s))(?=[^;&|)\n]*?\s"?(?:/\*?|/[A-Za-z]/?\*?|~/?\*?|\$HOME/?\*?|\$\{HOME\}/?\*?|[A-Za-z]:[\\/]\*?)"?(?=\s|$|[;&|)]))'
     severity: deny
     reason: >-
       `rm -rf` aimed at a filesystem root or a whole home directory. If you
@@ -86,10 +89,14 @@ rules:
       `grep -c '^NAME=' .env` instead of reading the file.
 
   # Same global-option prefix as the force-push rule: `git -C <dir> commit`.
-  - pattern: '\bgit(?:\s+-[Cc]\s+(?:"[^"]*"|''[^'']*''|\S+)|\s+--[\w-]+(?:=\S+)?)*\s+(?:commit|push)\b[^;&|\n]*--no-verify'
+  # For `git commit`, `-n` IS `--no-verify` — alone or in a cluster of flags
+  # that take no value (`-an`, `-nm "msg"`). Looked for only before the first
+  # quote, so `-m "head -n 5"` is a message, not a flag; `-uno` and `-mnew` carry
+  # values, not -n. For `git push`, `-n` is --dry-run and is left alone.
+  - pattern: '\bgit(?:\s+-[Cc]\s+(?:"[^"]*"|''[^'']*''|\S+)|\s+--[\w-]+(?:=\S+)?)*\s+(?:(?:commit|push)\b[^;&|\n]*--no-verify|commit\b[^;&|\n"'']*?(?<![\w-])-[apseiovqz]*n[apseiovqz]*(?:[mFCctuS]\S*)?(?![\w-]))'
     severity: ask
     reason: >-
-      `--no-verify` switches off the secret-guard hooks for the whole
-      commit/push, not just the line you believe is a false positive. Prefer the
-      inline `# secret-scan:allow` marker, which is per-line and shows up in the
-      diff.
+      `--no-verify` (for `git commit`, also `-n`) switches off the secret-guard
+      hooks for the whole commit/push, not just the line you believe is a false
+      positive. Prefer the inline `# secret-scan:allow` marker, which is per-line
+      and shows up in the diff.

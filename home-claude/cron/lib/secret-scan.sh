@@ -31,6 +31,8 @@
 #                                be used: a broken line must block, not switch
 #                                the denylist off.
 #   secret_scan_denylist_text  — secret_scan_text for that denylist.
+#   secret_scan_changed_binaries — the whole content of every changed file a
+#                                diff shows as "Binary files differ".
 #   secret_scan_git_paths      — run a path-listing git command and print one
 #                                UNQUOTED path per line.
 #   secret_scan_paths          — scan a newline-separated list of paths on stdin
@@ -258,6 +260,61 @@ secret_scan_denylist_text() {
     # $1 — a pattern file from secret_scan_denylist; raw content on stdin.
     # Case-insensitive, like every denylist check. Prints hits, returns 1 on any.
     _secret_scan_grep denylist "$1"
+}
+
+secret_scan_changed_binaries() {
+    # $1 — `index`: what is staged, against HEAD (the commit about to be made);
+    #      `worktree`: tracked files as they are on disk, against HEAD (a preview).
+    # $2 — a pattern file from secret_scan_denylist, or "" for none.
+    # The rest — an optional pathspec.
+    # Scans the WHOLE content of every added or modified file that git's diff
+    # calls binary — NUL bytes, UTF-16 among them — with secret_scan_text and the
+    # denylist. Prints `path: hit`; returns 1 on any hit or unreadable file.
+    #
+    # A diff prints such a file as "Binary files differ", without a single `+`
+    # line, so every diff-based gate read nothing of it: a key inside a staged
+    # SQLite file or a serialized cache was committed, and only a push guard —
+    # where there is one — could stop it. Git's own `--numstat` marks these files
+    # `-`, which picks them out in one call; the content is then read whole,
+    # because a binary file has no "added lines" to narrow it to.
+    _sscb_mode="$1"
+    _sscb_pat="$2"
+    shift 2
+    _sscb_base=HEAD
+    [ "$_sscb_mode" = index ] && _sscb_base=--cached
+    _sscb_list=$(git -c core.quotePath=false diff "$_sscb_base" --numstat -z --no-renames \
+        --diff-filter=AM -- "$@" 2>/dev/null \
+        | tr '\000' '\n' | awk -F '\t' '$1 == "-" && $2 == "-" { sub(/^-\t-\t/, ""); print }')
+    _sscb_fail=0
+    _sscb_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-binary.$$")
+    while IFS= read -r _sscb_f; do
+        [ -n "$_sscb_f" ] || continue
+        _sscb_rc=0
+        if [ "$_sscb_mode" = index ]; then
+            git cat-file blob ":0:$_sscb_f" > "$_sscb_tmp" 2>/dev/null || _sscb_rc=$?
+        else
+            cat -- "$_sscb_f" > "$_sscb_tmp" 2>/dev/null || _sscb_rc=$?
+        fi
+        if [ "$_sscb_rc" -ne 0 ]; then
+            printf '%s: could not be read, so it was not scanned\n' "$_sscb_f"
+            _sscb_fail=1
+            continue
+        fi
+        if ! _sscb_hits=$(secret_scan_text < "$_sscb_tmp"); then
+            _secret_scan_prefix "$_sscb_f" "$_sscb_hits"
+            _sscb_fail=1
+        fi
+        if [ -n "$_sscb_pat" ] && [ -s "$_sscb_pat" ] \
+            && ! _sscb_hits=$(secret_scan_denylist_text "$_sscb_pat" < "$_sscb_tmp"); then
+            _secret_scan_prefix "$_sscb_f (.sanitize-patterns)" "$_sscb_hits"
+            _sscb_fail=1
+        fi
+    done <<EOF
+$_sscb_list
+EOF
+    rm -f "$_sscb_tmp"
+    unset _sscb_mode _sscb_pat _sscb_base _sscb_list _sscb_tmp _sscb_f _sscb_rc _sscb_hits
+    return "$_sscb_fail"
 }
 
 secret_scan_git_paths() {

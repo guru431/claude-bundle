@@ -52,8 +52,8 @@ diff_content=$(git -c core.quotePath=false diff --cached --unified=0 -- . ':(exc
 added_content=$(printf '%s\n' "$diff_content" | grep -aE '^\+' | grep -avE '^\+\+\+' || true)
 
 # The personal denylist is read HERE rather than in step 3, because step 2b
-# below needs it too — a UTF-16 file has to be checked against both tables in
-# the one pass that can read it. A denylist that exists but cannot be used
+# below needs it too — a binary or UTF-16 file has to be checked against both
+# tables in the one pass that can read it. A denylist that exists but cannot be used
 # blocks: letting the commit through would mean checking it against nothing.
 pat=$(mktemp 2>/dev/null || echo "$repo_root/.sanitize-patterns.tmp")
 if ! secret_scan_denylist "$repo_root/.sanitize-patterns" "$pat"; then
@@ -72,35 +72,26 @@ if [ -n "$hits" ]; then
   fail=1
 fi
 
-# 2b) UTF-16 staged files. `git diff` calls them binary and prints "Binary files
-# differ" instead of a single `+` line, so steps 2 and 3 read NOTHING for them —
-# and UTF-16 is what `>` and `Out-File` produce by default in Windows
-# PowerShell 5.1, the shell this bundle is written for. A key pasted into such a
-# file was invisible to every one of the three detectors. Here the STAGED
-# content is read whole and decoded before either table is applied.
-staged_names=$(secret_scan_git_paths diff --cached --name-only --diff-filter=ACMR -- . ':(exclude).githooks/' 2>/dev/null || true)
-u16_hits=$(printf '%s\n' "$staged_names" | while IFS= read -r f; do
-  [ -n "$f" ] || continue
-  bom=$(git show ":$f" 2>/dev/null | od -An -tx1 -N2 | tr -d ' \n')
-  case "$bom" in fffe|feff) ;; *) continue ;; esac
-  if ! h=$(git show ":$f" 2>/dev/null | secret_scan_text); then
-    printf '%s: %s\n' "$f" "$h"
-  fi
-  if [ -s "$pat" ] && ! h=$(git show ":$f" 2>/dev/null | secret_scan_denylist_text "$pat"); then
-    printf '%s: %s\n' "$f" "$h"
-  fi
-done || true)
-if [ -n "$u16_hits" ]; then
-  echo "BLOCKED: possible secret or personal data in a staged UTF-16 file:"
-  printf '%s\n' "$u16_hits" | sed 's/^/  /'
+# 2b) Staged files git calls BINARY. `git diff` prints "Binary files differ"
+# for them instead of a single `+` line, so steps 2 and 3 read NOTHING of them.
+# UTF-16 is one such case — what `>` and `Out-File` produce by default in
+# Windows PowerShell 5.1, the shell this bundle is written for — and this step
+# used to read those alone, sniffing the BOM of EVERY staged file with three
+# process spawns apiece. Every other binary file (a SQLite database, a
+# serialized cache) went into the commit unread, while pre-push, which scans
+# binary blobs, would have stopped the same content one step later.
+# secret_scan_changed_binaries picks the binary files out with one
+# `git diff --numstat` and reads each one whole, decoded, against both tables.
+if ! bin_hits=$(secret_scan_changed_binaries index "$pat" . ':(exclude).githooks/'); then
+  echo "BLOCKED: possible secret or personal data in a staged binary or UTF-16 file:"
+  printf '%s\n' "$bin_hits" | sed 's/^/  /'
   fail=1
 fi
 
 # 3) Personal denylist — concrete values from untracked .sanitize-patterns
 # A plain grep: diff lines are text by construction (UTF-16 and binary files
-# never get `+` lines; step 2b reads the UTF-16 ones), so the decoding scanner
-# would only add process spawns to every commit. -a for the reason
-# secret_scan_diff gives.
+# never get `+` lines; step 2b reads those), so the decoding scanner would only
+# add process spawns to every commit. -a for the reason secret_scan_diff gives.
 if [ -s "$pat" ]; then
   hits=$(printf '%s\n' "$added_content" | grep -naiEf "$pat" || true)
   if [ -n "$hits" ]; then

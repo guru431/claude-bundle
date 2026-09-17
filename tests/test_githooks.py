@@ -169,6 +169,21 @@ def test_pre_commit_reads_a_utf16_file_in_a_non_ascii_directory(guarded: Repo):
 
 
 @integration
+@pytest.mark.parametrize("what", ["token", "denylist"])
+def test_pre_commit_reads_a_staged_binary_file(guarded: Repo, what: str):
+    """A diff shows a binary file as "Binary files differ" and no `+` line, and
+    step 2b read UTF-16 files only: a key inside a staged SQLite file was
+    committed, while pre-push would have stopped the same bytes."""
+    guarded.write(".sanitize-patterns", HOST + "\n")
+    secret = TOKEN if what == "token" else HOST
+    guarded.write("data/cache.db", b"SQLite format 3\x00\x10\x00" + b"\x00" * 8
+                  + f"value={secret}".encode() + b"\x00\x01\n")
+    cp = guarded.commit("cache")
+    assert cp.returncode != 0, f"a {what} inside a staged binary file was committed:\n{_out(cp)}"
+    assert "data/cache.db" in _out(cp)
+
+
+@integration
 def test_pre_commit_refuses_to_run_with_an_invalid_denylist(guarded: Repo):
     """`grep -f` exits 2 on a pattern it cannot compile, which `|| true` read as
     "no match": one typo switched the whole personal denylist off."""

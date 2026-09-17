@@ -190,7 +190,17 @@ guard_secrets() {
     # prints nothing (returns 0) when clean. Gate explicitly on non-empty output
     # instead of the pipeline exit code, so blocking never hinges on exit-code
     # propagation through the pipe.
-    hits=$(git diff --cached --unified=0 2>/dev/null | secret_scan_diff)
+    #
+    # The diff shows a binary file as "Binary files differ" and nothing else, so
+    # a token inside a staged binary (a SQLite file, a UTF-16 export) was
+    # committed here and stopped only by the outgoing scan — with the commit
+    # already made. secret_scan_changed_binaries reads those whole, as
+    # .githooks/pre-commit does.
+    local bin_hits
+    hits=$(git -c core.quotePath=false diff --cached --unified=0 2>/dev/null | secret_scan_diff)
+    bin_hits=$(secret_scan_changed_binaries index "")
+    hits="${hits:+$hits${bin_hits:+
+}}$bin_hits"
     [ -z "$hits" ] && return 0
     echo "[$label] SECRET-shaped token blocked from auto-commit (repo FAILED, index left as it was):" >> "$LOG_FILE"
     printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
@@ -212,8 +222,12 @@ guard_secrets_preview() {
         echo "[$label] [DRY] secret-scan lib unavailable — the real run WOULD SKIP this repo (fail closed)" >> "$LOG_FILE"
         return 0
     fi
-    local hits untracked f fhits bad
+    local hits untracked f fhits bad bin_hits
     hits=$(git -c core.quotePath=false diff HEAD --unified=0 -- "${SWEEP_EXCLUDES[@]}" 2>/dev/null | secret_scan_diff)
+    # Tracked binary files, as guard_secrets reads them from the index.
+    bin_hits=$(secret_scan_changed_binaries worktree "" "${SWEEP_EXCLUDES[@]}")
+    hits="${hits:+$hits${bin_hits:+
+}}$bin_hits"
     untracked=$(secret_scan_git_paths ls-files --others --exclude-standard -- "${SWEEP_EXCLUDES[@]}" 2>/dev/null)
     bad=$( { secret_scan_git_paths diff HEAD --name-only --diff-filter=ACMR -- "${SWEEP_EXCLUDES[@]}"
              printf '%s\n' "$untracked"; } 2>/dev/null | secret_scan_paths)

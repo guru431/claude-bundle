@@ -220,4 +220,26 @@ reset_counters; push_repo "$R14" "r14" "Auto-commit: test"
 git -C "$R14" show --name-only --format= HEAD | grep -q 'md2pdf-' && fail "T14: an .md2pdf-* temp directory was committed"
 git -C "$R14" show --name-only --format= HEAD | grep -qx 'app.py' || fail "T14: app.py not committed"
 
-echo "PASS: push_repo (14 scenarios)"
+# === Test 15: a token inside a BINARY file is stopped before the commit ===
+# The staged guard reads a diff, and a diff shows a binary file as "Binary files
+# differ": the key was committed, and only the outgoing scan stopped the push —
+# with the leaking commit already in the local history.
+R15="$TMP/r15"; mkrepo "$R15"
+printf 'SQLite format 3\000\001k=ghp_%s\000\n' "0123456789abcdefghij0123456789" > "$R15/cache.db"
+reset_counters; push_repo "$R15" "r15" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T15: a token in a new binary file did not fail the repo (failed=$failed pushed=$pushed)"
+[ "$(git -C "$R15" rev-list --count HEAD)" = "1" ] || fail "T15: the binary file carrying a token was committed"
+
+# === Test 16: the dry-run preview reads a modified TRACKED binary file too ===
+R16="$TMP/r16"; mkrepo "$R16"
+printf 'SQLite format 3\000\001clean\000\n' > "$R16/cache.db"
+git -C "$R16" add -A; git -C "$R16" commit -qm cache
+git -C "$R16" push -q origin "$(br "$R16")"
+printf 'SQLite format 3\000\001k=ghp_%s\000\n' "0123456789abcdefghij0123456789" > "$R16/cache.db"
+: > "$LOG_FILE"
+DRY_RUN=1
+reset_counters; push_repo "$R16" "r16" "Auto-commit: test"
+DRY_RUN=0
+grep -q "REPO WOULD BE BLOCKED" "$LOG_FILE" || fail "T16: the preview did not report the token in a tracked binary file"
+
+echo "PASS: push_repo (16 scenarios)"

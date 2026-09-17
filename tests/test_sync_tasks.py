@@ -96,6 +96,42 @@ foreach ($k in $cases.Keys) {
     assert got["interactive-mapped"] == "", got
 
 
+def test_repetition_is_registered_as_the_change_detection_expects(tmp_path: Path):
+    """AtStartup/AtLogOn dropped repeat_every from the XML while the change
+    detection still expected it, so such a task re-registered as `updated` on
+    every sync and never repeated. The XML goes through Task Scheduler's own
+    parser (COM, in memory — nothing is registered) and what it reads back must
+    be what the detection wants."""
+    code = define_functions(SYNC, ["Build-XmlTrigger", "Get-RepeatDuration", "Get-CalendarStart",
+                                   "Build-TaskXml", "ConvertTo-DurationSpan"]) + r"""
+$svc = New-Object -ComObject Schedule.Service
+$svc.Connect()
+$task = @{ name = 'T'; user = $env:USERNAME; hidden = $true; enabled = $true; runlevel = 'limited'; timeout_hours = 1 }
+foreach ($c in @(@('AtStartup', ''), @('AtLogOn', ''), @('AtStartup', 'PT8H'),
+                 @('Daily 01:00', ''), @('Weekly Sun 02:00', 'PT8H'))) {
+    $xml = Build-TaskXml $task 'cmd.exe' '/c exit 0' 'probe' 'Interactive' (Build-XmlTrigger $c[0] 'PT1M' 'PT4H' $c[1])
+    $def = $svc.NewTask(0)
+    $def.XmlText = $xml
+    $rep = $def.Triggers.Item(1).Repetition
+    $wantFor = Get-RepeatDuration $c[0] 'PT4H' $c[1]
+    $agree = ((ConvertTo-DurationSpan $rep.Interval) -eq (ConvertTo-DurationSpan 'PT4H')) -and
+             ((ConvertTo-DurationSpan $rep.Duration) -eq (ConvertTo-DurationSpan $wantFor))
+    Write-Output ("{0}|{1}|{2}|{3}" -f $c[0], $rep.Interval, $rep.Duration, $agree)
+}
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    rows = [line.split("|") for line in r.stdout.splitlines() if "|" in line]
+    assert rows == [
+        # Fired once, so no day-long default: repeat for as long as it is up.
+        ["AtStartup", "PT4H", "", "True"],
+        ["AtLogOn", "PT4H", "", "True"],
+        ["AtStartup", "PT4H", "PT8H", "True"],
+        ["Daily 01:00", "PT4H", "P1D", "True"],
+        ["Weekly Sun 02:00", "PT4H", "PT8H", "True"],
+    ], r.stdout
+
+
 def test_task_xml_carries_the_logon_type(tmp_path: Path):
     code = define_functions(SYNC, ["Build-TaskXml"]) + r"""
 $task = @{ name = 'T'; user = 'someone'; hidden = $true; enabled = $true; runlevel = 'limited'; timeout_hours = 1 }

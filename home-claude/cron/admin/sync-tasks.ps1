@@ -216,16 +216,35 @@ function Get-CalendarStart([int]$h, [int]$m) {
     return $t.ToString('s')
 }
 
+# How long a repetition lasts: the ONE answer for the XML below and for the
+# change detection in the main loop, so the two cannot disagree again. '' means
+# no <Duration> element, which Task Scheduler reads as "indefinitely".
+#   * no repeat_every          → '' (and no repetition at all)
+#   * repeat_for set           → that
+#   * calendar trigger         → P1D: the next day's trigger starts it afresh
+#   * AtStartup / AtLogOn      → indefinitely. Those fire once, so a P1D default
+#     would stop repeating a day after boot on a machine that runs for weeks;
+#     launchd's RunAtLoad + StartInterval, the same registry line on macOS,
+#     repeats for as long as the agent is loaded.
+function Get-RepeatDuration([string]$spec, [string]$repeatEvery, [string]$repeatFor) {
+    if (-not $repeatEvery) { return '' }
+    if ($repeatFor) { return $repeatFor }
+    if (@('AtLogOn', 'AtStartup') -contains $spec) { return '' }
+    return 'P1D'
+}
+
 function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [string]$repeatFor) {
-    # Optional <Repetition>: repeat within the trigger period (e.g. PT4H = every
-    # 4 hours). Honored for every calendar trigger (Daily/Weekly/Monthly); the
-    # syncer emits one native trigger per task. repeat_for defaults to P1D (a
-    # day). Additive: without repeat_every the fragment is empty → other tasks'
-    # XML is unchanged.
+    # Optional <Repetition>: re-run every repeat_every (e.g. PT4H) for
+    # Get-RepeatDuration. Every trigger kind takes one — the schema puts it in
+    # triggerBaseType. AtStartup/AtLogOn used to drop it, while the change
+    # detection went on expecting it: such a task re-registered as `updated` on
+    # every sync, and never repeated. Additive: without repeat_every the fragment
+    # is empty → other tasks' XML is unchanged.
     $rep = ""
     if ($repeatEvery) {
-        $dur = if ($repeatFor) { $repeatFor } else { 'P1D' }
-        $rep = "<Repetition><Interval>$repeatEvery</Interval><Duration>$dur</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>`n      "
+        $dur = Get-RepeatDuration $spec $repeatEvery $repeatFor
+        $durXml = if ($dur) { "<Duration>$dur</Duration>" } else { "" }
+        $rep = "<Repetition><Interval>$repeatEvery</Interval>$durXml<StopAtDurationEnd>false</StopAtDurationEnd></Repetition>"
     }
     if ($spec -eq 'AtLogOn') {
         # <Delay> is as valid here as it is on BootTrigger below, and needed for
@@ -235,16 +254,18 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
         # while the comparison below kept demanding it, so the task showed up
         # as `updated` on every single sync and re-registered, still undelayed.
         $d = if ($delay) { "<Delay>$delay</Delay>" } else { "" }
-        return "<LogonTrigger><Enabled>true</Enabled>$d</LogonTrigger>"
+        return "<LogonTrigger><Enabled>true</Enabled>$rep$d</LogonTrigger>"
     }
     if ($spec -eq 'AtStartup') {
         # Optional <Delay>: makes the boot trigger fire N after boot so network
         # shares (UNC scripts/.env) are mounted before launch. Without it an
         # onstart task can race the network and exit 2 (script not yet reachable).
-        # Schema order: <Enabled> (base type) then <Delay> (boot-trigger extension).
+        # Schema order: <Enabled> and <Repetition> (base type), then <Delay>
+        # (boot-trigger extension).
         $d = if ($delay) { "<Delay>$delay</Delay>" } else { "" }
-        return "<BootTrigger><Enabled>true</Enabled>$d</BootTrigger>"
+        return "<BootTrigger><Enabled>true</Enabled>$rep$d</BootTrigger>"
     }
+    if ($rep) { $rep += "`n      " }
     if ($spec -match '^Daily\s+(\d{1,2}):(\d{2})$') {
         $h = [int]$Matches[1]; $m = [int]$Matches[2]
         $start = Get-CalendarStart $h $m
@@ -834,10 +855,9 @@ foreach ($task in $reg.tasks) {
     $repeat_needs_change = $false
     $wantedDelay = if ($task.startup_delay) { "$($task.startup_delay)" } else { '' }
     $wantedRepeatEvery = if ($task.repeat_every) { "$($task.repeat_every)" } else { '' }
-    # Build-XmlTrigger defaults repeat_for to P1D whenever repeat_every is set.
-    $wantedRepeatFor = if ($task.repeat_every) {
-        if ($task.repeat_for) { "$($task.repeat_for)" } else { 'P1D' }
-    } else { '' }
+    # The same function Build-XmlTrigger registers with — not a second guess at
+    # its default, which is how the two used to disagree.
+    $wantedRepeatFor = Get-RepeatDuration "$($task.trigger)" "$($task.repeat_every)" "$($task.repeat_for)"
     $wantedRestartCount = if ($task.restart_count) { "$([int]$task.restart_count)" } else { '0' }
     $wantedRestartInterval = if ($task.restart_count -and [int]$task.restart_count -gt 0) {
         if ($task.restart_interval) { "$($task.restart_interval)" } else { 'PT1M' }

@@ -99,6 +99,25 @@ def test_a_variable_the_env_template_names_does_not_reach_a_test(pytester, monke
     result.assert_outcomes(passed=1)
 
 
+def test_a_config_file_in_the_checkout_stops_the_run_before_collection(pytester, monkeypatch):
+    """utils reads home-claude/.env and bundle.local.yaml where it is imported from.
+
+    No environment sandbox reaches that: TEST_SWEEP_SKIP=demo in the .env failed a
+    sweep alert test, and `dry_run_until` in the manifest suppressed the ledger
+    row an md2pdf-sync test asserts. So the run refuses to start and says why.
+    """
+    monkeypatch.delenv("CI", raising=False)
+    (pytester.path / "home-claude").mkdir()
+    (pytester.path / "home-claude" / ".env").write_text("TEST_SWEEP_SKIP=demo\n",
+                                                        encoding="utf-8")
+    result = _session(pytester, monkeypatch, """
+        def test_never_collected():
+            raise AssertionError("ran despite the checkout's .env")
+    """)
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.stderr.fnmatch_lines(["*home-claude/.env in this checkout*Move it*"])
+
+
 def test_a_run_that_writes_into_the_checkout_fails(pytester, monkeypatch):
     monkeypatch.delenv("CI", raising=False)
     result = _session(pytester, monkeypatch, """

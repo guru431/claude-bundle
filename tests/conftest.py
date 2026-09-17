@@ -94,8 +94,24 @@ def _neutralise(mp: pytest.MonkeyPatch, home: Path) -> None:
     mp.setenv("WIKI_LLM_PACE_SECONDS", "0")
 
 
+# Files utils reads from the tree it is imported from, and this suite imports it
+# from home-claude/ itself. No environment sandbox reaches them: _load_dotenv()
+# sets every name it finds missing, and the sandbox has just made the pipeline's
+# names missing. Measured: TEST_SWEEP_SKIP=demo in home-claude/.env failed a sweep
+# alert test, and `dry_run_until: 2999-01-01` in the manifest suppressed the
+# ledger row an md2pdf-sync test asserts.
+_CHECKOUT_CONFIG = ("home-claude/.env", "home-claude/bundle.local.yaml")
+
+
 def pytest_configure(config):
     """The sandbox for everything that runs before a test: collection, wide fixtures."""
+    found = [rel for rel in _CHECKOUT_CONFIG if (ROOT / rel).is_file()]
+    if found:
+        raise pytest.UsageError(
+            f"{', '.join(found)} in this checkout: the modules the suite imports from "
+            f"home-claude/ would load it into the tests (keys into os.environ, settings "
+            f"into what they assert). Move it to the deployment it configures, next to "
+            f"that deployment's cron/, and run again.")
     home = Path(tempfile.mkdtemp(prefix="bundle-suite-"))
     mp = pytest.MonkeyPatch()
     config.add_cleanup(lambda: shutil.rmtree(home, ignore_errors=True))

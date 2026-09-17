@@ -164,38 +164,21 @@ while read -r tag_sha _type _size tag_name; do
   fi
 done < "$tmpdir/tags"
 
-# 3) Fast path: one `cat-file --batch` stream through one grep, instead of two
-# process spawns per blob (~160ms each on Windows — minutes on a first push).
-# Deliberately OVER-eager: -a scans binary too, the stream ignores the
-# .githooks/ exclusion. Anything it flags is re-checked precisely in step 4,
-# which is the only content step that can fail the push. So a false alarm here
-# costs seconds, never a wrong verdict — and a clean push exits right now.
+# 3) Fast path: which new blobs could hold a hit at all. secret_scan_suspects
+# reads them all in a few `cat-file --batch` streams instead of a dozen process
+# spawns per blob (~160ms each on Windows — minutes on a first push), and step 4
+# spends the precise pass on its answer alone. Deliberately OVER-eager: it
+# ignores the allow marker and the .githooks/ exclusion, so a false alarm costs
+# one precise pass, never a wrong verdict — and a clean push exits right now.
 #
-# `tr -d '\000'` is what makes UTF-16 visible here. Step 4 transcodes properly
-# (secret_scan_text → secret_scan_decode → iconv), but it only ever runs when
-# THIS step raises a suspicion — and a UTF-16 blob reads as `s\0k\0-\0…`, which
-# matches nothing, so the precise pass was never reached and the push exited 0.
-# UTF-16 is the default of `>` and `Out-File` in Windows PowerShell 5.1, which is
-# the shell this bundle is written for. Deleting NUL bytes is crude — it can
-# glue two lines together and raise a false suspicion — and that is the right
-# trade here, because the cost of a false suspicion is one extra pass. Step 4
-# scans binary blobs the same way, so what raises a suspicion here is also what
-# it looks for there.
-#
-# Any exit status but 1 ("no match") counts as a suspicion: a grep that FAILED
-# must never read as a clean push.
-suspect=0
-if [ -s "$blobs" ]; then
-  scan_rc=0
-  git cat-file --batch < "$blobs" 2>/dev/null | tr -d '\000' | grep -qaE -e "$SECRET_SCAN_PATTERN" || scan_rc=$?
-  [ "$scan_rc" -eq 1 ] || suspect=1
-fi
-if [ "$suspect" -eq 0 ] && [ -s "$blobs" ] && [ -s "$pat" ]; then
-  scan_rc=0
-  git cat-file --batch < "$blobs" 2>/dev/null | tr -d '\000' | grep -qaiEf "$pat" || scan_rc=$?
-  [ "$scan_rc" -eq 1 ] || suspect=1
-fi
-if [ "$suspect" -eq 0 ]; then
+# A blob that opens with a UTF-16 BOM is always a suspect. This step used to
+# grep the raw stream with its NUL bytes deleted, which shows the ASCII of a
+# UTF-16 file but not the rest: a Cyrillic denylist entry takes two bytes per
+# character there, never matched, the precise pass never ran, and a
+# `--no-verify` commit carrying it was published. UTF-16 is the default of `>`
+# and `Out-File` in Windows PowerShell 5.1, the shell this bundle is written for.
+secret_scan_suspects "$blobs" "$pat" "$tmpdir" > "$tmpdir/suspects"
+if [ ! -s "$tmpdir/suspects" ]; then
   rm -rf "$tmpdir"
   trap - EXIT INT TERM
   # `fail` can already be 1 from the name, message and tag passes above, which
@@ -209,13 +192,13 @@ if [ "$suspect" -eq 0 ]; then
   exit 0
 fi
 
-# 4) Something in there matched — now spend the per-blob spawns to name it.
+# 4) Something in there may match — now spend the per-blob spawns to name it,
+# on the suspects only (every one of them is a blob under the size cap: they
+# come out of "$blobs").
 # Redirect, not a pipe: a pipe runs the loop in a subshell and every `fail=1`
 # is lost when it exits.
-while read -r sha type size path; do
-  if [ "$type" != blob ] || [ "$size" -gt "$max_blob_bytes" ]; then
-    continue
-  fi
+awk 'NR == FNR { s[$1] = 1; next } $2 == "blob" && ($1 in s)' "$tmpdir/suspects" "$typed" > "$tmpdir/suspect-typed"
+while read -r sha _type _size path; do
   # .githooks/ documents token FORMATS on purpose — same exclusion as
   # pre-commit and the CI secret guard.
   case "$path" in .githooks/*) continue ;; esac
@@ -235,7 +218,7 @@ while read -r sha type size path; do
     printf '%s\n' "$hits" | sed 's/^/  /'
     fail=1
   fi
-done < "$typed"
+done < "$tmpdir/suspect-typed"
 
 rm -rf "$tmpdir"
 trap - EXIT INT TERM

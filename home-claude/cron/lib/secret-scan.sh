@@ -37,6 +37,9 @@
 #                                against SENSITIVE_PATH_PATTERN.
 #   secret_scan_objects        — type every object of a `git rev-list --objects`
 #                                listing in one cat-file pass.
+#   secret_scan_suspects       — which of many blobs COULD hold a hit, from a few
+#                                stream passes; the precise scan then reads only
+#                                those.
 #   secret_scan_messages       — scan the commit MESSAGES of a rev list.
 #   secret_scan_range          — scan everything a rev range would PUBLISH:
 #                                every blob it introduces AND every commit
@@ -160,29 +163,34 @@ _secret_scan_grep() {
     # return path removes its temp file.
     _ssg_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-scan.$$")
     secret_scan_decode > "$_ssg_tmp"
-    if [ -s "$_ssg_tmp" ] && ! grep -Iq '' "$_ssg_tmp" 2>/dev/null; then
-        # BINARY — grep -I found a NUL byte. It used to answer "no match" for
+    # Every verdict below is taken on the content WITHOUT its NUL bytes: the very
+    # bytes secret_scan_suspects greps in its one stream over many blobs, which
+    # is what lets a caller skip a blob that stream did not flag. (`grep -I`, the
+    # old binary test, looks for a NUL in the first buffer only.)
+    tr -d '\000' < "$_ssg_tmp" > "$_ssg_tmp.nonul"
+    if ! cmp -s "$_ssg_tmp" "$_ssg_tmp.nonul"; then
+        # BINARY — the content had NUL bytes. `grep -I` answered "no match" for
         # such content, so a key inside a SQLite file or a BOM-less UTF-16 dump
         # was reported clean, even after pre-push's raw fast path had flagged
         # the very same blob. Now scanned as bytes with the NULs removed and
         # reported as the match alone: a binary "line" can be megabytes of
         # noise. The allow marker cannot apply — nobody writes it into a binary.
         if [ "$1" = token ]; then
-            _ssg_hits=$(tr -d '\000' < "$_ssg_tmp" | grep -aoE -e "$SECRET_SCAN_PATTERN" || true)
+            _ssg_hits=$(grep -aoE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp.nonul" || true)
         else
-            _ssg_hits=$(tr -d '\000' < "$_ssg_tmp" | grep -aoiEf "$2" || true)
+            _ssg_hits=$(grep -aoiEf "$2" "$_ssg_tmp.nonul" || true)
         fi
         if [ -n "$_ssg_hits" ]; then
             _ssg_hits=$(printf '%s\n' "$_ssg_hits" | LC_ALL=C tr -c '[:print:]\n' '?' \
                 | sed 's/^/binary content, NULs removed (check by hand): /')
         fi
     elif [ "$1" = token ]; then
-        _ssg_hits=$(grep -naE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp" \
+        _ssg_hits=$(grep -naE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp.nonul" \
             | grep -avF -e "$SECRET_SCAN_ALLOW" || true)
     else
-        _ssg_hits=$(grep -naiEf "$2" "$_ssg_tmp" || true)
+        _ssg_hits=$(grep -naiEf "$2" "$_ssg_tmp.nonul" || true)
     fi
-    rm -f "$_ssg_tmp"
+    rm -f "$_ssg_tmp" "$_ssg_tmp.nonul"
     unset _ssg_tmp
     if [ -n "$_ssg_hits" ]; then
         printf '%s\n' "$_ssg_hits"
@@ -323,6 +331,83 @@ secret_scan_messages() {
     fi
     unset _ssm_pat _ssm_msgs _ssm_hits
     return "$_ssm_fail"
+}
+
+secret_scan_suspects() {
+    # $1 — a file listing blob ids, one per line.
+    # $2 — a pattern file from secret_scan_denylist, or "" for none.
+    # $3 — a directory the caller owns, for scratch files.
+    #
+    # Prints the ids of the blobs that MAY hold a hit: every blob that
+    # secret_scan_text or secret_scan_denylist_text would flag is among them.
+    # It reads all the blobs in a fixed number of passes, where the precise
+    # functions cost about a dozen process spawns per blob — ~160 ms each on
+    # Windows, minutes on a first publication. A caller spends the precise pass
+    # on these ids alone.
+    #
+    # Why nothing the precise pass would flag can be missing:
+    #   * the stream grep sees each blob as its NUL-stripped bytes, line for line
+    #     — exactly what _secret_scan_grep greps — and honours no allow marker;
+    #   * a blob that opens with a UTF-16 BOM is ALWAYS a suspect. The precise
+    #     pass transcodes it and no raw stream can stand in for that: a
+    #     non-ASCII denylist entry takes two bytes per character there and never
+    #     matched the stream, so the precise pass never ran and the push went out;
+    #   * anything that says the stream was not read whole — a blob list that
+    #     does not come back in order, or grep failing — makes every blob a
+    #     suspect.
+    : > "$3/suspect-utf16"
+    : > "$3/suspect-hits"
+    [ -s "$1" ] || return 0
+    # Where each blob sits in the `cat-file --batch` stream, as line numbers, and
+    # which blobs open with a BOM. Counted in bytes from each header's size,
+    # because a blob can itself hold a line that looks exactly like a header.
+    # NULs become \001 for awk, whose implementations disagree about NUL bytes;
+    # the line structure is the same as in the NUL-stripped stream grep reads.
+    git cat-file --batch < "$1" 2>/dev/null | tr '\000' '\001' \
+        | LC_ALL=C awk -v bom="$3/suspect-utf16" '
+            left <= 0 {
+                if (split($0, h, " ") < 3 || h[2] == "missing") next
+                id = h[1]; left = h[3] + 1; first = NR + 1
+                next
+            }
+            {
+                if (NR == first) {
+                    b = substr($0, 1, 2)
+                    if (b == "\377\376" || b == "\376\377") print id > bom
+                }
+                left -= length($0) + 1
+                if (left <= 0) print id, first, NR
+            }' > "$3/suspect-ranges"
+    if ! cut -d ' ' -f 1 "$3/suspect-ranges" | cmp -s - "$1"; then
+        cat "$1"
+        return 0
+    fi
+    _sss_rc=0
+    git cat-file --batch < "$1" 2>/dev/null | tr -d '\000' \
+        | grep -naoE -e "$SECRET_SCAN_PATTERN" > "$3/suspect-hits" || _sss_rc=$?
+    if [ "$_sss_rc" -le 1 ] && [ -n "$2" ] && [ -s "$2" ]; then
+        # No -o here: a pattern that can match the empty string prints nothing
+        # with -o, while the precise pass reports every line it matches.
+        git cat-file --batch < "$1" 2>/dev/null | tr -d '\000' \
+            | grep -naiEf "$2" >> "$3/suspect-hits" || _sss_rc=$?
+    fi
+    if [ "$_sss_rc" -gt 1 ]; then
+        unset _sss_rc
+        cat "$1"
+        return 0
+    fi
+    unset _sss_rc
+    cut -d: -f1 "$3/suspect-hits" | sort -n -u > "$3/suspect-lines"
+    # Both inputs ascend, so one merge maps every hit line to its blob; a hit on
+    # a header line falls between two ranges and maps to none.
+    { awk 'FILENAME == ARGV[1] { n++; id[n] = $1; lo[n] = $2; hi[n] = $3; next }
+           {
+               l = $1 + 0
+               while (k < n && hi[k + 1] < l) k++
+               if (k < n && lo[k + 1] <= l) print id[k + 1]
+           }' "$3/suspect-ranges" "$3/suspect-lines"
+      cat "$3/suspect-utf16"
+    } | sort -u
 }
 
 _secret_scan_prefix() {

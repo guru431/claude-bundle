@@ -41,8 +41,9 @@ pytestmark = pytest.mark.skipif(BASH is None or GIT is None,
 # Assembled, never written out: a literal token in this file would be caught by
 # the very guards it tests.
 TOKEN = "ghp_" + "A" * 30
-# A denylist entry that means nothing outside these tests.
+# Denylist entries that mean nothing outside these tests.
 HOST = "corp-host-4711"
+CYRILLIC_HOST = "стенд-сборки-4711"
 
 
 def _out(cp: subprocess.CompletedProcess) -> str:
@@ -255,6 +256,20 @@ def test_pre_push_scans_a_binary_blob(guarded: Repo):
     cp = guarded.git("push", "origin", "main")
     assert cp.returncode != 0, f"a token in a binary blob was pushed:\n{_out(cp)}"
     assert "binary" in _out(cp).lower()
+
+
+@integration
+def test_pre_push_decodes_a_utf16_blob_for_a_non_ascii_denylist_entry(guarded: Repo):
+    """The fast path grepped the raw stream with NULs deleted: that shows the
+    ASCII of a UTF-16 file, but a Cyrillic character is two bytes there and a
+    UTF-8 pattern never matched — the precise pass never ran and the push went
+    out."""
+    guarded.write(".sanitize-patterns", CYRILLIC_HOST + "\n")
+    guarded.write("notes.txt", b"\xff\xfe" + f"deploy to {CYRILLIC_HOST}\r\n".encode("utf-16-le"))
+    guarded.plant()
+    cp = guarded.git("push", "origin", "main")
+    assert cp.returncode != 0, f"a UTF-16 blob with a Cyrillic denylist entry was pushed:\n{_out(cp)}"
+    assert "notes.txt" in _out(cp)
 
 
 @integration
@@ -516,6 +531,46 @@ def test_denylist_loader_reads_what_windows_editors_write(tmp_path: Path, raw: b
 def test_denylist_loader_treats_a_missing_file_as_no_denylist(tmp_path: Path):
     cp = _lib(tmp_path, 'secret_scan_denylist absent pat; echo "rc=$? bytes=$(wc -c < pat | tr -d " ")"')
     assert "rc=0 bytes=0" in _out(cp), _out(cp)
+
+
+def _blob_id(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha1(b"blob %d\x00" % len(data) + data).hexdigest()
+
+
+def test_the_fast_path_names_every_blob_the_precise_scan_would_flag(tmp_path: Path):
+    """secret_scan_suspects decides which blobs get the precise scan at all, so
+    what it leaves out is published unread. It must name every blob with a hit —
+    text, binary, UTF-16 with a non-ASCII entry, the denylist — and must not be
+    fooled by a blob holding a line that looks exactly like the next blob's
+    `cat-file --batch` header. The clean blob stays out: that is the speed-up."""
+    clean = b"nothing to see here\n"
+    blobs = {
+        "clean": clean,
+        "token": f"x = '{TOKEN}'\n".encode(),
+        "binary": b"\x00\x01head\x00" + f"k={TOKEN}".encode() + b"\x00\n",
+        "utf16": b"\xff\xfe" + f"deploy to {CYRILLIC_HOST}\r\n".encode("utf-16-le"),
+        "denylist": f"ssh {HOST}\n".encode(),
+        # A fake header naming the clean blob that follows, then a token: a parser
+        # that trusted header-shaped lines would pin the token on "clean".
+        "spoof": f"{_blob_id(clean)} blob {len(clean)}\n".encode() + clean
+                 + f"k={TOKEN}\n".encode(),
+    }
+    order = ["token", "binary", "utf16", "denylist", "spoof", "clean"]
+    for name in order:
+        (tmp_path / name).write_bytes(blobs[name])
+    (tmp_path / "sp").write_text(f"{HOST}\n{CYRILLIC_HOST}\n", encoding="utf-8")
+    env = _git_env(tmp_path)
+    cp = _lib(tmp_path, f"""
+git init -q repo && cd repo || exit 1
+git hash-object -w {' '.join('../' + n for n in order)} > ../list || exit 1
+secret_scan_denylist ../sp ../pat || exit 1
+mkdir ../scratch
+secret_scan_suspects ../list ../pat ../scratch""", env=env)
+    got = set(cp.stdout.decode().split())
+    want = {_blob_id(blobs[n]) for n in order if n != "clean"}
+    assert got == want, (f"expected {sorted(n for n in order if n != 'clean')}, got "
+                         f"{sorted(n for n in order if _blob_id(blobs[n]) in got)}\n{_out(cp)}")
 
 
 def test_binary_content_is_scanned_not_skipped(tmp_path: Path):

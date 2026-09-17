@@ -195,7 +195,8 @@ trigger grammar, and that every `script:` path exists in the bundle),
 `check-io-matrix.py`. That last one enforces a contract worth knowing
 before you add a task: **every task script must carry a machine-readable
 `# bundle-io: offbox=… money=… writes=…` header line**, and it must agree
-with the data/money matrix in `docs/cron-architecture.md`. It is how the
+with the data/money matrix in `docs/cron-architecture.md` — whose "Default
+state" column must also agree with each task's `enabled:`. It is how the
 bundle can honestly answer "what does this send off my machine, and what
 does it cost" without reading 15 scripts.
 
@@ -212,8 +213,8 @@ second copy of a rule, generate it or source it; do not paste it.
 | Change | Also update |
 |---|---|
 | New rule in `home-claude/CLAUDE.md` | If universal — also mirror into `codex/AGENTS.md`. The universal set is not prose here: it is `REQUIRED` in [`scripts/check-agents-sync.py`](scripts/check-agents-sync.py) (Findings, File Operations, Tool Selection Rules, Declaring MCP servers, Coding Discipline, Test policy, Secrets, Windows Task Scheduler, Error Recovery, File Encoding), and `COMPARED` in the same file is the subset whose wording must match rather than merely exist. This table used to name six of them, which is how two sections stayed unchecked in both directions — and the MCP section, present in both files, was checked by nothing. Claude-specific rules (slash commands, hooks, skills, plugin workflow) stay in `home-claude/CLAUDE.md` only. |
-| New skill in `home-claude/skills/` | Update `home-claude/skills/README.md`. If the skill ships a slash command, also add it to `home-claude/commands/`. |
-| New hook in `home-claude/hooks/` | Update `home-claude/hooks/README.md`. Update `home-claude/settings.example-with-hooks.json` to show how to wire it. Do NOT add it to the default `home-claude/settings.json` — hooks are opt-in. |
+| New skill in `home-claude/skills/` | Update `home-claude/skills/README.md`. If the skill ships a slash command, also add it to `home-claude/commands/`. The skill and slash-command counts the docs quote are checked by `scripts/check-doc-counts.py`. |
+| New hook in `home-claude/hooks/` | Update `home-claude/hooks/README.md`. Update `home-claude/settings.example-with-hooks.json` to show how to wire it. Do NOT add it to the default `home-claude/settings.json` — hooks are opt-in. The hook counts in README, INSTALL, this file and `hooks/README.md` are checked by `scripts/check-doc-counts.py`, which also defines what counts as a hook (`shipped_counts()`). |
 | New cron task in `home-claude/cron/registry.yaml` | The script itself goes under `home-claude/cron/<name>.{sh,py}`. Document the task briefly in `README.md` and `docs/cron-architecture.md` (the table of shipped tasks — keep its count in sync). |
 | New `bundle.local.yaml` key (project map / privacy policy) | Load it in the manifest block of `home-claude/cron/hooks/utils.py`, honor it in EVERY source collector (`wiki-flush-sessions.py`, `memory-update.py`) via `project_allowed()`, document it in `config/bundle.local.example.yaml` AND `docs/cron-architecture.md` (privacy-policy section). |
 | New LLM provider for cron | Add it to the `PROVIDERS` table in `home-claude/cron/hooks/utils.py` (single source of truth), wire an `_llm_<name>()` caller, add the key to `config/llm-providers.example.env`, add a row to `docs/llm-routing.md`. |

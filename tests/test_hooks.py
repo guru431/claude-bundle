@@ -247,6 +247,19 @@ def test_prompt_secret_warn_names_the_shape_never_the_value():
     assert _run_hook(hook, {"prompt": "rename task-management-system-v2"}).stdout.strip() == ""
 
 
+@pytest.mark.parametrize("secret,shape", [
+    (FAKE_TOKEN, "github-token"),
+    ("AKIA" + "Q7W3E9R1T5Y2U8I4", "aws-access-key"),
+], ids=["github-token", "aws-access-key"])     # not the token: ids land in caches and logs
+def test_prompt_secret_warn_names_the_shape_that_matched(secret: str, shape: str):
+    """The hook recorded the FIRST shape of the table, whatever had matched."""
+    r = _run_hook(TIER1_HOOKS / "prompt-secret-warn.py", {"prompt": f"use {secret} now"})
+    assert r.returncode == 0, r.stderr
+    context = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert f"(shape: {shape})" in context, context
+    assert secret not in r.stdout
+
+
 def test_prompt_secret_warn_without_cron_lib_does_nothing(tmp_path: Path):
     """A lite install has hooks/ and no cron/lib — silence, never an error."""
     lone = tmp_path / "hooks" / "prompt-secret-warn.py"

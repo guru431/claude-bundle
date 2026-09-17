@@ -22,6 +22,7 @@ Opt-in — see home-claude/settings.example-with-hooks.json.
 """
 import json
 import os
+import re
 import sys
 
 try:
@@ -52,13 +53,15 @@ def main() -> int:
     except ImportError:
         return 0            # a lite install has no cron/ — nothing to do
 
-    hits = []
-    for shape in shapes("scan"):
-        if scan_regex().search(prompt):
-            hits.append(shape.name)
-            break
-    if not hits:
+    found = scan_regex().search(prompt)
+    if not found:
         return 0
+    # WHICH format matched. scan_regex() is the scan shapes joined in table
+    # order, so the first shape that matches the found text on its own is the one
+    # that did. The loop this replaces rebuilt that whole alternation once per
+    # shape and recorded the first shape of the table whatever had matched.
+    kind = next((s.name for s in shapes("scan") if re.fullmatch(s.py, found.group(0))),
+                "key/token")
 
     # Names the SHAPE, never the value: this text goes back into the very
     # transcript the hook is warning about.
@@ -66,8 +69,8 @@ def main() -> int:
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
-                "NOTE: this prompt appears to contain a credential (a "
-                "key/token-shaped string). Treat it as sensitive: do not repeat "
+                f"NOTE: this prompt appears to contain a credential (shape: "
+                f"{kind}). Treat it as sensitive: do not repeat "
                 "it in your reply, in a file you write, in a shell command, or "
                 "in a summary — a transcript is stored on disk and, with the "
                 "wiki pipeline enabled, is sent to an LLM provider. If it is "

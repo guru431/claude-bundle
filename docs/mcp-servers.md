@@ -24,6 +24,31 @@ and a dependency on the network being up — none of it visible until you go loo
 { "command": "/path/to/.venv/bin/python", "args": ["/path/to/server.py"] }
 ```
 
+### An npm package, without `npx`
+
+A server that ships only as an npm package still does not need a resolver: install
+it once and point `node` at the JavaScript file its `package.json` names as `bin`
+(or `main` — see the second trap below).
+
+```jsonc
+// good — installed once, launched directly
+{ "command": "node", "args": ["/path/to/node_modules/some-mcp-server/dist/index.js"] }
+```
+
+Two places to install it, and the trade-off is who decides when it updates:
+
+- **Globally** — `npm install -g some-mcp-server`; `npm root -g` prints the
+  `node_modules` directory the path starts with. One copy for every project, and it
+  changes only when you run `npm update -g some-mcp-server`.
+- **Next to what uses it** — `npm install some-mcp-server` in the project (or in a
+  folder of its own). The version is pinned in that `package-lock.json` and moves
+  with a commit, per project. Write the path absolute: a relative one depends on the
+  directory the client starts the server in.
+
+Either way the version is fixed until you change it. `npx -y` gets you the latest
+release by resolving the package on every start — at the cost described below;
+without it, updating is a step you take.
+
 ## Why resolver wrappers are worse than they look
 
 Measured on a real Windows setup with several editor windows open:

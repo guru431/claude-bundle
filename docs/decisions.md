@@ -26,8 +26,9 @@ on. Applying the same table to the pipeline's own sinks costs one function call
 each and closes the most common single failure — a key pasted into a chat.
 
 **So, concretely:** `WIKI_MASK_SECRETS=1` (the default) masks key-shaped tokens
-before they are written to `.pending/`, quarantined to `cron/logs/rejected/`,
-appended to `FINDINGS.md`, appended to `USER.md`, or sent to a provider.
+before they are written to `.pending/` or a compaction handoff, quarantined to
+`cron/logs/rejected/`, appended to `FINDINGS.md`, appended to `USER.md`, or sent
+to a provider.
 
 **What is NOT masked, and never claimed to be:** hostnames, file paths,
 usernames, IP addresses, business content. If those must not leave the machine,
@@ -38,9 +39,11 @@ these projects are read) — not a redactor.
 
 ## D-02 · No versioned state schema, no pydantic.
 
-`.processed.json` is four keys whose values are `list[str]`. A schema layer plus
-a third runtime dependency, for a file that a human can read and repair with a
-text editor, is a cost with no matching risk. `load_state()` already rejects a
+`.processed.json` is four sections (`flush`, `compile_sessions`, `compile_kb`,
+`memory`) holding lists of marker strings and flat maps of retry counts and
+dates. A
+schema layer plus a third runtime dependency, for a file that a human can read
+and repair with a text editor, is a cost with no matching risk. `load_state()` already rejects a
 root that is not an object and quarantines a corrupt file rather than silently
 resetting dedup.
 
@@ -49,15 +52,21 @@ about — nested per-source objects, say, rather than lists of keys.
 
 ---
 
-## D-03 · `bundle-status.py` always exits 0; `claude-task-monitor.sh` too.
+## D-03 · A report of other things' failures exits 0.
 
-Neither is a gate. `bundle-status.py` is a manual view — it answers "how is this
-deployment doing", and every line is tagged `[ok]`/`[--]`/`[!!]` for a human.
-`scripts/self-test.ps1` is the pass/fail check, and it exits 1 on a failure.
+`bundle-status.py` is a manual view, not a gate — it answers "how is this
+deployment doing", every line is tagged `[ok]`/`[--]`/`[!!]` for a human, and it
+exits 0 whatever it found. `scripts/self-test.ps1` is the pass/fail check, and it
+exits 1 on a failure. The exception is `bundle-status.py --hooks`, which is a
+check: it exits 1 when a hook in `settings.json` is broken, so an installer or a
+CI step can gate on it.
 
-The monitor exits 0 because it *succeeded*: it found the failing task and sent
-the alert. A non-zero exit would make the monitor alert about itself, every
-morning, for doing its job.
+`claude-task-monitor.sh` exits 0 when it found a failing task and sent the
+alert: it *succeeded*, and a non-zero exit would make the monitor alert about
+itself, every morning, for doing its job. It exits non-zero when its OWN work
+fails — the task statuses could not be collected, or the alert could not be
+delivered — because that is the one failure nobody else reports.
+`claude-task-monitor.py` follows the same rule on POSIX.
 
 ---
 
@@ -101,7 +110,9 @@ a different threat model. The Windows password unlocks the whole account rather
 than one API quota, Task Scheduler needs it non-interactively so it cannot be
 prompted for, and DPAPI is the platform's own answer for exactly this. An API
 key is scoped, rotatable, and read by scripts that must run on Linux and macOS
-too, where there is no DPAPI.
+too, where there is no DPAPI. A task that should not need even that one can use
+`logon_type: s4u`: Windows then stores no password for it, at the price of the
+task having no network credentials.
 
 **Would change it:** a cross-platform, dependency-free way to hold the keys that
 does not just move the plaintext one file along.
@@ -142,11 +153,14 @@ give.
 stops being retried forever. It counts `deterministic` failures only — an answer
 that arrived and could not be used.
 
-`transient` (provider down, 429, network) does not count: waiting genuinely
-fixes it, and a ceiling on it would quarantine a week's material over a bad
-week. `config` (no key, a closed DLP gate, a spent balance) does not count
-either: nothing is wrong with the *source*, and destroying a night's material
-over a one-line fix is the wrong trade.
+`transient` (provider down, 408, 429, a 5xx, network) does not count: waiting
+genuinely fixes it, and a ceiling on it would quarantine a week's material over
+a bad week. `config` (no key, a refused key, a wrong model name or base URL, a
+closed DLP gate, a spent balance — 401, 402, 404 and every other 4xx that is not
+about the payload) does not count either: nothing is wrong with the *source*,
+and destroying a night's material over a one-line fix is the wrong trade. Only
+400, 413, 415 and 422, or an answer that arrived empty or unusable, are
+`deterministic`.
 
 The classification lives in one place, `utils.LLMResult`, because three scripts
 previously had three retry policies against one paragraph of documentation.

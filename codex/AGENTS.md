@@ -45,7 +45,9 @@ happens on closing depends on the outcome:
 
 - **Done** → the entry is simply **deleted**. It is not archived: `git log`
   and the code are the record, and re-telling it in prose turns the archive
-  into a dump.
+  into a dump. So the commit that closes it names the finding by its title —
+  where `FINDINGS.md` is not tracked (listed in `.gitignore`), that line of the
+  commit message is the only trace the entry ever existed.
 - **Rejected** (`wontfix`, `deferred`, or a `done` that dropped part of the
   work) → the entry **moves** to `FINDINGS-archive.md` next to `FINDINGS.md`.
   The archive has exactly one purpose: stop the same rejected thing being
@@ -290,11 +292,14 @@ Two policies matter for correctness (details in
 
 - **LogonType** — default is `password` (task fires before user login;
   survives overnight reboots). Requires `cron/admin/save-cred.cmd` to
-  have stashed a DPAPI-encrypted password.
+  have stashed a DPAPI-encrypted password. `s4u` also fires before login
+  and stores no password, but has no network credentials (no share paths,
+  no Git Credential Manager push) — a per-task choice for a local install.
+  `interactive` runs only while you are logged in.
 - **`script:` paths** — for Password-mode tasks, ALWAYS UNC
   (`\\<host>\<share>\...`) or local `C:\...`. **Never a mapped drive**
   (mapped drives don't exist in session 0 where Password tasks fire —
-  silent exit 127, no log).
+  silent exit 127, no log). An `s4u` task: local `C:\...` only.
 
 To add a new task: edit `cron/registry.yaml`, run `cron/admin/sync.cmd`,
 verify with `schtasks /query /tn <name> /fo list /v`.

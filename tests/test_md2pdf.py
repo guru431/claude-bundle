@@ -335,7 +335,7 @@ def _font_families(pdf: bytes) -> set[str]:
 
 
 @pytest.mark.integration
-def test_a_local_file_in_an_iframe_does_not_reach_the_pdf(md2pdf, tmp_path):
+def test_a_local_file_in_an_iframe_does_not_reach_the_pdf(md2pdf, tmp_path, monkeypatch):
     """Measured through the fonts, which needs no PDF text extractor.
 
     A plain-text file rendered in a frame is set in the browser's monospace font;
@@ -346,6 +346,8 @@ def test_a_local_file_in_an_iframe_does_not_reach_the_pdf(md2pdf, tmp_path):
         md2pdf.browser_candidates()
     except RuntimeError:
         pytest.skip("no Chromium-family browser on this machine")
+    # A browser that cannot start here (a CI sandbox) must cost a minute, not four.
+    monkeypatch.setenv("MD2PDF_TIMEOUT", "60")
     (tmp_path / "secret.txt").write_text("canary line that must stay on this machine\n",
                                          encoding="utf-8")
     (tmp_path / "dot.png").write_bytes(bytes.fromhex(
@@ -369,7 +371,7 @@ def test_a_local_file_in_an_iframe_does_not_reach_the_pdf(md2pdf, tmp_path):
 
 
 @pytest.mark.integration
-def test_the_title_guard_agrees_with_the_installed_browser(md2pdf, tmp_path):
+def test_the_title_guard_agrees_with_the_installed_browser(md2pdf, tmp_path, monkeypatch):
     """Pins the guard to a real print in both directions.
 
     A browser update that changed how the title is written would turn the guard
@@ -380,6 +382,7 @@ def test_the_title_guard_agrees_with_the_installed_browser(md2pdf, tmp_path):
         browser = md2pdf.browser_candidates()[0]
     except RuntimeError:
         pytest.skip("no Chromium-family browser on this machine")
+    monkeypatch.setenv("MD2PDF_TIMEOUT", "60")
     md = tmp_path / "Маршрут_поездки (v2).md"
     md.write_text("# Day 1\n\nA stop.\n", encoding="utf-8")
     pdf = tmp_path / "out.pdf"

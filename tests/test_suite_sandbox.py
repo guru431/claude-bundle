@@ -1,10 +1,11 @@
-"""tests/conftest.py itself: the sandbox and its two nets.
+"""tests/conftest.py itself: the sandbox, its two nets and the CI gates.
 
 Each of these once failed in silence. The ledger rows the suite wrote into the
 checkout read as nightly runs; a module evicted from sys.modules broke a test two
-files away, and only in the full run. A net that stops working says nothing
-either, so the tree guard runs here in a session of its own, under a copy of the
-conftest this suite runs under.
+files away, and only in the full run; a dependency skipped inside a fixture was
+a green dot on CI; `--durations` measured slow tests and nothing acted on it. A
+gate that stops working says nothing either, so the gates run here in sessions
+of their own, under a copy of the conftest this suite runs under.
 """
 from __future__ import annotations
 
@@ -79,3 +80,32 @@ def test_a_run_that_writes_into_the_checkout_fails(pytester, monkeypatch):
     result.assert_outcomes(passed=1)
     assert result.ret == pytest.ExitCode.TESTS_FAILED
     result.stdout.fnmatch_lines(["*created*home-claude/cron/logs/runs-2026.jsonl*"])
+
+
+def test_on_ci_a_check_that_did_not_run_or_ran_slow_fails(pytester, monkeypatch):
+    monkeypatch.setenv("CI", "1")
+    (pytester.path / "tests").mkdir()
+    (pytester.path / "tests" / "test_needs_it_at_import.py").write_text(
+        'import pytest\npytest.importorskip("no_such_module_anywhere")\n', encoding="utf-8")
+    result = _session(pytester, monkeypatch, """
+        import time
+        import pytest
+
+        @pytest.fixture
+        def dependency():
+            pytest.importorskip("no_such_module_anywhere")
+
+        def test_through_a_fixture(dependency):
+            pass
+
+        def test_slow():
+            time.sleep(0.15)
+
+        @pytest.mark.integration
+        def test_slow_and_marked():
+            time.sleep(0.15)
+    """, "\n_SLOW_CALL_SECONDS = 0.05\n", "--continue-on-collection-errors")
+    # errors: the module skipped at import, the fixture skipped in setup
+    result.assert_outcomes(passed=1, failed=1, errors=2)
+    result.stdout.fnmatch_lines(["*Skips are failures on CI*"])
+    result.stdout.fnmatch_lines(["*over the 0.05s*"])

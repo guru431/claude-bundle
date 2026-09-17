@@ -113,8 +113,29 @@ def cron_copy(tmp_path: Path) -> Path:
     return tmp_path
 
 
+# ── CI: a check that did not run, or ran too slowly, is a failure ───────────
+
 def _on_ci() -> bool:
     return os.environ.get("CI", "").lower() in ("1", "true", "yes")
+
+
+def _missing_dependency(report) -> bool:
+    reason = str(getattr(report, "longrepr", ""))
+    return report.skipped and ("could not import" in reason or "importorskip" in reason)
+
+
+_CI_SKIP_NOTE = ("\n\nCI installs requirements.txt, so a missing import here means the "
+                 "check did NOT run. Skips are failures on CI.")
+
+# The one-second rule of the test policy, as a gate — at three seconds, not one.
+# The slowest tests of the fast suite spawn bash or PowerShell, and on Windows
+# one of them measured 0.5-0.9 s run alone and 2.7 s in a full run while the
+# same machine was busy with other work: a two-second gate would have failed a
+# test that had not changed. A test that is slow for a reason — a sleep, a real
+# timeout, a round-trip to a host — is over three seconds on any runner. Only
+# the call is timed: a module-scoped fixture's setup belongs to every test of
+# the module, not to the first one.
+_SLOW_CALL_SECONDS = 3.0
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -125,18 +146,39 @@ def pytest_runtest_makereport(item, call):
     statement of the bundle's cardinal invariant. Locally the skip is a
     convenience; on CI, where requirements.txt is installed, it means the
     dependency is missing and the check did NOT run — silently, because `-q`
-    prints a skip as a dot.
+    prints a skip as a dot. Only the call phase used to be read, so a fixture
+    that asked for the dependency skipped its tests in SETUP, unseen.
+
+    On CI a test of the fast suite whose call takes over _SLOW_CALL_SECONDS fails
+    too. pytest.ini prints --durations on every run so that the measurement
+    exists; until this, nothing acted on it.
     """
     outcome = yield
     report = outcome.get_result()
-    if _on_ci() and report.when == "call" and report.skipped:
-        reason = str(getattr(report, "longrepr", ""))
-        if "could not import" in reason or "importorskip" in reason:
-            report.outcome = "failed"
-            report.longrepr = (
-                f"{reason}\n\nCI installs requirements.txt, so a missing import "
-                "here means the check did NOT run. Skips are failures on CI."
-            )
+    if not _on_ci():
+        return
+    if report.when in ("setup", "call") and _missing_dependency(report):
+        report.outcome = "failed"
+        report.longrepr = f"{report.longrepr}{_CI_SKIP_NOTE}"
+    elif (report.when == "call" and report.passed
+          and report.duration > _SLOW_CALL_SECONDS
+          and not any(item.get_closest_marker(m) for m in ("integration", "manual"))):
+        report.outcome = "failed"
+        report.longrepr = (
+            f"the call took {report.duration:.1f}s — over the {_SLOW_CALL_SECONDS:g}s a "
+            f"fast-suite test may take on CI. home-claude/CLAUDE.md § Test policy: a "
+            f"test over a second is either made fast or marked `integration`.")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector):
+    """The same rule for a whole file: `yaml = pytest.importorskip("yaml")` at
+    module level skips it at COLLECTION, before either phase above exists."""
+    outcome = yield
+    report = outcome.get_result()
+    if _on_ci() and _missing_dependency(report):
+        report.outcome = "failed"
+        report.longrepr = f"{report.longrepr}{_CI_SKIP_NOTE}"
 
 
 # ── a shared module a test evicts comes back after it ───────────────────────

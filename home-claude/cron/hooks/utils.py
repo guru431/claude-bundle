@@ -431,11 +431,21 @@ def project_allowed(project: str) -> bool:
     memory/feedback_*.md, incidents.md and sessions.md still went to the provider
     — and `[ClaudeBundle]` closed those while the transcripts went. Normalizing
     in the gate fixes every caller at once, the ones in other files included.
+
+    A denial also matches the name the project had under the old label rule
+    (legacy_project_name). Fixing that rule gave `project-alpha` and every
+    `…-project` directory a name of their own instead of `main`; without this, a
+    policy that denied `main` would have started sending them the night the fix
+    arrived. The allowlist matches the new name only: it grants, and granting on
+    a name the user never saw would be the wrong way round. To include such a
+    project while `main` stays denied, pin its directory to another name in
+    project_map.
     """
     if _MANIFEST_BROKEN:
         return False
     name = normalize_project_name(project)
-    if name in {normalize_project_name(e) for e in SKIP_JSONL_PROJECTS}:
+    skip = {normalize_project_name(e) for e in SKIP_JSONL_PROJECTS}
+    if name in skip or legacy_project_name(project) in skip:
         return False
     if ALLOW_PROJECTS and name not in {normalize_project_name(e) for e in ALLOW_PROJECTS
                                        if not _collapses_to_default(e)}:
@@ -3440,8 +3450,20 @@ def find_existing_page_by_name(folder: Path, filename: str) -> Path | None:
 # common inside them too ("My App").
 _NAME_SEPARATOR_RE = re.compile(r"\s+[—–-]\s+|[(`:]")
 
+# A leading "project" LABEL in a free-form heading: `Project: X`, `Project X`,
+# `Project (X)`, `Project — extracted facts (X)`. The word is followed by a colon,
+# whitespace, a parenthesis or a long dash. The rule used to be `^project\b`, and
+# `\b` also matches before the hyphen of `project-alpha`, the dot of
+# `project.alpha` and the end of a bare `project` — those are NAMES, and cut down
+# to `-alpha` or to nothing they fell into `main` together, with every
+# unattributed source. `project` is the trailing segment of any directory called
+# `…-project` or `…_project`, so that was not a rare name.
+_PROJECT_LABEL_RE = re.compile(r"^project(?:\s*:\s*|\s+|(?=[(—–]))", re.IGNORECASE)
+# The old rule, kept for legacy_project_name and nothing else.
+_LEGACY_PROJECT_LABEL_RE = re.compile(r"^project\b[:\s]*", re.IGNORECASE)
 
-def _slugify_project(raw: str) -> str:
+
+def _slugify_project(raw: str, label_re=_PROJECT_LABEL_RE) -> str:
     """Project slug from a free-form daily-log heading.
 
     Returns "" when nothing usable can be extracted, so the caller can fall back
@@ -3463,7 +3485,7 @@ def _slugify_project(raw: str) -> str:
     else:
         # Drop a leading "project" label, then keep everything up to the first
         # real separator.
-        s2 = re.sub(r"^project\b[:\s]*", "", s, flags=re.IGNORECASE).strip()
+        s2 = label_re.sub("", s).strip()
         if not s2 or s2[0] in "—–-(`:":
             # The prefix was empty / a bare label (e.g. the
             # "Project — extracted facts (claude-bundle)" form) — fall back to
@@ -3501,13 +3523,31 @@ def normalize_project_name(raw: str) -> str:
     with an empty KNOWN_PROJECTS (the shipped template default). Falls back to
     "main" when no usable name can be extracted.
     """
+    return _normalize_project_name(raw, _PROJECT_LABEL_RE)
+
+
+def legacy_project_name(raw: str) -> str:
+    """The name normalize_project_name gave `raw` before its label rule was fixed.
+
+    It differs only for a name starting with `project` followed by something
+    other than a colon, whitespace, a parenthesis or a long dash — `project-alpha`,
+    `project.alpha`, a bare `project` — which used to become `main` (or lose its
+    first word). Two readers need the old answer: flush, whose state recorded
+    those projects' transcripts under it (without it every one of them would be
+    read from byte 0 and sent again), and project_allowed, so that a denial which
+    covered such a project — of `main`, where they all landed — keeps covering it.
+    """
+    return _normalize_project_name(raw, _LEGACY_PROJECT_LABEL_RE)
+
+
+def _normalize_project_name(raw: str, label_re) -> str:
     low = re.sub(r"^project:\s*", "", raw.strip().lower()).strip()
     if low in UNATTRIBUTED_NAMES:
         return DEFAULT_PROJECT
     for proj in sorted(KNOWN_PROJECTS, key=len, reverse=True):
         if low == proj or low.startswith(proj + " ") or low.startswith(proj + "—") or low.startswith(proj + "-") or low.startswith(proj + "("):
             return proj
-    slug = _slugify_project(raw) or DEFAULT_PROJECT
+    slug = _slugify_project(raw, label_re) or DEFAULT_PROJECT
     return DEFAULT_PROJECT if slug in UNATTRIBUTED_NAMES else slug
 
 

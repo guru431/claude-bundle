@@ -1004,3 +1004,67 @@ def test_python_dotenv_follows_the_shared_quote_and_key_contract(bundle_tree: Pa
     assert {k: os.environ.get(k, "<unset>") for k in expected} == expected
     assert all(name not in os.environ for name in non_ascii), \
         "a non-ASCII key was set, which the shell parser would drop"
+
+
+# ── project names: `Project X` is a label, `project-alpha` is a name ────────
+
+@pytest.mark.parametrize("raw,expected", [
+    # Names that merely start with the word — they used to lose it.
+    ("project-alpha", "project-alpha"),
+    ("Project-Alpha", "project-alpha"),
+    ("project.alpha", "project-alpha"),
+    ("project", "project"),                  # the trailing segment of `…-project`
+    ("project_alpha", "project_alpha"),
+    ("projects", "projects"),
+    # The label forms the rule exists for — unchanged.
+    ("Project Alpha", "alpha"),
+    ("Project: alpha", "alpha"),
+    ("Project:alpha", "alpha"),
+    ("Project — extracted facts (claude-bundle)", "claude-bundle"),
+    ("Project—extracted facts (claude-bundle)", "claude-bundle"),
+    ("Project (finance)", "finance"),
+    ("Project(finance)", "finance"),
+    ("Project `finance` (notes)", "finance"),
+    ("Project:", "main"),
+])
+def test_a_project_label_is_stripped_but_a_name_starting_with_project_is_kept(
+        bundle_tree: Path, monkeypatch, raw: str, expected: str):
+    """`^project\\b` also matched before the hyphen of `project-alpha` and at the
+    end of a bare `project`, so those names were cut to nothing and fell into
+    `main` — together, and with every unattributed source."""
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.normalize_project_name(raw) == expected
+
+
+def test_projects_named_project_something_are_separate_and_can_be_allowed(
+        bundle_tree: Path, monkeypatch):
+    """With F2 an `allow_projects: [project-alpha]` entry was reported unusable
+    and allowed nothing, and two such projects shared one bucket."""
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(
+        "allow_projects:\n  - project-alpha\n", encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert not utils.config_errors(), utils.config_errors()
+    assert utils.project_allowed("project-alpha") is True
+    assert utils.project_allowed("project-beta") is False
+    assert utils.project_allowed("main") is False
+
+
+def test_a_denial_that_covered_a_project_under_its_old_name_keeps_covering_it(
+        bundle_tree: Path, monkeypatch):
+    """Fixing the name must not start sending what a policy denied yesterday.
+
+    Every `…-project` directory used to land in `main`; a policy denying `main`
+    therefore denied them, and giving them a name of their own would otherwise
+    have sent them the next night. The same for `project.alpha`, which used to
+    become `alpha`.
+    """
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(
+        "skip_projects:\n  - main\n  - alpha\n", encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.project_allowed("project") is False
+    assert utils.project_allowed("project-beta") is False
+    assert utils.project_allowed("project.alpha") is False
+    assert utils.project_allowed("beta") is True
+    assert utils.project_allowed("project_beta") is True   # never lost its name

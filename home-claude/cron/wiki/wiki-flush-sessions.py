@@ -42,7 +42,8 @@ for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (dir_to_project, parse_jsonl_delta, is_subagent_jsonl,
                    messages_day, llm_call_ex, worst_kind, llm_pace, atomic_write_text,
-                   normalize_project_name, KNOWN_PROJECTS, mark_phase_success,
+                   normalize_project_name, legacy_project_name, KNOWN_PROJECTS,
+                   mark_phase_success,
                    state_get, state_add, state_remove, is_dry_run, SKIP_DIRS,
                    project_allowed, slug_collisions, COLLECT_PLANS,
                    manifest_broken, policy_summary, sub_outside_fences, state_replace_prefix,
@@ -138,7 +139,7 @@ def get_processed_sessions() -> set[str]:
 
 
 def resume_offset(processed: set[str], project: str, name: str, size: int,
-                  legacy_project: str = "") -> int | None:
+                  legacy_projects=()) -> int | None:
     """Byte offset to resume this JSONL from, or None when nothing is new.
 
     The number in the key is HOW FAR INTO THE FILE this phase has already read.
@@ -162,14 +163,12 @@ def resume_offset(processed: set[str], project: str, name: str, size: int,
     the one offset; older states still carry several until each file's next
     recording clears them.
 
-    `legacy_project` is the pre-normalization bucket name (see
-    find_recent_jsonls): without it, the first run after project names started
-    being normalized would re-send every session of a project whose name is not
-    already a slug.
+    `legacy_projects` are the other names this file's state may be recorded under
+    (see jsonl_state_names): without them, the first run after a change to how
+    project names are derived would re-send every session of every project whose
+    name it changed.
     """
-    names = [project]
-    if legacy_project and legacy_project != project:
-        names.append(legacy_project)
+    names = [project, *(n for n in legacy_projects if n and n != project)]
     if name in processed:  # legacy bare-name key: finished
         return None
     done = -1
@@ -207,13 +206,27 @@ def processed_key(project: str, jf: Path, offset: int | None = None) -> str:
     return f"{project}/{jf.name}@{offset}"
 
 
+def jsonl_state_names(project: str, jf: Path) -> list[str]:
+    """Every project name a JSONL's state can be recorded under, current first.
+
+    The current bucket name; the raw `dir_to_project` name, from before names
+    were normalized; and the name normalization gave before its `project`-label
+    rule was fixed (utils.legacy_project_name), when `…-project` directories and
+    `project-alpha` were all recorded under `main`.
+    """
+    raw = dir_to_project(jf.parent.name)
+    names = [project]
+    for n in (raw, legacy_project_name(raw)):
+        if n not in names:
+            names.append(n)
+    return names
+
+
 def processed_key_prefixes(project: str, jf: Path) -> list[str]:
     """Every `@offset` key prefix one JSONL can be recorded under — all of them
-    are replaced when its new offset is recorded. The pre-normalization name
-    counts (see resume_offset's `legacy_project`): a stale offset left under it
-    wins the max just the same."""
-    names = {project, dir_to_project(jf.parent.name)}
-    return sorted(f"{n}/{jf.name}@" for n in names)
+    are replaced when its new offset is recorded. The legacy names count (see
+    jsonl_state_names): a stale offset left under one wins the max just the same."""
+    return sorted(f"{n}/{jf.name}@" for n in jsonl_state_names(project, jf))
 
 
 def source_marker(project: str, rel: str, chunk: str) -> str:
@@ -302,20 +315,23 @@ def find_recent_jsonls(processed: set[str], max_age_hours: int = 48,
             continue
         raw_project = dir_to_project(proj_dir.name)
         project = normalize_project_name(raw_project)
-        if not project_allowed(project):
+        # The RAW name: the gate normalizes it itself, and its legacy-name
+        # denial must see what the old rule made of THIS name, not of the slug.
+        if not project_allowed(raw_project):
             continue
         for jsonl in proj_dir.glob("*.jsonl"):
             try:
                 st = jsonl.stat()
             except OSError:
                 continue
+            names = jsonl_state_names(project, jsonl)
             start = resume_offset(processed, project, jsonl.name, st.st_size,
-                                  legacy_project=raw_project)
+                                  legacy_projects=names[1:])
             if start is None:
                 continue
             if st.st_size < 10240:  # < 10KB — too short
                 continue
-            unfinished = f"{project}/{jsonl.name}" in seen_unprocessed
+            unfinished = any(f"{n}/{jsonl.name}" in seen_unprocessed for n in names)
             if st.st_mtime < cutoff and not unfinished:
                 continue
             offsets[jsonl] = start
@@ -355,7 +371,7 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20,
             continue
         raw_project = dir_to_project(proj_dir.name)
         project = normalize_project_name(raw_project)
-        if not project_allowed(project):
+        if not project_allowed(raw_project):   # raw: see find_recent_jsonls
             continue
         for jsonl in proj_dir.glob("*.jsonl"):
             if jsonl in exclude:
@@ -365,7 +381,7 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20,
             except OSError:
                 continue
             start = resume_offset(processed, project, jsonl.name, st.st_size,
-                                  legacy_project=raw_project)
+                                  legacy_projects=jsonl_state_names(project, jsonl)[1:])
             if start is None:
                 continue
             if st.st_size < 10240:
@@ -407,16 +423,15 @@ def pending_draft_bucket(text: str) -> tuple[str, str, str]:
     if dir_name:
         if dir_name in SKIP_DIRS:
             return DATE, dir_name, "skip_dirs"
-        project = normalize_project_name(dir_to_project(dir_name))
-    elif fields.get("Project"):
-        # Normalized with the SAME function the compiler uses. A raw label went
-        # into the daily as `## My App` and compile-sessions then normalized it
-        # to a different slug than flush had used for the JSONL of the same
-        # session, so one session produced two project buckets.
-        project = normalize_project_name(fields["Project"])
+        raw = dir_to_project(dir_name)
     else:
-        project = DEFAULT_PROJECT
-    if not project_allowed(project):
+        # Normalized below with the SAME function the compiler uses. A raw label
+        # went into the daily as `## My App` and compile-sessions then normalized
+        # it to a different slug than flush had used for the JSONL of the same
+        # session, so one session produced two project buckets.
+        raw = fields.get("Project") or DEFAULT_PROJECT
+    project = normalize_project_name(raw)
+    if not project_allowed(raw):   # raw: see find_recent_jsonls
         return DATE, project, "policy"
     day = DATE
     stamp = fields.get("Day", "")
@@ -504,10 +519,11 @@ def collect_feedback_files(sent: set[str] | None = None) -> dict[str, list[tuple
             continue
         # Normalized, as in find_recent_jsonls: the raw name put a second
         # `## MyApp` next to the JSONL's `## myapp` in the same daily.
-        project = normalize_project_name(dir_to_project(proj_dir.name))
+        raw_project = dir_to_project(proj_dir.name)
+        project = normalize_project_name(raw_project)
         # Same privacy gate as the JSONL collectors — an excluded project must
         # not leak in through its memory/feedback files (unified policy).
-        if not project_allowed(project):
+        if not project_allowed(raw_project):
             continue
         for fb in mem_dir.glob("feedback_*.md"):
             if not _is_fresh(fb):
@@ -568,10 +584,11 @@ def collect_incidents_sessions(sent: set[str] | None = None) -> dict[str, list[t
         mem_dir = proj_dir / "memory"
         if not mem_dir.exists():
             continue
-        project = normalize_project_name(dir_to_project(proj_dir.name))
+        raw_project = dir_to_project(proj_dir.name)
+        project = normalize_project_name(raw_project)
         # Unified privacy gate (see collect_feedback_files) — incidents/sessions
         # of an excluded project must not reach the LLM either.
-        if not project_allowed(project):
+        if not project_allowed(raw_project):
             continue
         for fname in ["incidents.md", "sessions.md"]:
             f = mem_dir / fname
@@ -1224,7 +1241,8 @@ def main():
             f"recorded (state lock busy) — expect them to be sent again tomorrow")
     # …and drop them from the carry-over set: they are finished, so they should
     # go back to being selected by age like any other file.
-    done_carry = [f"{project}/{jf.name}" for project, jf in done_files]
+    done_carry = [f"{n}/{jf.name}" for project, jf in done_files
+                  for n in jsonl_state_names(project, jf)]
     if done_carry:
         state_remove("flush", "seen_unprocessed", done_carry)
     with open(LOG_MD, "a", encoding="utf-8") as f:

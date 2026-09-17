@@ -454,6 +454,42 @@ def test_a_truncated_transcript_is_read_from_its_own_offset_afterwards(bundle: P
         f"the grown file was re-read whole:\n{r2.stdout}"
 
 
+def test_flush_honours_offsets_recorded_under_a_projects_old_name(bundle: Path,
+                                                                 tmp_path: Path):
+    """A directory named `…-project` was recorded under `main` until its name was
+    fixed. Its transcripts must not be read from byte 0 and sent again because
+    the key now reads `project/…`: the old key is honoured, and replaced by the
+    new one the next time the file is recorded."""
+    home = tmp_path / "home_rename"
+    proj_dir = home / ".claude" / "projects" / "C--Users-test-work-my-project"
+    proj_dir.mkdir(parents=True)
+    jf = proj_dir / "s.jsonl"
+    _seed_session_jsonl(jf, 12, SESSION_DAY)
+    size = jf.stat().st_size
+    (bundle / "wiki" / ".processed.json").write_text(json.dumps(
+        {"flush": {"processed_jsonls": [f"main/s.jsonl@{size}"]}}), encoding="utf-8")
+    resp = bundle / "rename_response.md"
+    resp.write_text("- A durable fact. [[index]]\n", encoding="utf-8")
+    env = {"WIKI_LLM_MOCK_RESPONSE": str(resp), "USERPROFILE": str(home), "HOME": str(home)}
+    flush = bundle / "cron" / "wiki" / "wiki-flush-sessions.py"
+
+    r = _run(flush, env, cwd=bundle)
+    assert r.returncode == 0 and "Nothing to process" in r.stdout, \
+        f"a transcript recorded under the old name was sent again:\n{r.stdout}"
+
+    _seed_session_jsonl(jf, 2, SESSION_DAY, marker="tail", append=True)
+    r = _run(flush, env, cwd=bundle, args=["--dry-run"])
+    sizes = [int(m) for m in re.findall(r"LLM call\(s\), (\d+) chars", r.stdout)]
+    assert sizes and max(sizes) < size // 2, f"the grown file was read whole:\n{r.stdout}"
+    assert "project: 1 chunk(s)" in r.stdout, f"not under its own name:\n{r.stdout}"
+
+    r = _run(flush, env, cwd=bundle)
+    assert r.returncode == 0, f"flush failed:\n{r.stdout}\n{r.stderr}"
+    keys = json.loads((bundle / "wiki" / ".processed.json").read_text(
+        encoding="utf-8"))["flush"]["processed_jsonls"]
+    assert keys == [f"project/s.jsonl@{jf.stat().st_size}"], keys
+
+
 def test_flush_does_not_send_a_feedback_file_twice(bundle: Path, tmp_path: Path):
     """The 48-hour window let the same text out on two nights running.
 

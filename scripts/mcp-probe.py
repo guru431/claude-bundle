@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Check MCP server declarations — by handshake, not by "the process started".
 
-    python tools/mcp-probe.py                     # probe servers in ~/.claude.json
-    python tools/mcp-probe.py path/to/.mcp.json   # probe a specific config
-    python tools/mcp-probe.py CONFIG server-name  # probe one server
-    python tools/mcp-probe.py --check-wrappers    # audit declarations, launch nothing
+    python scripts/mcp-probe.py                     # probe servers in ~/.claude.json
+    python scripts/mcp-probe.py path/to/.mcp.json   # probe a specific config
+    python scripts/mcp-probe.py CONFIG server-name  # probe one server
+    python scripts/mcp-probe.py --check-wrappers    # audit declarations, launch nothing
 
 Probing launches each declared stdio server exactly as configured, sends `initialize`
 and `tools/list`, and reports stray stdout separately: MCP speaks JSON-RPC over stdout,

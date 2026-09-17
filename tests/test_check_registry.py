@@ -127,6 +127,24 @@ def test_repeat_for_must_be_a_day_where_the_posix_generator_runs(repeat_for, pla
     assert (not [p for p in problems if "repeat_for" in p]) is ok, problems
 
 
+@pytest.mark.parametrize("repeat_for, platform, ok", [
+    (None, None, True),        # open-ended on every platform
+    ("P1D", None, False),      # a day after boot on Windows, forever on systemd
+    ("PT8H", None, False),
+    ("P1D", "windows", True),  # Windows alone: repeat_for means what it says
+])
+def test_a_boot_repetition_has_no_repeat_for_where_the_posix_units_run(repeat_for, platform, ok):
+    """sync-tasks.ps1 now registers the repetition of an AtStartup trigger, and
+    gen-scheduler.py a boot timer with OnUnitActiveSec. Both are open-ended
+    unless Task Scheduler is given a repeat_for — which only Task Scheduler
+    would honour."""
+    problems = check_registry.check_task(
+        _task(trigger="AtStartup", repeat_every="PT4H", repeat_for=repeat_for, platform=platform))
+    assert (not [p for p in problems if "repeat_for" in p]) is ok, problems
+    if ok:
+        assert problems == []
+
+
 @pytest.mark.parametrize("start", ["01:00", "03:30", "04:00", "09:30"])
 def test_a_daily_repetition_keeps_its_hours_under_systemd(start):
     """Task Scheduler carries `Daily 09:30` every PT4H through 01:30 and 05:30.

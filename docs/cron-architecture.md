@@ -199,14 +199,15 @@ know before using it:
   three times on Windows and six times under systemd. `check-registry.py`
   rejects any other value unless the task is `platform: windows`, and it also
   compares the hours of the unit the generator actually writes with the hours
-  Task Scheduler fires — a `Daily` start late enough that systemd's `HH/N` step
-  would stop at midnight, where Task Scheduler carries on, fails the same way.
+  Task Scheduler fires — so a generator that stopped carrying the repetition
+  past midnight, as systemd's `HH/N` step once did, fails the same way.
 - **`AtStartup` / `AtLogOn` + `repeat_every`** repeats for as long as the
-  machine or the session is up, unless `repeat_for` limits it — those triggers
-  fire once, so a calendar trigger's one-day default would stop the repetition a
-  day after boot. On launchd that is `RunAtLoad` + `StartInterval`.
-  `gen-scheduler.py` has no systemd form for it and skips the unit, so
-  `check-registry.py` accepts the pairing only on a `platform: windows` task. A
+  machine or the session is up — those triggers fire once, so a calendar
+  trigger's one-day default would stop the repetition a day after boot.
+  `AtStartup` becomes `RunAtLoad` + `StartInterval` on launchd and a
+  boot-anchored timer (`OnBootSec` + `OnUnitActiveSec`) on systemd, both
+  open-ended too, so `check-registry.py` rejects a `repeat_for` on such a task
+  unless it is `platform: windows`. `AtLogOn` has no systemd form. A
   `startup_delay` alongside it applies to the first run only on Windows, but is
   repeated by the interval on launchd; the generator warns when the two are
   combined.

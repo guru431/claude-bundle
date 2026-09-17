@@ -215,7 +215,19 @@ def check_task(task: dict) -> list[str]:
         # field and repeats through the whole day, so `Daily 01:00` + PT4H +
         # PT8H ran three times on Windows and six on Linux and macOS.
         rep_for = task.get("repeat_for")
-        if (task.get("repeat_every") and rep_for is not None
+        if (task.get("repeat_every") and rep_for is not None and sched is not None
+                and str(task.get("trigger", "")) in gen.TRIGGER_SIMPLE):
+            # A boot trigger's units repeat for as long as the machine is up
+            # (systemd OnUnitActiveSec, launchd StartInterval), and so does Task
+            # Scheduler when repeat_for is absent. Any repeat_for — P1D too —
+            # would stop the repetition a day (or whatever it says) after boot
+            # on Windows alone.
+            problems.append(
+                f"repeat_for '{rep_for}' on an {task.get('trigger')} trigger stops the "
+                f"repetition on Windows only — the POSIX units repeat for as long as "
+                f"the machine is up. Leave repeat_for out, or mark the task "
+                f"platform: windows")
+        elif (task.get("repeat_every") and rep_for is not None
                 and gen.iso_seconds(str(rep_for)) not in (None, 24 * 3600)):
             problems.append(
                 f"repeat_for '{rep_for}' limits the repetition on Windows only — "
@@ -223,10 +235,11 @@ def check_task(task: dict) -> list[str]:
                 f"line would run on two schedules. Use P1D, or mark the task "
                 f"platform: windows")
         # And the day itself: Task Scheduler carries a repetition past midnight
-        # until the next day's start, while systemd's `HH/N` stops at 23:00 —
-        # `Daily 09:30` every PT4H is six runs there and four here. Compared on
-        # the generator's actual output, so a generator that learns to wrap
-        # stops tripping this without anyone touching it.
+        # until the next day's start, while systemd's `HH/N` step — what the
+        # generator used to write — stops at 23:00: `Daily 09:30` every PT4H was
+        # six runs there and four here. Compared on the generator's actual
+        # output, so a generator that wraps (as it now does) passes untouched,
+        # and one that stops wrapping fails again.
         trig = gen.TRIGGER_DAILY.fullmatch(str(task.get("trigger", "")))
         rep_h = gen.iso_hours(str(task.get("repeat_every") or ""))
         cal = (re.fullmatch(r"\*-\*-\* ([\d,/]+):\d+:00", sched[1])

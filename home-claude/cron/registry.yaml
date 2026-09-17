@@ -100,7 +100,9 @@
 #
 #   On AtStartup / AtLogOn, without repeat_for, the repetition lasts for as long
 #   as the machine or the session is up. Those triggers fire once; the day-long
-#   default of a calendar trigger would stop repeating a day after boot.
+#   default of a calendar trigger would stop repeating a day after boot. The
+#   POSIX units repeat open-ended as well, so a repeat_for there is for a
+#   `platform: windows` task only.
 #
 #   P1D is the only `repeat_for` a task that also runs on POSIX may use:
 #   gen-scheduler.py has no equivalent and repeats through the whole day, so

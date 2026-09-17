@@ -157,9 +157,9 @@ Two traps when a local stdio server misbehaves:
   while its `main` module starts fine. Check what actually runs before blaming your
   config — and remember `npx` always launches `bin`.
 
-Verify with a handshake, not with "the process started": `scripts/mcp-probe.py` in this
-bundle runs each declared server, performs `initialize` + `tools/list`, and reports
-stray stdout separately.
+Verify with a handshake, not with "the process started": `scripts/mcp-probe.py` in the
+bundle runs each server declared for Claude Code, performs `initialize` + `tools/list`,
+and reports stray stdout separately.
 
 ## Coding Discipline (Karpathy rules)
 
@@ -290,9 +290,12 @@ between the two without duplicating maintenance:
 - Per-project AGENTS.md inside each project (15–40 lines, links to key files
   + project-specific gotchas). Full rules stay in `CLAUDE.md`.
 
-When you edit a universal block here (file-ops, encoding, error recovery,
-findings, secrets/.env, Windows Task Scheduler), also update the matching
-section in `~/.codex/AGENTS.md`.
+When you edit a universal block here — Findings, Tool Selection Rules, File
+Operations, Declaring MCP servers, Coding Discipline, Test policy, Error
+Recovery, File Encoding, Secrets, Windows Task Scheduler — also update the
+matching section in `~/.codex/AGENTS.md`. That list is `REQUIRED` in the
+bundle's `scripts/check-agents-sync.py`, which fails CI when the two files
+drift; the script is the source, this sentence follows it.
 
 **Do NOT run `codex init`** — it overwrites AGENTS.md without honoring this
 split.

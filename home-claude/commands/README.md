@@ -1,6 +1,6 @@
 # User-level slash commands
 
-Two commands ship here.
+Two slash commands ship here.
 
 `code-review-ext.md` — a thin wrapper that calls the `code-review-external`
 skill and runs your reviewer script. It's a **template**: before first use, edit

@@ -153,6 +153,10 @@ Two traps when a local stdio server misbehaves:
   CLI while its `main` module starts fine. Check what actually runs before
   blaming your config — and remember `npx` always launches `bin`.
 
+Verify with a handshake, not with "the process started": `scripts/mcp-probe.py`
+in the bundle runs each server declared for Claude Code, performs `initialize` +
+`tools/list`, and reports stray stdout separately.
+
 ## Coding Discipline (Karpathy rules)
 
 ### 1. Think Before Coding

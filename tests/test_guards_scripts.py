@@ -41,9 +41,9 @@ def repo(tmp_path: Path) -> Path:
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc",
                                                       "logs", "state", ".env",
                                                       "bundle.local.yaml"))
-    for rel in ("README.md", "INSTALL.md", "CLAUDE.md", "AGENT-INSTRUCTIONS.md",
-                "CHANGELOG.md", "pytest.ini", "requirements.txt",
-                "requirements-dev.txt"):
+    for rel in ("README.md", "INSTALL.md", "CLAUDE.md", "AGENTS.md",
+                "AGENT-INSTRUCTIONS.md", "CHANGELOG.md", "pytest.ini",
+                "requirements.txt", "requirements-dev.txt"):
         src = ROOT / rel
         if src.is_file():
             shutil.copy2(src, dest / rel)
@@ -109,6 +109,44 @@ def test_io_matrix_catches_an_undisclosed_offbox_task(repo: Path):
     r = _run_guard("check-io-matrix.py", repo)
     assert r.returncode == 1, f"a false offbox=nothing went unnoticed:\n{r.stdout}"
     assert "ClaudeHealthcheck" in r.stdout
+
+
+def _edit_matrix_row(repo: Path, task: str, edit) -> None:
+    """Apply `edit(line) -> str` to the privacy-matrix row whose Task column names `task`."""
+    arch = repo / "docs" / "cron-architecture.md"
+    lines = arch.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, l in enumerate(lines) if "Data, cost & publishing per task" in l)
+    idx = next(i for i in range(start, len(lines))
+               if lines[i].startswith("|") and f"`{task}`" in lines[i].split("|")[1])
+    lines[idx] = edit(lines[idx])
+    arch.write_text("\n".join(l for l in lines if l is not None) + "\n", encoding="utf-8")
+
+
+def test_io_matrix_catches_a_row_cut_out_of_the_table(repo: Path):
+    """I25b: deleting a task's row must fail, even when another row still
+    mentions the task in passing — ClaudeMd2PdfSync's row names
+    `ClaudeGitPushAll`, and a search of every cell counted that as its row."""
+    _edit_matrix_row(repo, "ClaudeGitPushAll", lambda line: None)
+    r = _run_guard("check-io-matrix.py", repo)
+    assert r.returncode == 1, f"a deleted matrix row went unnoticed:\n{r.stdout}"
+    assert "ClaudeGitPushAll" in r.stdout
+
+
+@pytest.mark.parametrize("task, cell", [
+    ("ClaudeHealthcheck", "off"),              # an enabled task called off
+    ("ClaudeWikiCompileKB", "on (opt-in)"),    # a disabled task called on
+])
+def test_io_matrix_checks_the_default_state_column(repo: Path, task: str, cell: str):
+    """I24b / F35: the matrix said "on (KB compile off)" for three tasks that ship
+    `enabled: false`, and nothing read the column."""
+    def flip(line: str) -> str:
+        cells = line.split("|")
+        cells[-2] = f" {cell} "
+        return "|".join(cells)
+    _edit_matrix_row(repo, task, flip)
+    r = _run_guard("check-io-matrix.py", repo)
+    assert r.returncode == 1, f"a wrong Default state went unnoticed:\n{r.stdout}"
+    assert task in r.stdout and "Default state" in r.stdout
 
 
 def test_io_matrix_catches_a_missing_bundle_io_header(repo: Path):
@@ -302,3 +340,80 @@ def test_doc_counts_catches_a_task_count_that_drifted(repo: Path):
     reg.write_text("\n".join(lines[:start] + lines[end:]) + "\n", encoding="utf-8")
     r = _run_guard("check-doc-counts.py", repo)
     assert r.returncode == 1, f"a dropped task left the doc counts unchecked:\n{r.stdout}"
+
+
+def test_doc_counts_reads_number_words_past_fifteen(repo: Path):
+    """"sixteen tasks" was not in the word table, so it was skipped, not compared."""
+    readme = repo / "README.md"
+    readme.write_text(readme.read_text(encoding="utf-8")
+                      + "\nThe registry declares sixteen tasks.\n", encoding="utf-8")
+    r = _run_guard("check-doc-counts.py", repo)
+    assert r.returncode == 1, f"a spelled-out task count went unread:\n{r.stdout}"
+    assert "sixteen tasks" in r.stdout
+
+
+@pytest.mark.parametrize("task, edit", [
+    # A task that ships disabled, no longer called off.
+    ("ClaudeWarmWindow", lambda l: l.replace("off by default", "opt-in")),
+    # An enabled task called off by default.
+    ("ClaudeHealthcheck", lambda l: l.replace("morning self-check",
+                                              "morning self-check (off by default)")),
+])
+def test_doc_counts_off_by_default_matches_the_registry_per_row(repo: Path, task, edit):
+    arch = repo / "docs" / "cron-architecture.md"
+    lines = arch.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("| Task | Trigger |"))
+    idx = next(i for i in range(start, len(lines)) if lines[i].startswith(f"| `{task}` |"))
+    lines[idx] = edit(lines[idx])
+    arch.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    r = _run_guard("check-doc-counts.py", repo)
+    assert r.returncode == 1, f"a wrong 'off by default' went unnoticed:\n{r.stdout}"
+    assert task in r.stdout
+
+
+@pytest.mark.parametrize("rel, content, what", [
+    ("home-claude/hooks/new-guard.py", "print('{}')\n", "optional hooks"),
+    ("home-claude/skills/new-skill/SKILL.md", "---\nname: x\n---\n", "skills"),
+    ("home-claude/commands/new-command.md", "---\ndescription: x\n---\n", "slash commands"),
+])
+def test_doc_counts_catches_a_shipped_file_the_docs_do_not_count(repo: Path, rel, content, what):
+    """I27: a hook file was added and three documents kept three different numbers."""
+    target = repo / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    r = _run_guard("check-doc-counts.py", repo)
+    assert r.returncode == 1, f"a new {what} file left the docs' count unchecked:\n{r.stdout}"
+    assert what in r.stdout
+
+
+def test_doc_counts_does_not_count_a_compatibility_shim_as_a_hook(repo: Path):
+    """The definition in shipped_counts(): a file that only runs another hook
+    through runpy (ps1-bom-guard.py) is the old name of a hook, not a new one."""
+    (repo / "home-claude" / "hooks" / "old-name.py").write_text(
+        "import runpy\nrunpy.run_path('bash-guard.py', run_name='__main__')\n",
+        encoding="utf-8")
+    r = _run_guard("check-doc-counts.py", repo)
+    assert r.returncode == 0, f"a shim was counted as a hook:\n{r.stdout}"
+
+
+def test_agents_sync_compares_the_mcp_section(repo: Path):
+    """"Declaring MCP servers" is in both mirrors and was checked by nothing."""
+    agents = repo / "codex" / "AGENTS.md"
+    text = agents.read_text(encoding="utf-8")
+    assert "It stays alive." in text, "fixture rule not found"
+    agents.write_text(text.replace("It stays alive.", "It exits at once."), encoding="utf-8")
+    r = _run_guard("check-agents-sync.py", repo)
+    assert r.returncode == 1, f"a reworded MCP rule went unnoticed:\n{r.stdout}"
+    assert "Declaring MCP servers" in r.stdout
+
+
+def test_agents_sync_holds_the_prose_list_of_universal_sections(repo: Path):
+    """The payload told users six blocks were universal while REQUIRED had nine."""
+    claude = repo / "home-claude" / "CLAUDE.md"
+    text = claude.read_text(encoding="utf-8")
+    assert "Declaring MCP servers, Coding Discipline" in " ".join(text.split())
+    claude.write_text(text.replace("Declaring MCP servers, Coding", "Coding"),
+                      encoding="utf-8")
+    r = _run_guard("check-agents-sync.py", repo)
+    assert r.returncode == 1, f"a shortened universal list went unnoticed:\n{r.stdout}"
+    assert "Codex CLI coexistence" in r.stdout

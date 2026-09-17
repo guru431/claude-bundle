@@ -50,11 +50,13 @@ preserve that discipline.
 │   ├── CLAUDE.md                       global rules ← edit here for tier-1 rule changes
 │   ├── settings.json                   permissions + plugins
 │   ├── settings.example-with-hooks.json  same permissions, hooks wired in
-│   ├── hooks/                          6 opt-in hooks: iptables + bash deny-list,
-│   │                                   md2pdf, .ps1 BOM, prompt secret warning,
-│   │                                   Telegram on a long session's Stop
+│   ├── hooks/                          7 opt-in hooks: iptables + bash deny-list,
+│   │                                   sensitive-path ask, md2pdf, text encoding
+│   │                                   (.ps1/.sh; ps1-bom-guard.py = old name),
+│   │                                   prompt secret warning, Telegram when a
+│   │                                   long task finishes or waits (Notification)
 │   ├── skills/                         3 skill templates (placeholders)
-│   ├── commands/                       1 slash-command wrapper
+│   ├── commands/                       2 slash commands (/wiki is full tier)
 │   ├── wiki/                           empty Karpathy vault skeleton
 │   ├── bin/
 │   │   ├── _run-hidden.vbs             hidden-window Task Scheduler launcher
@@ -63,16 +65,24 @@ preserve that discipline.
 │       ├── hooks/                       session-start/end, pre-compact,
 │       │                                precompact-handoff, untrusted, utils.py
 │       ├── lib/                         sourceable/importable shared code:
-│       │                                secret-scan.sh, secret_shapes.py, dotenv.sh
+│       │                                secret-scan.sh, secret_shapes.py, dotenv.sh,
+│       │                                runtime.sh (which python / bash), env_names.py
+│       │                                (generated: check-env-ref.py --emit-names)
 │       ├── wiki/                        flush, compile-sessions, compile-kb,
-│       │                                build-index, lint, conflict-resolve, pipeline
+│       │                                build-index, lint, conflict-resolve, grep,
+│       │                                pipeline
 │       ├── prompts/                     the LLM prompts those phases send
-│       ├── tests/                       shell tests for the push guards
-│       ├── admin/                       sync-tasks, save-cred (+ .cmd wrappers)
+│       ├── tests/                       shell tests: push guards, runtime.sh,
+│       │                                telegram-send.sh
+│       ├── admin/                       sync-tasks, save-cred (+ .cmd wrappers),
+│       │                                lib/registry-parse.ps1 (the Windows registry reader)
 │       ├── registry.yaml                the 17 scheduled tasks — source of truth
 │       ├── runs.py                      Semantic Artifact SLO ledger
-│       ├── bundle-status.py             read-only health snapshot
+│       ├── bundle-status.py             read-only health snapshot; --hooks hook doctor
 │       ├── schtasks_status.py           Task Scheduler status parser
+│       ├── monitor_checks.py            what both task monitors share: registry
+│       │                                parser, port probe, LLM-chain report
+│       ├── claude-task-monitor.py       the POSIX task monitor
 │       ├── memory-update.py, log-retention.py, md2pdf-sync.py,
 │       ├── test-sweep.py, agents-md-sync-check.py, llm-call.py
 │       └── *.sh                         healthcheck, task-monitor, warm-window,
@@ -84,8 +94,13 @@ preserve that discipline.
 │   ├── claude-switch.ps1               env-driven provider switcher
 │   ├── get-key.ps1                     reads one key from .env for apiKeyHelper
 │   ├── install.ps1                     guided full/lite installer (Windows)
-│   ├── install-lite.sh                 lite installer (macOS/Linux)
+│   ├── install.sh, uninstall.sh        the same for macOS/Linux (lite, or
+│   │                                   --profile full; units with --install-units)
+│   ├── install-lite.sh                 = install.sh --profile lite
 │   ├── uninstall.ps1                   remove a deployment + its tasks
+│   ├── lib/                            bundle_install.py (install.sh's settings
+│   │                                   merge, manifest, diff, uninstall) and
+│   │                                   dotenv.ps1 (the one PowerShell .env parser)
 │   ├── gen-scheduler.py                systemd/launchd units from registry.yaml
 │   ├── bootstrap-registry.ps1          fill registry.yaml placeholders
 │   ├── self-test.ps1                   offline sanity check (one command)
@@ -97,8 +112,8 @@ preserve that discipline.
 │   ├── llm-providers.example.env       env template (committed; no values)
 │   └── bundle.local.example.yaml       machine-local manifest template (project map + privacy policy)
 ├── tests/                              pytest suite (offline, mock provider):
-│                                       pipeline, guards, agents-md-sync,
-│                                       test-sweep, schtasks-status, page names
+│                                       pipeline, hooks, fail-closed guards, guard
+│                                       scripts, git hooks, installers, monitors, …
 ├── VERSION, requirements.txt, requirements-dev.txt  semver stamp + runtime + test deps
 ├── pytest.ini                          the reference impl of the test policy
 ├── .githooks/{pre-commit,pre-merge-commit,commit-msg,pre-push}  secret guards (git config core.hooksPath .githooks)
@@ -138,7 +153,7 @@ imports it, and it is where four separate concerns live: the machine-local
 manifest (`~/.claude/bundle.local.yaml`) and the `project_allowed()` /
 `working_copy_allowed()` privacy gate; the JSON state ledger with file
 locking, quarantine and per-source attempt counters; wiki page I/O
-(frontmatter parse/dump, `source_hash` dedup, project-name slugging,
+(frontmatter parse/dump, `sources:` provenance, project-name slugging,
 reserved-name checks); and the LLM layer — the `PROVIDERS` table,
 `llm_call()` with its cross-process queue and fallback chain. A change
 here reaches all 17 tasks at once; that is the reason `tests/` mostly
@@ -156,16 +171,22 @@ fail-*open*, that test is the thing that must not be "fixed".
 (`ClaudeWikiPipeline`, the DEFAULT task) runs `flush → compile → index` in one
 process, each phase a subprocess whose log folds into the pipeline log,
 `--dry-run` / `--no-llm` passed through to all of them. The three phases also
-exist as separate tasks, shipping `enabled: false`. Sessions enter as JSONL
-tails dropped by the `session-*` hooks into `wiki/daily/.pending/`.
+exist as separate tasks, shipping `enabled: false`. Sessions enter as the JSONL
+transcripts under `~/.claude/projects/`, which flush reads itself; the opt-in
+`session-end` / `pre-compact` hooks add tails as drafts in `wiki/daily/.pending/`.
 
-What makes a re-run idempotent is the state ledger's PER-SOURCE MARKERS, each
-carrying a fingerprint of the content the run actually read: `<jsonl>@<size>`
-for flush, `DATE@fp` and `DATE#project@fp` for compile. (This paragraph used to
-credit `source_hash` — a function no shipped script calls, as
-`docs/wiki-method.md` says in as many words. A maintainer looking for the
-protection would have looked in the wrong place.) `compile-kb` is a separate,
-off-by-default source and is deliberately *not* in the chain.
+What makes a re-run idempotent is the state ledger's (`wiki/.processed.json`)
+PER-SOURCE MARKERS, one per source, each recording what the run actually read:
+`project/name.jsonl@offset` for a transcript (the byte offset flush has read up
+to, so the next night reads only the delta), `project/rel@fp` for feedback,
+plans and incidents, and for compile `DATE@fp` over the whole daily plus
+`DATE#project@fp` over ONE project's section — only the sections without a
+marker are sent again. (This paragraph used to credit `source_hash` — a function
+no shipped script calls. A maintainer looking for the protection would have
+looked in the wrong place.) The ledger is written under an OS file lock
+(`_file_lock(mode="os")`), falling back to an exclusive-create lock file where
+the filesystem cannot lock. `compile-kb` is a separate, off-by-default source
+and is deliberately *not* in the chain.
 
 **`registry.yaml` is the only declaration of a scheduled task**, and
 three things are checked against it: `check-registry.py` (field/kind/
@@ -190,7 +211,7 @@ second copy of a rule, generate it or source it; do not paste it.
 
 | Change | Also update |
 |---|---|
-| New rule in `home-claude/CLAUDE.md` | If universal — also mirror into `codex/AGENTS.md`. The universal set is not prose here: it is `REQUIRED` in [`scripts/check-agents-sync.py`](scripts/check-agents-sync.py) (Findings, File Operations, Tool Selection Rules, Coding Discipline, Test policy, Secrets, Windows Task Scheduler, Error Recovery, File Encoding), and `COMPARED` in the same file is the subset whose wording must match rather than merely exist. This table used to name six of the nine, which is how two sections stayed unchecked in both directions. Claude-specific rules (slash commands, hooks, skills, plugin workflow) stay in `home-claude/CLAUDE.md` only. |
+| New rule in `home-claude/CLAUDE.md` | If universal — also mirror into `codex/AGENTS.md`. The universal set is not prose here: it is `REQUIRED` in [`scripts/check-agents-sync.py`](scripts/check-agents-sync.py) (Findings, File Operations, Tool Selection Rules, Declaring MCP servers, Coding Discipline, Test policy, Secrets, Windows Task Scheduler, Error Recovery, File Encoding), and `COMPARED` in the same file is the subset whose wording must match rather than merely exist. This table used to name six of them, which is how two sections stayed unchecked in both directions — and the MCP section, present in both files, was checked by nothing. Claude-specific rules (slash commands, hooks, skills, plugin workflow) stay in `home-claude/CLAUDE.md` only. |
 | New skill in `home-claude/skills/` | Update `home-claude/skills/README.md`. If the skill ships a slash command, also add it to `home-claude/commands/`. |
 | New hook in `home-claude/hooks/` | Update `home-claude/hooks/README.md`. Update `home-claude/settings.example-with-hooks.json` to show how to wire it. Do NOT add it to the default `home-claude/settings.json` — hooks are opt-in. |
 | New cron task in `home-claude/cron/registry.yaml` | The script itself goes under `home-claude/cron/<name>.{sh,py}`. Document the task briefly in `README.md` and `docs/cron-architecture.md` (the table of shipped tasks — keep its count in sync). |
@@ -340,7 +361,7 @@ Setup once: `pip install -r requirements.txt -r requirements-dev.txt`
 | Windows offline check (JSON/YAML/hooks/placeholders) | `powershell -File scripts/self-test.ps1` |
 | PowerShell parse-check | see the `powershell` job in `.github/workflows/ci.yml` |
 | Wiki pipeline end-to-end, spends nothing | `WIKI_LLM_PROVIDER=mock python home-claude/cron/wiki/wiki-pipeline.py --dry-run` |
-| The two shell tests of the push guards (by hand) | `bash home-claude/cron/tests/test_push_repo.sh`, `bash home-claude/cron/tests/test_guard_protected.sh` |
+| The shell tests — push guards, `runtime.sh`, `telegram-send.sh` (by hand, as CI runs them) | `for t in home-claude/cron/tests/test_*.sh; do bash "$t"; done` |
 
 `pytest.ini` is deliberately the reference implementation of the test
 policy the bundle ships (`home-claude/CLAUDE.md` § test policy): a bare

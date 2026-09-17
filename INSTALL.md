@@ -128,17 +128,20 @@ one is offered, otherwise a direct interpreter path, never `npx -y` / `uv run`).
 
 ### 4. (Optional) Wire the hooks
 
-The default `settings.json` enables NO hook. `home-claude/hooks/` ships five
-you can merge in from `home-claude/settings.example-with-hooks.json`, and
-`hooks/README.md` says which tier each one needs:
+The default `settings.json` enables NO hook. `home-claude/hooks/` ships seven
+hooks (plus `ps1-bom-guard.py`, the old name of `text-encoding-guard.py`); the
+first six are wired in `home-claude/settings.example-with-hooks.json`, ready to
+merge, and `hooks/README.md` says which tier each one needs:
 
 | Hook | Event | What it does |
 |---|---|---|
-| `block-iptables-save-to-rules.py` | PreToolUse Bash | blocks the common `iptables-save > rules.v4` spellings |
-| `bash-guard.py` | PreToolUse Bash | a rule TABLE (`bash-deny.yaml`) — force-push to main, `rm -rf /`, printing a `.env`, `--no-verify` |
+| `bash-guard.py` | PreToolUse Bash | a rule TABLE (`bash-deny.yaml`) — `iptables-save` into the live rules, force-push to main, `rm -rf /`, printing a `.env`, `--no-verify` |
+| `sensitive-path-guard.py` | PreToolUse Read/Write/Edit | asks before a file tool touches a `.env`, a private key or another credential file (full tier — needs `cron/lib/`) |
 | `md2pdf-on-edit.py` | PostToolUse Write/Edit | regenerates `foo.pdf` when `foo.md` changes |
-| `ps1-bom-guard.py` | PostToolUse Write/Edit | adds the UTF-8 BOM a non-ASCII `.ps1` needs under PS 5.1 |
+| `text-encoding-guard.py` | PostToolUse Write/Edit | adds the UTF-8 BOM a non-ASCII `.ps1` needs under PS 5.1; takes a BOM and CRLF out of a `.sh` |
 | `prompt-secret-warn.py` | UserPromptSubmit | warns the model when your prompt carries a credential (full tier — needs `cron/lib/`) |
+| `session-telegram.py` | Notification | one Telegram line when a task longer than `CLAUDE_STOP_ALERT_MINUTES` finishes or waits for a permission (full tier) |
+| `block-iptables-save-to-rules.py` | PreToolUse Bash | the `iptables-save > rules.v4` rule alone. Not in the example — `bash-guard.py` carries the same rule; keep it only on a machine without PyYAML |
 
 Take only the ones your tier supports; the table in `hooks/README.md` marks
 which need `~/.claude/cron/`.
@@ -150,17 +153,23 @@ which need `~/.claude/cron/`.
 (Edge / Chrome / Chromium) it prints through headlessly;
 `scripts/self-test.ps1` warns if either is absent.
 
-**Take only the `PreToolUse` and `PostToolUse` entries here.** That file is
-a full-tier reference: its `SessionStart`, `SessionEnd`, and `PreCompact`
-entries point into `~/.claude/cron/`, which doesn't exist until Tier 2
-step 8 — merge them now and every session start fires a hook against a
-missing file. They're wired later, in step 8. (Lite skips this step
-entirely: both hooks are Python scripts.)
+**Take only the three Tier 1 entries here** — `bash-guard.py`,
+`md2pdf-on-edit.py` and `text-encoding-guard.py`. That file is a full-tier
+reference: `sensitive-path-guard.py`, `prompt-secret-warn.py` and
+`session-telegram.py` need `~/.claude/cron/`, and the `SessionStart`,
+`SessionEnd` and `PreCompact` entries run scripts out of it — it doesn't exist
+until Tier 2 step 8. Merged now, the first three do nothing and the session
+hooks fail on every event. They're wired later, in step 8. (Lite skips this
+step entirely: every hook is a Python script.)
 
-Replace `<user>` with your Windows username and `<python-exe>` with the
-absolute path to a real Python interpreter (`where python`) — it's the
-executable Claude Code spawns, so a placeholder or an env var won't do.
-See `home-claude/hooks/README.md` for the per-entry tier table.
+Replace `<python-exe>` with the absolute path to a real Python interpreter
+(`where python`) — it's the executable Claude Code spawns, so a placeholder or
+an env var won't do — and `<claude-home>` with your config root
+(`C:/Users/<you>/.claude`). See `home-claude/hooks/README.md` for the
+per-entry tier table. To check what you merged:
+`python <path-to-bundle>/home-claude/cron/bundle-status.py --hooks` parses and
+resolves every hook command in your `settings.json`; `--smoke` also runs each
+of the bundle's hooks once.
 
 ### 5. (Optional) Adapt the skill templates
 
@@ -322,9 +331,13 @@ out of the box), and — if you opt in — the `SessionStart` / `SessionEnd`
 `settings.json`. To turn them on, merge the `SessionStart`, `SessionEnd`,
 and `PreCompact` entries from `home-claude/settings.example-with-hooks.json`
 into your `settings.json` (replace `<python-exe>` with a real interpreter
-path and `<user>` with your username). Only do this **after** the copy
-above — they run scripts out of `~/.claude/cron/hooks/`. They can only be
-registered through `settings.json`, never via cron.
+path and `<claude-home>` with your config root) — and, now that `cron/` is in
+place, the other full-tier entries if you want them: `sensitive-path-guard.py`,
+`prompt-secret-warn.py`, `session-telegram.py`. Only do this **after** the copy
+above — they run scripts out of `~/.claude/cron/`. They can only be registered
+through `settings.json`, never via cron. Then
+`python ~/.claude/cron/bundle-status.py --hooks --smoke` checks every hook
+command in it and runs the bundle's own hooks once.
 
 ### 9. Create `.env` from the example
 
@@ -712,12 +725,13 @@ The pipeline only writes pages from sessions it knows about. Check:
   network, run a script with `--dry-run` (alias `--no-llm`), e.g.
   `python ~/.claude/cron/wiki/wiki-flush-sessions.py --dry-run`
 
-### `block-iptables-save` blocks a legitimate command
-Edit `~/.claude/hooks/block-iptables-save-to-rules.py` and add an
-exception, or delete the hook from `settings.json`. The hook exists
-because regenerating persisted iptables from a live save is a common
-source of silent firewall drift — but if your workflow really requires
-it, the hook is wrong for you.
+### The iptables-save rule blocks a legitimate command
+The rule is the first entry of `~/.claude/hooks/bash-deny.yaml`
+(`bash-guard.py`), and the whole of `block-iptables-save-to-rules.py` if you
+kept that older hook: delete the entry from the YAML, or remove the hook from
+`settings.json`. The rule exists because regenerating persisted iptables from
+a live save is a common source of silent firewall drift — but if your workflow
+really requires it, the rule is wrong for you.
 
 ---
 

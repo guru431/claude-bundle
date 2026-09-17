@@ -12,7 +12,9 @@ So: for each required universal heading (allowlist below), verify a matching
 heading-wording differences), AND that the section bodies still match once
 normalized. Normalization absorbs the differences that are known-cosmetic —
 whitespace, list-marker style, and the tool-specific words each file must use
-for itself. Anything left is real drift. Exit 1 listing it. Stdlib only.
+for itself. Anything left is real drift. The two places prose names the
+universal set for a human (PROSE_LISTS) must name every REQUIRED section too.
+Exit 1 listing it. Stdlib only.
 """
 from __future__ import annotations
 
@@ -28,16 +30,18 @@ AGENTS_MD = ROOT / "codex" / "AGENTS.md"
 # Substrings tolerate the intentional heading differences, e.g.
 # "(Windows + VS Code + Git Bash)" vs "(Windows + Git Bash)".
 #
-# CLAUDE.md § "What lives where" calls six blocks universal: file-ops, encoding,
-# error recovery, findings, secrets and Task Scheduler. Two of them were absent
-# from this list and therefore unchecked in either direction — "Error Recovery"
-# and "File Encoding" are H3 under `## Working methodology` in CLAUDE.md but
-# standalone H2 in AGENTS.md, and sections() only ever split on `## `. They are
-# in now, because sections() indexes H2 AND H3.
+# THIS list is the universal set; home-claude/CLAUDE.md § Codex CLI coexistence
+# and the root CLAUDE.md's "What lives where" table name it after this, not the
+# other way round. Both prose lists used to be shorter than the code: "Error
+# Recovery" and "File Encoding" were unchecked in either direction (H3 under
+# `## Working methodology` in CLAUDE.md, standalone H2 in AGENTS.md, while
+# sections() split on `## ` only), and "Declaring MCP servers" sat in both files
+# with nothing comparing them. sections() indexes H2 AND H3 now.
 REQUIRED = [
     "Findings",
     "File Operations",
     "Tool Selection Rules",
+    "Declaring MCP servers",
     "Coding Discipline",
     "Test policy",
     "Secrets",
@@ -57,10 +61,20 @@ REQUIRED = [
 # different home directory in each.
 COMPARED = [
     "Findings",
+    "Declaring MCP servers",
     "Coding Discipline",
     "Test policy",
     "Error Recovery",
     "File Encoding",
+]
+
+# The prose that names the universal set for a human: the payload's instruction
+# to keep ~/.codex/AGENTS.md in step, and this repo's "when changing X, also
+# touch Y" table. Both are held to REQUIRED, since both had already fallen behind
+# it once.
+PROSE_LISTS = [
+    (CLAUDE_MD, "Codex CLI coexistence"),
+    (ROOT / "CLAUDE.md", "What lives where"),
 ]
 
 # Each file must name its own tool, its own rules file and its own home. Folding
@@ -188,6 +202,19 @@ def check() -> int:
                 f"universal section '{req}' has drifted: "
                 f"CLAUDE.md '{c[0]}' and AGENTS.md '{a[0]}' no longer say the "
                 f"same thing (compare them and update both)")
+
+    for path, heading in PROSE_LISTS:
+        rel = path.relative_to(ROOT).as_posix()
+        found = find(sections(path, subtree=True), heading) if path.is_file() else None
+        if found is None:
+            problems.append(f"{rel}: no '{heading}' section, where the universal "
+                            f"set is named for a human")
+            continue
+        prose = " ".join(found[1].split())  # a name may wrap across lines
+        for req in REQUIRED:
+            if req not in prose:
+                problems.append(f"{rel} § {heading} does not name the universal "
+                                f"section '{req}' — its list has fallen behind REQUIRED")
 
     if problems:
         print("AGENTS/CLAUDE mirror drift:")

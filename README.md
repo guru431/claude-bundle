@@ -44,12 +44,13 @@ claude-bundle/
 │   ├── settings.json                   permissions + plugins + language
 │   ├── settings.example-with-hooks.json reference wiring for every shipped hook
 │   ├── hooks/                          user-level hooks (all opt-in)
-│   │   ├── block-iptables-save-to-rules.py
 │   │   ├── bash-guard.py + bash-deny.yaml  declarative deny/ask rule table
+│   │   ├── block-iptables-save-to-rules.py the iptables rule alone (bash-guard carries it)
+│   │   ├── sensitive-path-guard.py     ask before Read/Write/Edit of .env/keys
 │   │   ├── md2pdf-on-edit.py
-│   │   ├── ps1-bom-guard.py            keep the BOM PS 5.1 needs
+│   │   ├── text-encoding-guard.py      .ps1 BOM / .sh no-BOM+LF (ps1-bom-guard.py = old name)
 │   │   ├── prompt-secret-warn.py       flag a credential pasted into a prompt
-│   │   ├── session-telegram.py         Telegram when a LONG session ends/waits
+│   │   ├── session-telegram.py         Telegram when a LONG task finishes/waits
 │   │   └── README.md
 │   ├── skills/                         user-level skill templates
 │   │   ├── code-review-external/SKILL.md
@@ -58,7 +59,7 @@ claude-bundle/
 │   │   └── README.md
 │   ├── commands/                       user-level slash commands
 │   │   ├── code-review-ext.md
-│   │   └── wiki.md                     /wiki <words> — search the vault, no LLM
+│   │   └── wiki.md                     /wiki <words> — search the vault, no LLM (full tier)
 │   ├── wiki/                           empty Karpathy-style vault skeleton
 │   │   ├── index.md
 │   │   ├── projects/<your-slugs>/      atomic pages (incident/solution/...)
@@ -71,23 +72,30 @@ claude-bundle/
 │       ├── hooks/utils.py              shared LLM_call, JSONL parsing, wiki utils
 │       ├── lib/                         sourceable/importable shared code:
 │       │                                secret-scan.sh + secret_shapes.py (one
-│       │                                credential table for all three detectors),
-│       │                                dotenv.sh (one .env parser for the shell tasks)
+│       │                                credential table for every detector),
+│       │                                dotenv.sh (one .env parser for the shell tasks),
+│       │                                runtime.sh (which python / bash the shell tasks run),
+│       │                                env_names.py (the .env template's names, generated)
 │       ├── hooks/session-{start,end}.py  inject wiki context / dump session
 │       ├── hooks/pre-compact.py        LLM-summarized handoff before compaction
 │       ├── hooks/precompact-handoff.py background handoff writer (spawned by pre-compact)
-│       ├── llm-call.py                 CLI wrapper for utils.py::llm_call
+│       ├── llm-call.py                 CLI wrapper for utils.py::llm_call_ex; the exit code
+│       │                               names the failure (0 ok, 1 deterministic, 2 usage,
+│       │                               3 transient, 4 config)
 │       ├── telegram-send.sh            Bot API helper (env-driven)
 │       ├── prompts/                    LLM prompts (flush/compile/healthcheck)
-│       ├── wiki/wiki-*.py              7 scripts (flush/compile-sessions/compile-kb/build-index/lint/conflict-resolve + pipeline orchestrator)
-│       ├── bundle-status.py            on-demand full-profile health report
+│       ├── wiki/wiki-*.py              flush, compile-sessions, compile-kb, build-index, lint, conflict-resolve, grep + the pipeline orchestrator
+│       ├── bundle-status.py            on-demand full-profile health report; --hooks hook doctor
 │       ├── runs.py                      Semantic Artifact SLO ledger (per-year slices)
 │       ├── schtasks_status.py           Task Scheduler status parser
+│       ├── monitor_checks.py            what both task monitors share: registry parser,
+│       │                                port probe, LLM-chain report
 │       ├── test-sweep.py                run every project's suite (off by default)
 │       ├── agents-md-sync-check.py      reconcile AGENTS.md with CLAUDE.md (off by default)
-│       ├── log-retention.py            prune old cron/logs/*.{log,jsonl}
+│       ├── log-retention.py            prune old cron/logs/*.{log,jsonl,diff}
 │       ├── md2pdf-sync.py              regenerate stale paired PDFs (off by default)
 │       ├── claude-task-monitor.sh      alert on failed Task Scheduler jobs
+│       ├── claude-task-monitor.py      the same for systemd --user units / launchd agents (off by default)
 │       ├── git-push-all.sh             auto-push project repos
 │       ├── claude-healthcheck.sh       morning self-check
 │       ├── claude-warm-window.sh       ping the Claude 5h window (off by default)
@@ -95,7 +103,8 @@ claude-bundle/
 │       ├── registry.yaml               17 tasks declared here
 │       └── admin/                      idempotent sync + DPAPI cred saver
 │           ├── sync.cmd, sync-tasks.ps1
-│           └── save-cred.cmd, save-cred.ps1
+│           ├── save-cred.cmd, save-cred.ps1
+│           └── lib/registry-parse.ps1  the one Windows reader of registry.yaml
 │
 ├── codex/
 │   ├── AGENTS.md                      universal mirror for Codex CLI (~/.codex/)
@@ -106,7 +115,10 @@ claude-bundle/
 │   ├── get-key.ps1                   print one key from .env (for -KeyHelper)
 │   ├── install.ps1                    guided full/lite installer (Windows); -Diff previews an upgrade
 │   ├── uninstall.ps1                  remove what install.ps1 wrote (per manifest)
-│   ├── install-lite.sh               lite installer (macOS/Linux)
+│   ├── install.sh, uninstall.sh       the same pair for macOS/Linux (lite; --profile full)
+│   ├── install-lite.sh               = install.sh --profile lite
+│   ├── lib/bundle_install.py         install.sh's settings merge, manifest, diff, uninstall
+│   ├── lib/dotenv.ps1                the one PowerShell .env parser (also deployed to cron/lib/)
 │   ├── gen-scheduler.py              emit systemd/launchd units from registry.yaml
 │   ├── self-test.ps1                  one-command offline sanity check
 │   ├── check-doc-counts.py           CI guard: docs match the registry task count
@@ -116,7 +128,8 @@ claude-bundle/
 │   ├── check-io-matrix.py            CI guard: the privacy matrix matches each
 │   │                                 task's declared `# bundle-io:` line
 │   ├── mcp-probe.py                  verify MCP servers by handshake; --check-wrappers audits declarations
-│   ├── enable-guard.sh / .ps1        activate the pre-commit + pre-push secret-guard
+│   ├── enable-guard.sh / .ps1        activate the four git secret guards (pre-commit,
+│   │                                 pre-merge-commit, commit-msg, pre-push)
 │   └── bootstrap-registry.ps1         fill registry.yaml placeholders + path policy
 │
 ├── config/
@@ -129,7 +142,7 @@ claude-bundle/
 ├── pytest.ini                         the reference implementation of the test policy
 ├── VERSION, requirements.txt, requirements-dev.txt
 │
-├── .githooks/{pre-commit,commit-msg,pre-push}  secret guards (activate: git config core.hooksPath .githooks)
+├── .githooks/{pre-commit,pre-merge-commit,commit-msg,pre-push}  secret guards (activate: git config core.hooksPath .githooks)
 ├── .github/workflows/ci.yml           compileall + JSON/YAML validity + secret-guard + doc-count/registry/env/mirror/io-matrix guards + shellcheck (every shell script) + pytest + PowerShell parse/self-test CI
 │
 └── docs/
@@ -138,6 +151,7 @@ claude-bundle/
     ├── mcp-servers.md                 declaring MCP servers: HTTP / direct path, never npx -y
     ├── llm-routing.md                 claude-switch vs utils.py::llm_call
     ├── decisions.md                   why the bundle does NOT do certain things
+    ├── examples/                      a synthetic daily → page → index sample
     └── config-reference.md            generated index of every env var it reads
 ```
 
@@ -149,7 +163,7 @@ claude-bundle/
 |---|---|
 | `CLAUDE.md` | Karpathy coding discipline (Think/Simplicity/Surgical/Goal-driven), tool-selection rules (Glob/Grep/Read/Edit over Bash), Windows file-encoding rules (BOM for `.ps1`, no BOM for `.sh`), Findings pattern, Superpowers workflow, Codex coexistence note |
 | `settings.json` | Permissions allow-list, `enabledPlugins` for `superpowers` and `context7`, `language: ru` (change to your preference) |
-| `hooks/*.py` | Optional: block dangerous `iptables-save`, regenerate `.pdf` when paired `.md` is edited |
+| `hooks/*.py` | Optional: a deny/ask rule table for Bash commands, `.ps1`/`.sh` encoding fixes, regenerate `.pdf` when the paired `.md` is edited; with the full tier also an ask before a credential file is read or written, a warning on a pasted credential, and a Telegram line when a long task finishes |
 | `skills/*/SKILL.md` | Optional: `code-review-external` template (second-opinion review), `code-selfcheck` template (check your diff against your own anti-pattern catalog), `personal-voice` template (write text in your voice by register) |
 | `commands/code-review-ext.md` | Optional: `/code-review-ext` slash wrapper |
 
@@ -201,7 +215,7 @@ Which projects the pipeline may read is one declarative policy in
 honored by **every** source (JSONL, memory, plans, incidents) and
 previewable with `--dry-run` before a single token is spent.
 `cron/bundle-status.py` prints a read-only health snapshot of the whole
-deployment.
+deployment; `--hooks` checks the hooks wired in your `settings.json`.
 
 ### Companion artifacts
 
@@ -225,9 +239,10 @@ deployment.
 ## Quick start
 
 **Automated:** `scripts/install.ps1` (Windows — guided lite or full) or
-`scripts/install-lite.sh` (macOS/Linux — lite). Both stamp
-`~/.claude/.bundle-version` and run the self-test. The manual steps below
-are the fallback / reference.
+`bash scripts/install.sh` (macOS/Linux — lite, or `--profile full`). Both stamp
+`.bundle-version` and check what they installed. The manual steps below
+are the fallback / reference. Updating an existing deployment:
+[UPGRADING.md](UPGRADING.md).
 
 `install.ps1` takes two roots: **`-ClaudeHome`** (default `~/.claude` —
 config, and the only place Claude Code reads it from) and
@@ -332,12 +347,12 @@ status).
 - Telegram bot + chat_id (optional, for alerts — the pipeline runs fine
   without it, failures just go to the logs)
 
-Linux / macOS **lite** tier is fully supported via
-`scripts/install-lite.sh` (config only, OS-agnostic). For the **full**
-tier, `scripts/gen-scheduler.py` emits systemd `.timer`/`.service` units
-(Linux) or launchd `.plist` files (macOS) from the same OS-neutral
-`registry.yaml` — the Python and Bash parts of the pipeline are
-portable; only the Windows Task Scheduler layer is replaced.
+Linux / macOS: `bash scripts/install.sh` installs the **lite** tier (config
+only, OS-agnostic), and `bash scripts/install.sh --profile full --install-units`
+the **full** one. The units come from `scripts/gen-scheduler.py`, which emits
+systemd `.timer`/`.service` units (Linux) or launchd `.plist` files (macOS)
+from the same OS-neutral `registry.yaml` — the Python and Bash parts of the
+pipeline are portable; only the Windows Task Scheduler layer is replaced.
 
 ## Troubleshooting — common first failures
 
@@ -348,8 +363,11 @@ portable; only the Windows Task Scheduler layer is replaced.
 | `self-test.ps1` warns "Python not found" / skips checks | Python not on PATH | install Python 3.10+, or set `$env:CLAUDE_HOOK_PYTHON` |
 | Password-mode task exits 127, no log | `script:` on a mapped drive (absent in session 0) | use a UNC `\\host\share\...` or local `C:\...` path; `bootstrap-registry.ps1` warns about this |
 | All wiki pages land in `projects/main` | headings that yield no ASCII slug (e.g. all-Cyrillic names) fall back to `main` — an empty `known_projects` alone won't do it, distinct ASCII headings still split into distinct folders | populate `known_projects:` in `~/.claude/bundle.local.yaml`; `wiki-lint` flags this as "project-collapse" |
+| A hook fails on every tool call or session start | a `<placeholder>` left in its command, a script that is not there, or — on Windows — no Git Bash to run the quoted command form | `python ~/.claude/cron/bundle-status.py --hooks --smoke` names the broken entry |
 
-More detail in [`INSTALL.md` § Troubleshooting](INSTALL.md).
+More detail in [`INSTALL.md` § Troubleshooting](INSTALL.md); which log or state
+file answers which question is in
+[`docs/cron-architecture.md` § Where to look when something is wrong](docs/cron-architecture.md#where-to-look-when-something-is-wrong).
 
 ## License
 

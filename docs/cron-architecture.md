@@ -300,7 +300,8 @@ this table reflects it.
 | Task | Sends data off-box (to whom) | Spends money | Publishes / pushes | Default state |
 |---|---|---|---|---|
 | `ClaudeWikiPipeline` (the default nightly run — flush → compile → index in one process) | session/daily-log text of allowed projects → your LLM provider. This is the same payload as the two phase tasks below, because it IS those phases. Plus two Telegram Bot API lines of its own: a failure alert, and on the last night of a dated `dry_run_until` window a preview summary naming the projects, the payload size and the provider | yes (PAYG tokens) | no | on |
-| Wiki flush + compile (`ClaudeWikiFlush`, `ClaudeWikiCompileSessions`, `ClaudeWikiCompileKB`) | session/source text of allowed projects → your LLM provider (DeepSeek / OpenCode Go). Plans are excluded unless `collect_plans: true` | yes (PAYG tokens) | no | on (KB compile off) |
+| `ClaudeWikiFlush`, `ClaudeWikiCompileSessions` (the pipeline's phases, on timers of their own) | session/source text, then the daily-log sections, of allowed projects → your LLM provider. Plans are excluded unless `collect_plans: true` | yes (PAYG tokens) | no | off — `ClaudeWikiPipeline` runs these phases instead |
+| `ClaudeWikiCompileKB` | the text of your KB sources (`kb_sources/`, or `KB_SOURCE_DIR`) → your LLM provider. They belong to no project, so the project policy does not apply to them | yes (PAYG tokens) | no | off (opt-in) |
 | `ClaudeMemoryUpdate` | your user messages (up to ~40 KB/night) + a slice of `~/.claude/memory/` → your LLM provider. With `MEMORY_CROSS_NOTES=1`, a **second** call on top of that, carrying messages from two or more projects at once | yes (PAYG tokens) | no | on (cross-notes off) |
 | `ClaudeHealthcheck` | host metrics → your LLM provider (see below) | yes (PAYG tokens) | no | on |
 | `ClaudeGitPushAll` | your git remotes | no | yes (`git push`) | off (opt-in) |

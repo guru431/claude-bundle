@@ -11,9 +11,13 @@ Checks:
   1. task count / disabled count      (registry.yaml)
   2. task names in the schedule table (registry.yaml)
   3. per-task trigger times           (registry.yaml)
-  4. disabled tasks disclosed as off  (registry.yaml)
+  4. "off by default" in the schedule table on exactly the disabled tasks
+                                      (registry.yaml; the privacy matrix's own
+                                      Default state column is check-io-matrix.py's)
   5. LLM provider chain + default     (utils.py — the code, not its docstring)
   6. layout blocks list every top-level directory (CLAUDE.md, README.md)
+  7. how many hooks, session hooks, skills and slash commands the docs say ship
+                                      (the files under home-claude/ — see SHIPPED)
 
 Deterministic, no LLM and no third-party deps: PyYAML when present, else a
 small line state machine. The name is historical — it started as a count check.
@@ -46,6 +50,9 @@ WORD_NUM = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
     "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    # Past fifteen too: the registry has seventeen tasks, and a number word
+    # missing from this table is not a mismatch — it is silently skipped.
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
 }
 
 # A number (digits OR a spelled-out word like "twelve") followed — within a
@@ -126,13 +133,13 @@ def registry_task_names() -> set[str]:
         return names
 
 
-def arch_table_task_names(text: str) -> set[str]:
-    """Backtick-wrapped `Claude…` names from the ONE main task table in
+def arch_table_rows(text: str) -> list[tuple[int, str, str]]:
+    """(line number, task name, row) for the ONE main task table in
     docs/cron-architecture.md (the `| Task | Trigger | … |` table). Scoped to
     that table so prose mentions of task names elsewhere don't count."""
-    names: set[str] = set()
+    rows: list[tuple[int, str, str]] = []
     in_table = False
-    for line in text.splitlines():
+    for i, line in enumerate(text.splitlines(), 1):
         if re.match(r"^\|\s*Task\s*\|\s*Trigger\s*\|", line):
             in_table = True
             continue
@@ -144,8 +151,13 @@ def arch_table_task_names(text: str) -> set[str]:
             first_cell = line.split("|")[1] if "|" in line else ""
             m = re.search(r"`(Claude\w+)`", first_cell)
             if m:
-                names.add(m.group(1))
-    return names
+                rows.append((i, m.group(1), line))
+    return rows
+
+
+def arch_table_task_names(text: str) -> set[str]:
+    """The task names of that table."""
+    return {name for _, name, _ in arch_table_rows(text)}
 
 
 def _line(text: str, pos: int) -> int:
@@ -156,10 +168,8 @@ def _line(text: str, pos: int) -> int:
 # historical fact, not a current claim — comparing it to today's registry
 # manufactures findings. Same idea as excluding CHANGELOG.md from DOCS.
 HISTORY_RE = re.compile(r"(?i)\b(was|were|used to|previously|until|before|since)\b")
-# Wording that already tells the reader a task does not run on its own. A bare
-# "off" counts: the checks below only read TABLE ROWS, where the docs state the
-# default in a column ("off", "off (opt-in)") rather than in a full sentence.
-DISCLOSED_OFF_RE = re.compile(r"(?i)\boff\b|disabled|opt-in|not enabled")
+# How a row of the task table says a task does not run on its own.
+OFF_BY_DEFAULT_RE = re.compile(r"(?i)\b(?:off|disabled) by default\b")
 
 
 def check_triggers(problems: list[str], tasks: list[dict]) -> None:
@@ -195,25 +205,33 @@ def check_triggers(problems: list[str], tasks: list[dict]) -> None:
 
 
 def check_disabled_disclosed(problems: list[str], tasks: list[dict]) -> None:
-    """A task that ships disabled must be documented as such where it is listed.
+    """The task table says "off by default" on exactly the rows of the tasks that
+    ship `enabled: false`.
 
     Otherwise the docs promise a nightly job that never fires — the failure mode
-    is silent, because nothing errors: the task simply never runs.
+    is silent, because nothing errors: the task simply never runs — or call a
+    job that runs every night opt-in.
+
+    Per row, in both directions. The check used to accept the word "off" (or
+    "opt-in", "disabled") ANYWHERE on ANY table row of the page that named the
+    task, so the privacy matrix's "on (KB compile off)" counted as disclosing
+    three tasks that were not on at all. The matrix states the default in a
+    column of its own, and scripts/check-io-matrix.py checks that column task by
+    task; this function reads the task table only.
     """
-    off = [t["name"] for t in tasks if t.get("enabled") is False]
-    if not off:
-        return
     arch = ROOT / "docs" / "cron-architecture.md"
     if not arch.is_file():
         return
-    for i, line in enumerate(arch.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.lstrip().startswith("|") or HISTORY_RE.search(line):
-            continue
-        for name in off:
-            if re.search(rf"`{re.escape(name)}`", line) and not DISCLOSED_OFF_RE.search(line):
-                problems.append(f"docs/cron-architecture.md:{i}: `{name}` is listed "
-                                f"as scheduled, but registry.yaml has enabled: false "
-                                f"(say 'off by default')")
+    off = {t["name"] for t in tasks if t.get("enabled") is False}
+    for i, name, line in arch_table_rows(arch.read_text(encoding="utf-8")):
+        says_off = bool(OFF_BY_DEFAULT_RE.search(line))
+        if name in off and not says_off:
+            problems.append(f"docs/cron-architecture.md:{i}: `{name}` is listed "
+                            f"as scheduled, but registry.yaml has enabled: false "
+                            f"(say 'off by default')")
+        elif says_off and name not in off:
+            problems.append(f"docs/cron-architecture.md:{i}: `{name}` is called "
+                            f"off by default, but registry.yaml enables it")
 
 
 def check_provider_chain(problems: list[str]) -> None:
@@ -321,6 +339,79 @@ def check_layout_blocks(problems: list[str]) -> None:
                                 f"`{name}/`, which exists in the tree")
 
 
+HOME_CLAUDE = ROOT / "home-claude"
+
+# Docs that say how many hooks, skills and slash commands ship: the task docs
+# above, the two maps of the repo, and the READMEs of the directories themselves.
+SHIPPED_DOCS = DOCS + [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "home-claude/hooks/README.md",
+    "home-claude/skills/README.md",
+    "home-claude/commands/README.md",
+]
+
+_NUMBER = r"\b([A-Za-z]+|\d+)\s{1,4}"
+SHIPPED_CLAIMS = {
+    "optional hooks": re.compile(_NUMBER + r"(?:(?:optional|opt-in)\s{1,4})?hooks\b",
+                                 re.IGNORECASE),
+    "session hooks": re.compile(_NUMBER + r"session\s{1,4}hooks\b", re.IGNORECASE),
+    "skills": re.compile(_NUMBER + r"(?:(?:example|shipped)\s{1,4})?skill(?:\s{1,4}template)?s\b",
+                         re.IGNORECASE),
+    "slash commands": re.compile(_NUMBER + r"slash[\s-]{1,4}commands?(?:\s{1,4}wrappers?)?\b",
+                                 re.IGNORECASE),
+}
+
+
+def shipped_counts() -> dict[str, int]:
+    """What ships, counted from the tree — the ONE definition the docs follow.
+
+    optional hooks — every `.py` directly under home-claude/hooks/, except a
+        compatibility shim: a file that only hands over to another hook through
+        `runpy.run_path` (ps1-bom-guard.py, the old name of
+        text-encoding-guard.py, kept so an existing settings.json keeps
+        working). bash-deny.yaml is bash-guard.py's data, not a hook.
+    session hooks — the home-claude/cron/hooks/*.py scripts that
+        settings.example-with-hooks.json wires (SessionStart, SessionEnd,
+        PreCompact). Their helpers are not hooks: utils.py, untrusted.py, and
+        precompact-handoff.py, which pre-compact.py spawns.
+    skills — the directories under home-claude/skills/ that hold a SKILL.md.
+    slash commands — home-claude/commands/*.md, README.md excepted.
+
+    The drift this catches is the task count's: a hook file was added and three
+    documents went on quoting three different numbers.
+    """
+    hooks = [p for p in (HOME_CLAUDE / "hooks").glob("*.py")
+             if "runpy.run_path" not in p.read_text(encoding="utf-8", errors="replace")]
+    example = HOME_CLAUDE / "settings.example-with-hooks.json"
+    wired = set(re.findall(r"cron/hooks/([\w.-]+\.py)", example.read_text(encoding="utf-8"))) \
+        if example.is_file() else set()
+    skills = [d for d in (HOME_CLAUDE / "skills").iterdir() if (d / "SKILL.md").is_file()]
+    commands = [p for p in (HOME_CLAUDE / "commands").glob("*.md") if p.name != "README.md"]
+    return {"optional hooks": len(hooks), "session hooks": len(wired),
+            "skills": len(skills), "slash commands": len(commands)}
+
+
+def check_shipped_counts(problems: list[str]) -> None:
+    """A number the docs put in front of hooks / skills / slash commands."""
+    counts = shipped_counts()
+    for rel in SHIPPED_DOCS:
+        path = ROOT / rel
+        if not path.is_file():
+            if rel not in DOCS:  # a missing DOCS file is reported by check()
+                problems.append(f"{rel}: file missing")
+            continue
+        text = path.read_text(encoding="utf-8")
+        for what, claim in SHIPPED_CLAIMS.items():
+            for m in claim.finditer(text):
+                tok = m.group(1).lower()
+                got = int(tok) if tok.isdigit() else WORD_NUM.get(tok)
+                if got is not None and got != counts[what]:
+                    snip = re.sub(r"\s+", " ", m.group(0)).strip()
+                    problems.append(f'{rel}:{_line(text, m.start())}: "{snip}" claims '
+                                    f"{got} {what}, home-claude/ ships {counts[what]}")
+
+
 def check() -> int:
     total, n_disabled, names = registry_counts()
     print(f"registry: {total} tasks, {n_disabled} disabled "
@@ -370,6 +461,7 @@ def check() -> int:
     check_disabled_disclosed(problems, tasks)
     check_provider_chain(problems)
     check_layout_blocks(problems)
+    check_shipped_counts(problems)
 
     if problems:
         print("DOC DRIFT — update the docs (or the registry / utils.py):")

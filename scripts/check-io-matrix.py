@@ -22,9 +22,17 @@ and this script cross-checks it against the registry and the doc:
   1. every registry task's script exists and declares a `bundle-io:` line;
   2. a task that sends anything off-box, spends anything, or writes anywhere
      outside the bundle MUST have its own row in the matrix — the local-only
-     sentence must never be what covers it;
+     sentence must never be what covers it. "Its own row" means the TASK
+     column names it: a mention in another row's prose is not a disclosure;
   3. a task the matrix claims is local-only must actually declare
-     offbox=nothing / money=no.
+     offbox=nothing / money=no;
+  4. the "Default state" column agrees with `enabled:` for EVERY task its row
+     names. The cell's first word is the claim (`on` / `off`); what follows
+     qualifies a sub-feature ("on (cross-notes off)"). This column used to go
+     unread, and when the wiki phases moved into ClaudeWikiPipeline and started
+     shipping `enabled: false`, their row kept saying "on" — on the page people
+     read to decide what to enable. A task named in the table but absent from
+     the registry is reported too.
 
 Deterministic, stdlib + PyYAML (with the same line-parser fallback as
 check-doc-counts.py). Runs in CI and from scripts/self-test.ps1.
@@ -52,6 +60,8 @@ FIELD_RE = re.compile(r"\b(offbox|money|writes)=(.*?)(?=\s+\b(?:offbox|money|wri
 _NOTHING = {"", "no", "none", "nothing"}
 
 MATRIX_HEADING = "Data, cost & publishing per task"
+STATE_COLUMN = "default state"
+TASK_NAME_RE = re.compile(r"`(Claude\w+)`")
 
 
 def registry_tasks() -> list[dict]:
@@ -65,13 +75,16 @@ def registry_tasks() -> list[dict]:
         for raw in text.splitlines():
             m = re.match(r"^\s*-\s+name:\s*(.+?)\s*$", raw)
             if m:
-                tasks.append({"name": m.group(1).strip().strip("'\""), "script": ""})
+                tasks.append({"name": m.group(1).strip().strip("'\""), "script": "",
+                              "enabled": True})
                 continue
             if not tasks:
                 continue
             m = re.match(r"^\s*script:\s*(.+?)\s*$", raw)
             if m:
                 tasks[-1]["script"] = m.group(1).strip().strip("'\"")
+            if re.match(r"^\s*enabled:\s*false\s*$", raw):
+                tasks[-1]["enabled"] = False
         return tasks
 
 
@@ -157,9 +170,42 @@ def matrix_section(text: str) -> str:
     return rest[:nxt.start()] if nxt else rest
 
 
-def matrix_rows(section: str) -> str:
-    """Only the TABLE ROWS of the section — the intro prose is not a disclosure."""
-    return "\n".join(ln for ln in section.splitlines() if ln.lstrip().startswith("|"))
+def _cells(row: str) -> list[str]:
+    return [c.strip() for c in row.strip().strip("|").split("|")]
+
+
+def matrix_table(section: str) -> tuple[list[str], list[list[str]]]:
+    """(header cells, data rows as cell lists) of the section's table.
+
+    Only table rows count — the intro prose is not a disclosure.
+    """
+    rows = [ln for ln in section.splitlines() if ln.lstrip().startswith("|")]
+    if not rows:
+        return [], []
+    return _cells(rows[0]), [_cells(r) for r in rows[1:]
+                             if not set(r.strip()) <= set("|-: ")]
+
+
+def matrix_rows_by_task(body: list[list[str]], state_col: int | None) -> dict[str, str]:
+    """Task name → the Default state cell of the row whose TASK column names it."""
+    out: dict[str, str] = {}
+    for cells in body:
+        state = cells[state_col] if state_col is not None and state_col < len(cells) else ""
+        for name in TASK_NAME_RE.findall(cells[0]):
+            out[name] = state
+    return out
+
+
+def state_problem(name: str, cell: str, enabled: bool) -> str | None:
+    """Why a Default state cell misstates the registry, or None when it agrees."""
+    m = re.match(r"\s*(on|off)\b", cell, re.IGNORECASE)
+    if not m:
+        return (f"{name}: the matrix's Default state {cell!r} does not start with "
+                f"'on' or 'off', so it states no default at all")
+    if (m.group(1).lower() == "on") != enabled:
+        return (f"{name}: the matrix says Default state {cell!r}, but registry.yaml "
+                f"has enabled: {str(enabled).lower()} — fix the row (or the registry)")
+    return None
 
 
 def check() -> int:
@@ -173,10 +219,21 @@ def check() -> int:
         print(f"docs/cron-architecture.md has no '{MATRIX_HEADING}' section — "
               f"the privacy matrix is the page this guard exists to protect")
         return 1
-    rows = matrix_rows(section)
+    header, body = matrix_table(section)
+    lowered = [h.lower() for h in header]
+    state_col = lowered.index(STATE_COLUMN) if STATE_COLUMN in lowered else None
+    if state_col is None:
+        problems.append(f"the '{MATRIX_HEADING}' table has no 'Default state' "
+                        f"column — nothing checks what it says is on by default")
+    rows = matrix_rows_by_task(body, state_col)
+
+    tasks = registry_tasks()
+    for name in sorted(set(rows) - {t.get("name") for t in tasks}):
+        problems.append(f"{name}: has a row in the '{MATRIX_HEADING}' table but is "
+                        f"not a task in registry.yaml")
 
     disclosed = local_only = 0
-    for task in registry_tasks():
+    for task in tasks:
         name = task.get("name")
         if not name:
             continue
@@ -193,7 +250,11 @@ def check() -> int:
                 f"what keeps the privacy matrix honest.")
             continue
 
-        in_table = bool(re.search(rf"`{re.escape(name)}`", rows))
+        in_table = name in rows
+        if in_table and state_col is not None:
+            wrong = state_problem(name, rows[name], task.get("enabled") is not False)
+            if wrong:
+                problems.append(wrong)
         # "writes" inside the bundle's own tree (wiki/, logs/) is not a
         # publishing claim: the matrix column is about what leaves or is
         # modified OUTSIDE it.

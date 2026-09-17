@@ -103,14 +103,18 @@ def posix_script(task: dict, install_path: str) -> str:
     return raw.replace("\\", "/")
 
 
-def exec_argv(task: dict, install_path: str) -> list[str] | None:
+def exec_argv(task: dict, install_path: str, python: str | None = None) -> list[str] | None:
     kind = task.get("kind", "bash")
     script = posix_script(task, install_path)
     extra = [str(a) for a in (task.get("script_args") or [])]
     if kind == "bash":
         return ["/bin/bash", script] + extra
     if kind in ("python", "python_local"):
-        return ["/usr/bin/env", "python3", script] + extra
+        # `/usr/bin/env python3` resolves against the init system's PATH
+        # (/usr/bin:/bin under systemd --user), not yours: a pyenv or venv
+        # interpreter holding PyYAML and requests is simply not found at 02:30.
+        # --python pins the one the installer verified.
+        return ([python] if python else ["/usr/bin/env", "python3"]) + [script] + extra
     return None  # cmd / vbs / exec — Windows-only, no POSIX equivalent
 
 
@@ -158,9 +162,10 @@ def systemd_oncalendar(task: dict) -> tuple[str, str] | None:
     return None  # AtLogOn and anything else: unsupported here
 
 
-def emit_systemd(task: dict, install_path: str, out: Path) -> str | None:
+def emit_systemd(task: dict, install_path: str, out: Path,
+                 python: str | None = None) -> str | None:
     name = task["name"]
-    argv = exec_argv(task, install_path)
+    argv = exec_argv(task, install_path, python)
     if argv is None:
         return f"skip {name}: kind={task.get('kind')} has no POSIX equivalent"
     sched = systemd_oncalendar(task)
@@ -217,9 +222,10 @@ def _plist_calendar(task: dict) -> dict | None:
     return None
 
 
-def emit_launchd(task: dict, install_path: str, out: Path) -> str | None:
+def emit_launchd(task: dict, install_path: str, out: Path,
+                 python: str | None = None) -> str | None:
     name = task["name"]
-    argv = exec_argv(task, install_path)
+    argv = exec_argv(task, install_path, python)
     if argv is None:
         return f"skip {name}: kind={task.get('kind')} has no POSIX equivalent"
     label = f"{LAUNCHD_PREFIX}{name}"
@@ -294,7 +300,7 @@ def emit_launchd(task: dict, install_path: str, out: Path) -> str | None:
 
 
 def generate(tasks: list[dict], targets: list[str], install_path: str, out: Path,
-             include_disabled: bool, verbose: bool = True) -> int:
+             include_disabled: bool, verbose: bool = True, python: str | None = None) -> int:
     """Emit the units of every task that applies; return how many were written."""
     written = 0
     for task in tasks:
@@ -308,7 +314,8 @@ def generate(tasks: list[dict], targets: list[str], install_path: str, out: Path
                 print(f"  - {task['name']}: platform={plat}, skipped (not POSIX)")
             continue
         for tgt in targets:
-            note = (emit_systemd if tgt == "systemd" else emit_launchd)(task, install_path, out)
+            note = (emit_systemd if tgt == "systemd" else emit_launchd)(task, install_path, out,
+                                                                        python)
             if note:
                 print(f"  ! {note}")
             else:
@@ -382,6 +389,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--units-dir", default=None,
                     help="with --check: where the installed units are (default: "
                          "the per-user directory of the target)")
+    ap.add_argument("--python", default=None,
+                    help="absolute interpreter for python tasks (default: "
+                         "`/usr/bin/env python3`, resolved on the init system's PATH)")
     args = ap.parse_args(argv)
     if args.target is None:
         # A Linux box has no LaunchAgents: checking both there would report every
@@ -410,7 +420,8 @@ def main(argv: list[str] | None = None) -> int:
         names = {str(t.get("name")) for t in tasks if isinstance(t, dict)}
         drift = 0
         with tempfile.TemporaryDirectory() as tmp:
-            generate(tasks, targets, install_path, Path(tmp), args.all, verbose=False)
+            generate(tasks, targets, install_path, Path(tmp), args.all, verbose=False,
+                     python=args.python)
             for tgt in targets:
                 units = Path(args.units_dir).expanduser() if args.units_dir \
                     else installed_units_dir(tgt)
@@ -430,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\nin sync: the installed units are exactly what the registry generates")
         return 0
 
-    written = generate(tasks, targets, install_path, out, args.all)
+    written = generate(tasks, targets, install_path, out, args.all, python=args.python)
     print(f"\nWrote {written} unit file(s) under {out}/")
     print("Enable them:")
     if "systemd" in targets:

@@ -136,6 +136,22 @@ def test_the_default_unit_directories(gs, monkeypatch, tmp_path):
     assert gs.installed_units_dir("systemd") == tmp_path / "xdg" / "systemd" / "user"
 
 
+def test_python_tasks_run_the_pinned_interpreter(gs, registry, tmp_path):
+    """`/usr/bin/env python3` resolves on the init system's PATH, not the user's:
+    the venv or pyenv Python that holds PyYAML and requests is not found at
+    night. --python (what install.sh passes) pins the verified one."""
+    out = tmp_path / "out"
+    assert gs.main(["--target", "systemd", "--registry", str(registry), "--install-path",
+                    "/opt/claude", "--out-dir", str(out), "--python", "/opt/py/bin/python3"]) == 0
+    service = (out / "systemd" / "ClaudeNightly.service").read_text(encoding="utf-8")
+    assert "ExecStart=/opt/py/bin/python3 /opt/claude/cron/nightly.py" in service
+    bash_task = (out / "systemd" / "ClaudeWeekly.service").read_text(encoding="utf-8")
+    assert "ExecStart=/bin/bash /opt/claude/cron/weekly.sh" in bash_task
+    task = {"name": "T", "kind": "python", "script": "<bundle-install-path>/x.py"}
+    assert gs.exec_argv(task, "/opt/claude")[:2] == ["/usr/bin/env", "python3"], \
+        "without --python the default must not change"
+
+
 def test_units_dir_is_ambiguous_for_both_targets(gs, registry, tmp_path):
     with pytest.raises(SystemExit) as exc:
         gs.main(["--check", "--target", "both", "--registry", str(registry),

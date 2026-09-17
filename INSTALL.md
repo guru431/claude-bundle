@@ -41,8 +41,8 @@ agent instructions.
 | Lite — automated (`install.ps1 -Profile lite`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/`, `.bundle-version` stamp (no `.env`) | Windows PowerShell, VS Code + Claude Code ext | built-in check: the copied files exist and `settings.json` parses (the full `self-test.ps1` is for the full tier — it checks Python, YAML, hooks and the registry, none of which a lite install has) |
 | Lite — manual (Copy-Item snippet) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/` | Windows PowerShell | manual: `/help`, `/skills` in chat |
 | Full — automated (`install.ps1 -Profile full`) | Lite set + `hooks/`, `wiki/`, `bin/`, `cron/` + `.env` from template + registry bootstrap (optional `save-cred`/`sync`) | Python 3.10+, Git for Windows, an LLM backend | runs `self-test.ps1` automatically |
-| POSIX — lite (`install-lite.sh`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/`, `.bundle-version` stamp | bash (macOS/Linux) | manual: `/help`, `/skills` in chat |
-| POSIX — full (`cp` + `gen-scheduler.py`) | Lite set + `wiki/`, `cron/` + `.env` + generated systemd/launchd units | Python 3.10+, bash, systemd or launchd, an LLM backend | `gen-scheduler.py` prints enable cmds; check `journalctl --user` / `cron/logs/*.log` |
+| POSIX — lite (`bash scripts/install.sh`) | `CLAUDE.md`, `settings.json` (merged), `skills/`, `commands/` without the full-tier `wiki.md`, `.bundle-version` stamp, `.bundle-manifest.json` | bash; a Python 3.9+ for the merge and the manifest | built-in check: the files exist and `settings.json` parses |
+| POSIX — full (`bash scripts/install.sh --profile full`) | Lite set + `hooks/`, `wiki/`, `bin/`, `cron/` + `.env` + `bundle.local.yaml`; systemd/launchd units with `--install-units` | Python 3.10+ with requests + PyYAML, bash, systemd or launchd, an LLM backend | built-in: the deployed registry passes `check-registry.py` and `cron/` compiles; `gen-scheduler.py --check` for the units |
 
 - Choose **Lite** if you just want consistent rules, permissions, and
   plugins across machines and don't want to install anything. It is the
@@ -61,8 +61,9 @@ the profile and **defaults to lite** — press Enter and you get the config
 only. Answer `full` (or pass `-Profile full`) to run the whole sequence
 below: copy config, stamp `.bundle-version`, create `.env`, bootstrap the
 registry, optionally `save-cred` + `sync`, then self-test.
-`-NonInteractive` skips the elevation steps. **macOS/Linux lite:** `scripts/install-lite.sh`. The
-manual steps below stay as the reference.
+`-NonInteractive` skips the elevation steps. **macOS/Linux:** `bash scripts/install.sh`
+(lite by default, `--profile full` for the pipeline — see
+[Linux / macOS notes](#linux--macos-notes)). The manual steps below stay as the reference.
 
 **Before an upgrade:** `powershell -File scripts/install.ps1 -Diff` prints,
 file by file, what a re-install would change — `new` / `modified` /
@@ -691,58 +692,102 @@ The Python and Bash parts of the cron pipeline are portable. Only the
 Windows-specific layer (Task Scheduler, DPAPI password stashing) is
 replaced.
 
-**Tier 1 (lite)** — fully supported, OS-agnostic:
+**The installer.** `scripts/install.sh` is the POSIX twin of `install.ps1`:
+the same two tiers, the same two roots, the same `.bundle-manifest.json`,
+and `scripts/uninstall.sh` to take it back out. From the repo root:
 
 ```bash
-scripts/install-lite.sh          # copies config into ~/.claude, stamps the version
-# or: CLAUDE_CONFIG_DIR=/custom/path scripts/install-lite.sh
-#     (the variable the installer AND Claude Code both read — export it from
-#      your shell profile, or the client will keep reading ~/.claude)
+bash scripts/install.sh                         # lite (the default): config only, needs just bash
+bash scripts/install.sh --profile full          # + hooks, wiki, cron, .env, bundle.local.yaml
+bash scripts/install.sh --profile full --install-units --enable-linger
+bash scripts/install.sh --diff                  # per-file preview of an upgrade; writes nothing
+bash scripts/install.sh --profile full --dry-run   # the stages; writes nothing
+bash scripts/uninstall.sh                       # a dry run; --confirm deletes
+# CLAUDE_CONFIG_DIR=/custom/path bash scripts/install.sh
+#   (the variable the installer AND Claude Code both read — export it from your
+#    shell profile, or the client will keep reading ~/.claude)
 ```
 
-**Tier 2 (full)** — the wiki + cron scripts run as-is; generate scheduler
-units from the same `registry.yaml` instead of Task Scheduler. From the
-repo root:
+`bash scripts/install-lite.sh` still works — it is `install.sh --profile lite`.
+Call the scripts through `bash`: a fresh clone does not mark them executable.
+
+- **Lite** copies `CLAUDE.md`, `skills/` and `commands/` into the config root,
+  **merges** `settings.json` (your keys win, missing template keys are added,
+  the previous file stays as `settings.json.bak-<stamp>`), backs up anything
+  else it replaces into `.bundle-backup-<stamp>/` and stamps `.bundle-version`.
+  `commands/wiki.md` is left out: `/wiki` searches the vault only the full tier
+  builds. The merge and the manifest need a Python 3.9+. Without one the
+  install still completes, but `settings.json` is *replaced* (backup kept) and
+  no manifest is written — and the closing summary says both.
+- **Full** stops unless it finds Python 3.10+ with `requests` and PyYAML
+  (`pip install -r requirements.txt`). It adds `hooks/` to the config root and
+  `wiki/`, `bin/`, `cron/` to the pipeline root (`--pipeline-root`, default the
+  config root). `.env` (mode 600) and `bundle.local.yaml` are created from
+  their templates only when absent; a fresh `bundle.local.yaml` gets a
+  `dry_run_until:` a week out (step 12). Empty `PYTHON_EXE` / `BASH_EXE` lines
+  in `.env` are filled with the interpreters the preflight verified. An
+  existing `cron/registry.yaml` or `wiki/index.md` that is not what the last
+  install wrote is yours, and is kept.
+- **Units.** Without `--install-units` the full tier only shows what it would
+  install (`gen-scheduler.py --check`); the unit directory is not touched. With
+  it, units generated from the **deployed** registry go to
+  `~/.config/systemd/user` (honouring `$XDG_CONFIG_HOME`) and are enabled, or to
+  `~/Library/LaunchAgents` and are loaded. Python tasks run the verified
+  interpreter, not whatever `/usr/bin/env python3` finds on the scheduler's
+  PATH. Units a previous install placed for a task that has since been removed
+  or disabled are disabled and deleted. `--enable-linger` runs
+  `loginctl enable-linger`: without lingering, `--user` timers fire only while
+  you are logged in, so nightly work silently never happens.
+- **Uninstall** disables the recorded timers first, then removes only the files
+  whose checksum still matches the manifest; `.env`, `bundle.local.yaml`, an
+  edited registry, your wiki notes and logs stay. Exit 2 means changed files
+  were kept (`--force` removes them too); exit 3, that a timer could not be
+  disabled — in which case nothing was removed.
+
+**By hand** — what `install.sh --profile full --install-units` does, for a
+setup it does not fit. From the repo root:
 
 ```bash
-# 1. Copy the wiki + cron components into ~/.claude (POSIX form of step 8).
-# (bin/ is a Windows-only hidden-window launcher — not needed on POSIX, where
-#  gen-scheduler runs bash/python directly.)
-cp -r home-claude/wiki home-claude/cron ~/.claude/
+# 1. The components (POSIX form of step 8; bin/ also holds md2pdf.py):
+cp -r home-claude/hooks home-claude/wiki home-claude/cron home-claude/bin ~/.claude/
 
-# 2. Create + fill .env and the machine-local manifest (POSIX steps 9 + 12):
-cp config/llm-providers.example.env ~/.claude/.env
-cp config/bundle.local.example.yaml ~/.claude/bundle.local.yaml  # project map + privacy policy
-# Hold every phase in preview mode for the first week (see step 12) — nothing
-# is sent and nothing is written until you have read the previews:
-printf 'dry_run_until: %s
-' "$(date -d '+7 days' +%F 2>/dev/null || date -v+7d +%F)"     >> ~/.claude/bundle.local.yaml
-"${EDITOR:-nano}" ~/.claude/.env
+# 2. .env and the machine-local manifest, never over existing ones (steps 9 + 12).
+# Set dry_run_until: in bundle.local.yaml to a date a week out — every phase then
+# previews until that day, and nothing leaves the machine unread:
+[ -f ~/.claude/.env ] || cp config/llm-providers.example.env ~/.claude/.env
+[ -f ~/.claude/bundle.local.yaml ] || cp config/bundle.local.example.yaml ~/.claude/bundle.local.yaml
+"${EDITOR:-nano}" ~/.claude/bundle.local.yaml ~/.claude/.env
 
-# 3. Generate scheduler units from the OS-neutral registry.yaml:
-# Linux (systemd) — writes <name>.service + <name>.timer:
-python scripts/gen-scheduler.py --target systemd --install-path ~/.claude --out-dir units
-# macOS (launchd) — writes com.claude-bundle.<name>.plist:
-python scripts/gen-scheduler.py --target launchd --install-path ~/.claude --out-dir units
+# 3. Units from the DEPLOYED registry, run by the interpreter that has the deps:
+PY="$(python3 -c 'import sys; print(sys.executable)')"
+"$PY" scripts/gen-scheduler.py --target systemd --install-path ~/.claude \
+    --registry ~/.claude/cron/registry.yaml --python "$PY" --out-dir units
+# (macOS: --target launchd, which writes com.claude-bundle.<name>.plist)
 
 # 4. Install + enable (systemd) — the generator also prints these:
-cp units/systemd/*.{service,timer} ~/.config/systemd/user/
+cp units/systemd/*.service units/systemd/*.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
 for t in ~/.config/systemd/user/Claude*.timer; do systemctl --user enable --now "$(basename "$t")"; done
 
-# 4b. Make the timers fire WITHOUT an active login (overnight / headless) —
-# the POSIX analogue of Windows Password-mode. Without this, --user timers only
-# run while you are logged in, so nightly jobs silently never happen:
+# 4b. Timers that fire WITHOUT an active login — the POSIX analogue of Windows
+# Password-mode:
 loginctl enable-linger "$USER"           # check: loginctl show-user "$USER" -p Linger
+```
 
-# 4c. After editing the registry or upgrading the bundle: what is installed vs what
-# the registry now generates. Writes nothing; exit 3 on drift — `new`/`changed`
-# units to copy in, `stale` ones (a removed or disabled task) to disable and delete.
-# Pass the same --install-path / --registry / --all you generated with.
-python scripts/gen-scheduler.py --check --install-path ~/.claude
+**After editing the registry or upgrading the bundle:**
 
-# 5. Inspect a run:
-journalctl --user -u ClaudeWikiFlush.service --no-pager | tail -n 40
+```bash
+# What is installed vs what the registry now generates. Writes nothing; exit 3 on
+# drift — `new`/`changed` units to copy in, `stale` ones (a removed or disabled
+# task) to disable and delete. Pass the same --install-path / --registry /
+# --python / --all you generated with ($PY as in step 3); install.sh prints its
+# exact line at the end of every full install.
+"$PY" scripts/gen-scheduler.py --check --install-path ~/.claude \
+    --registry ~/.claude/cron/registry.yaml --python "$PY"
+bash scripts/install.sh --profile full --install-units    # applies it
+
+# Inspect a run:
+journalctl --user -u ClaudeWikiPipeline.service --no-pager | tail -n 40
 tail -n 40 ~/.claude/cron/logs/*.log     # the scripts' own per-task logs
 ```
 
@@ -765,3 +810,7 @@ stamp against the source and warns when a deployment is behind; on a split
 install pass `-InstallPath <PipelineRoot>` or it looks in the wrong place. To
 update a deployment, re-run the installer — it re-stamps, merges your
 `settings.json` rather than overwriting it, and backs up anything it replaces.
+On Linux / macOS the merge needs a Python 3.9+: without one `install.sh`
+replaces `settings.json`, keeps your version as `settings.json.bak-<stamp>`,
+and says so at the end. `install.ps1 -Diff` / `install.sh --diff` show the
+per-file changes first.

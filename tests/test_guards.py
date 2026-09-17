@@ -341,12 +341,6 @@ def test_private_addresses_are_leak_only():
 
 # ── .env parsing: env wins over the file, in BOTH implementations ───────────
 
-# The resolver is tests/conftest.py::find_bash now, behind a `bash` fixture that
-# FAILS on Windows where `skipif(_bash() is None)` skipped. The old name stays
-# for the modules that still import it from here.
-from conftest import find_bash as _bash  # noqa: E402,F401
-
-
 def test_shell_dotenv_does_not_override_the_environment(tmp_path: Path, bash: str):
     """`export "$key=$val"` was unconditional in all five shell copies.
 

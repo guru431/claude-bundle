@@ -124,17 +124,14 @@ _PATH_CASES = {
 }
 
 
-def test_python_and_shell_agree_on_sensitive_paths_in_any_case():
+def test_python_and_shell_agree_on_sensitive_paths_in_any_case(request):
     """is_sensitive_path() was case-sensitive while secret_scan_paths is not, so
     a Python consumer — the PreToolUse path guard among them — called `.ENV`
     harmless while every git gate refused it."""
-    from test_guards import _bash
     shapes = _shapes()
     python_says = {p for p in _PATH_CASES if shapes.is_sensitive_path(p)}
     assert python_says == {p for p, s in _PATH_CASES.items() if s}
-    bash = _bash()
-    if bash is None:
-        pytest.skip("bash not available")
+    bash = request.getfixturevalue("bash")
     script = ". '{}'\nsecret_scan_paths\n".format((LIB / "secret-scan.sh").as_posix())
     # Bytes, not text: a text-mode pipe on Windows would hand the shell `\r\n`.
     res = subprocess.run([bash, "-c", script],

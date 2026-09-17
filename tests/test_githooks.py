@@ -25,18 +25,20 @@ from pathlib import Path
 
 import pytest
 
-from test_guards import _bash   # the one resolver that avoids the WSL launcher
+from conftest import find_bash   # the one resolver that avoids the WSL launcher
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOKS = ROOT / ".githooks"
 LIB = ROOT / "home-claude" / "cron" / "lib" / "secret-scan.sh"
 GITHUB_PUSH = ROOT / "home-claude" / "cron" / "github-push.sh"
 
-BASH = _bash()
+BASH = find_bash()
 GIT = shutil.which("git")
 
-pytestmark = pytest.mark.skipif(BASH is None or GIT is None,
-                                reason="needs git and a POSIX shell")
+# The `bash` fixture fails on Windows without a POSIX shell instead of skipping:
+# these are the cardinal-rule guards, and a silent skip there reads as a pass.
+pytestmark = [pytest.mark.usefixtures("bash"),
+              pytest.mark.skipif(GIT is None, reason="needs git")]
 
 # Assembled, never written out: a literal token in this file would be caught by
 # the very guards it tests.

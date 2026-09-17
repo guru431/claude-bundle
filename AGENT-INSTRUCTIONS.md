@@ -272,7 +272,7 @@ It auto-elevates to UAC once for the whole batch. Watch
 
 ```cmd
 schtasks /query /tn ClaudeTaskMonitor /fo list /v
-schtasks /query /tn ClaudeWikiFlush  /fo list /v
+schtasks /query /tn ClaudeWikiPipeline /fo list /v
 ```
 
 Both should show `Status: Ready`. Force a test run:

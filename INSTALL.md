@@ -529,11 +529,12 @@ Then the registered tasks:
 
 ```cmd
 schtasks /query /tn ClaudeTaskMonitor /fo list /v
-schtasks /query /tn ClaudeWikiFlush /fo list /v
+schtasks /query /tn ClaudeWikiPipeline /fo list /v
 ```
 
 Each should report `Status: Ready` and a `Next Run Time` in the
-future. For every task at once, compared with what `registry.yaml` asks for
+future (a task that ships `enabled: false` is registered too, and reports
+`Disabled`). For every task at once, compared with what `registry.yaml` asks for
 (no elevation needed):
 
 ```powershell

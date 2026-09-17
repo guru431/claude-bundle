@@ -91,7 +91,12 @@ def test_the_task_starts_at_the_last_prompt_a_human_typed(hook, tmp_path: Path):
 
 
 def test_a_transcript_from_before_origin_existed(hook, tmp_path: Path):
+    """`origin` is not a documented field. Without it the task starts at the LAST
+    plain-text prompt — which is why the transcript opens with an earlier one:
+    the first-line fallback would answer 08:00, and must not be what answers."""
     t = _transcript(tmp_path / "s.jsonl", [
+        _user("2026-01-02T08:00:00Z", "an earlier task"),
+        _assistant("2026-01-02T08:30:00Z"),
         _user("2026-01-02T09:00:00Z", "the task"),
         _user("2026-01-02T09:30:00Z", "<command-name>/cost</command-name>"),
         _user("2026-01-02T09:40:00Z", "summary of the conversation", isCompactSummary=True),
@@ -206,6 +211,29 @@ def test_a_long_session_alerts_once_not_on_every_turn(claude_home: Path, tmp_pat
     idle = {**stop, "hook_event_name": "Notification", "notification_type": "idle_prompt"}
     assert len(_run(claude_home, idle)) == 1, "the idle notice after the Stop alerted again"
     assert len(_run(claude_home, idle, {"CLAUDE_STOP_ALERT_COOLDOWN_MINUTES": "0"})) == 2
+
+
+def test_without_origin_a_long_task_still_gets_its_message(claude_home: Path, tmp_path: Path):
+    """End to end on a transcript that has no `origin` anywhere."""
+    t = _transcript(tmp_path / "legacy.jsonl", [_user("2000-01-01T00:00:00Z", "a long task")])
+    payload = {"hook_event_name": "Notification", "notification_type": "idle_prompt",
+               "session_id": "s-legacy", "cwd": str(tmp_path / "work" / "myapp"),
+               "transcript_path": str(t)}
+    assert len(_run(claude_home, payload)) == 1
+
+
+def test_without_origin_the_task_is_timed_from_its_last_prompt(claude_home: Path, tmp_path: Path):
+    """No `origin`: an old first line must not make a task that has just started
+    look long. "Just started" without a clock: the last prompt is dated 9999."""
+    t = _transcript(tmp_path / "legacy-resumed.jsonl", [
+        _user("2000-01-01T00:00:00Z", "yesterday's task"),
+        _assistant("2000-01-01T00:05:00Z"),
+        _user("9999-01-01T00:00:00Z", "a task that has only just started"),
+    ])
+    payload = {"hook_event_name": "Notification", "notification_type": "idle_prompt",
+               "session_id": "s-legacy-resumed", "cwd": str(tmp_path / "work" / "myapp"),
+               "transcript_path": str(t)}
+    assert _run(claude_home, payload) == []
 
 
 def test_other_notifications_send_nothing(claude_home: Path, tmp_path: Path):

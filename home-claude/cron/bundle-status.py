@@ -39,7 +39,7 @@ from utils import (  # noqa: E402
     PROJECT_MAP, manifest_broken, policy_summary,
     BUNDLE_ROOT, WIKI_ROOT, PENDING_DIR, STATE_PATH, LLM_PROVIDER,
     DEFAULT_CHAIN, PROVIDERS, _env_first, ALLOW_OFFBOX,
-    PROJECTS_ROOT, PROJECTS_ROOT_SOURCE, count_wiki_pages, quarantined_count,
+    PROJECTS_ROOT, PROJECTS_ROOT_SOURCE, count_wiki_pages,
     CLAUDE_HOME, find_bash,
 )
 

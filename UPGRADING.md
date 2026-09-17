@@ -96,7 +96,13 @@ Then run `sync.cmd` once (step 4 above).
   no limit at all — one line, two behaviours.
 - **`repeat_for: P1D`** is the only value a task that also runs on POSIX may
   use; any other needs `platform: windows`. The generated systemd and launchd
-  units repeat through the whole day.
+  units repeat through the whole day. On an `AtStartup` or `AtLogOn` trigger
+  such a task may not carry `repeat_for` at all: the units repeat for as long as
+  the machine is up.
+- **An `AtStartup` / `AtLogOn` task with `repeat_every` never repeated.** The
+  syncer left the repetition out of what it registered, then found it missing
+  and re-registered the task on every sync. It now repeats — indefinitely,
+  unless `repeat_for` limits it — and `sync.cmd` reports it `updated` once.
 - **A `launcher:` on a mapped drive** now makes the syncer skip every task that
   runs through it (`kind` bash, python or cmd) in Password or S4U mode — exit 3,
   a partial sync. Such a task failed with exit 127 and no log in session 0

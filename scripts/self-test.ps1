@@ -822,10 +822,7 @@ if ($deployed) {
         # config_deprecations: the settings an upgrade left behind. They still
         # work, which is why nothing else here would ever flag them. getattr, so a
         # deployment older than the list reports none instead of failing.
-        # errors='replace': a pipe gets the ANSI code page, which has no `→` —
-        # and the report's chain line has three, so on the default provider this
-        # step died with UnicodeEncodeError and reported it as unreadable config.
-        $ccode = "import sys; sys.stdout.reconfigure(errors='replace'); sys.path.insert(0, sys.argv[1]); import utils; print('\n'.join(utils.config_report())); print('\n'.join('DEPRECATED ' + d for d in getattr(utils, 'config_deprecations', list)()))"
+        $ccode = "import sys; sys.path.insert(0, sys.argv[1]); import utils; print('\n'.join(utils.config_report())); print('\n'.join('DEPRECATED ' + d for d in getattr(utils, 'config_deprecations', list)()))"
         $out = Invoke-Checked { & $py -c $ccode $utilsDir }
         if ($script:lastRc -ne 0) { Warn "could not read the effective configuration:`n$out" }
         else {

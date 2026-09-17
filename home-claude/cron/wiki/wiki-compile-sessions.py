@@ -740,21 +740,34 @@ def record_markers(key: str, items: list[str], log) -> None:
             f"expect them to be compiled, and billed, again next run")
 
 
+# A flush that started longer ago than this is not tonight's flush. The phases
+# run nightly, so tonight's start is minutes old when compile asks.
+FLUSH_START_MAX_AGE_HOURS = 20
+
+
 def last_flush_start() -> datetime | None:
-    """When the most recent flush run STARTED, from the run ledger, or None.
+    """When tonight's flush run STARTED, from the run ledger, or None.
 
     The ledger records a run's end (`ts`) and its `duration_s`; flush passes its
     start for that. A record without a duration counts from its end. None means
-    no flush has recorded a run — nobody is consuming .pending at all.
+    no flush has recorded a run recently — nobody is consuming .pending, and
+    every draft is judged.
+
+    "Recently" matters: a flush that CRASHES writes no record, and last night's
+    start would then excuse every draft written since — the stalled night this
+    check exists to report.
     """
     try:
         rec = latest_by_task(read_latest_runs()).get("ClaudeWikiFlush")
         if not rec:
             return None
-        return (datetime.fromisoformat(rec["ts"])
-                - timedelta(seconds=float(rec.get("duration_s") or 0)))
+        started = (datetime.fromisoformat(rec["ts"])
+                   - timedelta(seconds=float(rec.get("duration_s") or 0)))
     except Exception:   # an unreadable ledger must not decide a verdict either way
         return None
+    if datetime.now() - started > timedelta(hours=FLUSH_START_MAX_AGE_HOURS):
+        return None
+    return started
 
 
 def stuck_pending(flush_started: datetime | None) -> int:

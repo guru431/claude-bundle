@@ -1156,6 +1156,28 @@ def test_a_draft_written_after_flush_started_is_not_a_lost_night(bundle: Path,
     assert r.returncode != 0, f"a draft flush left behind reported green:\n{r.stdout}"
 
 
+def test_a_flush_that_crashed_tonight_does_not_excuse_todays_drafts(bundle: Path):
+    """A crashed flush writes no ledger record, so the newest one is an OLD night's.
+
+    Its start must not excuse the drafts written since: they are exactly what
+    tonight's flush failed to process.
+    """
+    (bundle / "wiki" / "daily" / "2026-01-01.md").unlink()
+    runs_dir = Path(os.environ["CLAUDE_BUNDLE_RUNS_DIR"])
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    # A fixed date in the past: stale on any machine, so no real clock is involved.
+    (runs_dir / "runs-2001.jsonl").write_text(json.dumps({
+        "ts": "2001-01-01T02:40:00", "task": "ClaudeWikiFlush", "process_rc": 0,
+        "duration_s": 600.0, "verdict": "green"}) + "\n", encoding="utf-8")
+    pending = bundle / "wiki" / "daily" / ".pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    (pending / "today.md").write_text("# Session today\nProject: myproject\n\n### USER\nhi\n",
+                                      encoding="utf-8")
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py", {}, cwd=bundle)
+    assert r.returncode != 0, \
+        f"an old flush record excused a draft tonight's flush never took:\n{r.stdout}"
+
+
 _WIDGET_PAGE = json.dumps([{
     "path": "projects/myproject/widget-parser-fix.md", "action": "create",
     "content": "# Widget parser fix\n\nThe boundary check was off by one. "

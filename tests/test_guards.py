@@ -28,8 +28,12 @@ def _import_utils(monkeypatch, bundle_root: Path):
     """Import cron/hooks/utils.py fresh, rooted at a throwaway bundle tree."""
     # utils derives BUNDLE_ROOT from __file__, so the module has to be loaded
     # from a copy inside the tmp tree for its state/manifest paths to land there.
+    # monkeypatch, not sys.modules.pop: the module that was there comes back after
+    # the test. A bare pop left every later importer with a NEW object while
+    # modules loaded earlier kept the old one, so a patch applied to one never
+    # reached the other.
     monkeypatch.syspath_prepend(str(bundle_root / "cron" / "hooks"))
-    sys.modules.pop("utils", None)
+    monkeypatch.delitem(sys.modules, "utils", raising=False)
     return importlib.import_module("utils")
 
 
@@ -78,8 +82,8 @@ def test_backlog_max_negative_disables_sweep(bundle_tree: Path, monkeypatch):
     monkeypatch.setenv("CLAUDE_HOME", str(bundle_tree / "fake-home"))
     monkeypatch.syspath_prepend(str(bundle_tree / "cron" / "hooks"))
     monkeypatch.syspath_prepend(str(bundle_tree / "cron" / "wiki"))
-    sys.modules.pop("utils", None)
-    sys.modules.pop("wiki_flush", None)
+    monkeypatch.delitem(sys.modules, "utils", raising=False)
+    monkeypatch.delitem(sys.modules, "wiki_flush", raising=False)
     spec = importlib.util.spec_from_file_location(
         "wiki_flush", bundle_tree / "cron" / "wiki" / "wiki-flush-sessions.py")
     mod = importlib.util.module_from_spec(spec)
@@ -758,7 +762,7 @@ def test_feedback_of_a_camelcase_project_is_not_collected_when_skipped(
     monkeypatch.setenv("CLAUDE_HOME", str(home))
     monkeypatch.syspath_prepend(str(bundle_tree / "cron" / "hooks"))
     for name in ("utils", "untrusted", "runs"):
-        sys.modules.pop(name, None)
+        monkeypatch.delitem(sys.modules, name, raising=False)
     spec = importlib.util.spec_from_file_location(
         "wiki_flush_f2", bundle_tree / "cron" / "wiki" / "wiki-flush-sessions.py")
     flush = importlib.util.module_from_spec(spec)

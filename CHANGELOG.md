@@ -3,11 +3,51 @@
 Versioned releases start here (`## [x.y.z] - date`, semver). Older entries below
 are date-headed and predate the `VERSION` file.
 
-## [Unreleased] — two silent failures carried back from the meta-repo
+## [Unreleased]
 
-Both were found upstream and neither could be seen from inside this repo: one is
-a gateway contract that changed after 0.17.0 shipped, the other only shows up on
-a machine where the pipeline has been running unattended for a while.
+Clears FINDINGS.md and IDEAS.md again — 62 findings and 28 ideas from a full
+review of the tree. Every entry was checked against the code before anything was
+changed, and almost every fix comes with a regression test that fails on the code
+it replaces. What was done only in part, or declined on the merits, is recorded
+with its reasoning in the local archives; nothing was dropped in silence.
+Several fixes change what a deployed machine does — read **UPGRADING.md** before
+updating.
+
+### Upgrade notes
+
+The short list; UPGRADING.md has the steps.
+
+- **Windows registry:** `enabled: no` / `off` used to register the task as
+  ENABLED (the subset parser read a truthy string). It now disables it — check
+  custom registries before the next `sync.cmd`. `timeout_hours` is required
+  (`0` = no limit), multi-line values are rejected — a registry kept from 0.17.0
+  still carries five `description: >-` lines and fails `self-test -InstallPath`
+  until they are made one line — and `repeat_for` must be `P1D` unless the task
+  is `platform: windows`. Five shipped tasks show "updated" once.
+- **Privacy policy:** project names are compared normalized, so
+  `allow_projects: [MyApp]` now matches the `myapp` directory and STARTS sending
+  it; a typo'd key in `bundle.local.yaml` denies every project.
+- **Hooks in settings.json:** session-telegram belongs on `Notification` with the
+  matcher `idle_prompt|permission_prompt` — `Stop` fires after every answer. New
+  opt-in hooks, a `"timeout": 10` for SessionEnd, the block-iptables entry
+  retired; `bundle-status.py --hooks` checks the result.
+- **State:** `memory.sent_hashes` converts from a list to `{digest: date}` in
+  place; `flush.processed_sources` and `memory.deferred` are new. Compile markers
+  stay compatible — nothing is re-sent. Don't run the old and the new version
+  side by side during the upgrade: the state lock file now persists.
+- **Project names starting with `project`** (`project-alpha`) get their own wiki
+  folder instead of `main`; offsets and denials recorded under the old name are
+  honoured.
+- **`llm-call.py`** exits 0 ok, 1 deterministic, 2 usage, 3 transient, 4 config
+  (was 1 for every failure).
+- **`git-push-all.sh`** fails a repository with untracked sensitive files that
+  .gitignore does not cover, or outgoing commits that add one — instead of
+  pushing them.
+- **Leftovers:** `commands/README.md` (it appeared as a `/README` command) and,
+  on lite, `commands/wiki.md` are no longer installed; copies from an earlier
+  install stay until deleted.
+- **POSIX clones of this repo:** re-run `scripts/enable-guard.sh` for the new
+  `pre-merge-commit` hook.
 
 ### OpenCode Go rejects every call without a session header
 
@@ -20,12 +60,12 @@ quietly falls through to the next provider and somebody pays for it.
 - `PROVIDERS` grew an optional `session_header` field, declared for `opencode`.
   It is data like the rest of the table, so a future gateway with the same
   requirement is one line, not a code path.
-- The id is generated once per PROCESS (`_SESSION_ID`). That grain is the point:
-  a nightly script's run *is* a conversation — dozens of calls sharing a system
-  prefix the gateway can cache only if the id stays stable across them. A fresh
-  id per call throws the caching away; a constant one would lump unrelated runs
-  together. The script name is left readable in the id (useful in gateway-side
-  logs, not a secret) with a random tail so two concurrent runs stay distinct.
+- The id is generated once per PROCESS (`_SESSION_ID`): stable across the calls
+  of one phase — one flush, one compile — which share a system prefix the gateway
+  can cache. The nightly pipeline runs each phase as its own process, so a night
+  carries one id per phase, and `llm-call.py` one per invocation. The script
+  name is readable in the id (`bundle-<script>-<random>`): an identifier that now
+  reaches that gateway, and the data matrix says so.
 - Regression test asserts the header is present, identical across calls, and
   absent for providers that declare none.
 
@@ -40,77 +80,373 @@ the current one — and the `.md` it was built from is no backup, because the wh
 point of the pair is the PDF someone carries offline.
 
 - The print now goes into a sibling temp DIRECTORY and `os.replace`s the target
-  only once the result is a plausible PDF (exists, over 1 KiB). Any failure
-  leaves the previous document exactly as it was; the error message says so.
-  A directory, not just a temp file: an Edge that hands the job to a running
-  instance returns 0 long before that instance writes, and the late file then
-  lands under a name nothing cleans up (a full 10-page PDF was found sitting in
-  a project root that way). Browsers do not create missing directories, so
-  removing this one closes the door on the straggler. Sibling rather than $TMP,
-  so the swap stays a rename inside one filesystem.
+  only once the result is a plausible PDF. Any failure leaves the previous
+  document exactly as it was; the error message says so. A directory, not just a
+  temp file: an Edge that hands the job to a running instance returns 0 long
+  before that instance writes, and the late file then lands under a name nothing
+  cleans up. Browsers do not create missing directories, so removing this one
+  closes the door on the straggler.
 - `browser_candidates()` replaces the single `find_browser()` at the print site:
-  every installed browser is tried in turn. "Installed" is not "will print" — on
-  the machine that hit this, Edge returns 0 and prints nothing whether or not the
-  private profile is used, while the Chrome beside it prints the same HTML. The
-  override still short-circuits to one candidate, and `find_browser()` remains as
-  the "which browser would run" answer `self-test.ps1` asks for.
-- The mtime guard is gone: it existed to catch "returned 0, printed nothing",
-  which is now the ordinary "the temp file never appeared" case.
-- `tests/test_md2pdf.py` drives the real logic with the browser stubbed, pinning
-  what matters: a failed print keeps the old bytes, a truncated one too, the
-  browser is never pointed at the target itself, and the second browser gets its
-  turn when the first prints nothing.
+  every installed browser is tried in turn. "Installed" is not "will print".
+- "Plausible" grew a second test in this release: the PDF's `/Title` must be the
+  page's own `<title>` — Chromium titles an error page with the URL that failed,
+  so a printed error page never replaces a document.
 
-### A dead provider chain had no voice
+### The provider chain has one voice when it is down
 
 When every provider in `DEFAULT_CHAIN` fails, each task logs its own bad night
-and carries on; nothing says "this machine has no LLM at all". Upstream that
+and carries on; nothing said "this machine has no LLM at all". Upstream that
 state lasted two full nights before anyone noticed.
 
 - `record_chain_dead()` writes the fact to `cron/state/chain-dead.json` —
-  deliberately WITHOUT alerting. A night is a dozen processes and a hundred
-  calls meeting the same shut door, so notifying from the library would mean a
-  hundred messages; worse, it would give the library an outbound channel of its
-  own, and every task calling it would have to widen its `bundle-io:` line. The
-  matrix in `docs/cron-architecture.md` exists so a reader can tell, per task,
-  what leaves the machine.
-- `claude-healthcheck.sh` — the daily job that already owns the Telegram
-  channel — reports it, alongside the existing dead-man switch, and only while
-  the failure is fresh (last one within a day), so a chain that recovered on its
-  own stops paging. The recorded start of the outage survives later failures:
-  what a reader needs is how long it has been down.
+  deliberately without alerting from the library, which would mean a hundred
+  messages a night and an outbound channel for every task that calls it.
+- The task monitors report it — once per outage, as the first line of their
+  message, repeated only in the Monday digest. The monitor needs no LLM and ships
+  enabled; the healthcheck, which the privacy docs suggest switching off, speaks
+  only where no monitor runs, and skips its own LLM call while the chain is down
+  instead of paging "analysis failed" about the same outage.
+- An outage ends after a full day without a failure, counted from the LAST one:
+  counted from the first, a three-day outage restarted every 24 hours and was
+  reported again each morning.
 
 ### A crashed boot service read as healthy forever
 
 For a task triggered `AtStartup`/`AtLogOn` the scheduler's own answer carries no
 information: `LastRun` is the moment the machine booted and the result stays 0
 for as long as the task counts as "running". A daemon that started and then died
-therefore looked healthy indefinitely, and the monitor's freshness rules — there
-to stop it crying about old runs — buried it further.
+looked healthy indefinitely.
 
 - New optional registry field `health_port`, validated by
-  `scripts/check-registry.py` and documented in the registry header. No
-  scheduler acts on it; the monitor probes loopback and reports a closed port as
-  a failure whatever the exit status says.
-- Tasks that do not declare it are never probed — an ordinary scheduled job has
-  a real exit status, and a probe would only invent failures.
-- The no-PyYAML fallback parser learned the field too. A check that is silently
-  absent on some machines is the failure mode the field exists to remove.
+  `scripts/check-registry.py`. Both monitors — the Windows one included, which
+  had not read it — probe loopback through one shared implementation
+  (`cron/monitor_checks.py`) and report a closed port as a failure whatever the
+  exit status says. A task seen healthy is forgotten, so a second crash alerts
+  again.
+- Tasks that do not declare it are never probed.
 
 ### "Nothing to compile" covered a lost night as well as an idle one
 
-`wiki-compile-sessions` exited 0 whenever there was no new daily log. There are
-two ways to get there and they are opposites: flush ran and found nothing (fine),
-or flush FAILED and wrote no daily while the raw material still sits in
-`.pending` — nothing to compile *because the night was lost*. Upstream stood two
-days without an LLM provider while this task reported `rc=0` both nights and
-every health check watching the return code called the pipeline healthy.
+`wiki-compile-sessions` exited 0 whenever there was no new daily log — including
+the night flush FAILED and left its raw material in `.pending`. Upstream stood two
+days without an LLM provider while this task reported `rc=0`.
 
-- The branch now counts `.pending/*.md` first. Non-empty means failure: it logs
-  the count, records the run with `process_rc=1` and exits non-zero. An idle run
-  with an empty `.pending` stays green exactly as before.
-- Regression test covers both shapes, and asserts the message names `.pending` —
-  a failure nobody can act on is barely better than a silent one.
+- Non-empty `.pending` now means failure, with `process_rc=1` in the ledger —
+  but only for drafts older than the start of tonight's flush (read from the
+  ledger), and never in dry-run. The first version of this check paged every
+  night of a fresh install's preview week, and on a draft a hook wrote between
+  flush and compile.
+
+### Privacy: what left the machine that should not have
+
+- **The policy compared names as typed.** `skip_projects: [claudebundle]` closed
+  the transcripts of `…-ClaudeBundle` but not its feedback, incidents and
+  sessions files. `project_allowed()` now normalizes both sides, so every
+  collector honours every spelling.
+- **Hooks and flush named the same session differently.** `encode_cwd` replaced
+  three characters where Claude Code replaces every non-alphanumeric one, so a
+  hook missed `skip_projects` for a project flush denied. Drafts are now
+  attributed by the transcript's own directory, carry `Dir:`/`Day:` header
+  lines, apply `skip_dirs`, and are written atomically.
+- **A typo in `bundle.local.yaml` was a policy that did nothing.** An unknown key
+  is a config error; one within two edits of a real key (`skip_project:`) marks
+  the manifest broken, which denies every project.
+- **`local` sent transcripts through a proxy.** `requests` applied `HTTP_PROXY`
+  to loopback and followed redirects. A local-only call now ignores proxy
+  settings and refuses redirects, and `localhost`/`*.localhost` must resolve to
+  loopback addresses only.
+- **Unmasked payloads.** memory-update's cross-notes prompt, its memory files
+  and the compaction handoff (transcript tail, `/compact` focus and the handoff
+  file) now go through `masked()`; memory-update's prompts fence their data as
+  untrusted.
+- **md2pdf could print local files into a committed PDF.** `<iframe>`, `<embed>`
+  and `<object>` pointing at `file:` rendered `.env` contents on Chrome and Edge.
+  The page prints under a Content-Security-Policy; relative links no longer become
+  `file:///C:/Users/<name>/…` link targets inside the PDF.
+- **md2pdf-sync ignored the privacy policy** and sent file names and stderr to
+  Telegram. It skips denied projects and reports relative paths only.
+- **test-sweep leaked bundle settings into a foreign project's pytest.** The list
+  of names to strip came from a template the installer does not deploy. It is now
+  generated into `cron/lib/env_names.py` and checked in CI.
+- **The generic masker mangled prose.** `foreign key:`, `sort key:`, `hotkey=`
+  are left alone, and a named marker (`[REDACTED-GITHUB-TOKEN]`) is no longer
+  overwritten by the anonymous one.
+
+### Git guards a path, a typo or a merge could walk past
+
+- **The nightly sweep committed what it staged itself.** `git-push-all.sh`
+  checked sensitive names before `git add --all`; an untracked `credentials.json`
+  went to origin with `pushed=1`. It now checks after staging, and the outgoing
+  commits by name as well as content — for what the remote lacks, not the whole
+  branch. It also resolved `GIT_NET_TIMEOUT`, `PYTHON_EXE` and `BASH_EXE` before
+  loading `.env`, so values set there never reached it.
+- **Non-ASCII paths were invisible.** Git quotes them by default, and no name
+  pattern matched `"\320\277…/.env"`. Every gate lists paths through one NUL-safe
+  helper.
+- **One bad line in `.sanitize-patterns` switched the denylist off everywhere**
+  (`grep -f` exits 2, read as "no match"). One loader handles UTF-16, BOM and
+  CRLF, and a pattern that does not compile blocks and names the line.
+- **pre-push gated no file names**, did not scan binary blobs or annotated tag
+  messages, and its fast path could miss a UTF-16 blob. All covered; the precise
+  pass reads only the blobs the fast path names — a first publication of a large
+  repository through `github-push.sh` went from minutes to seconds.
+- **`github-push.sh` read patches**, which show nothing for a merge commit. All
+  four checks read the objects a publication carries.
+- **pre-commit failed open** without `secret-scan.sh` (D-10 said otherwise), and
+  scanned only UTF-16 among binary files.
+- **`git merge` ran no guard.** New `.githooks/pre-merge-commit`.
+- `tests/test_githooks.py` drives the hooks and `github-push.sh --check-only`
+  against real repositories: renames, Cyrillic folders, UTF-16, CRLF messages,
+  force pushes, evil merges, a commit that removes a leak.
+
+### The wiki pipeline: re-sent, lost or stuck less than it claimed
+
+- **A second `## <project>` in a daily re-sent the first.** Compile marks each
+  section separately; old merged markers still count.
+- **Feedback and incidents went out two nights running**, and a truncated
+  transcript was re-read every night. Sources are marked by content, one offset
+  key per transcript.
+- **A rejected path never reached the retry ceiling** (`kind` stayed `ok`), and
+  compile-kb crashed the whole run on one article that was not UTF-8. Both are
+  counted failures of that one source now.
+- **`--replay` changed state in dry-run**, cleared `demo-app` for `demo`, and
+  crashed whenever there was a marker to clear. It previews in dry-run and is
+  scoped to its project.
+- **A stolen lock was released by its previous owner**, turning the LLM queue
+  into parallel writers. Locks carry a token; the state ledger uses an OS lock,
+  with the old scheme only where the filesystem has none. `state_add` reports a
+  marker it could not record.
+- **A negative integer flag became "unlimited"** — it is now an ERROR and keeps
+  its default — and one bad byte made a transcript read as empty with no log
+  line; the byte is replaced and logged, and an unreadable file is carried over
+  to the next night instead of being filed as a trivial session.
+- **Crashed phases left no ledger row**; flush, compile and compile-kb now use
+  `terminal_record`. Reading a corrupt `.processed.json` no longer writes a copy
+  per call.
+- **A daily with a policy-denied section was marked compiled anyway**, so the
+  section never compiled once the policy allowed it — and a manifest that failed
+  to parse for one night (which denies everything) finalized every daily it
+  touched with nothing sent. Denial now means "not tonight"; `--replay
+  DATE#project` remains for anything older.
+- **The out-of-project quarantine saved the reason, not the change** (arguments
+  in the wrong order), and quarantined changes now keep non-Latin text readable
+  instead of `\uXXXX` escapes.
+- **A project named `project-alpha` normalized to `main`.** It keeps its own
+  name; offsets and denials recorded under the old one are honoured.
+- **`dry_run_until: confirm`** keeps the preview until a date is written; a dated
+  window sends one summary of what the preview would have sent, on its last night.
+- Compile shows the model page bodies without frontmatter, linked pages first.
+
+### The LLM layer: whose fault a failure is, and for how long
+
+- **401 and 404 were "deterministic"**, so a revoked key quarantined every source
+  after three nights — still quarantined once the key was fixed. Only
+  400/413/415/422 are the payload's fault now; 401/404 and other 4xx are `config`,
+  408 and non-retried 5xx `transient`.
+- **The breaker renewed every latch on each new one** and held a transient
+  outage for six hours. Each provider keeps its own timestamp; `config` latches
+  6 h, `transient` 30 min, and `local` never leaves the process (≤ 5 min).
+- **An unconfigured optional fallback made every dead chain a config problem.**
+  Only providers that are set up count toward the verdict.
+- **`WIKI_LLM_PROVIDER=claude` could bill the API instead of the subscription.**
+  In `-p` mode Claude Code uses `ANTHROPIC_API_KEY` whenever it is present, and
+  the CLI inherited one loaded from `.env`. The child now gets no `ANTHROPIC_*`
+  variable, and the caller's own environment is left alone — the old code popped
+  variables out of the parent process for the rest of its run. The
+  `ClaudeWarmWindow` ping withholds every `ANTHROPIC_*` too, not five by name
+  (`ANTHROPIC_DEFAULT_HAIKU_MODEL` remapped the model it asks for).
+- A 401/403 for a per-call model override no longer takes the provider away from
+  every other task.
+- `config_report()` / `bundle-status` answer why nothing went out: per provider,
+  key set or not, model, endpoint, breaker state, and the last dead chain.
+- `WIKI_LLM_PROVIDER=claude` finds npm's `claude.cmd`.
+
+### Claude Code hooks
+
+- **session-telegram fired after every answer** (`Stop` ends each response) and on
+  every notification type. It is Notification-based, times a task from the last
+  prompt a human typed, and has a per-session cooldown
+  (`CLAUDE_STOP_ALERT_COOLDOWN_MINUTES`).
+- **bash-deny.yaml missed the spellings it promised** (`git push origin main
+  --force`, `rm -r -f /`, `rm -rf ~/`, `+main` refspecs), and the first matching
+  rule hid a later `deny`. Every rule is evaluated and `deny` wins; the table is
+  tested row by row, with rows proving nothing was widened.
+- **The BOM guard broke UTF-16 and CP1251 files.** `text-encoding-guard.py`
+  leaves them alone, also keeps `.sh` free of BOM and CRLF, and writes
+  atomically; `ps1-bom-guard.py` stays as a compatible name.
+- **A killed `/compact` hook left a marker that cost 45 s** on every session
+  start. The writer is always detached and its marker carries a deadline;
+  `/compact <focus>` now steers the handoff.
+- SessionEnd gets its own timeout, hook reports reach the model
+  (`additionalContext`), and SessionStart warns when scheduled tasks have
+  recorded nothing for two days — the only alarm left when a password change
+  stops every task, watchdogs included.
+- `bundle-status` no longer writes a quarantine copy on every run against a
+  corrupt ledger, and `bundle-status.py --hooks [--smoke]` checks that each
+  configured hook's interpreter and script exist and that the bundle's own hooks
+  run cleanly.
+
+### Alerts that looked delivered, and monitors that saw less than they said
+
+- **`python3` could be the Microsoft Store stub.** `runtime.sh` accepts an
+  interpreter only after it runs; `telegram-send.sh` exits 1 when the splitter
+  produced nothing, instead of letting callers log "Alert sent".
+- **Localized `schtasks` output** turned each repeated header into a phantom task
+  that alerted as failed on ru-RU; a repeat of the first row is skipped in any
+  language.
+- **Findings watch** read `projects_root` before loading the manifest, and fell
+  back to the bundle's parent directory; it now takes the manifest's value and
+  reads no project without one.
+- **Stale verdicts are reported once** per task and bucket (`runs.py stale
+  --seen`), on both monitors, with a Monday digest; a task whose `platform:`
+  excludes the host is never "owed" a run.
+- The Windows session-0 check covers S4U tasks and flags an S4U task on a UNC
+  path.
+
+### Tasks
+
+- **memory-update marked messages sent before the provider saw them**, so a
+  failed night was never retried; a project deferred from a full prompt could be
+  lost for good. Both fixed; `sent_hashes` is bounded.
+- **test-sweep:** failed → env → ok now closes its finding; temp cleanup touches
+  only its own `sweep-run-<pid>` directories.
+- **md2pdf:** `MD2PDF_TIMEOUT` is one budget for the whole run and callers wait
+  30 s longer, so no half-written `.md2pdf-*` directory is left for the nightly
+  sweep to commit (the sweep excludes them too).
+- memory-update and md2pdf-sync write a ledger row on every exit, crashes
+  included; `*.diff` logs are rotated; an AGENTS.md autofix that grows the file
+  past 1.5× is refused.
+
+### Windows: registry, installer, switcher
+
+- **`description: >-` reached Task Scheduler as `>-`.** `check-registry.py`
+  rejects anything the syncer's subset parser cannot read, and `self-test.ps1`
+  compares that parser with PyYAML field by field — which found the `enabled: no`
+  bug above.
+- **`timeout_hours` became required**, and a schedule that would run differently
+  under systemd is rejected where the POSIX generator runs.
+- **`logon_type: s4u`** — tasks that run before logon without a stored password.
+  Opt-in: S4U has no network credentials, so shares, Git Credential Manager and
+  authenticated proxies fail. INSTALL.md has the "changed my Windows password"
+  runbook.
+- `install.ps1` recorded the bootstrapped registry, and a user's merged
+  settings.json, as its own — `uninstall.ps1` would delete them. Lite no longer
+  installs `/wiki`. A re-install now replaces a bootstrapped registry and a
+  `wiki/index.md` nobody changed (the registry after a backup), as `install.sh`
+  does, instead of keeping the old template forever.
+- Neither installer deploys `commands/README.md` any more: Claude Code turns
+  every `.md` in that folder into a slash command, so it appeared as `/README`.
+- `get-key.ps1` and `claude-switch.ps1` read `.env` under `CLAUDE_CONFIG_DIR`.
+- `uninstall.ps1` unregisters only its own deployment's tasks and says what
+  actually happened; it and `self-test.ps1` honour `CLAUDE_CONFIG_DIR`.
+- `sync-tasks.ps1`: a launcher on a mapped drive is caught, `-Verify` leaves no
+  transcript, `-Verify -Detail` shows registered vs wanted, the `.env` parser ships
+  with the deployment, and a repetition on a boot/logon trigger is registered.
+- `claude-switch.ps1` no longer recreates the `.bak` holding the old key, and a
+  typo in `OLLAMA_HOST` no longer kills `status`.
+- `self-test.ps1` no longer byte-compiles a whole drive when a deployment has
+  exactly one of `cron/`, `hooks/`, `bin/` (a single path was splatted character
+  by character), and prints non-ASCII output intact.
+
+### POSIX
+
+- **`scripts/install.sh`** (`--profile lite|full`) and **`scripts/uninstall.sh`**:
+  the full tier on Linux and macOS was seven manual commands. Same manifest as
+  `install.ps1`, user files preserved, units generated and installed only on
+  request, uninstall by manifest. `install-lite.sh` now merges settings.json.
+- **`gen-scheduler.py`** repeats past midnight like Task Scheduler (systemd's
+  `HH/N` stopped at 23:00), gives `AtStartup` + `repeat_every` a boot timer, and
+  `--check` reports installed units that drifted from the registry (exit 3).
+- **`mcp-probe.py`:** the handshake timeout is real, a chatty stderr no longer
+  deadlocks it, `--check-wrappers` sees `cmd /c npx -y …` and project
+  `.mcp.json` files.
+- **Four `.env` parsers, one contract:** Python, bash, PowerShell and the VBScript
+  launcher are compared on one fixture — one surrounding quote pair removed, no
+  inline comments, the first occurrence of a key wins; the launcher reads UTF-8
+  and runs `kind: cmd` with its quotes intact.
+
+### Tests and CI
+
+- **The suite wrote into the checkout it tests.** Every run added 18 rows to the
+  real run ledger, a log-retention log and an empty `%TEMP%/sweep-run-<pid>` — 150
+  had piled up on one machine — because modules imported at collection resolved
+  their paths before the sandbox existed. The sandbox is now set before
+  collection, and a run that writes into `cron/{logs,state}`, `wiki/`,
+  `FINDINGS.md` or `%TEMP%` fails. A bundle module a test evicts from
+  `sys.modules` is put back after it: two tests failed only in a full run
+  because one test had swapped `runs` under the modules holding it.
+- **Under `CI=1`** a dependency skip in setup or collection is a failure, not
+  only in the call phase, and a fast-suite test over 3 s fails.
+- **One `bash` fixture:** tests that need a POSIX shell fail on Windows without
+  one; `skipif(bash is None)` turned the git-guard tests into silent passes on
+  the platform the bundle is written for.
+- **The sandbox cleared 30 of the 59 settings the `.env` template names.** It now
+  clears all of them (from the generated `cron/lib/env_names.py`), and the suite
+  refuses to start when a `home-claude/.env` or `bundle.local.yaml` sits in the
+  checkout — `_load_dotenv` would put exactly the cleared values back. A run also
+  fails if the checkout's `git status` changed.
+- **The Windows CI job runs pytest** — the fast suite and `-m integration` — so the
+  PowerShell, Task Scheduler and cscript tests run somewhere. Checks that depend
+  on the runner rather than the commit are shaped for a fresh machine: the
+  schtasks parser is tested on Windows' own tasks, and the three md2pdf prints
+  through an installed browser stay local (the logic is covered with the browser
+  stubbed). CI's compileall treats a SyntaxWarning as an error and covers
+  `scripts/` and `tests/`.
+
+### Docs, and the guards that keep them honest
+
+- **The privacy matrix said "on" for three phases registered off**, and its guard
+  counted a task disclosed if its name appeared in any cell of any row.
+  `check-io-matrix.py` checks the Default state per task named in the row;
+  `check-doc-counts.py` checks "off by default" per row of the task table.
+- **`check-io-matrix.py`'s signal patterns held literal backspace bytes where
+  `\b` was meant** — since 0.16.0 only its curl and Telegram signals could match
+  anything. Fixed, and a task that sends to Telegram must say so in both its
+  `# bundle-io:` header and its matrix row, which found the gap in
+  `git-push-all.sh`, `memory-update.py` and the healthcheck row.
+- `check-doc-counts.py` counts hooks, session hooks, skills and slash commands
+  against every doc that states a number, in digits or words up to twenty;
+  "Declaring MCP servers" is a mirrored section of the rules payload.
+- `check-env-ref.py` sees reads through helper functions, `${X:-default}`
+  self-defaults and heredocs: `WIKI_ALLOW_OFFBOX` and `WIKI_MASK_SECRETS` no
+  longer show as read by nobody, and two settings missing from the template were
+  added. Each guard extension has a mutation test proving it can fail.
+- `docs/wiki-method.md` described idempotency, backlinks and `_log.md` the
+  opposite way round; D-03, D-09, the retention window, the handoff wait and the
+  session-start output are corrected; `docs/cron-architecture.md` has "Where to
+  look when something is wrong".
+- The `.env` template leads with the key-less `local` backend; `docs/mcp-servers.md`
+  has the npm recipe the "never `npx -y`" rule was missing; the Findings rule
+  asks the closing commit to name the finding it closes.
+
+### Upgrading, and a demo that spends nothing
+
+- **UPGRADING.md** — what each release needs from an existing install, guarded
+  by a test that requires a section for the release being prepared and a mention
+  of every deprecation the code reports.
+- `bundle-status.py` and `self-test.ps1` list deprecated settings and hook wiring
+  an older example taught (`upgrade:` advice, never counted as broken); the
+  installers end with what a re-install left for you to do.
+- `wiki-pipeline.py --demo` compiles the shipped example in a sandbox with the
+  mock provider: the pipeline, seen working before anything leaves the machine.
+- `bundle-status.py` ends with `[where to look]`: the logs, ledger and state files
+  this install actually has, and `config_report()` names a key written twice in
+  `.env` (the first value wins everywhere).
+- `WIKI_LLM_PROVIDER=deepseek` is reminded of its changed meaning for one last
+  release.
+
+### New
+
+- Hooks: `text-encoding-guard.py`, `sensitive-path-guard.py` (asks before
+  Read/Write/Edit of `.env`, keys, credentials).
+- `.githooks/pre-merge-commit`.
+- `UPGRADING.md`, `wiki-pipeline.py --demo` with `docs/examples/mock-response.json`.
+- `scripts/install.sh`, `scripts/uninstall.sh`, `gen-scheduler.py --check`,
+  `sync-tasks.ps1 -Verify -Detail`, `bundle-status.py --hooks [--smoke]`.
+- `cron/monitor_checks.py`, `cron/lib/env_names.py` (generated),
+  `cron/admin/lib/registry-parse.ps1`.
+- Registry: `logon_type: s4u`. Manifest: `dry_run_until: confirm`. Env:
+  `MD2PDF_TIMEOUT`, `CLAUDE_STOP_ALERT_COOLDOWN_MINUTES`.
 
 ## [0.17.0] - 2026-09-11
 

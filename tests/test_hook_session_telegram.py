@@ -189,16 +189,24 @@ def test_a_denied_project_is_never_named(claude_home: Path, tmp_path: Path):
         "skip_projects:\n  - secretproj\n", encoding="utf-8")
     notification = {"hook_event_name": "Notification", "notification_type": "idle_prompt"}
 
+    # Filed where Claude Code files a session, ~/.claude/projects/<encoded cwd>/:
+    # the project is read from that directory first, as flush reads it, so a
+    # transcript lying anywhere else would name its temp folder instead.
+    def filed(dir_name: str, name: str) -> Path:
+        folder = claude_home / "projects" / dir_name
+        folder.mkdir(parents=True, exist_ok=True)
+        return _long_task(folder, name)
+
     sent = _run(claude_home, {**notification, "session_id": "s-denied",
                               "cwd": str(tmp_path / "work" / "secretproj"),
-                              "transcript_path": str(_long_task(tmp_path, "a"))})
+                              "transcript_path": str(filed("C--work-secretproj", "a"))})
     assert len(sent) == 1, sent
     assert "secretproj" not in sent[0]
     assert "a project" in sent[0]
 
     sent = _run(claude_home, {**notification, "session_id": "s-allowed",
                               "cwd": str(tmp_path / "work" / "myapp"),
-                              "transcript_path": str(_long_task(tmp_path, "b"))})
+                              "transcript_path": str(filed("C--work-myapp", "b"))})
     assert len(sent) == 2 and "myapp" in sent[1], sent
 
 

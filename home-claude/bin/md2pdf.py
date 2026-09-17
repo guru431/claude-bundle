@@ -146,6 +146,19 @@ def find_browser() -> str:
 CONTENT_POLICY = ("default-src 'none'; img-src file: data: http: https:; "
                   "style-src 'unsafe-inline'")
 
+# A link a browser can only print as a local file: URL. Chromium writes every
+# link it can resolve into the PDF as a clickable target, and for this file://
+# page a local target meant `file:///C:/Users/<name>/…` — the user name and the
+# path, inside a PDF that is then committed. Relative targets are neutralised by
+# the <base href="about:blank"> md_to_html writes: against that base they do not
+# resolve, so the browser writes no link and the text stays (measured, Chrome
+# 152 and Edge 153). An ABSOLUTE file: target is not affected by a base, so it
+# is removed here; Markdown syntax cannot produce one (markdown-it refuses file:
+# links), raw HTML and the python-markdown fallback can. Web, mailto and in-page
+# links are untouched.
+_FILE_HREF_RE = re.compile(r"""\s+href\s*=\s*(?:"\s*file:[^"]*"|'\s*file:[^']*'|file:[^\s>]*)""",
+                           re.I)
+
 
 def md_to_html(md_path: Path) -> str:
     import re
@@ -185,7 +198,10 @@ def md_to_html(md_path: Path) -> str:
         )
 
     # resolve relative image paths to absolute file:// URIs so headless Chrome
-    # finds them when rendering the HTML from a temp file
+    # finds them when rendering the HTML from a temp file — `src` only, the
+    # resources the print needs. `href` went through the same rewrite, which is
+    # how a relative link turned into a file:///C:/Users/<name>/… link target in
+    # the PDF (see _FILE_HREF_RE).
     md_dir = md_path.resolve().parent
 
     def fix_src(match: "re.Match[str]") -> str:
@@ -199,7 +215,8 @@ def md_to_html(md_path: Path) -> str:
             return f'{attr}="{candidate.as_uri()}"'
         return match.group(0)
 
-    body = re.sub(r'(src|href)="([^"]+)"', fix_src, body)
+    body = re.sub(r'(src)="([^"]+)"', fix_src, body)
+    body = _FILE_HREF_RE.sub("", body)
 
     # ESCAPED: a filename can carry `<`, `&` or a quote, and an unescaped one
     # breaks out of the <title> element and corrupts the document.
@@ -209,6 +226,9 @@ def md_to_html(md_path: Path) -> str:
         f"<!DOCTYPE html><html><head>"
         f'<meta charset="utf-8">'
         f'<meta http-equiv="Content-Security-Policy" content="{CONTENT_POLICY}">'
+        # Before anything that carries a URL: relative link targets must not
+        # resolve against the temp HTML's location (see _FILE_HREF_RE).
+        f'<base href="about:blank">'
         f"<title>{title}</title>"
         f"<style>{CSS}</style></head><body>{body}</body></html>"
     )

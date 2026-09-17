@@ -329,6 +329,98 @@ def test_the_page_is_printed_under_a_policy_that_loads_no_frames(md2pdf, tmp_pat
     assert "<br>" in body, "raw HTML still renders — the policy, not the parser, closes the hole"
 
 
+# ── link targets must not publish local paths ───────────────────────────────
+#
+# Chromium writes every link it can resolve into the PDF as a clickable target,
+# and for this file:// page a local target became `file:///C:/Users/<name>/…` —
+# the user name and the path, inside a PDF that then gets committed. Measured on
+# Chrome 152 and Edge 153: md2pdf's own `href` rewrite produced such targets, and
+# any other relative href resolved against the temp HTML in %TEMP%.
+
+_A_HREF = re.compile(r"""<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.I)
+_BASE_HREF = re.compile(r"""<base\b[^>]*?\bhref\s*=\s*"([^"]*)\"""", re.I)
+
+
+class LinkWritingBrowser(FakeBrowser):
+    """Prints link targets the way Chromium does: every href that resolves.
+
+    Resolved against the page's <base href> when there is one, else against the
+    page's own file:// URL — a result without a scheme is no link at all, which
+    is what the real browsers write for a target that does not resolve.
+    """
+
+    def __call__(self, cmd, **kwargs):
+        from urllib.parse import urljoin, urlsplit
+        from urllib.request import url2pathname
+
+        page_url = cmd[-1]
+        page = Path(url2pathname(urlsplit(page_url).path)).read_text(encoding="utf-8")
+        base = _BASE_HREF.search(page)
+        targets = [urljoin(base.group(1) if base else page_url, next(g for g in m.groups() if g is not None))
+                   for m in _A_HREF.finditer(page)]
+        annotations = b"".join(f"<</Subtype /Link /A <</S /URI /URI ({t})>>>>\n".encode()
+                               for t in targets if urlsplit(t).scheme)
+        self.writes = b"%PDF-1.4\n" + annotations + b"%" + b"z" * 4096 + b"\n%%EOF\n"
+        return super().__call__(cmd, **kwargs)
+
+
+def _links_fixture(folder: Path) -> Path:
+    (folder / "notes.md").write_text("# notes\n", encoding="utf-8")
+    (folder / "dot.png").write_bytes(bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d"
+        "4944415478da63f8cfc0f01f0005000201a5f1d3960000000049454e44ae426082"))
+    md = folder / "links.md"
+    md.write_text(
+        "# Links\n\n"
+        "- [a sibling](notes.md) and [a missing one](missing.md)\n"
+        "- <a href='quoted.md'>raw, single-quoted</a>, <a href=bare.md>raw, bare</a>\n"
+        '- <a href="file:///C:/Users/me/raw.md">raw, absolute</a>\n'
+        "- [the web](https://example.com/page) and [a section](#links)\n"
+        "- ![dot](dot.png)\n", encoding="utf-8")
+    return md
+
+
+def test_no_link_target_in_the_pdf_is_a_local_file(md2pdf, tmp_path, monkeypatch):
+    md = _links_fixture(tmp_path)
+    browser = LinkWritingBrowser()
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: ["/fake/chrome"])
+    monkeypatch.setattr(md2pdf.subprocess, "run", browser)
+
+    md2pdf.convert(md, tmp_path / "links.pdf")
+
+    printed = (tmp_path / "links.pdf").read_bytes()
+    assert b"/URI (file:" not in printed, printed[:600]
+    assert b"/URI (https://example.com/page)" in printed, "web links must stay clickable"
+
+
+def test_images_still_resolve_to_the_file_the_print_needs(md2pdf, tmp_path):
+    page = md2pdf.md_to_html(_links_fixture(tmp_path))
+
+    assert f'src="{(tmp_path / "dot.png").resolve().as_uri()}"' in page
+    head = page.partition("<body>")[0]
+    assert '<base href="about:blank">' in head
+
+
+@pytest.mark.integration
+def test_the_installed_browser_writes_no_local_link_target(md2pdf, tmp_path, monkeypatch):
+    try:
+        md2pdf.browser_candidates()
+    except RuntimeError:
+        pytest.skip("no Chromium-family browser on this machine")
+    monkeypatch.setenv("MD2PDF_TIMEOUT", "60")
+    md = _links_fixture(tmp_path)
+    try:
+        md2pdf.convert(md, tmp_path / "links.pdf")
+    except RuntimeError as exc:
+        pytest.skip(f"this environment cannot print at all: {exc}")
+
+    printed = (tmp_path / "links.pdf").read_bytes()
+    targets = re.findall(rb"/URI\s*\(((?:\\.|[^\\)])*)\)", printed)
+    assert not [t for t in targets if t.lower().startswith(b"file:")], targets
+    assert b"https://example.com/page" in targets, targets
+    assert b"/Subtype /Image" in printed, "the local image must still print"
+
+
 def _font_families(pdf: bytes) -> set[str]:
     return {name.split(b"+", 1)[-1].decode("latin-1")
             for name in re.findall(rb"/BaseFont\s*/([^\s/<>\[\]()]+)", pdf)}

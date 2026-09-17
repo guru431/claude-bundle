@@ -257,19 +257,33 @@ guard_secrets_preview() {
 # an earlier run, or with --no-verify — went straight to `git push` with no
 # secret check at all. That is the same unattended-leak path the staged guard
 # exists to close, one step later in the pipeline.
-# Args: <label> <branch>. Returns non-zero → caller must not push.
+#
+# FILE NAMES are checked here as well as contents, against the same table as
+# guard_staged_sensitive. The sweep refuses to COMMIT a `.env` or a
+# `credentials.json`, yet pushed one that had been committed by hand: `.env`
+# holding `DB_PASSWORD=hunter2` has no token shape, and a credential on a private
+# server is still a credential on a server. A file that is meant to be tracked
+# is pushed once by hand; after that it is no longer outgoing.
+# Args: <label> <branch> <remote>. Returns non-zero → caller must not push.
 guard_outgoing_secrets() {
     local label="$1" branch="$2" remote="${3:-origin}"
     if ! command -v secret_scan_range >/dev/null 2>&1; then
         echo "[$label] SECRET-SCAN unavailable (lib not loaded) — NOT pushing (fail closed)" >> "$LOG_FILE"
         return 1
     fi
-    local range hits
-    if git rev-parse --verify -q "$remote/$branch" >/dev/null 2>&1; then
-        range="$remote/$branch..$branch"
-    else
-        # First push of this branch: the whole reachable history is published.
-        range="$branch"
+    # What the push publishes: everything reachable from the branch that the
+    # remote does not already have — the set .githooks/pre-push scans. The old
+    # range, `<remote>/<branch>..<branch>` or the whole branch when it was new,
+    # rescanned the entire history on the first push of every new branch; with
+    # file names in the check, a repository that has tracked an `.npmrc` for
+    # years would have failed on every such branch.
+    local range="$branch --not --remotes=$remote"
+    local names hits blocked=0
+    names=$(secret_scan_range_paths "$range" | secret_scan_paths)
+    if [ -n "$names" ]; then
+        echo "[$label] SENSITIVE file name(s) in OUTGOING commits — push blocked:" >> "$LOG_FILE"
+        printf '%s\n' "$names" | sed 's/^/    /' >> "$LOG_FILE"
+        blocked=1
     fi
     # secret_scan_range walks the BLOBS the range introduces plus every commit
     # MESSAGE. `git log -p` — what this used to do — shows no diff at all for a
@@ -277,13 +291,19 @@ guard_outgoing_secrets() {
     # produced zero hits and was pushed; and nothing scanned commit messages,
     # where a pasted token is just as published. UTF-16 content is transcoded by
     # the library before grepping, which `-I` alone treated as binary and skipped.
-    hits=$(secret_scan_range "$range")
-    [ -z "$hits" ] && return 0
-    echo "[$label] SECRET-shaped token in OUTGOING commits ($range) — push blocked:" >> "$LOG_FILE"
-    printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
+    #
+    # Its exit status decides, not whether it printed: it also prints a NOTE when
+    # a blob over 1 MiB was not scanned, and gating on output turned that note
+    # into a blocked push — a repository with one large asset failed every night.
+    if ! hits=$(secret_scan_range "$range"); then
+        echo "[$label] SECRET-shaped token in OUTGOING commits — push blocked:" >> "$LOG_FILE"
+        blocked=1
+    fi
+    [ -n "$hits" ] && printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
+    [ "$blocked" -eq 0 ] && return 0
     # In dry-run the guard runs for the preview only — there is nothing to alert about.
     if [ "$DRY_RUN" != "1" ] && [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
-        "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret in unpushed commits of [$label] — NOT pushed. Rewrite the history that carries it and rotate the key." >> "$LOG_FILE" 2>&1
+        "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: possible secret or sensitive file in unpushed commits of [$label] — NOT pushed. Rewrite the history that carries it and rotate the key; a file meant to be tracked is pushed once by hand." >> "$LOG_FILE" 2>&1
     fi
     return 1
 }

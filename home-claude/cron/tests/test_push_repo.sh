@@ -242,4 +242,40 @@ reset_counters; push_repo "$R16" "r16" "Auto-commit: test"
 DRY_RUN=0
 grep -q "REPO WOULD BE BLOCKED" "$LOG_FILE" || fail "T16: the preview did not report the token in a tracked binary file"
 
-echo "PASS: push_repo (16 scenarios)"
+# === Test 17: a sensitive file committed BY HAND is not pushed either ===
+# The sweep refuses to commit a .env, but the outgoing check read contents only:
+# `DB_PASSWORD=hunter2` has no token shape, so a hand commit of .env was pushed.
+R17="$TMP/r17"; mkrepo "$R17"
+printf 'DB_PASSWORD=hunter2\n' > "$R17/.env"
+git -C "$R17" add .env; git -C "$R17" commit -qm config
+reset_counters; push_repo "$R17" "r17" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T17: a hand-committed .env did not fail the repo (failed=$failed pushed=$pushed)"
+[ "$(git -C "$R17" rev-parse "origin/$(br "$R17")")" != "$(git -C "$R17" rev-parse HEAD)" ] \
+    || fail "T17: origin received the .env"
+
+# === Test 18: a sensitive file the remote ALREADY has does not block a new branch ===
+# The outgoing range used to be the whole branch on its first push, so with file
+# names in the check a repository that has tracked an .npmrc for years would fail
+# on every new branch. Only what the remote lacks is outgoing.
+R18="$TMP/r18"; mkrepo "$R18"
+printf 'registry=https://registry.example.invalid/\n' > "$R18/.npmrc"
+git -C "$R18" add -A; git -C "$R18" commit -qm npmrc
+git -C "$R18" push -q origin "$(br "$R18")"
+git -C "$R18" checkout -q -b feature
+echo feature > "$R18/feature.txt"; git -C "$R18" add -A; git -C "$R18" commit -qm feature
+reset_counters; push_repo "$R18" "r18" "Auto-commit: test"
+[ "$pushed" = "1" ] || fail "T18: a new branch was blocked by a file the remote already had (failed=$failed)"
+
+# === Test 19: one blob over 1 MiB is a note, not a blocked push ===
+# The outgoing guard gated on "the scan printed something", and the scan prints a
+# NOTE for a blob it skips by size: a repository with one large asset was FAILED
+# every night.
+R19="$TMP/r19"; mkrepo "$R19"
+head -c 1100000 /dev/zero | tr '\000' 'a' > "$R19/asset.dat"
+git -C "$R19" add -A; git -C "$R19" commit -qm asset
+: > "$LOG_FILE"
+reset_counters; push_repo "$R19" "r19" "Auto-commit: test"
+[ "$pushed" = "1" ] || fail "T19: a clean repository with one large blob was not pushed (failed=$failed)"
+grep -q "NOT scanned" "$LOG_FILE" || fail "T19: the note about the unscanned blob is missing from the log"
+
+echo "PASS: push_repo (19 scenarios)"

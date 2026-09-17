@@ -214,9 +214,29 @@ for k in ('collect_plans',):
     v = d.get(k)
     if v is not None and not isinstance(v, bool):
         print('%s must be true/false, got %s' % (k, type(v).__name__)); sys.exit(4)
-unknown = sorted(set(d) - KNOWN)
+# An unknown key is ignored at runtime, UNLESS it is a near miss of a known one:
+# cron/hooks/utils.py (its loop over unknown manifest keys) reads a key within
+# two edits of a known key as that key, unreadable, and denies every project
+# (`skip_project:` plainly meant skip_projects). edit_distance is a copy of
+# utils.py::_edit_distance, not an import: importing utils loads the manifest
+# and the .env of the tree it sits in. Keep the two in step.
+def edit_distance(a, b):
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+unknown = sorted(set(d) - KNOWN, key=str)
+near = [(k, n) for k in unknown
+        for n in sorted(x for x in KNOWN if edit_distance(str(k).lower(), x) <= 2)[:1]]
+if near:
+    print('; '.join('%r is a near miss of %r - the pipeline denies EVERY project until it is fixed' % kn
+                    for kn in near))
+    sys.exit(4)
 if unknown:
-    print('unknown key(s): %s' % ', '.join(unknown)); sys.exit(5)
+    print('unknown key(s): %s' % ', '.join(map(str, unknown))); sys.exit(5)
 sys.exit(0)
 '@
     $manifests = @{ 'bundle.local.example.yaml (template)' = (Join-Path $root 'config/bundle.local.example.yaml') }

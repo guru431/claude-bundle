@@ -62,11 +62,20 @@ def _load_dotenv() -> None:
         # legal. What makes a `PATH=/evil` line inert is the `key not in
         # os.environ` guard below, and that guard is the whole precedence rule:
         # **env > dotenv**, a variable already in the environment is never
-        # overwritten from the file.
-        if not key or key[0].isdigit() or any(not (c.isalnum() or c == "_") for c in key):
+        # overwritten from the file — and, by the same test, the FIRST occurrence
+        # of a key in the file wins over a later one.
+        # isascii(): str.isalnum() accepts any script's letters, the shell's
+        # `[A-Za-z_][A-Za-z0-9_]*` does not, and a key one parser sets and the
+        # other drops is the drift the shared .env contract forbids.
+        if (not key or not key.isascii() or key[0].isdigit()
+                or any(not (c.isalnum() or c == "_") for c in key)):
             continue
         if key not in os.environ:
-            os.environ[key] = value.strip().strip('"').strip("'")
+            # ONE matching pair of surrounding quotes comes off, as in every
+            # parser of this file. strip('"').strip("'") took off any number of
+            # either kind, mismatched ones included: `""x""` became x, `"x'` x.
+            v = value.strip()
+            os.environ[key] = v[1:-1] if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'" else v
 
 
 _load_dotenv()

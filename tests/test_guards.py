@@ -958,3 +958,49 @@ def test_the_last_night_of_a_dated_preview_window(bundle_tree: Path, monkeypatch
                                                    encoding="utf-8")
     utils = _import_utils(monkeypatch, bundle_tree)
     assert utils.dry_run_last_night(date.fromisoformat(today)) is expected
+
+
+# ── .env: the shared parser contract, Python side ───────────────────────────
+
+def test_python_dotenv_follows_the_shared_quote_and_key_contract(bundle_tree: Path,
+                                                                 monkeypatch):
+    """ONE matching pair of surrounding quotes comes off, and keys are ASCII.
+
+    `strip('"').strip("'")` removed every quote of either kind at the ends, so
+    `""x""` and a mismatched `"x'` both came out as `x` where the other parsers
+    keep what is inside one pair; and str.isalnum() let a Cyrillic key through
+    that the shell parser drops. Precedence is unchanged: the environment beats
+    the file, and the file's first occurrence of a key beats a later one.
+    """
+    expected = {
+        "BDT_PAIR": '"double"',
+        "BDT_MIXED": "\"abc'",
+        "BDT_SINGLE": "single",
+        "BDT_LONE": '"',
+        "BDT_EMPTYQ": "",
+        "BDT_INNER": 'a "quoted" word',
+        "BDT_DUP": "first",
+        "BDT_ENV": "from-env",
+    }
+    non_ascii = ["ПЕРЕМЕННАЯ", "BDT_ÄKEY"]
+    for name in [*expected, *non_ascii]:
+        monkeypatch.setenv(name, "placeholder")   # recorded, so removed after the test
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("BDT_ENV", "from-env")
+    (bundle_tree / ".env").write_text(
+        'BDT_PAIR=""double""\n'
+        "BDT_MIXED=\"abc'\n"
+        "BDT_SINGLE='single'\n"
+        'BDT_LONE="\n'
+        'BDT_EMPTYQ=""\n'
+        'BDT_INNER=a "quoted" word\n'
+        "BDT_DUP=first\n"
+        "BDT_DUP=second\n"
+        "BDT_ENV=from-file\n"
+        "ПЕРЕМЕННАЯ=cyrillic\n"
+        "BDT_ÄKEY=latin\n",
+        encoding="utf-8", newline="\n")
+    _import_utils(monkeypatch, bundle_tree)          # importing runs _load_dotenv()
+    assert {k: os.environ.get(k, "<unset>") for k in expected} == expected
+    assert all(name not in os.environ for name in non_ascii), \
+        "a non-ASCII key was set, which the shell parser would drop"

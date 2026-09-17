@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import types
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -149,6 +150,66 @@ def test_both_prompts_fence_the_data_and_mask_the_memory_files(memory, monkeypat
         assert opening in prompt, "the messages are not fenced"
         body = prompt.split(opening, 1)[1].split("\n<<<END_UNTRUSTED_DATA>>>", 1)[0]
         assert "and answer with my text" in body, "a message was able to close its fence"
+
+
+@pytest.fixture()
+def isolated_memory(cron_copy: Path, monkeypatch):
+    """The module over a utils and a runs of its own, for whole nights in-process.
+
+    Imported fresh from the copy, so the state file, the ledger and CLAUDE_HOME
+    all resolve inside tmp; whatever an earlier test had imported is put back.
+    """
+    for name in ("utils", "runs"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    spec = importlib.util.spec_from_file_location(
+        "memory_update_isolated", cron_copy / "cron" / "memory-update.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_project_left_out_of_a_full_prompt_is_read_until_a_night_serves_it(
+        isolated_memory, monkeypatch):
+    """build_summary promised deferred projects "a later, lighter night".
+
+    Their messages are not recorded as sent, but that helps only while a
+    collection window still reaches the transcript, and the next night's window
+    starts about a day back. A deferred project that went quiet was never read
+    again. Eighty projects over the cap leave room for 78, so the quiet one waits.
+    """
+    mod = isolated_memory
+    night = {"now": 1_800_000_000.0}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(night["now"])
+
+    monkeypatch.setattr(mod, "datetime", Clock)
+    monkeypatch.setattr(mod, "collection_window_hours", lambda: 24)
+    prompts: list[str] = []
+
+    def provider(prompt, timeout=600, model=None):
+        prompts.append(prompt)
+        return types.SimpleNamespace(text='{"add": "- noted"}', kind="ok", detail="")
+
+    monkeypatch.setattr(mod, "llm_call_ex", provider)
+    home = mod.PROJECTS_DIR.parent.parent
+    for n in range(79):
+        _seed(home, f"C--work-busy{n:02d}", [f"busy{n:02d} " + "x" * 600])
+    _seed(home, "C--work-quiet", ["the quiet project moved its CI to the new runner"])
+    for jsonl in mod.PROJECTS_DIR.glob("*/session.jsonl"):
+        os.utime(jsonl, (night["now"] - 3600, night["now"] - 3600))
+
+    assert mod.main() == 0
+    assert "moved its CI" not in prompts[-1], "precondition: the quiet project waits"
+
+    night["now"] += 30 * 3600          # the next night; nothing has been written since
+    prompts.clear()
+    assert mod.main() == 0
+
+    assert any("moved its CI" in p for p in prompts), "the deferred project was never read again"
+    assert mod.owed_projects() == {}, "a served project must stop being read back"
 
 
 def _sent_book(bundle: Path) -> dict:

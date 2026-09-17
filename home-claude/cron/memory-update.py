@@ -258,9 +258,52 @@ def remember_sent(sent, seen, today: date | None = None) -> None:
         f"{len(kept)} remembered")
 
 
+def owed_projects() -> dict[str, int]:
+    """Projects an earlier night left out of the prompt → how far back to read them."""
+    raw = load_state(persist=False).get("memory", {}).get("deferred")
+    if not isinstance(raw, dict):
+        return {}
+    return {p: int(v) for p, v in raw.items()
+            if isinstance(p, str) and isinstance(v, (int, float))}
+
+
+def remember_deferred(deferred, since: float) -> None:
+    """Keep the projects tonight's prompt left out readable until one takes them.
+
+    Their messages are not recorded as sent, but that is worth something only
+    while a collection window still reaches the transcript — and the next
+    night's window starts about a day back. A deferred project that went quiet
+    was never read again: build_summary promised "a later, lighter night", and
+    the messages never reached memory at all. So the cutoff of the night that
+    deferred a project is remembered — the OLDEST one, while it keeps being
+    deferred — and the collector reads that project back to it. A project served
+    tonight, or with nothing left to send, drops out of the list.
+    """
+    if is_dry_run():
+        return
+    owed = owed_projects()
+    wanted = {p: min(owed.get(p, int(since)), int(since)) for p in deferred}
+    if wanted == owed:
+        return
+    with _state_lock() as held:
+        if not held:
+            log("deferred projects NOT recorded (state lock busy) — one that goes "
+                "quiet may not be read again")
+            return
+        state = load_state()
+        state.setdefault("memory", {})["deferred"] = wanted
+        save_state(state)
+    if wanted:
+        log(f"owed a later night, read back to their first deferral: "
+            f"{', '.join(sorted(wanted))}")
+
+
 def collect_today_user_messages(
-        hours: int = 24) -> tuple[dict[str, str], dict[str, str], set[str]]:
-    """Collect user messages from JSONLs modified in the last N hours, by project.
+        since: float) -> tuple[dict[str, str], dict[str, str], set[str]]:
+    """Collect user messages from JSONLs modified since `since` (epoch), by project.
+
+    A project an earlier night deferred is read back to that night instead —
+    see remember_deferred().
 
     Returns (messages by project, {digest: text} of the messages not sent
     before, digests of already-sent messages met again). Nothing is recorded
@@ -270,7 +313,7 @@ def collect_today_user_messages(
     held for messages a cap cut out of the prompt. main() records them, through
     remember_sent(), once the provider has answered.
     """
-    cutoff = datetime.now().timestamp() - hours * 3600
+    owed = owed_projects()
     # Accumulate as a list per project and cap once at the end: two dirs can
     # resolve to the same project name, and capping each dir's chunk separately
     # would let the merge order decide what survives.
@@ -293,6 +336,10 @@ def collect_today_user_messages(
         # memory extraction (this task sends user messages to the LLM too).
         if not project_allowed(proj_name):
             continue
+        cutoff = min(since, owed.get(proj_name, since))
+        if cutoff < since:
+            log(f"  {proj_name}: deferred on an earlier night — reading back to "
+                f"{datetime.fromtimestamp(cutoff):%Y-%m-%d %H:%M}")
 
         bits: list[str] = []
         # Oldest session file first. glob() order is filesystem order, and
@@ -351,11 +398,47 @@ def collect_today_user_messages(
     return capped, fresh, seen
 
 
-def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) -> str:
+# "### <name>\n" + the "\n\n" between sections, per project in a summary.
+SUMMARY_SECTION_OVERHEAD = 12
+# A share below this is not worth sending — a 60-character slice of a project's
+# day carries nothing the model can use. Past that point the thing to cut is the
+# NUMBER of projects, not the share: keeping the floor while dividing by n made
+# the sum exceed the very cap build_summary exists to enforce (n above ~78
+# projects), and it did so silently, because the log line printed the result
+# size without comparing it to the budget.
+SUMMARY_MIN_SHARE = 500
+
+
+def _sections(proj_messages: dict[str, str]) -> str:
     # Sorted, not filesystem-iteration order: the cap must always bite the same
     # tail instead of whichever projects happened to be walked last.
-    parts = [f"### {proj}\n{proj_messages[proj]}" for proj in sorted(proj_messages)]
-    text = "\n\n".join(parts)
+    return "\n\n".join(f"### {proj}\n{proj_messages[proj]}" for proj in sorted(proj_messages))
+
+
+def deferred_projects(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) -> list[str]:
+    """The projects a prompt of `cap` characters leaves for a later night, sorted.
+
+    Empty unless the material is over the cap AND more projects have some than
+    SUMMARY_MIN_SHARE lets in. One function, because two callers need the
+    answer: build_summary, which leaves them out, and main(), which has to
+    remember them (remember_deferred) — a second copy of the rule could disagree
+    about who was left out.
+    """
+    if len(_sections(proj_messages)) <= cap:
+        return []
+    projects = sorted(proj_messages)
+    max_projects = max(1, cap // (SUMMARY_MIN_SHARE + SUMMARY_SECTION_OVERHEAD))
+    if len(projects) <= max_projects:
+        return []
+    # Which ones to keep: the projects with the most material this cycle — that
+    # is where the day actually happened.
+    keep = set(sorted(projects, key=lambda p: len(proj_messages[p]),
+                      reverse=True)[:max_projects])
+    return [p for p in projects if p not in keep]
+
+
+def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) -> str:
+    text = _sections(proj_messages)
     if len(text) <= cap:
         return text
 
@@ -364,28 +447,12 @@ def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) ->
     # the same alphabetically-last ones, every busy night — with no state and no
     # retry, those projects simply never reached memory. Each project now keeps
     # its NEWEST messages within its share, cut on message boundaries (never
-    # mid-sentence), so nothing is dropped outright.
-    per_project_overhead = 12  # "### <name>\n" + the "\n\n" between sections
-    # A share below MIN_SHARE is not worth sending — a 60-character slice of a
-    # project's day carries nothing the model can use. Past that point the thing
-    # to cut is the NUMBER of projects, not the share: keeping the floor while
-    # dividing by n made the sum exceed the very cap this function exists to
-    # enforce (n above ~78 projects), and it did so silently, because the log
-    # line printed the result size without comparing it to the budget.
-    MIN_SHARE = 500
-    projects = sorted(proj_messages)
-    max_projects = max(1, cap // (MIN_SHARE + per_project_overhead))
-    deferred: list[str] = []
-    if len(projects) > max_projects:
-        # Which ones to keep: the projects with the most material this cycle —
-        # that is where the day actually happened. The rest are picked up on a
-        # later, lighter night rather than shrunk into uselessness now.
-        keep = set(sorted(projects, key=lambda p: len(proj_messages[p]),
-                          reverse=True)[:max_projects])
-        deferred = [p for p in projects if p not in keep]
-        projects = [p for p in projects if p in keep]
+    # mid-sentence). Projects past the SUMMARY_MIN_SHARE limit wait for a later
+    # night, and remember_deferred() makes sure that night still reads them.
+    deferred = deferred_projects(proj_messages, cap)
+    projects = [p for p in sorted(proj_messages) if p not in deferred]
     n = len(projects)
-    share = max(MIN_SHARE, cap // n - per_project_overhead)
+    share = max(SUMMARY_MIN_SHARE, cap // n - SUMMARY_SECTION_OVERHEAD)
     out = []
     for proj in projects:
         body = proj_messages[proj]
@@ -397,12 +464,12 @@ def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) ->
         f"capped to ~{share} chars each (newest kept), result {len(summary)} chars")
     if deferred:
         log(f"build_summary: {len(deferred)} project(s) deferred to a later run "
-            f"(the cap allows {n} at the {MIN_SHARE}-char minimum): "
+            f"(the cap allows {n} at the {SUMMARY_MIN_SHARE}-char minimum): "
             f"{', '.join(deferred)}")
     if len(summary) > cap:
         log(f"WARNING: build_summary still {len(summary)} chars against a {cap} cap "
             f"— one project's minimum share does not fit; raise PROMPT_TOTAL_CAP "
-            f"or lower MIN_SHARE")
+            f"or lower SUMMARY_MIN_SHARE")
     return summary
 
 
@@ -627,7 +694,8 @@ def _update(rec: dict) -> int:
     if window > 24:
         log(f"Catch-up window: {window}h (the last green run was longer ago than "
             f"a day — a missed day used to be lost for good)")
-    msgs, fresh, seen = collect_today_user_messages(hours=window)
+    since = datetime.now().timestamp() - window * 3600
+    msgs, fresh, seen = collect_today_user_messages(since)
     log(f"Collected user messages from {len(msgs)} projects")
 
     if is_dry_run():
@@ -648,6 +716,10 @@ def _update(rec: dict) -> int:
         # cap is not recorded and may be offered again: a repeated tail is the
         # cheap side of that trade, a message that never went out is not.
         remember_sent([d for d, text in fresh.items() if text in carried], seen)
+        # And the projects that prompt had no room for stay readable until a
+        # later night serves them — a failed night records nothing, and the
+        # widened catch-up window covers everything anyway.
+        remember_deferred(deferred_projects(msgs), since)
     cross_kind = update_cross_notes(msgs)
     log("=== End Memory Update ===")
     run_incident_extract()

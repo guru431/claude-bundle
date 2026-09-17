@@ -41,10 +41,11 @@ def _load_dotenv() -> None:
     dotenv = BUNDLE_ROOT / ".env"
     if not dotenv.is_file():
         return
+    seen: dict[str, tuple[int, str]] = {}
     # utf-8-sig: a BOM (what Notepad and `Set-Content` write by default on
     # Windows) otherwise becomes part of the FIRST key's name, and that one
     # variable silently goes missing.
-    for raw in dotenv.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+    for number, raw in enumerate(dotenv.read_text(encoding="utf-8-sig", errors="replace").splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -70,6 +71,16 @@ def _load_dotenv() -> None:
         if (not key or not key.isascii() or key[0].isdigit()
                 or any(not (c.isalnum() or c == "_") for c in key)):
             continue
+        # A key written twice is resolved first-wins by every parser, silently —
+        # and the template's empty `DEEPSEEK_KEY=` above a value appended at the
+        # bottom makes the key not set at all. Said once, by config_report().
+        if key in seen:
+            first, first_value = seen[key]
+            _DOTENV_DUPLICATES.append(
+                f"{key} on lines {first} and {number}: the first wins"
+                + (" — an empty one, which reads as not set" if not first_value else ""))
+        else:
+            seen[key] = (number, value.strip().strip("\"'"))
         if key not in os.environ:
             # ONE matching pair of surrounding quotes comes off, as in every
             # parser of this file. strip('"').strip("'") took off any number of
@@ -78,6 +89,7 @@ def _load_dotenv() -> None:
             os.environ[key] = v[1:-1] if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'" else v
 
 
+_DOTENV_DUPLICATES: list[str] = []
 _load_dotenv()
 
 
@@ -2721,6 +2733,8 @@ def config_report() -> list[str]:
         else:
             source = "resolved from PATH"
         lines.append(f"{name:<17} = {resolved or 'NOT FOUND'}  ({source})")
+    for note in _DOTENV_DUPLICATES:
+        lines.append(f"{'.env duplicate':<17} = {note}")
     lines.append(f"{'privacy':<17} = {policy_summary()}")
     if _CONFIG_ERRORS:
         lines.append("ERRORS:")

@@ -56,6 +56,19 @@ def test_settings_an_upgrade_left_behind_are_named_and_a_clean_env_has_none(tmp_
     assert utils.config_deprecations() == []
 
 
+def test_a_key_written_twice_in_env_is_named_with_the_line_that_wins(tmp_path):
+    """Every .env parser resolves a duplicated key first-wins, and says nothing.
+    The template ships `DEEPSEEK_KEY=` empty, so a key appended at the bottom of
+    the file was simply not set."""
+    bundle = _bundle(tmp_path, "DEEPSEEK_KEY=\nWIKI_RETRY_LIMIT=2\nWIKI_LLM_PACE_SECONDS=1\n"
+                               "DEEPSEEK_KEY=test-value\nWIKI_RETRY_LIMIT=5\n")
+    r = _status(bundle)
+    assert r.returncode == 0, r.stderr
+    dupes = [ln.split("=", 1)[1].strip() for ln in r.stdout.splitlines() if ".env duplicate" in ln]
+    assert dupes == ["DEEPSEEK_KEY on lines 1 and 4: the first wins — an empty one, which reads as not set",
+                     "WIKI_RETRY_LIMIT on lines 2 and 5: the first wins"], r.stdout
+
+
 def test_the_doctor_advises_on_old_wiring_without_failing_it(tmp_path):
     """A settings.json that worked yesterday must not fail the self-test after an
     upgrade — so none of this may count as broken."""

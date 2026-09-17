@@ -132,8 +132,10 @@ Then run `sync.cmd` once (step 4 above).
   `get-key.ps1`, `claude-switch.ps1`, the installer) took the last line and the
   task launcher the first non-empty one, so a `DEEPSEEK_KEY=…` or `PYTHON_EXE=…`
   appended below the template's empty line worked for some of them — and now
-  works for none. Fill the template's line in place and delete the duplicate.
-  (The installer fills an empty `PYTHON_EXE` / `BASH_EXE` line itself.) Quotes:
+  works for none. Fill the template's line in place and delete the duplicate;
+  `bundle-status.py` names every duplicated key as `.env duplicate`, with the
+  lines involved. (The installer fills an empty `PYTHON_EXE` / `BASH_EXE` line
+  itself.) Quotes:
   exactly one matching pair around a value comes off, in every reader.
 - **The privacy policy compares normalized names.** `allow_projects` and
   `skip_projects` entries now match regardless of case and punctuation, in every

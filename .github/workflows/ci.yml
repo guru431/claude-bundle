@@ -241,8 +241,13 @@ jobs:
           CI: "1"
         run: |
           # `-m integration` was defined, documented and never run anywhere. The
-          # Windows-only ones skip themselves by platform.
-          python -m pytest tests/ -q -m integration
+          # Windows-only ones skip themselves by platform. The three md2pdf prints
+          # through an installed browser are deselected, as in the Windows job and
+          # for its reason: they test the runner image's browser, not the commit.
+          python -m pytest tests/ -q -m integration \
+            --deselect tests/test_md2pdf.py::test_the_installed_browser_writes_no_local_link_target \
+            --deselect tests/test_md2pdf.py::test_a_local_file_in_an_iframe_does_not_reach_the_pdf \
+            --deselect tests/test_md2pdf.py::test_the_title_guard_agrees_with_the_installed_browser
 
   powershell:
     name: powershell + pytest (windows)
@@ -311,7 +316,17 @@ jobs:
       - name: pytest, integration (windows)
         env:
           CI: "1"
-        # Nothing deselected: real git and Git Bash, the PowerShell 5.1 installers
-        # and syncer, cscript, schtasks, a headless Chromium for md2pdf (those three
-        # tests skip rather than fail where the runner cannot print).
-        run: python -m pytest tests/ -q -m integration
+        # Real git and Git Bash, the PowerShell 5.1 installers and syncer, cscript,
+        # schtasks (asserted on Windows' own tasks, which every install has) — what
+        # this job installs or Windows itself guarantees.
+        # Deselected: md2pdf's three prints through an INSTALLED browser. They pin
+        # how a particular Edge or Chrome renders — link targets, a framed local
+        # file, the title of its error page — which is true or false of whatever
+        # browser the runner image shipped this week, not of the commit under test.
+        # md2pdf's own logic runs in the fast suite with the browser stubbed; these
+        # three stay in `pytest -m integration` on the machines md2pdf prints on.
+        run: >-
+          python -m pytest tests/ -q -m integration
+          --deselect tests/test_md2pdf.py::test_the_installed_browser_writes_no_local_link_target
+          --deselect tests/test_md2pdf.py::test_a_local_file_in_an_iframe_does_not_reach_the_pdf
+          --deselect tests/test_md2pdf.py::test_the_title_guard_agrees_with_the_installed_browser

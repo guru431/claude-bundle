@@ -197,14 +197,27 @@ def test_console_decoding_survives_a_missing_oem_codec():
 
 @pytest.mark.integration
 @pytest.mark.skipif(os.name != "nt", reason="schtasks.exe is Windows-only")
-def test_collect_sees_real_tasks():
-    """On Windows the fallback must actually work: live names and codes.
+def test_collect_sees_real_tasks(monkeypatch):
+    """On Windows the fallback must actually work: live names, codes and dates.
 
     The skipif is not decoration: this is the only test in the file that shells
     out, and `pytest -m integration` on a Linux CI runner would fail on a
     missing binary rather than on anything about the code.
+
+    Asserted on Windows' OWN tasks, with the system filter lifted for this call.
+    What the filter keeps is whatever else a machine happens to carry, and a
+    freshly imaged CI runner need not carry anything: collect() would then raise
+    "no tasks at all" about a parser that works. Every Windows install has tasks
+    under \\Microsoft\\Windows\\, and the filter has its own test above.
     """
+    is_system, asked = st.is_system_task, []
+    monkeypatch.setattr(st, "is_system_task", lambda name: asked.append(name) or False)
+
     tasks = st.collect()
-    assert tasks
+
+    assert any(is_system(name) for name in asked), "no task of Windows' own in the output"
     assert all(isinstance(t["LastResult"], int) for t in tasks)
     assert all(t["LastResult"] >= 0 for t in tasks), "codes must be unsigned"
+    # Dates in this machine's own format, which is the runner's locale on CI: one
+    # the parser cannot read comes back as 'unknown' instead of a time.
+    assert not [t for t in tasks if t["LastRun"] == st.UNKNOWN], "a Last Run Time went unread"

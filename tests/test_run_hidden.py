@@ -41,8 +41,9 @@ def _recorder(path: Path, exit_code: int) -> Path:
     return path
 
 
-def _launch(bundle: Path, *args: str) -> int:
+def _launch(bundle: Path, *args: str, env_extra: dict | None = None) -> int:
     env = {k: v for k, v in os.environ.items() if k not in ("BASH_EXE", "PYTHON_EXE")}
+    env.update(env_extra or {})
     return subprocess.run([CSCRIPT, "//B", "//nologo", str(bundle / "bin" / "_run-hidden.vbs"),
                            *args], env=env, timeout=60).returncode
 
@@ -71,3 +72,21 @@ def test_an_interpreter_from_a_bom_export_quoted_non_ascii_env_line_is_used(tmp_
     assert _launch(bundle, "python", str(task), "--full") == 4
     assert (interpreter.parent / "received.txt").read_text(encoding="ascii").strip() == \
         f'"{task}" "--full"'
+
+
+def test_a_launcher_copied_away_from_the_bundle_still_logs_why_it_failed(tmp_path):
+    """`launcher:` pointing at a local copy is the documented way round a bundle
+    on a share — and next to that copy there is no cron\\. CreateFolder makes one
+    level only, so creating cron\\logs failed, and the one line naming the missing
+    interpreter was never written: Task Scheduler showed 9009 and nothing else."""
+    root = tmp_path / "local-launcher"
+    (root / "bin").mkdir(parents=True)
+    shutil.copyfile(ROOT / "home-claude" / "bin" / "_run-hidden.vbs",
+                    root / "bin" / "_run-hidden.vbs")
+    missing = tmp_path / "no-such-python" / "python.exe"
+    assert _launch(root, "python", str(tmp_path / "task.py"),
+                   env_extra={"PYTHON_EXE": str(missing)}) == 9009
+    log = root / "cron" / "logs" / "launcher.log"
+    assert log.is_file(), "the launch failure left no trace anywhere"
+    line = log.read_text(encoding="latin-1")          # OpenTextFile writes the ANSI codepage
+    assert "interpreter not found" in line and "no-such-python\\python.exe" in line

@@ -212,12 +212,24 @@ Sub LogLaunchFailure(message)
     Dim logDir, logPath, logFile
     On Error Resume Next
     logDir = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName)) & "\cron\logs"
-    If Not fso.FolderExists(logDir) Then fso.CreateFolder(logDir)
+    ' Every missing level, not just the last: CreateFolder makes one. A launcher
+    ' copied to a local path (the documented way round a bundle on a share) has
+    ' no cron\ beside it, so the single call failed and this line was lost -
+    ' in exactly the setup where a launch is most likely to fail. The location
+    ' stays derived from the launcher's own root, like the .env lookup above.
+    CreateFolderTree logDir
     logPath = logDir & "\launcher.log"
     Set logFile = fso.OpenTextFile(logPath, 8, True)
     logFile.WriteLine Now & " " & message
     logFile.Close
     On Error Goto 0
+End Sub
+
+Sub CreateFolderTree(path)
+    If path = "" Then Exit Sub
+    If fso.FolderExists(path) Then Exit Sub
+    CreateFolderTree fso.GetParentFolderName(path)
+    fso.CreateFolder path
 End Sub
 
 ' Check the interpreter EXISTS before trying to run it: the error message can

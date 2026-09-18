@@ -158,12 +158,38 @@ secret_scan_decode() {
     unset _ssdec_tmp _ssdec_enc
 }
 
+secret_scan_denylist_ere() {
+    # $1 — a pattern file from secret_scan_denylist. Prints its lines joined into
+    # ONE alternation, or nothing when the file is empty.
+    #
+    # Why not just `grep -f "$1"`: GNU grep 3.0, the one Git for Windows ships,
+    # ABORTS (rc=134) on `-i` together with `-f`, on any input, down to two
+    # lines. `-i` without `-f` and `-f` without `-i` are both fine, and every
+    # denylist pass is case-insensitive by policy. Worse than the crash was how
+    # it read from outside: every call site swallowed the status with `|| true`,
+    # so an aborted grep became «no hits» and the personal denylist matched
+    # nothing at all on Windows — silently, in every gate at once.
+    # Joining the patterns keeps the semantics (each line is a valid ERE —
+    # secret_scan_denylist has already compiled them one by one) and stays clear
+    # of the crash.
+    [ -s "$1" ] || return 0
+    paste -sd '|' "$1"
+}
+
 _secret_scan_grep() {
     # Raw content on stdin. $1 — `token` for the credential shapes, or
     # `denylist` with a pattern file from secret_scan_denylist in $2. Prints the
     # hits and returns 1 when there are any. Same no-trap rule as above; every
     # return path removes its temp file.
     _ssg_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-scan.$$")
+    _ssg_ere=""
+    [ "$1" = token ] || _ssg_ere=$(secret_scan_denylist_ere "$2")
+    if [ "$1" != token ] && [ -z "$_ssg_ere" ]; then
+        rm -f "$_ssg_tmp"                    # an empty denylist matches nothing
+        cat > /dev/null
+        unset _ssg_tmp _ssg_ere
+        return 0
+    fi
     secret_scan_decode > "$_ssg_tmp"
     # Every verdict below is taken on the content WITHOUT its NUL bytes: the very
     # bytes secret_scan_suspects greps in its one stream over many blobs, which
@@ -180,7 +206,7 @@ _secret_scan_grep() {
         if [ "$1" = token ]; then
             _ssg_hits=$(grep -aoE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp.nonul" || true)
         else
-            _ssg_hits=$(grep -aoiEf "$2" "$_ssg_tmp.nonul" || true)
+            _ssg_hits=$(grep -aoiE -e "$_ssg_ere" "$_ssg_tmp.nonul" || true)
         fi
         if [ -n "$_ssg_hits" ]; then
             _ssg_hits=$(printf '%s\n' "$_ssg_hits" | LC_ALL=C tr -c '[:print:]\n' '?' \
@@ -190,7 +216,7 @@ _secret_scan_grep() {
         _ssg_hits=$(grep -naE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp.nonul" \
             | grep -avF -e "$SECRET_SCAN_ALLOW" || true)
     else
-        _ssg_hits=$(grep -naiEf "$2" "$_ssg_tmp.nonul" || true)
+        _ssg_hits=$(grep -naiE -e "$_ssg_ere" "$_ssg_tmp.nonul" || true)
     fi
     rm -f "$_ssg_tmp" "$_ssg_tmp.nonul"
     unset _ssg_tmp
@@ -379,7 +405,8 @@ secret_scan_messages() {
             _ssm_fail=1
         fi
         if [ -n "$_ssm_pat" ] && [ -s "$_ssm_pat" ]; then
-            _ssm_hits=$(printf '%s\n' "$_ssm_msgs" | grep -naiEf "$_ssm_pat" || true)
+            _ssm_hits=$(printf '%s\n' "$_ssm_msgs" \
+                | grep -naiE -e "$(secret_scan_denylist_ere "$_ssm_pat")" || true)
             if [ -n "$_ssm_hits" ]; then
                 printf '%s\n' "$_ssm_hits" | sed 's/^/commit message (.sanitize-patterns): /'
                 _ssm_fail=1
@@ -446,7 +473,7 @@ secret_scan_suspects() {
         # No -o here: a pattern that can match the empty string prints nothing
         # with -o, while the precise pass reports every line it matches.
         git cat-file --batch < "$1" 2>/dev/null | tr -d '\000' \
-            | grep -naiEf "$2" >> "$3/suspect-hits" || _sss_rc=$?
+            | grep -naiE -e "$(secret_scan_denylist_ere "$2")" >> "$3/suspect-hits" || _sss_rc=$?
     fi
     if [ "$_sss_rc" -gt 1 ]; then
         unset _sss_rc

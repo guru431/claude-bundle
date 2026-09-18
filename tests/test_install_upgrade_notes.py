@@ -255,6 +255,11 @@ $results.missing = Test-KeepRegistry (Join-Path $PipelineRoot 'cron/none.yaml')
 # cannot say which.
 $probe = Join-Path $PipelineRoot 'cron/registry.yaml'
 $results.psVersion = "$($PSVersionTable.PSVersion)"
+$results.psModulePath = "$env:PSModulePath"
+$results.psHome = "$PSHOME"
+$results.fileHashCmd = "$(Get-Command Get-FileHash -ErrorAction SilentlyContinue | ForEach-Object { "$($_.CommandType) $($_.Source) $($_.Module.Path)" })"
+$results.utilityLoaded = "$(Get-Module Microsoft.PowerShell.Utility | ForEach-Object { "$($_.Version) $($_.Path)" })"
+$results.utilityAvailable = "$((Get-Module -ListAvailable Microsoft.PowerShell.Utility | ForEach-Object { "$($_.Version) $($_.Path)" }) -join ' ;; ')"
 $results.probePath = "$probe"
 $results.probeExists = [bool](Test-Path $probe)
 $results.probeLiteral = [bool](Test-Path -LiteralPath $probe)

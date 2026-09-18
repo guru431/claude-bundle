@@ -330,7 +330,7 @@ $OPENCODE_DIRECT_MODELS = @("minimax-m3", "qwen3.7-max")
 # Ollama (local or LAN) — host:port comes from Get-OllamaHostPort above.
 # Ollama serves the Anthropic /v1/messages API natively, so Claude Code talks to
 # it directly — no proxy needed. Adjust OLLAMA_MODELS to the models you've pulled.
-$OLLAMA_MODELS = @("gemma4:12b", "qwen3.5:9b", "qwen3.6:35b-a3b-q4_K_M", "gpt-oss:20b")
+$OLLAMA_MODELS = @("gemma4:12b")
 
 # Request timeout written into every backend env block. Default 3000000 ms (50 min)
 # suits slow self-hosted / proxied models; override via API_TIMEOUT_MS env if you

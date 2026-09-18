@@ -55,7 +55,7 @@ def test_the_menu_names_the_ccr_proxy_it_would_use(tmp_path: Path):
 
 def test_switching_to_a_backend_with_a_malformed_host_still_stops(tmp_path: Path):
     """The other half of F54: only the read-only paths became lenient."""
-    r = _switch(tmp_path / "project", "ollama", "qwen3.5:9b", OLLAMA_HOST="[::1")
+    r = _switch(tmp_path / "project", "ollama", "gemma4:12b", OLLAMA_HOST="[::1")
     assert r.returncode == 2, r.stdout + r.stderr
     assert "OLLAMA_HOST has '[' without ']'" in r.stdout
 

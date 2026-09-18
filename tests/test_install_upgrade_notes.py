@@ -33,6 +33,20 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest().upper()
 
 
+def _diag(r, got: dict) -> str:
+    """Everything the PowerShell run said, for an assertion that failed.
+
+    These tests read their result out of a JSON file, so a cmdlet that wrote an
+    error and carried on left the run's exit code at 0 and the failure said only
+    that a value was wrong. The two Windows-only failures this made unreadable
+    passed on every machine they could be reproduced on; without the run's own
+    output there is nothing else to go on.
+    """
+    return ("\n-- powershell stdout --\n" + (r.stdout or "").strip() +
+            "\n-- powershell stderr --\n" + (r.stderr or "").strip() +
+            "\n-- results --\n" + json.dumps(got, indent=2, ensure_ascii=False))
+
+
 def _layout(tmp_path: Path) -> dict:
     """A source bundle, a config root and a pipeline root with some files in each."""
     src = tmp_path / "src"
@@ -236,9 +250,21 @@ $results.template = Test-KeepRegistry (Join-Path $srcHome 'cron/registry.yaml')
 $results.noManifest = Test-KeepRegistry {ps_quote(reg)}
 $results.missing = Test-KeepRegistry (Join-Path $PipelineRoot 'cron/none.yaml')
 
+# Each conjunct Write-Manifest's registry_bootstrapped_sha256 hangs on, recorded
+# separately: the note is absent whichever one is false, and the manifest alone
+# cannot say which.
+$probe = Join-Path $PipelineRoot 'cron/registry.yaml'
+$results.psVersion = "$($PSVersionTable.PSVersion)"
+$results.probePath = "$probe"
+$results.probeExists = [bool](Test-Path $probe)
+$results.probeLiteral = [bool](Test-Path -LiteralPath $probe)
+$results.probePlaceholder = [bool](Select-String -Path $probe -Pattern '<(bundle-install-path|user)>' -Quiet)
+$results.probeHash = "$((Get-FileHash $probe -Algorithm SHA256).Hash)"
+
 # What this run bootstrapped is recorded — and a kept registry is not.
 $script:registryKept = $false
 Write-Manifest 'full'
+$results.manifestExists = [bool](Test-Path -LiteralPath (Join-Path $ClaudeHome '.bundle-manifest.json'))
 $script:previousManifest = Get-Content (Join-Path $ClaudeHome '.bundle-manifest.json') -Raw | ConvertFrom-Json
 $results.recorded = "$($script:previousManifest.registry_bootstrapped_sha256)"
 $results.unedited = Test-KeepRegistry {ps_quote(reg)}
@@ -252,13 +278,13 @@ $results.recordedWhenKept = "$((Get-Content (Join-Path $ClaudeHome '.bundle-mani
     r = run_ps(code, tmp_path, cwd=tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     got = json.loads((tmp_path / "keep.json").read_text(encoding="utf-8"))
-    assert got["template"] is False, "a template with placeholders is not the user's"
-    assert got["noManifest"] is True, "no record of what was bootstrapped: kept, as before"
-    assert got["missing"] is False
-    assert got["recorded"] == _sha(reg)
-    assert got["unedited"] is False, "the registry the last install bootstrapped was kept"
-    assert got["edited"] is True, "an edited registry would be replaced"
-    assert got["recordedWhenKept"] == "", "a kept registry must not be recorded as bootstrapped"
+    assert got["template"] is False, "a template with placeholders is not the user's" + _diag(r, got)
+    assert got["noManifest"] is True, "no record of what was bootstrapped: kept" + _diag(r, got)
+    assert got["missing"] is False, _diag(r, got)
+    assert got["recorded"] == _sha(reg), _diag(r, got)
+    assert got["unedited"] is False, "the registry the last install bootstrapped was kept" + _diag(r, got)
+    assert got["edited"] is True, "an edited registry would be replaced" + _diag(r, got)
+    assert got["recordedWhenKept"] == "", "a kept registry is not recorded as bootstrapped" + _diag(r, got)
 
 
 @requires_powershell   # one PowerShell process, like the tests above
@@ -282,6 +308,16 @@ def test_install_ps1_replaces_only_a_wiki_index_nobody_changed(tmp_path):
 $srcHome = {ps_quote(lay['src'] / 'home-claude')}
 $results = [ordered]@{{}}
 $script:previousManifest = $null
+# The shipped page Test-KeepWikiIndex compares against, reached the way it
+# reaches it: a page that does not resolve reads exactly like a changed one.
+$probe = Join-Path $srcHome 'wiki/index.md'
+$results.psVersion = "$($PSVersionTable.PSVersion)"
+$results.srcHome = "$srcHome"
+$results.probePath = "$probe"
+$results.probeExists = [bool](Test-Path $probe)
+$results.probeLiteral = [bool](Test-Path -LiteralPath $probe)
+$results.probeHashJoined = "$((Get-FileHash $probe -Algorithm SHA256).Hash)"
+$results.probeHashDirect = "$((Get-FileHash {ps_quote(shipped)} -Algorithm SHA256).Hash)"
 $results.missing = Test-KeepWikiIndex {ps_quote(lay['pipe'] / 'wiki' / 'none.md')}
 $results.shipped = Test-KeepWikiIndex {ps_quote(shipped)}
 $results.noRecord = Test-KeepWikiIndex {ps_quote(installed)}
@@ -294,8 +330,8 @@ $results.refreshed = Test-KeepWikiIndex {ps_quote(refreshed)}
     r = run_ps(code, tmp_path, cwd=tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     got = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
-    assert got["missing"] is False
-    assert got["shipped"] is False, "the shipped page holds nothing of the user's"
-    assert got["noRecord"] is True, "no record of what the last install wrote: kept, as before"
-    assert got["unchanged"] is False, "the page the last install wrote, untouched, was kept"
-    assert got["refreshed"] is True, "a page build-index had refreshed would be replaced"
+    assert got["missing"] is False, _diag(r, got)
+    assert got["shipped"] is False, "the shipped page holds nothing of the user's" + _diag(r, got)
+    assert got["noRecord"] is True, "no record of what the last install wrote: kept" + _diag(r, got)
+    assert got["unchanged"] is False, "the page the last install wrote, untouched, was kept" + _diag(r, got)
+    assert got["refreshed"] is True, "a page build-index had refreshed would be replaced" + _diag(r, got)

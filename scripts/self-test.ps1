@@ -111,8 +111,12 @@ function Invoke-Checked([scriptblock]$sb, [switch]$AllStreams) {
         $env:PYTHONIOENCODING = 'utf-8'
     } catch { $prevConsole = $null }
     try {
-        if ($AllStreams) { $out = (& $sb *>&1 | Out-String).Trim() }
-        else             { $out = (& $sb 2>&1 | Out-String).Trim() }
+        # -Width, or Out-String wraps every line at the console's. The checks
+        # below match anchored patterns against this text — `^browser=(...)$` on
+        # a path, whole lines by prefix — so on an 80-column console a long
+        # enough path came back in two pieces and the check read the first one.
+        if ($AllStreams) { $out = (& $sb *>&1 | Out-String -Width 500).Trim() }
+        else             { $out = (& $sb 2>&1 | Out-String -Width 500).Trim() }
         $script:lastRc = $LASTEXITCODE
         return $out
     } finally {

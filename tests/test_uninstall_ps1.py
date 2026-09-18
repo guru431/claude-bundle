@@ -79,7 +79,11 @@ def test_the_summary_says_what_happened_to_the_scheduled_tasks(tmp_path: Path):
     code = f"""
 $ErrorActionPreference = 'Stop'
 function Summary([string]$dir) {{
-    $text = & {ps_quote(UNINSTALL)} -ClaudeHome $dir *>&1 | Out-String
+    # -Width, or Out-String wraps at the console's: a summary line of 88
+    # characters came back split at 80, the filter below kept only the first
+    # half, and the test failed on an 80-column console while passing on CI's
+    # 120. Nothing here is about how wide anything is displayed.
+    $text = & {ps_quote(UNINSTALL)} -ClaudeHome $dir *>&1 | Out-String -Width 500
     return (($text -split "`r?`n") | Where-Object {{ $_ -like 'scheduled tasks:*' -or $_ -like '*would unregister*' }}) -join ' || '
 }}
 $lines = @()

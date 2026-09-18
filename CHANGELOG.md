@@ -356,6 +356,12 @@ days without an LLM provider while this task reported `rc=0`.
   with the deployment, and a repetition on a boot/logon trigger is registered.
 - `claude-switch.ps1` no longer recreates the `.bak` holding the old key, and a
   typo in `OLLAMA_HOST` no longer kills `status`.
+- **`self-test.ps1` reads a check's output at full width.** `Out-String` wraps
+  every line at the console's, and the checks match anchored patterns against
+  that text — `^browser=(...)$` on a path, whole lines by prefix — so on an
+  80-column console a long enough path came back in two pieces and the check read
+  the first one. The same wrap failed a `uninstall.ps1` test locally while it
+  passed on CI's 120 columns.
 - `self-test.ps1` no longer byte-compiles a whole drive when a deployment has
   exactly one of `cron/`, `hooks/`, `bin/` (a single path was splatted character
   by character), and prints non-ASCII output intact.

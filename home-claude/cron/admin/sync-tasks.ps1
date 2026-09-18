@@ -62,6 +62,22 @@ $script:_dotEnvLib = @(
 ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if ($script:_dotEnvLib) { . $script:_dotEnvLib }
 
+# The same helper install.ps1 and uninstall.ps1 carry, for the same reason: in
+# Windows PowerShell 5.1 Get-FileHash is a function of the
+# Microsoft.PowerShell.Utility module, not an engine cmdlet, and where that
+# module does not resolve it is absent — under Task Scheduler, in session 0,
+# with nobody reading the log. Here it decides whether the hidden-window
+# launcher needs redistributing.
+function Get-Sha256([string]$path) {
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($full)
+        try { return [System.BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+        finally { $stream.Dispose() }
+    } finally { $sha.Dispose() }
+}
+
 # The interpreter a kind=python_local task will be registered with. Session 0
 # has no user PATH and no inherited process env, so the bare name `python.exe`
 # resolves to nothing there — the value that survives is PYTHON_EXE pinned in
@@ -735,8 +751,7 @@ if ((Test-Path $masterLauncher) -and (Test-Path $launcher)) {
 if ((Test-Path $masterLauncher) -and -not $masterIsLauncher) {
     $needCopy = $true
     if (Test-Path $launcher) {
-        $needCopy = ((Get-FileHash -LiteralPath $masterLauncher -Algorithm SHA256).Hash -ne
-                     (Get-FileHash -LiteralPath $launcher       -Algorithm SHA256).Hash)
+        $needCopy = ((Get-Sha256 $masterLauncher) -ne (Get-Sha256 $launcher))
     }
     if (-not $needCopy) {
         Write-Host "[launcher ] up to date" -ForegroundColor DarkGray

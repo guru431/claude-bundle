@@ -325,6 +325,18 @@ days without an LLM provider while this task reported `rc=0`.
   bug above.
 - **`timeout_hours` became required**, and a schedule that would run differently
   under systemd is rejected where the POSIX generator runs.
+- **Every SHA-256 the Windows scripts take goes through .NET now (`Get-Sha256`),
+  not `Get-FileHash`.** In Windows PowerShell 5.1 `Get-FileHash` is a FUNCTION of
+  the `Microsoft.PowerShell.Utility` module, not a cmdlet of the engine, so where
+  that module does not resolve by name it is absent while `Test-Path` and
+  `Select-String` around it keep working. On GitHub's windows-2025 image it does
+  not resolve: `install.ps1` wrote `.bundle-manifest.json` with no hashes in it
+  and reported success, and the next upgrade would have kept a registry it should
+  have replaced. `uninstall.ps1` would have read every file as edited, and
+  `sync-tasks.ps1` would have stopped redistributing the launcher. The spelling
+  is unchanged (uppercase hex, no separators), so manifests written before this
+  still compare. `tests/test_ps_portability.py` holds the rule for all six
+  functions that module exports.
 - **`logon_type: s4u`** — tasks that run before logon without a stored password.
   Opt-in: S4U has no network credentials, so shares, Git Credential Manager and
   authenticated proxies fail. INSTALL.md has the "changed my Windows password"

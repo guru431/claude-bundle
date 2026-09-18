@@ -52,6 +52,21 @@ function Info($m) { Write-Host $m -ForegroundColor Cyan }
 function Good($m) { Write-Host "[ok]   $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "[warn] $m" -ForegroundColor Yellow }
 
+# The same helper install.ps1 carries, for the same reason: in Windows PowerShell
+# 5.1 Get-FileHash is a function of the Microsoft.PowerShell.Utility module, not
+# an engine cmdlet, and where that module does not resolve it is absent. Here it
+# decides whether a file still is what the install wrote, so its absence would
+# read as "you edited this" for every file at once.
+function Get-Sha256([string]$path) {
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($full)
+        try { return [System.BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+        finally { $stream.Dispose() }
+    } finally { $sha.Dispose() }
+}
+
 $ClaudeHome = $ClaudeHome.TrimEnd('\', '/')
 $mfPath = Join-Path $ClaudeHome '.bundle-manifest.json'
 
@@ -240,12 +255,12 @@ foreach ($f in @($mf.written)) {
     if ("$($f.root)" -ne 'pipeline_root' -and "$($f.path)" -eq 'settings.json') {
         $settingsTpl = Join-Path (Split-Path -Parent $PSScriptRoot) 'home-claude\settings.json'
         if (-not (Test-Path $settingsTpl) -or
-            (Get-FileHash $full -Algorithm SHA256).Hash -ne (Get-FileHash $settingsTpl -Algorithm SHA256).Hash) {
+            (Get-Sha256 $full) -ne (Get-Sha256 $settingsTpl)) {
             Info "keeping settings.json — it is not the template the installer copies (your settings, merged or edited); remove it yourself if you mean to"
             continue
         }
     }
-    if ($f.sha256 -and (Get-FileHash $full -Algorithm SHA256).Hash -ne $f.sha256 -and -not $Force) {
+    if ($f.sha256 -and (Get-Sha256 $full) -ne $f.sha256 -and -not $Force) {
         Warn "changed since install — keeping $($f.path) (use -Force to delete it anyway)"
         $skipped++
         continue

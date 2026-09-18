@@ -85,6 +85,27 @@ function Get-RelPath($full, $base) {
     return [System.IO.Path]::GetFullPath($full).Substring(([System.IO.Path]::GetFullPath($base)).Length).TrimStart('\', '/').Replace('\', '/')
 }
 
+# SHA-256 of a file, spelled as Get-FileHash spells it: uppercase hex, no
+# separators. Every manifest ever written holds that spelling, and an upgrade
+# compares against it, so the two must not diverge.
+#
+# Not Get-FileHash itself. In Windows PowerShell 5.1 it is a FUNCTION of the
+# Microsoft.PowerShell.Utility module, not a cmdlet of the engine — so where that
+# module does not resolve by name, it is simply absent while Select-String,
+# Test-Path and ConvertTo-Json (engine cmdlets) keep working. GitHub's
+# windows-2025 image is such a place: the manifest there came out with no hashes
+# at all, and the next upgrade would have kept a registry it should have
+# replaced. .NET is always present; this cannot go missing.
+function Get-Sha256([string]$path) {
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($full)
+        try { return [System.BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+        finally { $stream.Dispose() }
+    } finally { $sha.Dispose() }
+}
+
 # Files inside a directory every profile installs that work only with the full
 # tier. `/wiki` searches the vault the nightly pipeline builds, through
 # cron/wiki/wiki-grep.py — a lite install has neither, so the command it placed
@@ -166,7 +187,7 @@ function Write-Manifest($tier) {
         $files += [pscustomobject]@{
             root   = $e.root
             path   = $e.path
-            sha256 = (Get-FileHash $full -Algorithm SHA256).Hash
+            sha256 = (Get-Sha256 $full)
         }
     }
     $mf = [pscustomobject]@{
@@ -183,7 +204,7 @@ function Write-Manifest($tier) {
     # not tell whether the task definitions changed in between (Get-UpgradeNotes).
     $regTemplate = Join-Path $srcHome 'cron/registry.yaml'
     if ($tier -eq 'full' -and (Test-Path $regTemplate)) {
-        $mf | Add-Member -NotePropertyName registry_template_sha256 -NotePropertyValue (Get-FileHash $regTemplate -Algorithm SHA256).Hash
+        $mf | Add-Member -NotePropertyName registry_template_sha256 -NotePropertyValue (Get-Sha256 $regTemplate)
     }
     # And the registry this run BOOTSTRAPPED, so the next install can tell an
     # untouched one from yours (Test-KeepRegistry). Never for a kept registry:
@@ -191,7 +212,7 @@ function Write-Manifest($tier) {
     $regDeployed = Join-Path $PipelineRoot 'cron/registry.yaml'
     if ($tier -eq 'full' -and -not $script:registryKept -and (Test-Path $regDeployed) -and
         -not (Select-String -Path $regDeployed -Pattern '<(bundle-install-path|user)>' -Quiet)) {
-        $mf | Add-Member -NotePropertyName registry_bootstrapped_sha256 -NotePropertyValue (Get-FileHash $regDeployed -Algorithm SHA256).Hash
+        $mf | Add-Member -NotePropertyName registry_bootstrapped_sha256 -NotePropertyValue (Get-Sha256 $regDeployed)
     }
     $json = ($mf | ConvertTo-Json -Depth 4)
     # Manifest lives at ClaudeHome: it is the root that always exists (lite has no
@@ -219,7 +240,7 @@ function Backup-Overwrites($src, $dst, $label) {
         if (Test-HeldBack $label $rel) { continue }   # not copied, so not replaced
         $target = Join-Path $dst $rel
         if (-not (Test-Path $target -PathType Leaf)) { continue }
-        if ((Get-FileHash $target -Algorithm SHA256).Hash -eq (Get-FileHash $f.FullName -Algorithm SHA256).Hash) { continue }
+        if ((Get-Sha256 $target) -eq (Get-Sha256 $f.FullName)) { continue }
         $bak = Join-Path $script:backupDir (Join-Path $label $rel)
         New-Item -ItemType Directory -Force -Path (Split-Path $bak -Parent) | Out-Null
         Copy-Item $target $bak -Force
@@ -513,8 +534,8 @@ function Invoke-BundleDiff {
         $base = if ($e.root -eq 'claude_home') { $ClaudeHome } else { $PipelineRoot }
         $dst = Join-Path $base $e.path
         if (-not (Test-Path $dst -PathType Leaf)) { $status = 'new' }
-        elseif ((Get-FileHash $dst -Algorithm SHA256).Hash -eq
-                (Get-FileHash $e.src -Algorithm SHA256).Hash) { $status = 'unchanged' }
+        elseif ((Get-Sha256 $dst) -eq
+                (Get-Sha256 $e.src)) { $status = 'unchanged' }
         else { $status = 'modified' }
         $counts[$status]++
         if ($status -ne 'unchanged') {
@@ -557,7 +578,7 @@ function Test-KeepRegistry([string]$path) {
     if (-not (Test-Path $path)) { return $false }
     if (Select-String -Path $path -Pattern '<(bundle-install-path|user)>' -Quiet) { return $false }
     $recorded = "$($script:previousManifest.registry_bootstrapped_sha256)"
-    return -not ($recorded -and $recorded -eq (Get-FileHash $path -Algorithm SHA256).Hash)
+    return -not ($recorded -and $recorded -eq (Get-Sha256 $path))
 }
 
 # Whether a re-install keeps the deployed wiki/index.md — install.sh's rule, from
@@ -569,9 +590,9 @@ function Test-KeepRegistry([string]$path) {
 # index a previous run already kept as yours) still keeps it.
 function Test-KeepWikiIndex([string]$path) {
     if (-not (Test-Path $path)) { return $false }
-    $hash = (Get-FileHash $path -Algorithm SHA256).Hash
+    $hash = (Get-Sha256 $path)
     $shipped = Join-Path $srcHome 'wiki/index.md'
-    if ((Test-Path $shipped) -and (Get-FileHash $shipped -Algorithm SHA256).Hash -eq $hash) { return $false }
+    if ((Test-Path $shipped) -and (Get-Sha256 $shipped) -eq $hash) { return $false }
     $was = @($script:previousManifest.written) |
         Where-Object { "$($_.root)" -eq 'pipeline_root' -and "$($_.path)" -eq 'wiki/index.md' } |
         Select-Object -First 1
@@ -617,7 +638,7 @@ function Get-UpgradeNotes($prev, [string]$tier) {
     # The scheduled tasks: what gets registered is the registry read by the
     # syncer, so a change to either leaves the registered tasks behind.
     $template = Join-Path $srcHome 'cron/registry.yaml'
-    $templateHash = if (Test-Path $template) { (Get-FileHash $template -Algorithm SHA256).Hash } else { '' }
+    $templateHash = if (Test-Path $template) { (Get-Sha256 $template) } else { '' }
     # No field: an installer older than this one wrote that manifest, so the
     # template it came with is older too. Not the version string — a checkout
     # between releases carries the same VERSION with a different registry.
@@ -627,7 +648,7 @@ function Get-UpgradeNotes($prev, [string]$tier) {
         $src = Join-Path $srcHome $rel
         if (-not (Test-Path $src)) { continue }
         $was = @($prev.written) | Where-Object { "$($_.path)" -eq $rel } | Select-Object -First 1
-        if (-not $was -or "$($was.sha256)" -ne (Get-FileHash $src -Algorithm SHA256).Hash) { $syncerChanged = $true }
+        if (-not $was -or "$($was.sha256)" -ne (Get-Sha256 $src)) { $syncerChanged = $true }
     }
     $sync = Join-Path $PipelineRoot 'cron\admin\sync.cmd'
     if ($regChanged -and $script:registryKept) {
@@ -705,8 +726,8 @@ if (-not $DryRun) {
         $dst = Join-Path $ClaudeHome $f
         $src = Join-Path $srcHome $f
         if ((Test-Path $dst) -and (Test-Path $src)) {
-            $a = (Get-FileHash $dst -Algorithm SHA256).Hash
-            $b = (Get-FileHash $src -Algorithm SHA256).Hash
+            $a = (Get-Sha256 $dst)
+            $b = (Get-Sha256 $src)
             if ($a -ne $b) {
                 Copy-Item $dst "$dst.bak-$stamp" -Force
                 Good "backed up $f -> $f.bak-$stamp"

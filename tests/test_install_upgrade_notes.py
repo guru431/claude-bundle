@@ -164,7 +164,8 @@ def test_install_ps1_says_what_an_upgrade_left_to_do(tmp_path):
     prev = _previous(lay["home"], lay["pipe"])
     syncer = lay["src"] / "home-claude" / "cron" / "admin" / "sync-tasks.ps1"
     unchanged_syncer = {"root": "pipeline_root", "path": "cron/admin/sync-tasks.ps1", "sha256": _sha(syncer)}
-    code = define_functions(ROOT / "scripts" / "install.ps1", ["Get-UpgradeNotes"]) + f"""
+    code = define_functions(ROOT / "scripts" / "install.ps1",
+                            ["Get-UpgradeNotes", "Get-Sha256"]) + f"""
 $srcHome = {ps_quote(lay['src'] / 'home-claude')}
 $ClaudeHome = {ps_quote(lay['home'])}
 $PipelineRoot = {ps_quote(lay['pipe'])}
@@ -236,7 +237,7 @@ def test_install_ps1_replaces_only_a_registry_it_bootstrapped_and_nobody_edited(
     edited = tmp_path / "edited.yaml"
     edited.write_text(reg.read_text(encoding="utf-8") + "    enabled: false\n", encoding="utf-8")
     code = define_functions(ROOT / "scripts" / "install.ps1",
-                            ["Test-KeepRegistry", "Write-Manifest", "Good", "Info"]) + f"""
+                            ["Test-KeepRegistry", "Write-Manifest", "Get-Sha256", "Good", "Info"]) + f"""
 $srcHome = {ps_quote(lay['src'] / 'home-claude')}
 $ClaudeHome = {ps_quote(lay['home'])}; $homeFull = $ClaudeHome
 $PipelineRoot = {ps_quote(lay['pipe'])}; $pipeFull = $PipelineRoot
@@ -252,24 +253,14 @@ $results.missing = Test-KeepRegistry (Join-Path $PipelineRoot 'cron/none.yaml')
 
 # Each conjunct Write-Manifest's registry_bootstrapped_sha256 hangs on, recorded
 # separately: the note is absent whichever one is false, and the manifest alone
-# cannot say which.
+# cannot say which — which is how a missing Get-FileHash read as "nothing to
+# record" for a whole release.
 $probe = Join-Path $PipelineRoot 'cron/registry.yaml'
 $results.psVersion = "$($PSVersionTable.PSVersion)"
-$results.psModulePath = "$env:PSModulePath"
-$results.psHome = "$PSHOME"
-$results.fileHashCmd = "$(Get-Command Get-FileHash -ErrorAction SilentlyContinue | ForEach-Object { "$($_.CommandType) $($_.Source) $($_.Module.Path)" })"
-$results.utilityLoaded = "$(Get-Module Microsoft.PowerShell.Utility | ForEach-Object { "$($_.Version) $($_.Path)" })"
-$results.utilityAvailable = "$((Get-Module -ListAvailable Microsoft.PowerShell.Utility | ForEach-Object { "$($_.Version) $($_.Path)" }) -join ' ;; ')"
-$results.languageMode = "$($ExecutionContext.SessionState.LanguageMode)"
-$results.utilityPsd1 = [bool](Test-Path -LiteralPath (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1'))
-$results.moduleCount = "$((Get-Module -ListAvailable -ErrorAction SilentlyContinue | Measure-Object).Count)"
-$results.importUtility = "$(try {{ Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop; 'ok' }} catch {{ $_.Exception.Message }})"
-$results.fileHashAfterImport = [bool](Get-Command Get-FileHash -ErrorAction SilentlyContinue)
 $results.probePath = "$probe"
 $results.probeExists = [bool](Test-Path $probe)
-$results.probeLiteral = [bool](Test-Path -LiteralPath $probe)
 $results.probePlaceholder = [bool](Select-String -Path $probe -Pattern '<(bundle-install-path|user)>' -Quiet)
-$results.probeHash = "$((Get-FileHash $probe -Algorithm SHA256).Hash)"
+$results.probeHash = "$(Get-Sha256 $probe)"
 
 # What this run bootstrapped is recorded — and a kept registry is not.
 $script:registryKept = $false
@@ -314,7 +305,8 @@ def test_install_ps1_replaces_only_a_wiki_index_nobody_changed(tmp_path):
     refreshed.write_text(installed.read_text(encoding="utf-8") + "\n## Stats\n\n| projects/ | 3 |\n",
                          encoding="utf-8")
     record = {"written": [{"root": "pipeline_root", "path": "wiki/index.md", "sha256": _sha(installed)}]}
-    code = define_functions(ROOT / "scripts" / "install.ps1", ["Test-KeepWikiIndex"]) + f"""
+    code = define_functions(ROOT / "scripts" / "install.ps1",
+                            ["Test-KeepWikiIndex", "Get-Sha256"]) + f"""
 $srcHome = {ps_quote(lay['src'] / 'home-claude')}
 $results = [ordered]@{{}}
 $script:previousManifest = $null
@@ -322,12 +314,9 @@ $script:previousManifest = $null
 # reaches it: a page that does not resolve reads exactly like a changed one.
 $probe = Join-Path $srcHome 'wiki/index.md'
 $results.psVersion = "$($PSVersionTable.PSVersion)"
-$results.srcHome = "$srcHome"
 $results.probePath = "$probe"
 $results.probeExists = [bool](Test-Path $probe)
-$results.probeLiteral = [bool](Test-Path -LiteralPath $probe)
-$results.probeHashJoined = "$((Get-FileHash $probe -Algorithm SHA256).Hash)"
-$results.probeHashDirect = "$((Get-FileHash {ps_quote(shipped)} -Algorithm SHA256).Hash)"
+$results.probeHash = "$(Get-Sha256 $probe)"
 $results.missing = Test-KeepWikiIndex {ps_quote(lay['pipe'] / 'wiki' / 'none.md')}
 $results.shipped = Test-KeepWikiIndex {ps_quote(shipped)}
 $results.noRecord = Test-KeepWikiIndex {ps_quote(installed)}

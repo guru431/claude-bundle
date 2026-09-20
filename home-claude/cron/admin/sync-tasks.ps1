@@ -27,7 +27,11 @@
 #
 # Exit codes: 0 = everything applied, 2 = at least one task FAILED to register,
 #             3 = at least one task was SKIPPED (invalid trigger, missing target,
-#             mapped drive, foreign task) — a partial sync must not read as success.
+#             mapped drive, foreign task) — a partial sync must not read as success,
+#             4 = -Verify found something wrong with the CURRENT state (a task
+#             missing, disabled, or whose last run failed). Its own code: -Verify
+#             used to report that as 3 as well, so a caller could not tell "the
+#             sync was partial" from "the night is in doubt".
 
 param(
     [switch]$DryRun,
@@ -499,8 +503,13 @@ function Get-VerifyDetail([hashtable]$task, [hashtable]$current, [string]$launch
     $wantDesc = "$marker | $($task.description)"
     $wantTrigger = "$($task.trigger)"
     if ($task.repeat_every) {
-        $for = if ($task.repeat_for) { $task.repeat_for } else { 'P1D' }
-        $wantTrigger += " every $($task.repeat_every) for $for"
+        # Get-RepeatDuration, not a local 'P1D' default — the same function the
+        # XML and the change detection use. For AtStartup/AtLogOn it answers ''
+        # (indefinitely), so `want` used to promise "for P1D" against a task
+        # registered to repeat forever.
+        $for = Get-RepeatDuration "$($task.trigger)" "$($task.repeat_every)" "$($task.repeat_for)"
+        $forText = if ($for) { "for $for" } else { 'indefinitely' }
+        $wantTrigger += " every $($task.repeat_every) $forText"
     }
     if ($task.startup_delay) { $wantTrigger += " delay $($task.startup_delay)" }
     $haveTrigger = "$($current.triggerType)" -replace '^MSFT_Task', '' -replace 'Trigger$', ''
@@ -727,7 +736,7 @@ if ($Verify) {
     Write-Host ""
     Write-Host "=== Summary === ok: $okCount  warn: $warn  absent (disabled): $absent" -ForegroundColor Cyan
     try { Stop-Transcript | Out-Null } catch {}
-    if ($warn -gt 0) { exit 3 }
+    if ($warn -gt 0) { exit 4 }
     exit 0
 }
 

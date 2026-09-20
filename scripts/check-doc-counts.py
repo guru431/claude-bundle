@@ -254,8 +254,20 @@ def check_provider_chain(problems: list[str]) -> None:
         return
     code_chain = re.findall(r'"(\w+)"', m.group(1))
 
-    m = re.search(r'LLM_PROVIDER\s*=\s*os\.environ\.get\(\s*"WIKI_LLM_PROVIDER"\s*,\s*"(\w+)"', src)
-    code_default = m.group(1) if m else None
+    # What WIKI_LLM_PROVIDER means when it is UNSET. utils.py spells that as a
+    # constant picked up by an `if not _raw_provider` branch, not as a default
+    # argument to os.environ.get — which is what this used to look for, so the
+    # comparison below had quietly not run for two releases. Both halves are
+    # required: a constant on its own says nothing about what the branch does.
+    m = re.search(r"^PROVIDER_CHAIN_NAME\s*=\s*[\"'](\w+)[\"']", src, re.M)
+    wired = re.search(r"if not _raw_provider:\s*\n\s*LLM_PROVIDER\s*=\s*PROVIDER_CHAIN_NAME", src)
+    code_default = m.group(1) if (m and wired) else None
+    if not code_default:
+        # Symmetric with the DEFAULT_CHAIN branch above: a check that stops
+        # working has to say so, or a refactor switches it off in silence.
+        problems.append("utils.py: the WIKI_LLM_PROVIDER default not found "
+                        "(PROVIDER_CHAIN_NAME + the `if not _raw_provider` "
+                        "branch) — the default-provider check is blind")
 
     # Provider names as they are spelled in prose. A bare arrow means nothing on
     # its own (docs draw data flow with arrows too), so a line must also talk

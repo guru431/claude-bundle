@@ -120,7 +120,14 @@ def page_updated(path: Path) -> str:
             return upd
     except Exception:
         pass
-    return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
+    except OSError:
+        # The fallback was outside the try: a page deleted between the glob and
+        # this stat (Obsidian sync, a hand edit during the nightly run) took the
+        # whole index build down with an unhandled exception, where every other
+        # walk in the pipeline treats that race as "skip this file".
+        return ""
 
 
 def ensure_project_log(project_dir: Path) -> None:
@@ -134,7 +141,10 @@ def ensure_project_log(project_dir: Path) -> None:
         "Project page updates. Populated automatically by compile scripts "
         "when they write to pages.\n"
     )
-    log_path.write_text(content, encoding="utf-8")
+    # Atomic, like every other write in this file: a run interrupted between
+    # creating the file and filling it left an empty _log.md, and the check
+    # above (`exists()`) means no later run would ever repair it.
+    atomic_write_text(log_path, content)
 
 
 def build_projects_index() -> tuple[int, int]:

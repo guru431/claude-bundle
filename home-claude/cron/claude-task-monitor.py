@@ -232,9 +232,15 @@ def load_seen() -> dict:
 
 
 def save_seen(seen: dict) -> None:
+    # Atomic (temp + os.replace), the convention md2pdf-sync.save_last_run and
+    # utils.atomic_write_text already follow here: a process killed mid-write
+    # leaves a truncated JSON, load_seen() reads it as {}, and every standing
+    # failure is re-alerted as new.
     try:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        STATE_PATH.write_text(json.dumps(seen, indent=1), encoding="utf-8")
+        tmp = STATE_PATH.with_name(STATE_PATH.name + ".tmp")
+        tmp.write_text(json.dumps(seen, indent=1), encoding="utf-8")
+        tmp.replace(STATE_PATH)
     except OSError as exc:
         log(f"state not written ({exc}) — the next run may repeat this alert")
 
@@ -326,10 +332,12 @@ def main() -> int:
             if (name not in (CHAIN_SEEN_KEY, STALE_SEEN_KEY)
                     and name not in {n for n, _ in problems}):
                 seen.pop(name, None)
-        save_seen(seen)
 
         if not fresh and not chain and not stale_block:
             log("no new failures")
+            # Nothing to deliver, so there is nothing to lose by recording the
+            # prune now.
+            save_seen(seen)
             rec["note"] = f"{len(tasks)} task(s) checked, {len(problems)} failing"
             return 0
 
@@ -342,9 +350,17 @@ def main() -> int:
         rec["delivery"] = "ok" if delivered else "failed"
         rec["note"] = f"{len(tasks)} task(s) checked, {len(fresh)} new failure(s)"
         if not delivered:
-            log("ALERT DELIVERY FAILED — the alert was NOT delivered")
+            # The state stays UNWRITTEN. Everything above — the failures, the
+            # chain outage, the stale buckets — was marked "reported" in memory
+            # only; writing that now would make the next run call this alert
+            # "already reported" and nobody would ever receive it. A unit failure
+            # does not fire again on its own, so this monitor is its only
+            # reporter.
+            log("ALERT DELIVERY FAILED — the alert was NOT delivered "
+                "(seen-state not updated: it will be retried next run)")
             rec["process_rc"] = 1
             return 1
+        save_seen(seen)
         log(f"alert sent ({len(fresh)} new failure(s))")
         return 0
 

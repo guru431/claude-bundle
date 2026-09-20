@@ -276,9 +276,14 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
         count = len((tools_reply.get("result") or {}).get("tools") or []) if tools_reply else None
 
         if count is None:
-            print(f"{name:<14} OK initialize ({label}), but tools/list timed out")
-        else:
-            print(f"{name:<14} OK — {label}, {count} tool(s)")
+            # Not a pass. The probe promises a full handshake, and a server
+            # whose tools/list never answers is of no use to an MCP client —
+            # but this printed the line and still returned True, so the run
+            # ended "all good" with exit 0 over a server nobody could use.
+            print(f"{name:<14} FAIL — OK initialize ({label}), "
+                  f"but tools/list timed out")
+            return False
+        print(f"{name:<14} OK — {label}, {count} tool(s)")
         ok = True
     finally:
         if proc.returncode is None:

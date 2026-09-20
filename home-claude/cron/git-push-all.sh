@@ -145,6 +145,14 @@ $staged
 guard_protected_deletions() {
     local label="$1"
     local deleted
+    # No lib → no secret_scan_git_paths, the pipeline above produces nothing,
+    # `deleted` comes back empty and the guard waves the deletion through. Fail
+    # CLOSED like every other guard in this file instead of being the one that
+    # silently does not run.
+    if ! command -v secret_scan_git_paths >/dev/null 2>&1; then
+        echo "[$label] SECRET-SCAN unavailable (lib not loaded) — repo FAILED, nothing committed (fail closed)" >> "$LOG_FILE"
+        return 1
+    fi
     # Unquoted paths, for the same reason as above: a FINDINGS.md under a
     # non-ASCII folder was quoted, matched nothing, and its deletion was committed.
     deleted=$(secret_scan_git_paths diff --cached --name-only --diff-filter=D 2>/dev/null | grep -E "$PROTECTED_RE")
@@ -159,6 +167,9 @@ guard_protected_deletions() {
 $deleted
 (left in the working tree, not committed — delete by hand)" >> "$LOG_FILE" 2>&1
     fi
+    # 0: the deletion was handled. The repo itself is fine and the rest of its
+    # changes still get committed — only an unavailable scan (above) fails it.
+    return 0
 }
 
 # Secret guard: scan the staged diff for token-shaped strings before committing
@@ -367,7 +378,11 @@ push_repo() {
             # pathspec so a file that appears between status and add can never
             # sneak in (and md2pdf's temp directory — see SWEEP_EXCLUDES).
             git add --all -- "${SWEEP_EXCLUDES[@]}" >> "$LOG_FILE" 2>&1
-            guard_protected_deletions "$label"
+            if ! guard_protected_deletions "$label"; then
+                failed=$((failed + 1))
+                failed_repos="${failed_repos:+$failed_repos, }$label"
+                return
+            fi
             # The sensitive-path table again, on what the add above just staged.
             if ! guard_staged_sensitive "$label" 1; then
                 failed=$((failed + 1))
@@ -428,8 +443,16 @@ push_repo() {
         return
     fi
     if git_push "$remote" "$branch"; then
-        echo "[$label] pushed $branch" >> "$LOG_FILE"
-        pushed=$((pushed + 1))
+        if [ "$DRY_RUN" = "1" ]; then
+            # A dry-run pushed nothing, so it says so and counts nothing: the
+            # line used to read "pushed $branch" and bump the counter, which put
+            # the same `Done: pushed=N` summary under a run that changed nothing
+            # as under a real one.
+            echo "[$label] [DRY] would push $branch" >> "$LOG_FILE"
+        else
+            echo "[$label] pushed $branch" >> "$LOG_FILE"
+            pushed=$((pushed + 1))
+        fi
     else
         echo "[$label] FAILED to push" >> "$LOG_FILE"
         failed=$((failed + 1))

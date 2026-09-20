@@ -49,6 +49,18 @@ LOG_FILE="$LOG_DIR/task-monitor_${DATE}.log"
 echo "=== Task Monitor $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$LOG_FILE"
 echo "TRACE: BUNDLE_ROOT=$BUNDLE_ROOT" >> "$LOG_FILE"
 
+# --- Seen-state snapshot, restored when the alert is not delivered ---
+# Two stages mark things as "already reported" BEFORE anything leaves the
+# machine: the collector heredoc below (task failures, the chain outage) and
+# `runs.py stale --seen` further down. A single failed Telegram delivery then
+# buried those failures until the Monday digest — up to seven days of silence,
+# which is the "monitor down, nobody noticed" state this script exists to
+# prevent. The file as it stands right now is put back if delivery fails.
+SEEN_STATE="$CRON_DIR/state/task-monitor-seen.json"
+SEEN_BACKUP="$SEEN_STATE.prealert"
+rm -f "$SEEN_BACKUP"
+[ -f "$SEEN_STATE" ] && cp "$SEEN_STATE" "$SEEN_BACKUP"
+
 # --- Collect task statuses via PowerShell ---
 echo "TRACE: stage=tasks $(date '+%H:%M:%S')" >> "$LOG_FILE"
 TASK_STATUS=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$CRON_DIR" 2>>"$LOG_FILE" <<'PYSCRIPT'
@@ -546,6 +558,15 @@ if [ -n "$ALERTS" ]; then
         # read as a delivered one, which is the worst outcome for a monitor.
         echo "ALERT DELIVERY FAILED: telegram-send.sh exited $TG_RC — alert NOT delivered" >> "$LOG_FILE"
         MONITOR_RC=1
+        # Nothing in this alert was actually reported, so the seen-state goes
+        # back to what it was before the run: tomorrow's run sends it again
+        # instead of filing it under "already reported".
+        if [ -f "$SEEN_BACKUP" ]; then
+            cp "$SEEN_BACKUP" "$SEEN_STATE"
+        else
+            rm -f "$SEEN_STATE"   # there was no state file before this run
+        fi
+        echo "seen-state rolled back — the same failures will be alerted next run" >> "$LOG_FILE"
         # The only channel just failed, so leave the evidence somewhere that
         # does not depend on it — the same emergency file the FATAL path uses.
         echo "$(date '+%Y-%m-%d %H:%M:%S') ALERT DELIVERY FAILED (rc=$TG_RC), undelivered alert follows:" >> "$HOME/task-monitor-fatal.log"
@@ -554,6 +575,7 @@ if [ -n "$ALERTS" ]; then
 else
     echo "All tasks OK, no alert needed" >> "$LOG_FILE"
 fi
+rm -f "$SEEN_BACKUP"
 
 echo "=== End Task Monitor $(date '+%H:%M:%S') ===" >> "$LOG_FILE"
 

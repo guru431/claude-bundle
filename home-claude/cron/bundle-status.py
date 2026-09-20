@@ -77,6 +77,7 @@ def main() -> int:
     # The chain the SELECTED provider actually uses: only `chain` (the default)
     # falls back; any explicit provider name is that provider alone.
     chain = DEFAULT_CHAIN if LLM_PROVIDER == "chain" else [LLM_PROVIDER]
+    unknown = [p for p in chain if p not in PROVIDERS]
     chain = [p for p in chain if p in PROVIDERS]
     keys = {p: _env_first(PROVIDERS[p]["key_env"]) for p in chain}
     # A key can perfectly well come from the process env instead of the file, so
@@ -89,6 +90,12 @@ def main() -> int:
     else:
         bad(".env: MISSING (no provider keys / alerts)")
     print(f"  provider (WIKI_LLM_PROVIDER): {LLM_PROVIDER}")
+    # A misspelt provider name left NOTHING in the chain, so the key checks below
+    # had nothing to iterate and the "no key set" line could not fire either: the
+    # section read green for a provider that cannot run at all.
+    if unknown:
+        bad(f"WIKI_LLM_PROVIDER={LLM_PROVIDER}: unknown provider(s) "
+            f"{', '.join(unknown)} — not in the PROVIDERS table, nothing will run")
     # Derived from the PROVIDERS table, not a hardcoded pair: a new provider row
     # used to be invisible here and its missing key read as "all good".
     for p in chain:

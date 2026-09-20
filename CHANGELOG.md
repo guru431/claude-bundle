@@ -48,6 +48,83 @@ The short list; UPGRADING.md has the steps.
   install stay until deleted.
 - **POSIX clones of this repo:** re-run `scripts/enable-guard.sh` for the new
   `pre-merge-commit` hook.
+- **`sync-tasks.ps1 -Verify`** exits **4** when the current state is in doubt
+  (was 3, the code a partial SYNC uses). Anything that branched on 3 for a
+  `-Verify` call — `self-test.ps1` did — needs the new number.
+- **`runs.py stale --json --seen <file>`** is now refused by argparse instead of
+  silently ignoring `--seen`.
+
+### A second sweep: the 28 findings the weekly auto-review filed
+
+`ClaudeCodeReviewWeekly` filed 28 findings on 2026-09-19. Twenty-seven were real
+and are fixed here; the one that was not — a claim that `cron/lib/dotenv.sh`
+resolves a duplicated key "last wins" — is in the local archive with the reason
+(the parser's `env > dotenv` guard already makes the FIRST occurrence win, and
+`tests/test_dotenv_parity.py` pins exactly that).
+
+**An undelivered alert is no longer filed as delivered.** Both task monitors
+marked a failure "already reported" BEFORE the alert left the machine, so one
+failed Telegram delivery buried it: on POSIX for good (a failed unit does not
+fail again on its own), on Windows until the Monday digest — up to seven days of
+the "monitor down, nobody noticed" silence both scripts exist to prevent. The
+POSIX monitor now writes its seen-state only after a successful send, and the
+Windows one snapshots the file at the start of the run and restores it when
+delivery fails. `save_seen()` writes through a temp file + replace, like every
+other state writer here.
+
+**Telegram: a whitespace-only message, and a message sent twice.** The empty
+check ran on the raw argument while the splitter sends `strip()`ed text, so a
+message of only newlines reached the Bot API as `text:""` (HTTP 400). And
+`--retry 2` on a POST re-sent `sendMessage` whenever a reply missed
+`--max-time 30` — the request had already arrived. Both gone.
+
+**Guards that did not fail closed, checks that were blind.**
+
+- `git-push-all.sh::guard_protected_deletions` waved a deletion through when the
+  secret-scan library was not loaded, alone among the guards in that file; it now
+  fails the repo, and the caller acts on that.
+- `bundle-status.py` printed a green `[config]` section for a misspelt
+  `WIKI_LLM_PROVIDER`: the unknown name left an empty chain, so every key check
+  below it had nothing to iterate.
+- `check-doc-counts.py` had stopped checking the documented default provider two
+  releases ago — the regex still looked for an `os.environ.get(...)` default that
+  `utils.py` no longer has. It reads the current shape and, like its
+  `DEFAULT_CHAIN` sibling, now says so when it cannot.
+- `mcp-probe.py` counted a server whose `tools/list` timed out as OK, so the run
+  ended "all good" with exit 0 over a server no MCP client can use.
+- `self-test.ps1` called python's `find_spec` and `git config` outside
+  `Invoke-Checked`: under `$ErrorActionPreference='Stop'` a single line on stderr
+  — the interpreter noise step 8 exists to diagnose — killed the whole run.
+  `PYTHONIOENCODING` is also restored where the console encoding could not be
+  changed, instead of leaking to every later child.
+
+**Windows Task Scheduler.** `sync.cmd` passed its own path and its temp file into
+a PowerShell `-Command` inside single quotes, so a profile holding an apostrophe
+broke the parse and the self-elevation silently did nothing — both now travel in
+the environment. `sync-tasks.ps1 -Verify` gets its own exit code (4) instead of
+overloading the partial-sync 3, and `-Verify -Detail` reports a boot/logon task's
+repetition through `Get-RepeatDuration` rather than promising `P1D` for a task
+registered to repeat indefinitely. The monitors' PyYAML-less fallback parser now
+reads `enabled: no|off|False` as disabled and unwraps quoted `platform:` values.
+
+**Quiet data loss.** `memory-update.py` recorded a digest as sent on a SUBSTRING
+match, so a message the cap dropped was never offered again if it occurred inside
+one that was kept. `utils.quarantine_raw` built its filename from a second-
+resolution stamp plus a truncated source id, and two payloads in the same second
+collided — the second write replaced the only surviving copy of the first.
+`atomic_write_text` used a pid-only temp name, which two threads of one process
+share. `wiki-build-index.py` writes the `_log.md` skeleton atomically (an
+interrupted run left an empty one that `exists()` then protected for ever) and
+survives a page deleted between the glob and its `stat`.
+
+**Smaller things.** `_file_lock` checks its deadline on the failed-steal path too,
+so a lock file held open by another process no longer hangs the caller for ever
+past `LLM_LOCK_WAIT`. `bundle_install.py` keeps the `export ` prefix when filling
+an empty `.env` line. `claude-switch.ps1` anchors the port when it names the
+current backend, so `:3456` no longer matches `:34567`. `test-sweep.py` reads
+`TEST_SWEEP_TELEGRAM` through `_env_bool`, so `off`/`no`/`false` mean off.
+`git-push-all.sh` in dry-run logs `[DRY] would push` and counts nothing, instead
+of reporting the same `pushed=N` as a real sweep.
 
 ### OpenCode Go rejects every call without a session header
 

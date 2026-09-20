@@ -65,21 +65,40 @@ def read_registry(registry: Path) -> list[dict]:
                 if isinstance(t, dict)]
     except Exception:
         pass
+    def unwrap(value: str) -> str:
+        """One surrounding pair of matching quotes off, as PyYAML reads it.
+
+        `platform: 'windows'` is the same scalar as `platform: windows` to every
+        other reader of this file; here the quoted spelling never matched the
+        comparison and the task was treated as cross-platform. Same idea as
+        admin/lib/registry-parse.ps1::Unwrap-Value.
+        """
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        return value
+
+    # Every spelling YAML 1.1 — and therefore PyYAML, which check-registry.py,
+    # gen-scheduler.py and the syncer all use — reads as False. This parser knew
+    # only the literal "false", so on a box without PyYAML `enabled: no` read as
+    # True and the monitor paged about a task the user had switched off and
+    # nothing had deployed.
+    falsy = {"false", "no", "off"}
     tasks: list[dict] = []
     cur: dict | None = None
     for raw in text.splitlines():
         stripped = raw.strip()
         if stripped.startswith("- name:"):
-            cur = {"name": stripped.split(":", 1)[1].strip().strip("'\"")}
+            cur = {"name": unwrap(stripped.split(":", 1)[1])}
             tasks.append(cur)
         elif cur is None:
             continue
         elif stripped.startswith("enabled:"):
-            cur["enabled"] = stripped.split(":", 1)[1].strip() != "false"
+            cur["enabled"] = unwrap(stripped.split(":", 1)[1]).lower() not in falsy
         elif stripped.startswith("platform:"):
-            cur["platform"] = stripped.split(":", 1)[1].strip()
+            cur["platform"] = unwrap(stripped.split(":", 1)[1])
         elif stripped.startswith("trigger:"):
-            cur["trigger"] = stripped.split(":", 1)[1].strip().strip("'\"")
+            cur["trigger"] = unwrap(stripped.split(":", 1)[1])
         elif stripped.startswith(("timeout_hours:", "health_port:")):
             key, _, val = stripped.partition(":")
             val = val.strip()

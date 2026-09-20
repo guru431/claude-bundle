@@ -34,7 +34,11 @@ if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
 fi
 
 MSG="$1"
-if [ -z "$MSG" ]; then
+# Checked AFTER whitespace is stripped, because that is what the splitter below
+# sends (`fh.read().strip()`). A message of only spaces or newlines passed a bare
+# `-z "$MSG"` guard, came out of the splitter as chunks=[''], and reached the Bot
+# API as text:"" — a guaranteed HTTP 400 and status=1 instead of this Usage line.
+if [ -z "$(printf '%s' "$MSG" | tr -d '[:space:]')" ]; then
     echo "Usage: telegram-send.sh 'message'" >&2
     exit 1
 fi
@@ -104,8 +108,13 @@ for part in "$PARTS_DIR"/part*.json; do
     # to notice: a curl with no --max-time can hang on a black-holed connection
     # until Task Scheduler's own timeout, which for the tasks that call this is
     # measured in hours, and the monitor reads "still running" as OK.
-    RESPONSE=$(curl -sS --connect-timeout 10 --max-time 30 --retry 2 \
-      --retry-connrefused -X POST \
+    #
+    # No --retry: sendMessage is a POST and is NOT idempotent. curl counts an
+    # operation timeout among its transient errors, so a request that reached
+    # Telegram but whose reply missed --max-time 30 was posted a second time —
+    # the message went out twice. --retry-connrefused is gone with it: it is a
+    # modifier of --retry and does nothing on its own.
+    RESPONSE=$(curl -sS --connect-timeout 10 --max-time 30 -X POST \
       -H "Content-Type: application/json; charset=utf-8" \
       --data-binary "@$part" \
       -w '\n%{http_code}' \

@@ -573,19 +573,24 @@ def main() -> None:
 
     sub.add_parser("selftest", help="check verdict classification")
     st = sub.add_parser("stale", help="list tasks whose last verdict is too old")
-    st.add_argument("--json", action="store_true",
-                    help="machine-readable output (bundle-status reads this)")
-    st.add_argument("--seen", metavar="STATE_JSON", type=Path, default=None,
-                    help="alert once (the task monitor): print only verdicts not "
-                         "reported before, plus a Monday digest of the rest, and "
-                         "remember them in this JSON file")
+    # Mutually exclusive, and argparse says so. `stale --json --seen <file>` used
+    # to fall through to the plain branch: --seen was silently ignored, no state
+    # was read or written, and the alert-once semantics the monitor relies on
+    # disappeared without a word.
+    how = st.add_mutually_exclusive_group()
+    how.add_argument("--json", action="store_true",
+                     help="machine-readable output (bundle-status reads this)")
+    how.add_argument("--seen", metavar="STATE_JSON", type=Path, default=None,
+                     help="alert once (the task monitor): print only verdicts not "
+                          "reported before, plus a Monday digest of the rest, and "
+                          "remember them in this JSON file")
 
     args = ap.parse_args()
     if args.cmd == "record":
         _cli_record(args)
     elif args.cmd == "selftest":
         sys.exit(_selftest())
-    elif args.cmd == "stale" and args.seen and not args.json:
+    elif args.cmd == "stale" and args.seen:
         sys.exit(_cli_stale_seen(args.seen))
     elif args.cmd == "stale":
         # Exit 1 when anything is stale, so a shell monitor can branch on the

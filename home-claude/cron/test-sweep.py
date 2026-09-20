@@ -65,7 +65,8 @@ sys.path.insert(0, str(CRON_DIR / "hooks"))
 # drifted from the other two copies over where an entry goes when the file's
 # header is non-standard. The helpers below only build the TEXT of a finding;
 # the file handling is utils'.
-from utils import (PROJECTS_ROOT, _env_int, append_finding as file_finding,  # noqa: E402
+from utils import (PROJECTS_ROOT, _env_bool, _env_int,  # noqa: E402
+                   append_finding as file_finding,
                    atomic_write_text, close_finding as drop_finding,
                    find_bash, finding_is_open, mask_secrets)
 
@@ -95,7 +96,12 @@ TIMEOUT_FULL = _env_int("TEST_SWEEP_TIMEOUT_FULL", 3600, minimum=1)
 # it reaches the line that writes state — so a long night lost every result it
 # had already collected, red ones included.
 RUN_BUDGET_SECONDS = _env_int("TEST_SWEEP_RUN_BUDGET", 2 * 3600 - 300, minimum=1)
-TELEGRAM_ENABLED = os.environ.get("TEST_SWEEP_TELEGRAM", "1") != "0"
+# Through _env_bool, like every other flag in the bundle: a bare `!= "0"` read
+# `off`, `no`, `false` and `disabled` — the spellings that mean "switched off"
+# everywhere else here — as ON, so a typo silently started sending. Invalid
+# values keep Telegram on (on_invalid=True): a sweep that cannot say it is red
+# is the failure this task exists to prevent.
+TELEGRAM_ENABLED = _env_bool("TEST_SWEEP_TELEGRAM", True, on_invalid=True)
 # Projects the sweep leaves alone (comma-separated), e.g. a suite that is run
 # by its own host on its own schedule.
 SKIP_PROJECTS: set[str] = {

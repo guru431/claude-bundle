@@ -620,7 +620,11 @@ def atomic_write_text(path: Path, text: str, newline: str = "\n") -> None:
     `agents-md-sync-check.py::detect_newline`).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    # pid AND a per-call token. The pid alone is not unique inside one process:
+    # two threads writing the same file — append_finding from two phases, say —
+    # picked the same temp path, and the second write either clobbered the first
+    # or lost the race at replace. `_file_lock` uses a token for the same reason.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(text, encoding="utf-8", errors="replace", newline=newline)
     tmp.replace(path)
 
@@ -756,7 +760,14 @@ def quarantine_raw(source_id: str, reason: str, raw: str) -> None:
         safe = _re.sub(r"[^A-Za-z0-9._-]", "_", str(source_id))[:80]
         safe_reason = _re.sub(r"[^A-Za-z0-9._-]", "_", str(reason))[:40]
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        (d / f"{stamp}_{safe}_{safe_reason}.txt").write_text(
+        # A short unique token, right after the stamp. Second resolution plus a
+        # sanitized (and 80-char-truncated) source id is not unique: two payloads
+        # quarantined in the same second under the same reason produced one name,
+        # and the second write silently replaced the ONLY surviving copy of the
+        # first. It goes BEFORE the reason because callers find these files by
+        # the `*_<reason>.txt` tail (_preserve_corrupt_state's per-content dedup).
+        uniq = uuid.uuid4().hex[:6]
+        (d / f"{stamp}_{uniq}_{safe}_{safe_reason}.txt").write_text(
             masked(str(raw or "")), encoding="utf-8", errors="replace")
     except Exception:
         pass
@@ -1059,6 +1070,16 @@ def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
                     try:
                         os.replace(path, steal)
                     except OSError:
+                        # The deadline is checked here as well. It used to live
+                        # only on the "not stale yet" path below, so a replace
+                        # that keeps failing — the file held open by another
+                        # process or by an antivirus on Windows — spun here for
+                        # ever, ignoring the wait the caller asked for and the
+                        # fail-open this function promises. The nightly task
+                        # then hung until the scheduler killed it.
+                        if time.time() >= deadline:
+                            _lock_timeout_notice(label, wait, fail_open)
+                            break
                         time.sleep(0.5)
                         continue
                     # Between the stat and the replace the holder may have

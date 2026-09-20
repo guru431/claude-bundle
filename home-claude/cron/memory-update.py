@@ -473,6 +473,25 @@ def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) ->
     return summary
 
 
+def carried_messages(summary: str) -> set[str]:
+    """Exactly the messages a prompt body carried, as whole messages.
+
+    The caller used to ask `text in carried` — a SUBSTRING test. A message the
+    cap dropped, but which happens to occur inside one that was kept ("go on",
+    quoted in a longer message), counted as sent and was never offered again:
+    a silent loss, and in the losing direction. The body is taken apart the way
+    _sections / cap_newest_messages put it together; a message that itself
+    contains a section boundary is simply not recognised, and is offered again —
+    the harmless side.
+    """
+    out: set[str] = set()
+    for section in summary.split("\n\n### "):
+        body = section[4:] if section.startswith("### ") else section
+        _, _, body = body.partition("\n")      # drop the "### <project>" line
+        out.update(part for part in body.split(MSG_SEP) if part)
+    return out
+
+
 def update_user_md(proj_messages: dict[str, str]) -> tuple[int | None, str, str]:
     """Append newly-learned facts to USER.md.
 
@@ -715,7 +734,8 @@ def _update(rec: dict) -> int:
         # the messages the prompt carried in full. A message cut mid-text by a
         # cap is not recorded and may be offered again: a repeated tail is the
         # cheap side of that trade, a message that never went out is not.
-        remember_sent([d for d, text in fresh.items() if text in carried], seen)
+        carried_set = carried_messages(carried)
+        remember_sent([d for d, text in fresh.items() if text in carried_set], seen)
         # And the projects that prompt had no room for stay readable until a
         # later night serves them — a failed night records nothing, and the
         # widened catch-up window covers everything anyway.

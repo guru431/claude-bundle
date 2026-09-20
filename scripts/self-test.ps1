@@ -123,8 +123,12 @@ function Invoke-Checked([scriptblock]$sb, [switch]$AllStreams) {
         $ErrorActionPreference = $prev
         if ($null -ne $prevConsole) {
             try { [Console]::OutputEncoding = $prevConsole } catch {}
-            $env:PYTHONIOENCODING = $prevPyEnc
         }
+        # Outside that `if`: with no console attached the catch above sets
+        # $prevConsole to $null, and PYTHONIOENCODING='utf-8' then stayed in the
+        # process environment for the rest of the self-test and was inherited by
+        # every later child — the opposite of "put back afterwards".
+        $env:PYTHONIOENCODING = $prevPyEnc
     }
 }
 
@@ -470,9 +474,12 @@ if ($py) {
     foreach ($mod in @('requests', 'yaml')) {
         # find_spec returns None (no exception, no stderr) for a missing module,
         # so this never trips the PS 5.1 native-stderr-under-Stop abort that a
-        # bare `import $mod` traceback would.
-        $have = (& $py -c "import importlib.util,sys; sys.stdout.write('1' if importlib.util.find_spec('$mod') else '0')" 2>$null)
-        if ($have -eq '1') { Ok "Python module importable: $mod" }
+        # bare `import $mod` traceback would. Through Invoke-Checked all the same,
+        # like the version probe above: the interpreter's OWN startup noise on
+        # stderr — the very case this step exists to diagnose — killed the
+        # self-test here, because a bare `2>$null` still runs under 'Stop'.
+        $have = (Invoke-Checked { & $py -c "import importlib.util,sys; sys.stdout.write('1' if importlib.util.find_spec('$mod') else '0')" }).Trim()
+        if ($have -match '(?m)^1$') { Ok "Python module importable: $mod" }
         else { Warn "Python module '$mod' not importable — run: pip install -r requirements.txt (Tier-2 LLM calls / YAML parsing need it)" }
     }
 }
@@ -645,8 +652,13 @@ if ($py) {
 # ~/.claude deployment), so gate on .githooks + .git being present.
 $hook = Join-Path $root '.githooks/pre-commit'
 if ((-not $deployed) -and (Test-Path $hook) -and (Test-Path (Join-Path $root '.git'))) {
-    $hp = & git -C $root config core.hooksPath 2>$null
-    if ($hp -eq '.githooks') { Ok "secret-guard hook active (core.hooksPath=.githooks)" }
+    # Invoke-Checked, like every other native call here: under the script's
+    # $ErrorActionPreference='Stop' a bare `2>$null` still turns anything git
+    # writes to stderr (a config or ownership warning) into a terminating
+    # NativeCommandError, which killed the self-test between §9 and §15.
+    $hp = (Invoke-Checked { & git -C $root config core.hooksPath }).Trim()
+    # Matched as a LINE: git's own stderr shares the captured output with it.
+    if ($hp -match '(?m)^\.githooks\s*$') { Ok "secret-guard hook active (core.hooksPath=.githooks)" }
     else { Warn "secret-guard hook not active — run scripts/enable-guard.ps1 (git config core.hooksPath .githooks)" }
 }
 
@@ -804,7 +816,9 @@ if ($deployed) {
         $out = Invoke-Checked { & $stDeployed -Verify } -AllStreams
         $rc = $script:lastRc
         if ($rc -eq 0) { Ok "sync-tasks -Verify: every registered task is healthy" }
-        elseif ($rc -eq 3) { Warn "sync-tasks -Verify reported problems:`n$out" }
+        # 4, -Verify's own code: 3 means "the last SYNC was partial", which this
+        # read-only call never performs.
+        elseif ($rc -eq 4) { Warn "sync-tasks -Verify reported problems:`n$out" }
         else { Warn "sync-tasks -Verify exited ${rc}:`n$out" }
     }
 

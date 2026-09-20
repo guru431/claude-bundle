@@ -32,7 +32,14 @@ REM (install.ps1) could not distinguish success from a UAC cancel or a failed
 REM registration. A cancelled/failed elevation throws -> 1223 (ERROR_CANCELLED).
 REM The path is wrapped in [char]34 quotes so a %TEMP% containing spaces still
 REM arrives as a single argument (Start-Process joins -ArgumentList with spaces).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $p = Start-Process -FilePath '%~f0' -ArgumentList '--from-relaunch', ([char]34 + '%ARGS_FILE%' + [char]34) -Verb RunAs -Wait -PassThru -ErrorAction Stop } catch { Write-Host $_.Exception.Message; exit 1223 }; exit $p.ExitCode"
+REM
+REM Both paths travel in the ENVIRONMENT, not inside the -Command string. They
+REM used to be interpolated into PowerShell single quotes, so a profile or TEMP
+REM holding an apostrophe (O'Brien) ended the string early: -Command failed to
+REM parse and the self-elevation silently did nothing.
+set "CLAUDE_SYNC_SELF=%~f0"
+set "CLAUDE_SYNC_ARGSFILE=%ARGS_FILE%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $p = Start-Process -FilePath $env:CLAUDE_SYNC_SELF -ArgumentList '--from-relaunch', ([char]34 + $env:CLAUDE_SYNC_ARGSFILE + [char]34) -Verb RunAs -Wait -PassThru -ErrorAction Stop } catch { Write-Host $_.Exception.Message; exit 1223 }; exit $p.ExitCode"
 set "RC=%errorlevel%"
 if exist "%ARGS_FILE%" del "%ARGS_FILE%" >nul 2>&1
 exit /b %RC%

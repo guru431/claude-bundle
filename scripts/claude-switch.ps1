@@ -433,14 +433,18 @@ function Get-CurrentMode($obj) {
     # A malformed CCR_HOST / OLLAMA_HOST gives nothing to match against, but it
     # must not end a read-only command: the URL falls through to `custom`, which
     # still shows it.
+    # `(?![0-9])` ends the port. Without it the port was matched as a plain
+    # SUBSTRING, so with CCR_PORT=3456 a URL on port 34567 read as `ccr` — and
+    # status/menu named a backend the user is not on. Same for ollama.
+    $portEnd = '(?![0-9])'
     try {
         $ccrHost, $ccrPort = Get-CcrHostPort
-        $ccrPattern = "127\.0\.0\.1:$ccrPort|localhost:$ccrPort|$([regex]::Escape($ccrHost)):$ccrPort"
+        $ccrPattern = "(127\.0\.0\.1|localhost|$([regex]::Escape($ccrHost))):$ccrPort$portEnd"
         if ($url -match $ccrPattern) { return "ccr$modelStr  ($url)" }
     } catch { }
     try {
         $ollamaHost, $ollamaPort = Get-OllamaHostPort
-        if ($url -match "$([regex]::Escape($ollamaHost)):$ollamaPort") { return "ollama-local$modelStr  ($url)" }
+        if ($url -match "$([regex]::Escape($ollamaHost)):$ollamaPort$portEnd") { return "ollama-local$modelStr  ($url)" }
     } catch { }
     if ($url -match "opencode\.ai")         { return "opencode-direct$modelStr  ($url)" }
     if ($url -match "minimax\.io|minimaxi") { return "minimax-direct$modelStr  ($url)" }

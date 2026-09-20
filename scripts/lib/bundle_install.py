@@ -239,9 +239,15 @@ def set_env_if_empty(path: str, key: str, value: str) -> int:
     for i, line in enumerate(lines):
         if filled.match(line):
             return 1
-        if empty.match(line):
+        blank = empty.match(line)
+        if blank:
             ending = line[len(line.rstrip("\r\n")):] or "\n"
-            lines[i] = f"{key}={value}{ending}"
+            # Keep the `export ` the line was written with — the pattern above
+            # explicitly allows it, and dropping it rewrote a line the user or
+            # the template chose: a `.env` that a shell also sources stopped
+            # passing that variable to child processes.
+            prefix = "export " if blank.group(1) else ""
+            lines[i] = f"{prefix}{key}={value}{ending}"
             break
     else:
         if lines and not lines[-1].endswith("\n"):

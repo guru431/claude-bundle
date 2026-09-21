@@ -415,7 +415,15 @@ function Preflight-Full {
         # find_spec, not `import`: importing requests/yaml executes them, and a
         # broken install then raises on stderr rather than answering the
         # question. This form prints nothing and exits with a code.
-        $depProbe = Invoke-Native $pySource @('-c', 'import importlib.util as u,sys; sys.exit(0 if u.find_spec("requests") and u.find_spec("yaml") else 1)')
+        #
+        # The module names are in SINGLE quotes, like the version probe above.
+        # Windows PowerShell 5.1 does not escape a double quote embedded in an
+        # argument it hands to a native exe, so `u.find_spec("requests")` reached
+        # python as `u.find_spec(requests)` — NameError, exit 1, stderr swallowed
+        # by Invoke-Native's 2>$null. Every full install under 5.1 therefore died
+        # here claiming the deps were missing, however complete they were, and
+        # the message named the one fix that could not help.
+        $depProbe = Invoke-Native $pySource @('-c', "import importlib.util as u,sys; sys.exit(0 if u.find_spec('requests') and u.find_spec('yaml') else 1)")
         if ($depProbe.ExitCode -ne 0) {
             # Not optional for the full tier: cron/hooks/utils.py imports requests
             # at call time and registry parsing needs PyYAML, so warn-and-continue

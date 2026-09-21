@@ -414,6 +414,17 @@ days without an LLM provider while this task reported `rc=0`.
   is unchanged (uppercase hex, no separators), so manifests written before this
   still compare. `tests/test_ps_portability.py` holds the rule for all six
   functions that module exports.
+- **The full tier's dependency probe failed under Windows PowerShell 5.1,
+  however complete the install was.** `Preflight-Full` asked python for
+  `u.find_spec("requests")`, and 5.1 does not escape a double quote embedded in
+  an argument it hands to a native exe: python received `u.find_spec(requests)`,
+  raised `NameError` and exited 1, with the traceback swallowed by
+  `Invoke-Native`'s `2>$null`. Every `-Profile full` install stopped there
+  saying the runtime deps were missing, and the one fix it printed
+  (`pip install -r requirements.txt`) could not change the answer. The module
+  names are single-quoted now, like the version probe three lines above them.
+  The CI PowerShell job parse-checks `install.ps1` under 5.1 but never runs its
+  preflight, which is why nothing caught this.
 - **`logon_type: s4u`** — tasks that run before logon without a stored password.
   Opt-in: S4U has no network credentials, so shares, Git Credential Manager and
   authenticated proxies fail. INSTALL.md has the "changed my Windows password"

@@ -174,6 +174,23 @@ def cron_copy(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture()
+def short_tmp_path() -> Path:
+    """A fresh directory at the top of %TEMP%, for a tree that runs deep.
+
+    Windows without LongPathsEnabled refuses a path of 260 characters or more,
+    and a wiki page's atomic write — `<page>.md.<pid>.<uuid>.tmp` inside a demo
+    sandbox or a copied bundle — sits over a hundred characters below the test's
+    root. Under `tmp_path` that root is --basetemp plus the test's name, so the
+    outcome depended on where the caller put --basetemp and on how many digits
+    the PID had: the pipeline and demo tests failed in a full run started with a
+    --basetemp deep in an agent's scratchpad, and passed rerun on their own.
+    """
+    path = Path(tempfile.mkdtemp(prefix="cb-")).resolve()
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
 # ── bash ─────────────────────────────────────────────────────────────────────
 
 @functools.lru_cache(maxsize=None)
@@ -272,8 +289,8 @@ def pytest_runtest_makereport(item, call):
     that asked for the dependency skipped its tests in SETUP, unseen.
 
     On CI a test of the fast suite whose call takes over _SLOW_CALL_SECONDS fails
-    too. pytest.ini prints --durations on every run so that the measurement
-    exists; until this, nothing acted on it.
+    too. `--durations` makes the measurement visible; until this, nothing acted
+    on it.
     """
     outcome = yield
     report = outcome.get_result()

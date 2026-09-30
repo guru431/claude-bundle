@@ -39,8 +39,11 @@ def _import_utils(monkeypatch, bundle_root: Path):
 
 @pytest.fixture()
 def bundle_tree(tmp_path: Path) -> Path:
+    # Without logs/ and state/, as in conftest.cron_copy: what a run from this
+    # checkout left there is not the test's, and it was a third of the files
+    # this fixture copied for every test that asks for it.
     import shutil
-    shutil.copytree(CRON, tmp_path / "cron")
+    shutil.copytree(CRON, tmp_path / "cron", ignore=shutil.ignore_patterns("logs", "state"))
     return tmp_path
 
 

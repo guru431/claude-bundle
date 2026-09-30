@@ -10,6 +10,16 @@
 # silent SKIPs that `-q` renders as dots. (tests/conftest.py turns such a skip
 # into a failure when CI=1, so the two halves cannot drift.)
 pytest>=7
+# pytest-timeout — pytest.ini sets `timeout = 30`: a hung test fails with its
+# name instead of holding the run until CI's or the sweep's own limit, which
+# names nothing. Without the plugin pytest only warns about an unknown key and
+# the limit is silently gone.
+pytest-timeout>=2
+# pytest-xdist — `-n auto` is how the fast suite stays inside its 60 s budget
+# on Windows: ~850 tests at ~0.1 s each, many of them starting PowerShell, bash
+# or a Python child, take ~85 s one after another and ~30 s spread over the
+# cores. CI runs the suite without it.
+pytest-xdist
 PyYAML
 # shellcheck, as a pip package, so `{ git ls-files '*.sh'; git ls-files
 # '.githooks/*'; } | xargs shellcheck --severity=warning -e SC1091 -f gcc`

@@ -81,7 +81,10 @@ def _env(tmp_path: Path, **extra) -> dict:
     return env
 
 
-def test_the_demo_prints_the_example_and_leaves_its_install_alone(tmp_path: Path):
+def test_the_demo_prints_the_example_and_leaves_its_install_alone(short_tmp_path: Path):
+    # The demo's sandbox goes under TEMP, and TEMP under this root: its deepest
+    # file is ~110 characters below it (conftest.short_tmp_path).
+    tmp_path = short_tmp_path
     # A checkout in miniature whose home-claude/ is a LIVE install: settings with
     # keys and a chain, a vault, a state ledger, logs, a breaker state.
     repo = tmp_path / "repo"

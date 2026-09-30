@@ -502,6 +502,20 @@ days without an LLM provider while this task reported `rc=0`.
   through an installed browser stay local (the logic is covered with the browser
   stubbed). CI's compileall treats a SyntaxWarning as an error and covers
   `scripts/` and `tests/`.
+- **Two tests failed only when `--basetemp` was deep.** The retry-ceiling test and
+  the demo test build trees whose deepest file — a wiki page's atomic
+  `<page>.md.<pid>.<uuid>.tmp` — lies over a hundred characters below the test's
+  root, and Windows without long paths refuses 260. Under a `--basetemp` in an
+  agent's scratchpad they crossed it or not by the number of digits in the PID.
+  They now build at the top of `%TEMP%` (`short_tmp_path`), and the pipeline and
+  guard fixtures no longer copy the checkout's `cron/logs` and `cron/state`.
+- **Every test is limited to 30 s** (pytest-timeout, `timeout = 30` in
+  `pytest.ini`): a hung test fails with its name instead of holding the run. CI's
+  integration steps pass `--timeout=300`. `--durations=10` left `addopts` — it
+  belongs to whoever measures.
+- **The fast suite runs with `-n auto`** (pytest-xdist, in requirements-dev.txt):
+  one after another it takes ~85 s on Windows, over its 60 s budget, spread over
+  the cores ~30 s. CI still runs it serially.
 
 ### Docs, and the guards that keep them honest
 

@@ -353,11 +353,7 @@ Setup once: `pip install -r requirements.txt -r requirements-dev.txt`
 
 | What | Command |
 |---|---|
-| Fast test suite (the default; 60s budget) | `python -m pytest tests/ -q` |
-| One file | `python -m pytest tests/test_pipeline.py -q` |
-| One test | `python -m pytest tests/test_guards.py::test_valid_manifest_allows -q` |
-| The `integration` tests excluded by default | `python -m pytest tests/ -m integration -q` |
-| As CI runs it (a dependency skip, or a fast test over 3 s, fails) | `CI=1 python -m pytest tests/ -q` |
+| One test file (a targeted run; the test levels are below the table) | `python -m pytest tests/test_pipeline.py -q` |
 | All five CI guards | `python scripts/check-registry.py && python scripts/check-doc-counts.py && python scripts/check-env-ref.py && python scripts/check-io-matrix.py && python scripts/check-agents-sync.py` |
 | Shell lint (CI parity — gates on warnings) | `{ git ls-files '*.sh'; git ls-files '.githooks/*'; } \| xargs shellcheck --severity=warning -e SC1091 -f gcc` |
 | Secret-format scan (same lib as pre-commit) | `. home-claude/cron/lib/secret-scan.sh && git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/'` |
@@ -369,12 +365,20 @@ Setup once: `pip install -r requirements.txt -r requirements-dev.txt`
 | The pipeline on the shipped example, spends nothing | `python home-claude/cron/wiki/wiki-pipeline.py --demo` |
 | The shell tests — push guards, `runtime.sh`, `telegram-send.sh` (by hand, as CI runs them) | `for t in home-claude/cron/tests/test_*.sh; do bash "$t"; done` |
 
-`pytest.ini` is deliberately the reference implementation of the test
-policy the bundle ships (`home-claude/CLAUDE.md` § test policy): a bare
-`pytest` is the fast suite, `--durations=10` is on so the "mark
-`integration` **by measurement**" rule is actually measurable, and
-`testpaths` is mandatory. Keep it that way — it is documentation as much
-as config.
+**Test levels.** The commands of each level — targeted, fast, full — are
+declared once, in the test contract the maintainer's machine keeps outside
+this repository (the `tests` field of its project registry), which its
+nightly test sweep and its agents read; they are not repeated here. What the
+levels mean is `pytest.ini`, deliberately the reference implementation of the
+test policy the bundle ships (`home-claude/CLAUDE.md` § test policy): a bare
+`pytest` is the fast suite with a 60 s budget, which on Windows it meets only
+spread over the cores (`-n auto`, pytest-xdist); `integration` and `manual`
+are deselected by default; every test is limited to 30 s (pytest-timeout,
+`timeout = 30`), which a slower level lifts with its own `--timeout`; and
+`testpaths` is mandatory. `--durations=N` is the measurement behind "mark
+`integration` **by measurement**" and goes on the command line. `CI=1` turns
+on CI's two gates (below). Keep `pytest.ini` that way — it is documentation as
+much as config.
 
 ## Local verification
 

@@ -47,9 +47,16 @@ def _run(script: Path, env_extra: dict, cwd: Path,
 
 
 @pytest.fixture()
-def bundle(tmp_path: Path) -> Path:
-    """A throwaway bundle tree: cron/ copied in, an empty wiki/ with one daily."""
-    shutil.copytree(CRON_SRC, tmp_path / "cron")
+def bundle(short_tmp_path: Path) -> Path:
+    """A throwaway bundle tree: cron/ copied in, an empty wiki/ with one daily.
+
+    At the top of %TEMP%, not under --basetemp: see conftest.short_tmp_path.
+    Without cron/logs and cron/state, as in conftest.cron_copy: they hold what a
+    run from this checkout left behind.
+    """
+    tmp_path = short_tmp_path
+    shutil.copytree(CRON_SRC, tmp_path / "cron",
+                    ignore=shutil.ignore_patterns("logs", "state"))
     wiki = tmp_path / "wiki"
     (wiki / "daily").mkdir(parents=True)
     # Replicate the shipped vault skeleton the index builder expects to exist.

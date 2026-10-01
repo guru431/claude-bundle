@@ -318,8 +318,8 @@ this table reflects it.
 | `ClaudeMemoryUpdate` | your user messages (up to ~40 KB/night) + a slice of `~/.claude/memory/` → your LLM provider. With `MEMORY_CROSS_NOTES=1`, a **second** call on top of that, carrying messages from two or more projects at once. On a night with nothing extracted, one line saying why → Telegram Bot API | yes (PAYG tokens) | no | on (cross-notes off) |
 | `ClaudeHealthcheck` | host metrics → your LLM provider (see below); when a check fires, the alert with the model's analysis of those metrics → Telegram Bot API, and a line when the analysis itself failed | yes (PAYG tokens) | no | on |
 | `ClaudeGitPushAll` | your commits → your git remotes, and Telegram alerts naming the repos that failed or were held back, with the paths that held them back — a sensitive file name, or a protected file such as `FINDINGS.md` whose deletion was not committed; never a secret's value. Before a push, what the remote does not have yet is scanned: a token-shaped secret, or a sensitive file name (`.env`, private keys, credential files — the table the git hooks use), holds that repo back, and it fails every night until the file is out of its history or pushed once by hand. A blob over 1 MiB is noted in the log, not scanned | no | yes — auto-commits and `git push`es every repo under `projects_root` (the vault too, when `wiki/` has a `.git` of its own) | off (opt-in) |
-| `ClaudeTaskMonitor` / alerts | failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the titles of stale findings from every allowed project → Telegram Bot API | no | no | on |
-| `ClaudeTaskMonitorPosix` | failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers → Telegram Bot API | no | no | off (POSIX only) |
+| `ClaudeTaskMonitor` / alerts | failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the titles of stale findings from every allowed project, the last stderr lines of a failed bash/python task, and the names of allowed repos whose changes have not reached their remote for 48h (only with `ClaudeGitPushAll` on) → Telegram Bot API | no | no | on |
+| `ClaudeTaskMonitorPosix` | failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers, plus the names of allowed repos whose changes have not reached their remote for 48h (only with `ClaudeGitPushAll` on) → Telegram Bot API | no | no | off (POSIX only) |
 | `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
 | `ClaudeMd2PdfSync` | on a failure, the paths of the documents that did not convert (relative to `projects_root`) → Telegram Bot API; the reasons stay in the local log. Projects the privacy policy denies are not walked. The render is local, except that the browser fetches any remote image a document links | no | rewrites the paired `*.pdf` in your working copies — which `ClaudeGitPushAll` commits when that task is on | off |
 | `ClaudeWikiLint` | a lint summary → Telegram Bot API, only with `WIKI_LINT_TELEGRAM=1` | no | rewrites vault pages, only with `--fix` | on (alerts off) |
@@ -335,7 +335,11 @@ name of the script that made it, one id per process (see
 `cron/wiki/wiki-conflict-resolve.py` is not in the table because it is not a
 scheduled task — it is run by hand. When you do run it, it sends a WHOLE vault
 page to your provider and, with `--apply`, rewrites that page; `--dry-run`
-prints what it would send and calls nothing.
+prints what it would send and calls nothing. A page under `projects/<slug>/`
+goes only when `project_allowed(<slug>)` says so — the same policy the
+collectors honor, so a project you skipped after its pages were compiled stays
+home. `tests/test_llm_exit_privacy_contract.py` requires that gate (or a listed
+reason) of every module that calls the LLM.
 
 ### What `ClaudeHealthcheck` actually sends
 
@@ -363,12 +367,17 @@ provider therefore degrades the alert's prose, not the alert.
 Four deterministic conditions can raise the alert on their own, each
 independent of the model:
 
-- **Local disk** at or above `HEALTHCHECK_DISK_PCT`. Pseudo-filesystems are
-  excluded by mount point (`HEALTHCHECK_DISK_EXCLUDE`) — a `/snap/*`
-  squashfs is permanently 100% full and used to page every morning.
-- **Remote disk** at or above `HEALTHCHECK_REMOTE_DISK_PCT` (defaults to the
-  local threshold). Before this, a remote host at 98% was only ever text
-  inside the prompt, so it could never decide whether to wake anyone.
+- **Local disk**: less than `HEALTHCHECK_DISK_FREE_GB` (default 5) free on
+  the tightest local filesystem — free space, not the share used, because a
+  build-cache-heavy system drive lives at 85-100% for months and a percent
+  threshold paged every morning until the morning that mattered read like the
+  rest. `HEALTHCHECK_DISK_PCT` also pages when you set it (no default).
+  Pseudo-filesystems are excluded by mount point (`HEALTHCHECK_DISK_EXCLUDE`) —
+  a `/snap/*` squashfs is permanently 100% full and has nothing free.
+- **Remote disk**, by the same rules: `HEALTHCHECK_REMOTE_DISK_FREE_GB` and the
+  opt-in `HEALTHCHECK_REMOTE_DISK_PCT`, each defaulting to its local
+  counterpart. Before this, a full remote host was only ever text inside the
+  prompt, so it could never decide whether to wake anyone.
 - **The task monitor stopped running.** A task that stops firing has no
   failing run to report, and that is as true of the task monitor of this
   platform (`ClaudeTaskMonitor` on Windows, `ClaudeTaskMonitorPosix`
@@ -796,7 +805,8 @@ Paths are relative to the pipeline root (`~/.claude` on a default install).
 
 | Where | What it answers |
 |---|---|
-| `cron/logs/<name>_<date>.log` | What one run of a task did, and why it failed. Each script writes its own (`wiki-pipeline_`, `memory-update_`, `healthcheck_`, `task-monitor_`, `git-push-all_`, …); the hidden launcher redirects nothing. Build-index writes none: under the pipeline its output is in `wiki-pipeline_<date>.log`, with every other phase's. |
+| `cron/logs/<name>_<date>.log` | What one run of a task did, and why it failed. Each script writes its own (`wiki-pipeline_`, `memory-update_`, `healthcheck_`, `task-monitor_`, `git-push-all_`, …); the hidden launcher redirects nothing to these.
+| `cron/logs/task-stderr/<script>_<date>.log` | What a bash/python task printed to stderr — the traceback its own log never got. Kept by the hidden launcher on Windows (`bin/_run-hidden.vbs`; not for AtStartup/AtLogOn tasks), deleted when empty, purged after 14 days; `ClaudeTaskMonitor` quotes its last lines under a FAIL. | Build-index writes none: under the pipeline its output is in `wiki-pipeline_<date>.log`, with every other phase's. |
 | `cron/logs/launcher.log` | Why a task's `Last Result` is **9009** and it left no log: `bin/_run-hidden.vbs` writes a line only when the launch itself failed — a `BASH_EXE` / `PYTHON_EXE` path that does not exist, or a command Windows could not start. |
 | Event Viewer → Task Scheduler → Operational (turn it on once; `Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 50`) | Whether the trigger fired at all, and a logon failure (`0x8007052E`: the stored password is stale) before any script ran. |
 | `%TEMP%\sync-tasks_<timestamp>.log` | Why a task was skipped or failed at registration — the transcript of a registering sync run (`-Verify` and `-DryRun` write none). |

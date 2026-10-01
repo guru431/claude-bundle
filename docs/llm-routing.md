@@ -258,7 +258,10 @@ PATHEXT included, so the `claude.cmd` shim of an npm install is found; set
 `CLAUDE_BIN` when it is not on PATH at all. It runs on the subscription you
 signed in to with `claude /login`: every `ANTHROPIC_*` variable is withheld
 from it, because `claude -p` uses an `ANTHROPIC_API_KEY` — the `.env` line
-included — whenever one is set, and bills the API.
+included — whenever one is set, and bills the API. It also runs without hands:
+no built-in tools (`--tools ""`), no MCP servers (`--strict-mcp-config`), from
+an empty temporary directory and without a session transcript — the prompt
+carries transcript and wiki text nobody vetted, and the caller wants only text.
 
 ### Where the keys come from
 

@@ -457,7 +457,14 @@ function Build-Action([hashtable]$task, [string]$launcher) {
         $pythonExe = Get-PythonExe
         return @{ execute=$pythonExe; arguments=((Quote-Path $script) + $rest); work_dir=$null }
     }
-    return @{ execute='wscript.exe'; arguments=($script:WSCRIPT_FLAGS + ' ' + (Quote-Path $launcher) + ' ' + $kind + ' ' + (Quote-Path $script) + $rest); work_dir=$null }
+    # The launcher keeps a bash/python task's stderr in cron\logs\task-stderr\.
+    # An AtStartup/AtLogOn task runs until the next reboot and its file would grow
+    # all that time, so it gets the <kind>-daemon mode: the same, without it.
+    $mode = $kind
+    if (@('bash', 'python') -contains $kind -and @('AtStartup', 'AtLogOn') -contains "$($task.trigger)") {
+        $mode = "$kind-daemon"
+    }
+    return @{ execute='wscript.exe'; arguments=($script:WSCRIPT_FLAGS + ' ' + (Quote-Path $launcher) + ' ' + $mode + ' ' + (Quote-Path $script) + $rest); work_dir=$null }
 }
 
 # ── compare current vs wanted ────────────────────────────────────────────────

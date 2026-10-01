@@ -134,13 +134,24 @@ def link_target(link: str) -> str:
     return link.removesuffix(".md")
 
 
+def link_key(target: str) -> str:
+    """The key a link and a page are matched on — casefolded per segment.
+
+    Obsidian resolves `[[Hugo]]` to `hugo.md`, the compilers dedupe page names
+    case-insensitively, and so do the Windows and macOS filesystems; matching
+    exact case made one vault report 2952 of its 19021 "broken" links falsely.
+    Casefold only — hyphens and underscores stay significant, as in Obsidian.
+    """
+    return "/".join(seg.casefold() for seg in target.split("/") if seg)
+
+
 @lru_cache(maxsize=1)
 def vault_targets() -> tuple[set[str], dict[str, int]]:
     """Everything a wikilink may point at.
 
     Returns (full paths relative to WIKI_ROOT without .md, stem → how many
-    pages carry that stem). index/CLAUDE/log pages are link targets even
-    though find_all_pages skips them as lint subjects.
+    pages carry that stem), both as link_key()s. index/CLAUDE/log pages are
+    link targets even though find_all_pages skips them as lint subjects.
 
     Cached: two checks call it, and the lint run writes no pages, so the second
     full rglob of the vault only repeated the first one's I/O. Callers treat the
@@ -153,8 +164,9 @@ def vault_targets() -> tuple[set[str], dict[str, int]]:
         rel = f.relative_to(WIKI_ROOT)
         if any(p in SKIP_PARTS for p in rel.parts):
             continue
-        paths.add(rel.with_suffix("").as_posix())
-        stems[f.stem] = stems.get(f.stem, 0) + 1
+        paths.add(link_key(rel.with_suffix("").as_posix()))
+        stem = link_key(f.stem)
+        stems[stem] = stems.get(stem, 0) + 1
     return paths, stems
 
 
@@ -175,7 +187,7 @@ def check_broken_links(pages: dict[str, list[Path]]) -> list[str]:
             rel = path.relative_to(WIKI_ROOT)
             for link in extract_wikilinks(text):
                 target = link_target(link)
-                if target in targets:
+                if link_key(target) in targets:
                     continue
                 # [[FINDINGS.md]] and friends name a working file in the
                 # project's repository, not a wiki page — no page by that name
@@ -186,7 +198,7 @@ def check_broken_links(pages: dict[str, list[Path]]) -> list[str]:
                 # A bare stem resolves only when it is unique vault-wide; a
                 # path-qualified link must match a real path (no stem fallback,
                 # or [[projects/a/foo]] would silently land on projects/b/foo).
-                n = 0 if "/" in target else stems.get(target, 0)
+                n = 0 if "/" in target else stems.get(link_key(target), 0)
                 if n == 1:
                     continue
                 if n > 1:
@@ -220,15 +232,15 @@ def check_orphan_pages(pages: dict[str, list[Path]]) -> list[str]:
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
         for link in extract_wikilinks(text):
-            all_links.add(link_target(link))
+            all_links.add(link_key(link_target(link)))
 
     for name, paths in pages.items():
         for path in paths:
             full = path.relative_to(WIKI_ROOT).with_suffix("").as_posix()
-            if full in all_links:
+            if link_key(full) in all_links:
                 continue
             # A bare stem only vouches for a page when nothing else shares it.
-            if stems.get(name, 0) == 1 and name in all_links:
+            if stems.get(link_key(name), 0) == 1 and link_key(name) in all_links:
                 continue
             warnings.append(f"WARN: orphan page: {full}")
 
@@ -729,8 +741,13 @@ def main():
         else:
             log("No regressions past baseline")
     else:
-        log("No baseline yet — first run, recording counts")
-    save_baseline(class_counts)
+        log("No baseline yet")
+    # Only the scheduled run moves the baseline — the registry passes the flag.
+    # Every run used to overwrite it, so a manual check between two scheduled
+    # ones silently swallowed whatever had grown since the last of them.
+    if "--save-baseline" in sys.argv:
+        save_baseline(class_counts)
+        log("Baseline saved")
 
     log(f"=== Lint complete ===")
 

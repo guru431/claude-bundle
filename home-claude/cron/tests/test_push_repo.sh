@@ -327,4 +327,43 @@ grep -q "^python .*runs\.py record" "$TMP/stubs.log" \
 [ "$(git -C "$P/app" rev-parse HEAD)" = "$(git -C "$P/app" rev-parse "origin/$(br "$P/app")")" ] \
     || fail "T20: the change was not pushed"
 
-echo "PASS: push_repo (21 scenarios)"
+# === Test 21: an unfinished merge fails the repo; nothing is committed ===
+# `git add --all` marks conflicted files resolved, so the auto-commit used to
+# publish the conflict markers; an unfinished rebase detaches HEAD and slid into
+# a quiet "skipped" instead.
+R21="$TMP/r21"; mkrepo "$R21"
+B21=$(br "$R21")
+git -C "$R21" checkout -qb side; echo side > "$R21/app.py"; git -C "$R21" commit -qam side
+git -C "$R21" checkout -q "$B21"; echo main > "$R21/app.py"; git -C "$R21" commit -qam main
+git -C "$R21" merge -q side >/dev/null 2>&1 && fail "T21: the merge was meant to conflict"
+HEAD21=$(git -C "$R21" rev-parse HEAD)
+reset_counters; push_repo "$R21" "r21" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T21: an unfinished merge was not FAILED (failed=$failed skipped=$skipped)"
+[ "$(git -C "$R21" rev-parse HEAD)" = "$HEAD21" ] || fail "T21: a commit was made on top of the conflict"
+grep -q "unfinished git operation (merge)" "$LOG_FILE" || fail "T21: the log does not name the merge"
+
+# === Test 22: a blocked commit gives the index back as it was before the run ===
+# Without it, what the script staged waited for the user's next manual commit:
+# `git commit` for one file took the secret the guard had just refused with it.
+R22="$TMP/r22"; mkrepo "$R22"
+echo mine > "$R22/mine.py"; git -C "$R22" add mine.py      # staged by hand
+printf 'token = "ghp_%s"\n' "0123456789abcdefghij0123456789" > "$R22/leak.py"
+reset_counters; push_repo "$R22" "r22" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T22: the staged secret did not fail the repo (failed=$failed)"
+STAGED22=$(git -C "$R22" diff --cached --name-only)
+[ "$STAGED22" = "mine.py" ] || fail "T22: index not restored — staged now: $(echo "$STAGED22" | tr '\n' ' ')"
+[ -f "$R22/.git/index.git-push-all" ] && fail "T22: the index backup was left behind"
+
+# === Test 23: a repository git cannot open is FAILED, not skipped ===
+# A `.git` that git refuses (dubious ownership under another account, a broken
+# repo) gave an empty branch name and a quiet "no branch, skipping" every night.
+R23="$TMP/r23"; mkdir -p "$R23/.git"
+reset_counters; push_repo "$R23" "r23" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T23: an unopenable repo was not FAILED (failed=$failed skipped=$skipped)"
+
+# === Test 24: a directory the sweep cannot enter is FAILED, not skipped ===
+reset_counters; push_repo "$TMP/no-such-dir" "r24" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T24: cd failure was not FAILED (failed=$failed skipped=$skipped)"
+cd "$TMP" || exit 1
+
+echo "PASS: push_repo (25 scenarios)"

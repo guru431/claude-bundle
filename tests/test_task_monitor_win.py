@@ -446,3 +446,58 @@ def test_without_utils_the_findings_watch_reads_no_project(deployed):
 
     assert "[app]" not in res.stdout, res.stdout
     assert "decoy" not in res.stdout, res.stdout
+
+
+# ── a failed task's stderr tail, from the launcher's file ────────────────────
+
+STDERR_REGISTRY = ("version: 1\ntasks:\n"
+                   "  - name: ClaudeNightly\n"
+                   r"    script: C:\bundle\cron\nightly-job.py" "\n"
+                   "    kind: python\n"
+                   "    trigger: Daily 02:00\n"
+                   "    timeout_hours: 4\n")
+
+
+def _stderr_file(tmp_path: Path, last_run: str, seconds_after: int) -> Path:
+    """The launcher's stderr file for ClaudeNightly, written `seconds_after` the run."""
+    folder = tmp_path / "logs" / "task-stderr"
+    folder.mkdir(parents=True, exist_ok=True)
+    f = folder / "nightly-job_2026-09-01.log"
+    f.write_text("noise\nTraceback (most recent call last):\n  File x\nKeyError: 'boom'\n",
+                 encoding="utf-8")
+    at = datetime.strptime(last_run, "%Y-%m-%d %H:%M").timestamp() + seconds_after
+    os.utime(f, (at, at))
+    return f
+
+
+@pytest.mark.parametrize("pyyaml", [True, False])
+def test_a_fail_line_carries_the_tail_of_the_tasks_stderr(run_task_status, tmp_path,
+                                                          monkeypatch, pyyaml):
+    """Task Scheduler keeps a non-zero Last Result and nothing else; the reason
+    is the traceback the launcher saved. Also without PyYAML: the fallback
+    parser has to know `kind:` and `script:` for this to work there."""
+    if not pyyaml:
+        monkeypatch.setitem(sys.modules, "yaml", None)
+    (tmp_path / "registry.yaml").write_text(STDERR_REGISTRY, encoding="utf-8")
+    _stderr_file(tmp_path, "2026-09-01 02:00", seconds_after=30)
+    out = run_task_status([_task("ClaudeNightly", result=1, last_run="2026-09-01 02:00")])
+    lines = out.splitlines()
+    i = next(n for n, ln in enumerate(lines) if ln.startswith("ClaudeNightly: exit 1"))
+    assert lines[i + 1:i + 4] == ["    stderr: Traceback (most recent call last):",
+                                  "    stderr: File x", "    stderr: KeyError: 'boom'"], out
+
+
+def test_an_older_failures_stderr_is_not_shown_under_todays_fail(run_task_status, tmp_path):
+    (tmp_path / "registry.yaml").write_text(STDERR_REGISTRY, encoding="utf-8")
+    _stderr_file(tmp_path, "2026-09-01 02:00", seconds_after=-86400)
+    out = run_task_status([_task("ClaudeNightly", result=1, last_run="2026-09-01 02:00")])
+    assert "ClaudeNightly: exit 1" in out and "stderr:" not in out, out
+
+
+def test_the_stderr_folder_follows_the_registrys_launcher(tmp_path):
+    """A local copy of the launcher keeps its files beside that copy."""
+    reg = tmp_path / "registry.yaml"
+    reg.write_text(r"launcher: D:\local\bin\_run-hidden.vbs" "\ntasks: []\n", encoding="utf-8")
+    assert monitor_checks.stderr_dir(reg).as_posix().endswith("D:/local/cron/logs/task-stderr")
+    reg.write_text(r"launcher: <bundle-install-path>\bin\_run-hidden.vbs" "\n", encoding="utf-8")
+    assert monitor_checks.stderr_dir(reg) == tmp_path / "logs" / "task-stderr"

@@ -14,7 +14,7 @@
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the TITLES of stale findings from every allowed project -> Telegram Bot API money=no writes=$HOME/task-monitor-fatal.log OUTSIDE the bundle (a start-up failure, or the full text of an alert it could not deliver: task names, Password/S4U task command lines), and cron/state/task-monitor-seen.json
+# bundle-io: offbox=a failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the TITLES of stale findings from every allowed project, the last stderr lines of a failed bash/python task, and the names of allowed repos whose changes have not reached their remote for 48h (only with ClaudeGitPushAll on) -> Telegram Bot API money=no writes=$HOME/task-monitor-fatal.log OUTSIDE the bundle (a start-up failure, or the full text of an alert it could not deliver: task names, Password/S4U task command lines), and cron/state/task-monitor-seen.json
 
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -z "$BUNDLE_ROOT" ] || [ ! -d "$BUNDLE_ROOT/cron" ]; then
@@ -146,6 +146,8 @@ try:
 except OSError:
     REGISTRY = {}
 TIMEOUTS = {name: t.get('timeout_hours') for name, t in REGISTRY.items()}
+# The launcher keeps a bash/python task's stderr; a FAIL line carries its tail.
+STDERR_DIR = monitor_checks.stderr_dir(Path(sys.argv[1]) / 'registry.yaml')
 
 
 def hung_since(task, now):
@@ -257,6 +259,9 @@ if failures:
                          f"dropped [{tag}]")
         else:
             lines.append(f"{f['Name']}: exit {f['LastResult']} (last run: {f['LastRun']}) [{tag}]")
+            entry = REGISTRY.get(f['Name'], {})
+            if entry.get('kind') in ('bash', 'python'):
+                lines += monitor_checks.stderr_tail(STDERR_DIR, entry.get('script'), f['LastRun'])
     if any('[ORPHAN]' in ln for ln in lines):
         lines.append('  ORPHAN → add to cron/registry.yaml, disable it, or add to EXCLUDE_TASKS with a reason')
     print('\n'.join(NOTES + lines))
@@ -288,7 +293,8 @@ elif [ "$TASK_STATUS" != "OK" ]; then
     # `<name>: nothing listening on port N …`). The block can also carry the
     # ORPHAN hint and the "collected via the schtasks fallback" note, and
     # counting those would inflate the header's failed-task count.
-    TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | grep -cE ': exit |: running since |: nothing listening on port ')
+    # Indented lines are attachments (a stderr tail), never a task of their own.
+    TASK_FAIL_COUNT=$(printf '%s\n' "$TASK_STATUS" | grep -v '^[[:space:]]' | grep -cE ': exit |: running since |: nothing listening on port ')
     ALERTS="$TASK_STATUS"
 fi
 
@@ -485,6 +491,53 @@ if [ -n "$FINDINGS_ALERT" ]; then
     echo "Findings check: $FINDINGS_ALERT" >> "$LOG_FILE"
     ALERTS="${ALERTS:+$ALERTS
 }$FINDINGS_ALERT"
+fi
+
+# --- Changes that have not reached their remote for >48h ---
+# The result, not the run: git-push-all can die halfway or never start, and it
+# alerts only on a FAILED repo. monitor_checks.unpushed_report — silent unless
+# ClaudeGitPushAll is enabled; once per set of stuck repos (seen-state, rolled
+# back with the rest when the alert is not delivered).
+echo "TRACE: stage=unpushed $(date '+%H:%M:%S')" >> "$LOG_FILE"
+UNPUSHED=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$BUNDLE_ROOT" 2>>"$LOG_FILE" <<'PYSCRIPT'
+import json
+import sys
+from pathlib import Path
+
+BUNDLE_ROOT = Path(sys.argv[1])
+sys.path.insert(0, str(BUNDLE_ROOT / 'cron'))
+sys.path.insert(0, str(BUNDLE_ROOT / 'cron' / 'hooks'))
+import monitor_checks
+# utils for PROJECTS_ROOT and the privacy gate; without it, only the wiki repo.
+try:
+    import utils
+    root, allowed = utils.PROJECTS_ROOT, utils.working_copy_allowed
+except Exception as exc:
+    root, allowed = None, (lambda name: False)
+    print(f"unpushed: utils not importable ({type(exc).__name__}: {exc}) — "
+          f"only the wiki repo is checked", file=sys.stderr)
+state = BUNDLE_ROOT / 'cron' / 'state' / 'task-monitor-seen.json'
+try:
+    seen = json.loads(state.read_text(encoding='utf-8'))
+    seen = seen if isinstance(seen, dict) else {}
+except (OSError, ValueError):
+    seen = {}
+log_line, alert = monitor_checks.unpushed_report(
+    seen, BUNDLE_ROOT / 'cron' / 'registry.yaml', root, BUNDLE_ROOT, allowed=allowed)
+if log_line:
+    print(log_line, file=sys.stderr)
+try:
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps(seen, indent=1), encoding='utf-8')
+except OSError:
+    pass
+print(alert)
+PYSCRIPT
+)
+
+if [ -n "$UNPUSHED" ]; then
+    ALERTS="${ALERTS:+$ALERTS
+}$UNPUSHED"
 fi
 
 # --- Stale artifact verdicts (Semantic Artifact SLO, cron/runs.py) ---

@@ -71,3 +71,23 @@ def test_a_missing_file_is_created_with_the_header(utils, tmp_path):
     findings = tmp_path / "FINDINGS.md"
     assert utils.append_finding(findings, TITLE, "ctx", "what", "how", project="demo") is True
     assert findings.read_text(encoding="utf-8").startswith(_header(utils))
+
+
+def test_closing_an_entry_keeps_fenced_lines_and_its_neighbours(utils, tmp_path):
+    """close_finding cut at the next `## ` line, fenced or not: an entry whose
+    fenced example held a `## ` line lost only its head, and the tail stayed as
+    an orphan block glued to the next entry; a fenced example that QUOTED the
+    title was taken for the entry itself and cut out of its owner."""
+    findings = tmp_path / "FINDINGS.md"
+    other = ("## 2026-09-28 · someone else's entry [P3]\n**What:** quotes it:\n"
+             f"```\n## 2026-09-01 · {TITLE} [P2]\n```\n**Status:** open\n\n")
+    findings.write_text(_header(utils)
+                        + f"## 2026-09-30 · {TITLE} [P2]\n**What:** example:\n"
+                        + "```\n## not an entry\nmore\n```\n**Status:** open\n\n"
+                        + other, encoding="utf-8")
+
+    assert utils.close_finding(findings, TITLE) is True
+    text = findings.read_text(encoding="utf-8")
+    assert "not an entry" not in text and "more" not in text, text
+    assert other.strip() in text, "the neighbour (and its quote) did not survive"
+    assert utils.close_finding(findings, TITLE) is False, "a quoted title was closed as an entry"

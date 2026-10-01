@@ -1455,6 +1455,10 @@ def close_finding(path: Path, title: str) -> bool:
 
     Deleting is the documented close for a DONE finding — `git log` is the
     record. A rejected one is moved to FINDINGS-archive.md by hand.
+
+    Entries are cut at `## ` lines OUTSIDE a code fence, like the writer finds
+    them. Cutting at any `## ` line left the tail of an entry whose fenced
+    example held one, and took a fenced quote of the title for the entry itself.
     """
     try:
         if not path.exists():
@@ -1462,10 +1466,15 @@ def close_finding(path: Path, title: str) -> bool:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    pattern = re.compile(
-        r"(?ms)^## \d{4}-\d{2}-\d{2} · " + re.escape(masked(title))
-        + r" \[[^\]]*\]\n.*?(?=^## |\Z)")
-    new = pattern.sub("", text)
+    bounds = _finding_offsets(text)
+    want = masked(title)
+    kept: list[str] = []
+    for start, end in zip(bounds, bounds[1:] + [len(text)]):
+        block = text[start:end]
+        m = _FINDING_TITLE_RE.match(block.split("\n", 1)[0])
+        if not (m and m.group(1).strip() == want):
+            kept.append(block)
+    new = (text[:bounds[0]] if bounds else text) + "".join(kept)
     if new == text:
         return False
     try:
@@ -4661,7 +4670,18 @@ def _llm_claude(prompt: str, timeout: int = 600) -> str | None:
     URL or model left behind still steers the call away from the subscription.
     CLAUDECODE / CLAUDE_CODE_ENTRYPOINT stop a nested CLI from starting; they
     used to be popped from os.environ, i.e. for the rest of this process.
+
+    A model without hands. Every caller wants text back, and the prompt carries
+    text nobody vetted — session transcripts, wiki pages compiled from them.
+    Started bare, the CLI got every built-in tool (Bash included), the user's
+    MCP servers and the permissions of the directory the task ran in, so an
+    instruction planted in that text could run unasked. So: no built-in tools
+    (`--tools ""`), no MCP (`--strict-mcp-config` with no `--mcp-config`), an
+    empty temp directory as cwd (no CLAUDE.md, no project permissions), and no
+    transcript — a machine call is not a session for the nightly flush.
     """
+    import tempfile
+
     env = {k: v for k, v in os.environ.items()
            if not k.upper().startswith("ANTHROPIC_")
            and k.upper() not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
@@ -4674,16 +4694,20 @@ def _llm_claude(prompt: str, timeout: int = 600) -> str | None:
     import shutil
     claude_bin = shutil.which(claude_bin) or claude_bin
     try:
-        result = subprocess.run(
-            [claude_bin, "-p", "--model", "sonnet", "--output-format", "text", "-"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=timeout,
-            encoding="utf-8",
-            errors="replace",
-        )
+        with tempfile.TemporaryDirectory(prefix="bundle-claude-",
+                                         ignore_cleanup_errors=True) as sandbox:
+            result = subprocess.run(
+                [claude_bin, "-p", "--model", "sonnet", "--output-format", "text",
+                 "--tools", "", "--strict-mcp-config", "--no-session-persistence", "-"],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+                cwd=sandbox,
+            )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
         return None

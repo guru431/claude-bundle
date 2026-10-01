@@ -51,7 +51,9 @@ installer generates the first from the second.
 | `GIT_SSH_COMMAND` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
 | `HANDOFF_WAIT_SECONDS` | optional (commented) | `home-claude/cron/hooks/session-start.py` |
 | `HEALTHCHECK_DISK_EXCLUDE` | optional (commented) | `home-claude/cron/claude-healthcheck.sh` |
+| `HEALTHCHECK_DISK_FREE_GB` | optional (commented) | `home-claude/cron/claude-healthcheck.sh` |
 | `HEALTHCHECK_DISK_PCT` | optional (commented) | `home-claude/cron/claude-healthcheck.sh` |
+| `HEALTHCHECK_REMOTE_DISK_FREE_GB` | optional (commented) | `home-claude/cron/claude-healthcheck.sh` |
 | `HEALTHCHECK_REMOTE_DISK_PCT` | optional (commented) | `home-claude/cron/claude-healthcheck.sh` |
 | `KB_SOURCE_DIR` | optional (commented) | `home-claude/cron/wiki/wiki-compile-kb.py`, `home-claude/cron/wiki/wiki-lint.py` |
 | `LOCAL_LLM_ALLOWED_HOSTS` | optional (commented) | `home-claude/cron/hooks/utils.py` |
@@ -100,7 +102,7 @@ installer generates the first from the second.
 | `WIKI_RETRY_LIMIT` | optional (commented) | `home-claude/cron/hooks/utils.py` |
 | `WIN_REMOTE_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 
-_78 variables._
+_80 variables._
 
 ## `bundle.local.yaml` keys
 

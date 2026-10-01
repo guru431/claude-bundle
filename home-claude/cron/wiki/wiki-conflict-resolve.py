@@ -37,7 +37,7 @@ if hasattr(sys.stderr, "reconfigure"):
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (  # noqa: E402
     BUNDLE_ROOT, WIKI_ROOT, WIKI_NON_PAGES, atomic_write_text, is_dry_run,
-    llm_call, read_page, write_page,
+    llm_call, project_allowed, read_page, write_page,
 )
 from untrusted import fence  # noqa: E402
 
@@ -92,6 +92,23 @@ def find_collisions() -> list[Path]:
                for i in range(len(h1)) for j in range(i + 1, len(h1))):
             out.append(f)
     return out
+
+
+def page_allowed(page: Path) -> bool:
+    """The privacy gate for a whole page going to the provider.
+
+    `projects/<slug>/…` belongs to a project, and the policy decides
+    (project_allowed — a broken manifest denies them all). This script sent
+    every colliding page with no gate at all: a project added to skip_projects
+    after its pages were compiled still went out whole on the next merge, while
+    every collector upstream had stopped reading it. Pages outside `projects/`
+    (kb/ and the like) are compiled from the user's own KB inbox — no project's
+    data, the same reason compile-kb has no gate.
+    """
+    parts = page.relative_to(WIKI_ROOT).parts
+    if len(parts) >= 3 and parts[0] == "projects":
+        return project_allowed(parts[1])
+    return True
 
 
 def merged_is_sane(original: str, merged: str) -> tuple[bool, str]:
@@ -166,8 +183,11 @@ def main() -> int:
         print(f"ERROR: prompt not found: {PROMPT_PATH}", file=sys.stderr)
         return 1
     prompt_tpl = PROMPT_PATH.read_text(encoding="utf-8")
-    pages = find_collisions()
+    found = find_collisions()
+    pages = [f for f in found if page_allowed(f)]
     log(f"=== WikiConflictResolve {DATE} ===")
+    if len(pages) < len(found):
+        log(f"withheld by the privacy policy: {len(found) - len(pages)} page(s)")
     log(f"pages holding two versions: {len(pages)}; taking {min(args.limit, len(pages))}")
     if len(pages) > args.limit:
         # Explicitly, not silently: a truncated batch must not read as "all done".

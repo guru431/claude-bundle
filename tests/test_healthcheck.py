@@ -102,12 +102,15 @@ def _stub(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def run_healthcheck(cron: Path, tmp_path: Path,
-                    bash: str) -> tuple[subprocess.CompletedProcess, list[str], str]:
+def run_healthcheck(cron: Path, tmp_path: Path, bash: str, disk_env: dict | None = None,
+                    ) -> tuple[subprocess.CompletedProcess, list[str], str]:
     """Run the copied claude-healthcheck.sh; (result, Telegram messages, its log).
 
     llm-call.py and telegram-send.sh in `cron` are expected to be stubs already;
     the host collectors that fall back to PowerShell on Git Bash are stubbed here.
+    The disk check is switched off unless `disk_env` is given — then it runs with
+    the shipped defaults plus those settings (a `df` stub in tmp_path/bin decides
+    what it measures).
     """
     sent = tmp_path / "sent.txt"
     fake_bin = tmp_path / "bin"
@@ -115,10 +118,11 @@ def run_healthcheck(cron: Path, tmp_path: Path,
     for tool in ("uptime", "free", "ps"):
         _stub(fake_bin / tool, "#!/bin/bash\nexit 0\n")
     _stub(cron / "telegram-send.sh", '#!/bin/bash\nprintf "%s\\n---\\n" "$1" >> "$SENT_FILE"\n')
-    env = dict(os.environ, PYTHON_EXE=sys.executable, BASH_EXE=bash,
-               SENT_FILE=sent.as_posix(), HEALTHCHECK_DISK_PCT="100",
-               REMOTE_SSH_HOST="", WIN_REMOTE_HOST="",
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HEALTHCHECK_")}
+    env.update(PYTHON_EXE=sys.executable, BASH_EXE=bash,
+               SENT_FILE=sent.as_posix(), REMOTE_SSH_HOST="", WIN_REMOTE_HOST="",
                PATH=os.pathsep.join([str(fake_bin), os.environ.get("PATH", "")]))
+    env.update({"HEALTHCHECK_DISK_FREE_GB": "0"} if disk_env is None else disk_env)
     res = subprocess.run([bash, (cron / "claude-healthcheck.sh").as_posix()],
                          capture_output=True, text=True, env=env, timeout=120)
     log = "\n".join(p.read_text(encoding="utf-8", errors="replace")

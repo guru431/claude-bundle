@@ -537,3 +537,32 @@ def test_the_claude_cli_gets_the_subscription_and_the_caller_keeps_its_env(
     assert "CLAUDECODE" not in child and "CLAUDE_CODE_ENTRYPOINT" not in child
     assert child.get("CLAUDE_CODE_OAUTH_TOKEN") == "subscription-token"
     assert {k: os.environ.get(k) for k in given} == given, "the caller's environment changed"
+
+
+def test_the_claude_cli_gets_no_tools_no_mcp_and_no_project_dir(cron_copy: Path,
+                                                                 monkeypatch):
+    """Every caller of this provider wants text back, and the prompt carries text
+    nobody vetted — session transcripts, wiki pages compiled from them. Started
+    as it was, the CLI got every built-in tool (Bash included), the user's MCP
+    servers and the permissions of whatever directory the task ran in, so an
+    instruction planted in that text could run with no one asked. Now: no tools,
+    no MCP, an empty temp directory, and no transcript (a machine call is not a
+    session for the nightly flush to compile)."""
+    monkeypatch.setenv("CLAUDE_BIN", "claude")
+    u = _load_utils(cron_copy, "utils_claude_sandbox")
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"], seen["cwd"] = argv, kw.get("cwd")
+        seen["listing"] = sorted(os.listdir(kw["cwd"])) if kw.get("cwd") else None
+        return subprocess.CompletedProcess(argv, 0, stdout="answer\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert u._llm_claude("hi") == "answer"
+
+    argv = seen["argv"]
+    assert argv[argv.index("--tools") + 1] == ""
+    assert "--strict-mcp-config" in argv and "--mcp-config" not in argv
+    assert "--no-session-persistence" in argv
+    assert seen["cwd"] and seen["listing"] == [], "the CLI ran in a directory with files"
+    assert not Path(seen["cwd"]).exists(), "the sandbox directory was left behind"

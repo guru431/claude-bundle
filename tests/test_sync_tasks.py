@@ -178,6 +178,26 @@ foreach ($row in (Get-VerifyDetail $task $current $launcher 'managed-by-registry
     assert rows["trigger"][1:] == ["", "Daily 02:30", "Daily 02:30"], rows
 
 
+def test_a_boot_or_logon_task_gets_the_launcher_mode_without_stderr_capture(tmp_path: Path):
+    """The launcher keeps a bash/python task's stderr in a file; a task started
+    at boot or logon runs until the next reboot, so its file would grow all that
+    time. Those get `<kind>-daemon` — the same launch, no capture."""
+    code = define_functions(SYNC, ["Build-Action", "Quote-Arg", "Quote-Path"]) + r"""
+$script:WSCRIPT_FLAGS = '//B //nologo'
+foreach ($t in @(@{ kind = 'python'; trigger = 'Daily 02:30' },
+                 @{ kind = 'bash';   trigger = 'AtStartup' },
+                 @{ kind = 'python'; trigger = 'AtLogOn' },
+                 @{ kind = 'cmd';    trigger = 'AtLogOn' })) {
+    $t.name = 'T'; $t.script = 'C:\b\job'; $t.script_args = @()
+    Write-Output (Build-Action $t 'C:\b\bin\_run-hidden.vbs').arguments
+}
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    modes = [line.split('_run-hidden.vbs" ', 1)[1].split(" ", 1)[0] for line in r.stdout.splitlines()]
+    assert modes == ["python", "bash-daemon", "python-daemon", "cmd"], r.stdout
+
+
 @windows_only
 @pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
 def test_a_deployed_syncer_reads_python_exe_from_the_deployed_env(tmp_path: Path):

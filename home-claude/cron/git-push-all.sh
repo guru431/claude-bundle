@@ -398,16 +398,65 @@ guard_outgoing_secrets() {
     return 1
 }
 
+# An unfinished git operation in the current repo: prints its name, or nothing.
+# Unmerged entries also catch a conflicted `git stash pop`, which writes no
+# MERGE_HEAD.
+git_pending_op() {
+    local gd
+    gd=$(git rev-parse --git-dir 2>/dev/null) || return 0
+    if [ -f "$gd/MERGE_HEAD" ]; then echo merge
+    elif [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ]; then echo rebase
+    elif [ -f "$gd/CHERRY_PICK_HEAD" ]; then echo cherry-pick
+    elif [ -f "$gd/REVERT_HEAD" ]; then echo revert
+    elif [ -n "$(git diff --name-only --diff-filter=U 2>/dev/null)" ]; then echo "unmerged paths"
+    fi
+}
+
+# Put back the index push_repo saved before `git add --all`. mv, not cp: a rename
+# needs no free space, and a full disk is exactly the night a rollback is needed.
+# Args: <label> <index_file> <saved_copy>
+restore_index() {
+    if mv -f "$3" "$2" 2>>"$LOG_FILE"; then
+        echo "[$1] index restored to its state before the run (what the sweep staged is unstaged)" >> "$LOG_FILE"
+    else
+        echo "[$1] WARNING: index NOT restored from $3 — what the sweep staged is still staged; unstage it by hand" >> "$LOG_FILE"
+    fi
+}
+
 # Unified per-repo run: auto-commit (with the .env exclusion + the protected-
 # deletion guard) + push origin <branch>. Replaces the copy-pasted blocks
 # (main loop / wiki), which had already drifted apart. Updates the global
 # counters pushed/skipped/failed/failed_repos. Does the cd into "$dir" itself.
 # Args: <dir> <label> <commit_msg>
+#
+# A failed cd and a failed git below are FAILED, not skipped: skipped moves
+# neither the exit code nor the alert. A repo git will not open (dubious
+# ownership under another account) or whose status fails (a full disk) would
+# otherwise never leave the machine, under a log line naming the wrong cause.
 push_repo() {
     local dir="$1" label="$2" commit_msg="$3"
     if ! cd "$dir"; then
-        echo "[$label] ERROR: cannot cd $dir, skipping" >> "$LOG_FILE"
-        skipped=$((skipped + 1)); return
+        echo "[$label] FAILED: cannot cd $dir" >> "$LOG_FILE"
+        failed=$((failed + 1))
+        failed_repos="${failed_repos:+$failed_repos, }$label"
+        return
+    fi
+    if ! git rev-parse --git-dir >/dev/null 2>>"$LOG_FILE"; then
+        echo "[$label] FAILED: git cannot open the repository (dubious ownership? see stderr above)" >> "$LOG_FILE"
+        failed=$((failed + 1))
+        failed_repos="${failed_repos:+$failed_repos, }$label"
+        return
+    fi
+    # Before the detached-HEAD check: an unfinished rebase detaches HEAD and slid
+    # into a quiet skip, and under an unfinished merge `git add --all` marks the
+    # conflicted files resolved — the auto-commit published the markers.
+    local op
+    op=$(git_pending_op)
+    if [ -n "$op" ]; then
+        echo "[$label] FAILED: unfinished git operation ($op) — nothing committed or pushed; finish or abort it by hand" >> "$LOG_FILE"
+        failed=$((failed + 1))
+        failed_repos="${failed_repos:+$failed_repos, }$label"
+        return
     fi
     local branch
     branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
@@ -437,7 +486,16 @@ push_repo() {
         echo "[$label] no git remote configured — nothing to push" >> "$LOG_FILE"
         skipped=$((skipped + 1)); return
     fi
-    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    # A failed status (`Out of diskspace` refreshing the index) printed nothing —
+    # that is, "clean tree", "up to date" and a lost nightly commit, unlogged.
+    local status
+    if ! status=$(git status --porcelain 2>>"$LOG_FILE"); then
+        echo "[$label] FAILED: git status rc!=0 (no space / index.lock / permissions?)" >> "$LOG_FILE"
+        failed=$((failed + 1))
+        failed_repos="${failed_repos:+$failed_repos, }$label"
+        return
+    fi
+    if [ -n "$status" ]; then
         if ! guard_staged_sensitive "$label"; then
             failed=$((failed + 1))
             failed_repos="${failed_repos:+$failed_repos, }$label"
@@ -451,17 +509,42 @@ push_repo() {
             git status --porcelain >> "$LOG_FILE" 2>&1
             guard_secrets_preview "$label"
         else
+            # A copy of the index before `git add --all`: on any refusal below
+            # (a guard, the commit) the index goes back to it — what the user
+            # staged by hand stays, what the sweep staged is taken off. Without
+            # the rollback it waited for the next manual commit, and a commit
+            # "of one file" carried off the secret the guard had just refused.
+            local index_file index_saved
+            index_file=$(git rev-parse --git-path index)
+            index_saved="$index_file.git-push-all"
+            if ! cp -f "$index_file" "$index_saved" 2>>"$LOG_FILE"; then
+                echo "[$label] FAILED: could not save the index before git add (no space?)" >> "$LOG_FILE"
+                failed=$((failed + 1))
+                failed_repos="${failed_repos:+$failed_repos, }$label"
+                return
+            fi
             # Safety: exclude any path matching .env / .env.* / **/.env* via
             # pathspec so a file that appears between status and add can never
             # sneak in (and md2pdf's temp directory — see SWEEP_EXCLUDES).
-            git add --all -- "${SWEEP_EXCLUDES[@]}" >> "$LOG_FILE" 2>&1
+            # Its exit code decides: an add that failed (index.lock, a full disk)
+            # left an empty index, which the check below read as "nothing to
+            # commit" — a green night with the work still on the box.
+            if ! git add --all -- "${SWEEP_EXCLUDES[@]}" >> "$LOG_FILE" 2>&1; then
+                echo "[$label] FAILED to stage (git add rc!=0: no space / index.lock / permissions?)" >> "$LOG_FILE"
+                restore_index "$label" "$index_file" "$index_saved"
+                failed=$((failed + 1))
+                failed_repos="${failed_repos:+$failed_repos, }$label"
+                return
+            fi
             if ! guard_protected_deletions "$label"; then
+                restore_index "$label" "$index_file" "$index_saved"
                 failed=$((failed + 1))
                 failed_repos="${failed_repos:+$failed_repos, }$label"
                 return
             fi
             # The sensitive-path table again, on what the add above just staged.
             if ! guard_staged_sensitive "$label" 1; then
+                restore_index "$label" "$index_file" "$index_saved"
                 failed=$((failed + 1))
                 failed_repos="${failed_repos:+$failed_repos, }$label"
                 return
@@ -470,20 +553,24 @@ push_repo() {
                 # FAILED, not skipped: same event class as
                 # guard_outgoing_secrets, so the sweep exits non-zero and the
                 # monitor reports it instead of a green night.
+                restore_index "$label" "$index_file" "$index_saved"
                 failed=$((failed + 1))
                 failed_repos="${failed_repos:+$failed_repos, }$label"
                 return
             fi
             if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
                 echo "[$label] nothing to commit after .env exclusion" >> "$LOG_FILE"
+                rm -f "$index_saved"
             elif git_commit -m "$commit_msg"; then
                 echo "[$label] auto-committed changes" >> "$LOG_FILE"
+                rm -f "$index_saved"
             else
                 # A rejecting pre-commit hook or a missing user.email leaves the
                 # work staged and uncommitted. Reporting "auto-committed" and
                 # carrying on made the repo look up to date (local == remote) and
                 # the sweep exit 0 — the changes silently never left the machine.
                 echo "[$label] FAILED to commit (hook rejected / identity missing?) — repo skipped" >> "$LOG_FILE"
+                restore_index "$label" "$index_file" "$index_saved"
                 failed=$((failed + 1))
                 failed_repos="${failed_repos:+$failed_repos, }$label"
                 return

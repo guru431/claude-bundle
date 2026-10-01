@@ -10,9 +10,12 @@
 '           in session 0, where a dialog nobody can dismiss holds the task open
 '           until its execution time limit. Host options are consumed by wscript
 '           itself, so WScript.Arguments still starts at <kind>.
-'   <kind>   = bash | python | cmd
+'   <kind>   = bash | python | cmd | bash-daemon | python-daemon
 '   <script> = absolute path (UNC or local C:\) — never a mapped drive for
 '              Password-mode tasks
+'
+' stderr of a bash/python task is kept in <bundle>\cron\logs\task-stderr\
+' <script stem>_<date>.log; the -daemon kinds run the same without that capture.
 '
 ' Exit codes:
 '   0    — child exited 0
@@ -35,6 +38,18 @@ End If
 Dim kind, script, i, extra, cmd, shell, rc
 kind   = LCase(WScript.Arguments(0))
 script = WScript.Arguments(1)
+
+' The stderr of a bash/python task goes to a file (PrepareStderrFile below).
+' Before, everything a script printed outside its own log — a traceback above
+' all — was lost: Task Scheduler kept a non-zero Last Result and nothing else,
+' and the monitor had a FAIL line with no reason on it. stderr only: it is small,
+' and the traceback lives there. The -daemon kinds are the same without it — the
+' syncer gives them to AtStartup/AtLogOn tasks, whose file would grow until the
+' next reboot.
+Dim captureStderr
+captureStderr = (kind = "bash" Or kind = "python")
+If kind = "bash-daemon" Then kind = "bash"
+If kind = "python-daemon" Then kind = "python"
 
 ' Each extra argument is re-quoted, and an embedded quote is DOUBLED first.
 ' Without that an argument that already carries `"` — which is what
@@ -246,15 +261,89 @@ If exePath <> "" And InStr(exePath, "\") > 0 Then
     End If
 End If
 
+' The capture goes through `cmd /s /c`, and cmd returns the exit code of the
+' last command, so the task's own code still reaches Task Scheduler. /s: cmd
+' strips only the first and the last quote of the line and runs the rest as is,
+' so the quotes around the interpreter and the script survive.
+Dim errFile, runCmd, comSpec
+errFile = ""
+If captureStderr Then errFile = PrepareStderrFile(script, cmd)
+runCmd = cmd
+If errFile <> "" Then
+    comSpec = env("ComSpec")
+    If comSpec = "" Then comSpec = "C:\Windows\System32\cmd.exe"
+    runCmd = """" & comSpec & """ /s /c """ & cmd & " 2>>""" & errFile & """"""
+End If
+
 ' 0 = hidden window, True = wait for child to finish so the exit code propagates.
 On Error Resume Next
-rc = shell.Run(cmd, 0, True)
+rc = shell.Run(runCmd, 0, True)
 If Err.Number <> 0 Then
-    LogLaunchFailure "FATAL: could not launch [" & cmd & "] - " & _
+    LogLaunchFailure "FATAL: could not launch [" & runCmd & "] - " & _
         Err.Number & " " & Err.Description
     Err.Clear
     On Error Goto 0
     WScript.Quit 9009
 End If
 On Error Goto 0
+If errFile <> "" Then DropIfEmpty errFile
 WScript.Quit rc
+
+' Prepares the stderr file and returns its path - or "" where a capture is not
+' possible: the folder cannot be made, the file cannot be opened for append (a
+' full disk, permissions). The task then runs WITHOUT the redirect: a cmd that
+' cannot open its redirect target does not start the command at all, and the
+' healthcheck and git-push-all are among these tasks. A command line holding `%`
+' runs without it too: cmd would expand %VAR% inside the arguments, which a
+' direct launch leaves alone.
+Function PrepareStderrFile(scriptPath, commandLine)
+    Dim dirPath, stamp, filePath, probe
+    PrepareStderrFile = ""
+    If InStr(commandLine, "%") > 0 Then Exit Function
+    dirPath = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName)) & _
+        "\cron\logs\task-stderr"
+    On Error Resume Next
+    CreateFolderTree dirPath
+    If Err.Number <> 0 Or Not fso.FolderExists(dirPath) Then
+        LogLaunchFailure "WARN: stderr capture off, no folder " & dirPath & " - " & Err.Description
+        Err.Clear
+        On Error Goto 0
+        Exit Function
+    End If
+    PurgeOldStderr dirPath
+    stamp = Year(Now) & "-" & Right("0" & Month(Now), 2) & "-" & Right("0" & Day(Now), 2)
+    filePath = dirPath & "\" & fso.GetBaseName(Replace(scriptPath, "/", "\")) & "_" & stamp & ".log"
+    Err.Clear
+    Set probe = fso.OpenTextFile(filePath, 8, True)
+    If Err.Number <> 0 Then
+        LogLaunchFailure "WARN: stderr capture off, cannot open " & filePath & " - " & Err.Description
+        Err.Clear
+        On Error Goto 0
+        Exit Function
+    End If
+    probe.Close
+    On Error Goto 0
+    PrepareStderrFile = filePath
+End Function
+
+' An empty file after the run is noise, not a trace: the folder should show only
+' the tasks that had something to say. A file held by a concurrent run of the
+' same script is left alone - the error is swallowed.
+Sub DropIfEmpty(filePath)
+    On Error Resume Next
+    If fso.FileExists(filePath) Then
+        If fso.GetFile(filePath).Size = 0 Then fso.DeleteFile filePath
+    End If
+    On Error Goto 0
+End Sub
+
+' Files older than 14 days are removed by the launcher itself: log-retention
+' walks the top of cron\logs and does not reach this folder.
+Sub PurgeOldStderr(dirPath)
+    Dim f
+    On Error Resume Next
+    For Each f In fso.GetFolder(dirPath).Files
+        If DateDiff("d", f.DateLastModified, Now) > 14 Then f.Delete True
+    Next
+    On Error Goto 0
+End Sub

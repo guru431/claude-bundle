@@ -1583,6 +1583,38 @@ def test_lint_walkers_skip_the_same_folders(bundle: Path, monkeypatch):
         "a link from outside the vault kept a page from being reported as an orphan"
 
 
+def test_lint_resolves_links_the_way_obsidian_does(bundle: Path, monkeypatch):
+    """Case-insensitively. Obsidian resolves `[[Hugo]]` to `hugo.md`, the
+    compilers dedupe page names case-insensitively, and so do the Windows and
+    macOS filesystems — the lint alone compared exact case. In one vault 2952 of
+    19021 "broken" links were that, and the orphan check missed the same links."""
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_case", "wiki-lint.py")
+    tools = bundle / "wiki" / "kb" / "tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    (tools / "hugo.md").write_text("# Hugo\n\nA static site generator.\n", encoding="utf-8")
+    (tools / "site.md").write_text("# Site\n\nBuilt with [[Hugo]], see [[kb/Tools/Hugo]].\n",
+                                   encoding="utf-8")
+    pages = lint.find_all_pages()
+    broken = [w for w in lint.check_broken_links(pages) if "kb/tools/site.md" in w.replace("\\", "/")]
+    assert broken == [], broken
+    assert "WARN: orphan page: kb/tools/hugo" not in lint.check_orphan_pages(pages)
+
+
+def test_only_the_scheduled_lint_moves_the_baseline(bundle: Path, monkeypatch):
+    """The baseline is what next week's run is compared with. Every run used to
+    overwrite it, so a manual check between two scheduled ones silently swallowed
+    whatever had grown since the last of them. Only `--save-baseline` — the flag
+    the registry passes — writes it now."""
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_baseline", "wiki-lint.py")
+    for argv in (["wiki-lint.py"], ["wiki-lint.py", "--save-baseline"]):
+        monkeypatch.setattr(sys, "argv", argv)
+        try:
+            lint.main()
+        except SystemExit:
+            pass                        # an index desync in the sandbox vault is not the point
+        assert lint.BASELINE_FILE.exists() == ("--save-baseline" in argv), argv
+
+
 def test_a_second_section_of_a_compiled_project_is_sent_alone(bundle: Path):
     """The next night's append must not re-send the section already compiled.
 

@@ -68,6 +68,75 @@ The short list; UPGRADING.md has the steps.
   key VALUES in `~/.claude/.env`**; a repository that carries one is FAILED
   instead of pushed. Logs and payloads show such a value as
   `[REDACTED-VAULT:<NAME>]`.
+- **The healthcheck pages on free space**: less than `HEALTHCHECK_DISK_FREE_GB`
+  (default 5) free on the tightest local filesystem. `HEALTHCHECK_DISK_PCT` no
+  longer has a default — set it to keep the old 85% alert as well.
+- **`wiki-lint.py` moves its baseline only with `--save-baseline`**, which
+  `ClaudeWikiLint` now passes; a registry kept from an earlier install needs
+  that `script_args` line, or its baseline stays where it is.
+- **`git-push-all.sh` FAILs** a repository with an unfinished merge, rebase,
+  cherry-pick or revert, one git cannot open, and a failed `cd`, `git status`
+  or `git add` — instead of committing conflict markers or skipping in silence.
+- **The Windows launcher keeps task stderr** in `cron/logs/task-stderr/`;
+  AtStartup/AtLogOn bash/python tasks get a `-daemon` launch mode without it,
+  and `sync.cmd` reports them `updated` once.
+- **Both task monitors report changes that have not reached their remote for
+  48 hours** — only while `ClaudeGitPushAll` is enabled.
+
+### Ported back from the meta-repo: no hands for `claude -p`, one more privacy gate, the push sweep's git failures
+
+A two-week comparison of the files the bundle shares with the meta-repo it is
+extracted from turned up fixes made on one side only. These went the meta-repo's
+way into the bundle; each comes with a test that fails on the code it replaces.
+
+**`WIKI_LLM_PROVIDER=claude` runs without hands.** The CLI was started bare: every
+built-in tool (Bash included), the user's MCP servers and the permissions of the
+directory the task ran in — on a prompt carrying transcript and wiki text nobody
+vetted. It now runs with `--tools ""`, `--strict-mcp-config`, from an empty
+temporary directory and with `--no-session-persistence` (a machine call is not a
+session for the nightly flush to compile).
+
+**`wiki-conflict-resolve.py` honors the privacy policy.** It sent every colliding
+page to the provider with no gate, so a project added to `skip_projects` after
+its pages were compiled still went out whole on the next merge pass. Pages under
+`projects/<slug>/` now ask `project_allowed`; a broken manifest withholds them
+all. `tests/test_llm_exit_privacy_contract.py` makes the gate a contract: every
+module that calls the LLM references `project_allowed` / `working_copy_allowed`
+or is listed with its reason.
+
+**`git-push-all.sh` and git's own failures.** Under an unfinished merge,
+`git add --all` marked conflicted files resolved and the auto-commit published
+the markers; an unfinished rebase detached HEAD and became a quiet skip. A
+repository git refuses (dubious ownership under another account), a failed
+`git status` (a full disk) and a failed `git add` all read as "nothing to
+commit". All of these are FAILED now. And a blocked auto-commit gives the index
+back as it was before the run: what the sweep had staged used to wait for the
+user's next manual commit, secret included.
+
+**Disk: free space, not the share used.** A build-cache-heavy system drive lives
+at 85-100% for months; the 85% default paged every morning until the morning the
+disk really filled read like the thirty before it. The tightest local filesystem
+with less than `HEALTHCHECK_DISK_FREE_GB` free pages; the percent is opt-in, for
+remote hosts as well. `df` rows are found by their capacity field, so a
+filesystem or mount point with a space in its name (Git Bash's
+`C:/Program Files/Git`) is measured instead of dropped.
+
+**`wiki-lint.py` resolves links the way Obsidian does** — case-insensitively — and
+only the scheduled run moves the regression baseline: a manual check between two
+scheduled ones used to swallow whatever had grown since the last.
+
+**The traceback of a failed task.** `bin/_run-hidden.vbs` keeps the stderr of
+bash/python tasks in `cron/logs/task-stderr/<script>_<date>.log` (empty files
+removed, 14 days kept), and `ClaudeTaskMonitor` puts its last three lines under
+the task's FAIL line. The exit code still reaches Task Scheduler unchanged.
+
+**Work that never leaves.** Both monitors now name the repositories git-push-all
+sweeps whose commits or uncommitted changes have waited more than 48 hours —
+once per set of stuck repositories, only for projects the privacy policy allows,
+and only while `ClaudeGitPushAll` is enabled.
+
+**Smaller:** `close_finding` cuts entries at headings outside code fences, as the
+writer finds them (`tests/test_findings_writer.py`).
 
 ### A finding is found by its heading, not by a substring
 

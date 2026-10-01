@@ -104,3 +104,52 @@ def test_a_launcher_copied_away_from_the_bundle_still_logs_why_it_failed(tmp_pat
     assert log.is_file(), "the launch failure left no trace anywhere"
     line = log.read_text(encoding="latin-1")          # OpenTextFile writes the ANSI codepage
     assert "interpreter not found" in line and "no-such-python\\python.exe" in line
+
+
+def _talker(path: Path, exit_code: int, stderr: str = "") -> Path:
+    """A .cmd interpreter that records its arguments, may print to stderr, exits."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    say = f"echo {stderr} 1>&2\r\n" if stderr else ""
+    path.write_text(f'@echo off\r\necho %*> "%~dp0received.txt"\r\n{say}exit /b {exit_code}\r\n',
+                    encoding="ascii")
+    return path
+
+
+def _stderr_files(bundle: Path) -> list[Path]:
+    folder = bundle / "cron" / "logs" / "task-stderr"
+    return sorted(folder.glob("*.log")) if folder.is_dir() else []
+
+
+def test_a_tasks_stderr_is_kept_and_its_exit_code_still_arrives(tmp_path):
+    """A traceback printed outside the task's own log used to vanish: Task
+    Scheduler kept a non-zero Last Result and nothing else, so the monitor's FAIL
+    line had no reason on it."""
+    bundle = _bundle(tmp_path)
+    interpreter = _talker(tmp_path / "py" / "python.cmd", exit_code=5, stderr="Traceback boom")
+    task = tmp_path / "nightly-job.py"
+    assert _launch(bundle, "python", str(task), "--full",
+                   env_extra={"PYTHON_EXE": str(interpreter)}) == 5
+    files = _stderr_files(bundle)
+    assert [f.name.rsplit("_", 1)[0] for f in files] == ["nightly-job"], files
+    assert "Traceback boom" in files[0].read_text(encoding="latin-1")
+    assert (interpreter.parent / "received.txt").read_text(encoding="ascii").strip() == \
+        f'"{task}" "--full"'
+
+
+def test_a_quiet_run_leaves_no_stderr_file(tmp_path):
+    bundle = _bundle(tmp_path)
+    interpreter = _talker(tmp_path / "py" / "python.cmd", exit_code=0)
+    assert _launch(bundle, "python", str(tmp_path / "job.py"),
+                   env_extra={"PYTHON_EXE": str(interpreter)}) == 0
+    assert _stderr_files(bundle) == []
+
+
+def test_a_daemon_kind_runs_without_the_capture(tmp_path):
+    """An AtStartup/AtLogOn task runs until the next reboot — its file would grow
+    all that time, so the syncer gives it the -daemon kind."""
+    bundle = _bundle(tmp_path)
+    interpreter = _talker(tmp_path / "py" / "python.cmd", exit_code=3, stderr="daemon chatter")
+    assert _launch(bundle, "python-daemon", str(tmp_path / "server.py"),
+                   env_extra={"PYTHON_EXE": str(interpreter)}) == 3
+    assert (interpreter.parent / "received.txt").is_file(), "the daemon did not run"
+    assert _stderr_files(bundle) == []

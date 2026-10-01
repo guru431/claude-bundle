@@ -318,6 +318,8 @@ tasks:
     project: main
     description: Weekly wiki health check (broken links, orphan pages, duplicates, project-collapse).
     script: <bundle-install-path>\cron\wiki\wiki-lint.py
+    # Only this run moves the comparison baseline; a manual run leaves it alone.
+    script_args: ["--save-baseline"]
     kind: python
     trigger: Weekly Sunday 02:00
     user: <user>

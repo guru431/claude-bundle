@@ -41,7 +41,7 @@ box once the units are installed.
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers -> Telegram Bot API money=no writes=cron/state/task-monitor-posix-seen.json
+# bundle-io: offbox=a failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers, plus the names of allowed repos whose changes have not reached their remote for 48h (only with ClaudeGitPushAll on) -> Telegram Bot API money=no writes=cron/state/task-monitor-posix-seen.json
 from __future__ import annotations
 
 import json
@@ -69,7 +69,8 @@ from runs import STALE_SEEN_KEY, stale_alert, terminal_record  # noqa: E402
 # the service port probe and the once-per-outage LLM-chain report. Two copies
 # had already drifted — see monitor_checks' header.
 from monitor_checks import (  # noqa: E402
-    CHAIN_SEEN_KEY, chain_dead_report, check_health_ports, read_registry)
+    CHAIN_SEEN_KEY, UNPUSHED_SEEN_KEY, chain_dead_report, check_health_ports,
+    read_registry, unpushed_report)
 
 DATE = datetime.now().strftime("%Y-%m-%d")
 LAUNCHD_PREFIX = "com.claude-bundle."
@@ -319,16 +320,28 @@ def main() -> int:
             log(line)
         if standing:
             log(f"already reported, still stale: {', '.join(standing)}")
+        # Changes that have not reached their remote — the Windows monitor's
+        # check, through the same function, once per set of stuck repos.
+        try:
+            unpushed_log, unpushed = unpushed_report(
+                seen, REGISTRY, utils.PROJECTS_ROOT, BUNDLE_ROOT,
+                allowed=utils.working_copy_allowed)
+        except Exception as exc:
+            unpushed_log = unpushed = (f"unpushed: the check itself failed "
+                                       f"({type(exc).__name__}: {exc})")
+        if unpushed_log:
+            log(unpushed_log)
+        unpushed_block = [unpushed] if unpushed else []
         fresh = [(name, line) for name, line in problems if seen.get(name) != line]
         for name, line in problems:
             log(line if seen.get(name) != line else f"{line} (already reported)")
             seen[name] = line
         for name in list(seen):
-            if (name not in (CHAIN_SEEN_KEY, STALE_SEEN_KEY)
+            if (name not in (CHAIN_SEEN_KEY, STALE_SEEN_KEY, UNPUSHED_SEEN_KEY)
                     and name not in {n for n, _ in problems}):
                 seen.pop(name, None)
 
-        if not fresh and not chain and not stale_block:
+        if not fresh and not chain and not stale_block and not unpushed_block:
             log("no new failures")
             # Nothing to deliver, so there is nothing to lose by recording the
             # prune now.
@@ -337,7 +350,7 @@ def main() -> int:
             return 0
 
         body = "\n".join(([chain] if chain else []) + [line for _, line in fresh]
-                         + stale_block)
+                         + stale_block + unpushed_block)
         header = (f"Bundle tasks (POSIX): {len(fresh)} failed unit(s)" if fresh
                   else "Bundle tasks (POSIX): attention needed")
         msg = f"{header}\n\n{body}\n\nCheck logs: cron/logs/\n"

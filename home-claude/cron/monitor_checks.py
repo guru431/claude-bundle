@@ -24,6 +24,8 @@ from __future__ import annotations
 import json
 import re
 import socket
+import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -113,11 +115,60 @@ def read_registry(registry: Path) -> list[dict]:
             cur["platform"] = value(stripped)
         elif stripped.startswith("trigger:"):
             cur["trigger"] = value(stripped)
+        elif stripped.startswith(("kind:", "script:")):
+            # The Windows monitor finds a failed task's stderr by its script.
+            cur[stripped.split(":", 1)[0]] = value(stripped)
         elif stripped.startswith(("timeout_hours:", "health_port:")):
             key = stripped.split(":", 1)[0]
             val = value(stripped)
             cur[key] = int(val) if val.isdigit() else None
     return tasks
+
+
+def stderr_dir(registry: Path) -> Path:
+    """Where the launcher keeps task stderr: <launcher root>/cron/logs/task-stderr.
+
+    The launcher derives the folder from its own location, so it follows the
+    registry's `launcher:` — a local copy of the launcher (the documented way
+    round a bundle on a share) keeps its files beside that copy. A missing key
+    or an unfilled placeholder means the bundle's own folder.
+    """
+    try:
+        m = re.search(r"(?m)^launcher:[ \t]*(.+?)[ \t]*$", registry.read_text(encoding="utf-8"))
+    except OSError:
+        m = None
+    launcher = m.group(1).strip("'\"") if m else ""
+    if launcher and "<" not in launcher:
+        return Path(launcher.replace("\\", "/")).parent.parent / "cron" / "logs" / "task-stderr"
+    return registry.parent / "logs" / "task-stderr"
+
+
+def stderr_tail(folder: Path, script: str, last_run: str, lines: int = 3) -> list[str]:
+    """The last lines a failed bash/python task printed to stderr, or [].
+
+    The launcher keeps them in <folder>/<script stem>_<date>.log — the traceback
+    the script's own log never got. Only a file written no earlier than the run
+    itself (LastRun, to the minute) counts: the tail of an older failure under
+    today's FAIL line would mislead.
+    """
+    stem = Path(str(script or "").replace("\\", "/")).stem
+    if not stem:
+        return []
+    name = re.compile(re.escape(stem) + r"_\d{4}-\d{2}-\d{2}\.log")
+    try:
+        since = datetime.strptime(last_run, "%Y-%m-%d %H:%M").timestamp() - 60
+        files = sorted((f.stat().st_mtime, f) for f in folder.iterdir()
+                       if name.fullmatch(f.name))
+        files = [f for mtime, f in files if mtime >= since]
+        if not files:
+            return []
+        with open(files[-1], "rb") as fh:
+            fh.seek(max(0, fh.seek(0, 2) - 4096))
+            text = fh.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return []
+    tail = [ln.strip() for ln in text.splitlines() if ln.strip()][-lines:]
+    return [f"    stderr: {ln[:200]}" for ln in tail]
 
 
 def check_health_ports(tasks: list[dict]) -> list[tuple[str, str]]:
@@ -212,3 +263,144 @@ def chain_dead_report(seen: dict, now: datetime,
     if now.weekday() == 0:
         return f"LLM chain still DOWN since {started} (reported earlier)"
     return None
+
+
+# ── changes that never reach their remote ────────────────────────────────────
+# Asked here, of the repositories, rather than at the end of git-push-all: that
+# run can die halfway (a full disk) or never start, and it alerts only on a
+# FAILED repo — a skipped one, or a run that did not happen, says nothing. So
+# the monitor looks at the result instead of the run: unpushed commits against
+# the branch's remote, and the oldest uncommitted change. No network — the
+# remote-tracking ref is what git-push-all's own fetch leaves behind.
+UNPUSHED_LIMIT_H = 48
+UNPUSHED_SEEN_KEY = "<unpushed>"
+# What git-push-all leaves out on purpose (its SWEEP_EXCLUDES) is not "stuck".
+_SWEEP_EXCLUDED = re.compile(r"(^|/)(\.env(\.[^/]+)?|\.md2pdf-[^/]*)(/|$)")
+
+
+def _git(repo: Path, *args: str) -> str:
+    r = subprocess.run(["git", "-C", str(repo), "-c", "core.quotePath=false", *args],
+                       capture_output=True, timeout=120)
+    if r.returncode != 0:
+        err = r.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        raise RuntimeError(err[-1][:120] if err else f"git rc={r.returncode}")
+    return r.stdout.decode("utf-8", errors="replace")
+
+
+def _branch_remote(repo: Path, branch: str) -> str:
+    """The branch's own remote, else the first one — git-push-all's choice."""
+    for args in (("config", "--get", f"branch.{branch}.remote"), ("remote",)):
+        try:
+            names = _git(repo, *args).split()
+        except RuntimeError:
+            continue
+        if names:
+            return names[0]
+    return ""
+
+
+def _oldest_change(repo: Path) -> float | None:
+    """mtime of the oldest uncommitted change (a deleted file has none)."""
+    items = _git(repo, "status", "--porcelain", "-z").split("\0")
+    oldest, i = None, 0
+    while i < len(items):
+        entry = items[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        if entry[0] in "RC":
+            i += 1                              # a rename is followed by its old name
+        path = entry[3:]
+        if _SWEEP_EXCLUDED.search(path):
+            continue
+        try:
+            mtime = (repo / path).stat().st_mtime
+        except OSError:
+            continue
+        oldest = mtime if oldest is None else min(oldest, mtime)
+    return oldest
+
+
+def _stuck(repo: Path, now: float) -> str | None:
+    """What has been waiting longer than UNPUSHED_LIMIT_H in one repo, or None."""
+    branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    remote = _branch_remote(repo, branch) if branch != "HEAD" else ""
+    if not remote:
+        return None                 # detached or no remote: git-push-all skips it too
+    parts = []
+    try:
+        _git(repo, "rev-parse", "--verify", "-q", f"{remote}/{branch}")
+    except RuntimeError:
+        pass                        # never pushed: there is nothing to count against
+    else:
+        stamps = [int(s) for s in _git(repo, "log", "--format=%ct",
+                                       f"{remote}/{branch}..{branch}").split()]
+        if stamps and (now - min(stamps)) / 3600 > UNPUSHED_LIMIT_H:
+            parts.append(f"{len(stamps)} unpushed commit(s), oldest "
+                         f"{(now - min(stamps)) / 86400:.0f}d")
+    changed = _oldest_change(repo)
+    if changed is not None and (now - changed) / 3600 > UNPUSHED_LIMIT_H:
+        parts.append(f"uncommitted for {(now - changed) / 86400:.0f}d")
+    return ", ".join(parts) or None
+
+
+def _reported_by_push_all(log_dir: Path) -> set[str]:
+    """Labels the last git-push-all run reported itself (FAILED / blocked)."""
+    logs = sorted(log_dir.glob("git-push-all_*.log"))
+    try:
+        text = logs[-1].read_text(encoding="utf-8", errors="replace") if logs else ""
+    except OSError:
+        return set()
+    run = text.rsplit("=== git-push-all started", 1)[-1]
+    return {m.group(1) for m in re.finditer(
+        r"^\[([^\]]+)\] .*(?:FAILED|blocked|SENSITIVE|SECRET)", run, re.M)}
+
+
+def unpushed_report(seen: dict, registry: Path, projects_root: Path | None,
+                    bundle_root: Path, now: float | None = None,
+                    allowed=lambda name: True) -> tuple[str, str]:
+    """(log line, alert line) about the repos git-push-all sweeps; updates `seen`.
+
+    Silent unless ClaudeGitPushAll is enabled: with no sweep promised, unpushed
+    work is just work. The alert goes out when the SET of stuck repositories
+    changes, not every morning — the log has the line every run. A repo git
+    cannot open is stuck by definition: git-push-all cannot push it either.
+    `allowed` is the privacy gate for a working copy (utils.working_copy_allowed):
+    the line names projects, and it goes to Telegram.
+    """
+    task = next((t for t in read_registry(registry) if t.get("name") == "ClaudeGitPushAll"),
+                None)
+    if task is None or task.get("enabled") is False:
+        seen.pop(UNPUSHED_SEEN_KEY, None)
+        return "", ""
+    now = time.time() if now is None else now
+    repos = []
+    if projects_root is not None and projects_root.is_dir():
+        repos += [(p.parent.name, p.parent) for p in sorted(projects_root.glob("*/.git"))
+                  if p.is_dir() and allowed(p.parent.name)]
+    if (bundle_root / "wiki" / ".git").is_dir():
+        repos.append(("wiki", bundle_root / "wiki"))
+    stuck = []
+    for label, repo in repos:
+        if (repo / ".no-autopush").exists():
+            continue
+        try:
+            what = _stuck(repo, now)
+        except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
+            what = f"git does not answer ({type(exc).__name__}: {exc})"
+        if what:
+            stuck.append((label, what))
+    if not stuck:
+        seen.pop(UNPUSHED_SEEN_KEY, None)
+        return f"unpushed: {len(repos)} repo(s) checked, none stuck", ""
+    reported = _reported_by_push_all(bundle_root / "cron" / "logs")
+    items = [f"{label} — {what}"
+             + (" (git-push-all reported it)" if label in reported else " [silent]")
+             for label, what in stuck]
+    line = (f"Not reaching the remote for >{UNPUSHED_LIMIT_H}h ({len(stuck)}): "
+            + "; ".join(items))
+    labels = sorted(label for label, _ in stuck)
+    if seen.get(UNPUSHED_SEEN_KEY) == labels:
+        return f"{line} (already reported)", ""
+    seen[UNPUSHED_SEEN_KEY] = labels
+    return line, line

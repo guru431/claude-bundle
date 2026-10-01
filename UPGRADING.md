@@ -130,6 +130,13 @@ Then run `sync.cmd` once (step 4 above).
 - **New optional fields:** `logon_type: s4u` (runs before logon with no stored
   password, and no network credentials) and `health_port` (a service the
   monitors probe on loopback). See the registry header.
+- **`ClaudeWikiLint` passes `script_args: ["--save-baseline"]`.** Only that run
+  moves the lint's regression baseline now; a kept registry without the line
+  leaves the baseline frozen and compares every week against the old one. Copy
+  the line from the new template.
+- **AtStartup / AtLogOn tasks of kind bash or python** are registered with the
+  launcher's `bash-daemon` / `python-daemon` mode, which skips the new stderr
+  capture (`cron/logs/task-stderr/`); `sync.cmd` reports them `updated` once.
 - **Uninstalling a first install made by an older `install.ps1`:** that
   manifest recorded the bootstrapped registry as the installer's own file, and
   `uninstall.ps1` would delete it. Re-run the installer once before you ever
@@ -194,6 +201,14 @@ Then run `sync.cmd` once (step 4 above).
   `HTTPS_PROXY`, refuses a redirect, and accepts `localhost` or `*.localhost`
   only when the name resolves to loopback. A server on another machine must be
   named in `LOCAL_LLM_ALLOWED_HOSTS` — by host name or, now also, by address.
+- **The healthcheck's disk alert is free space**: less than
+  `HEALTHCHECK_DISK_FREE_GB` (default 5) on the tightest local filesystem.
+  `HEALTHCHECK_DISK_PCT` (and `HEALTHCHECK_REMOTE_DISK_PCT`) still page when
+  set, but no longer default to 85 — add `HEALTHCHECK_DISK_PCT=85` to `.env` to
+  keep the old alert alongside the new one.
+- **`WIKI_LLM_PROVIDER=claude` gets no tools.** The CLI runs with `--tools ""`
+  and `--strict-mcp-config` from an empty directory; it returns text, which is
+  all the pipeline ever used.
 - **The Windows task monitor's findings watch** reads the projects under
   `projects_root` and nothing else. Without it, only the bundle's own
   `FINDINGS.md` is read (it used to scan the directory above the bundle).

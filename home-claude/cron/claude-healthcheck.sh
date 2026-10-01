@@ -108,37 +108,85 @@ $(local_top_procs)
 $(df -h 2>/dev/null || powershell.exe -Command 'Get-CimInstance Win32_LogicalDisk | Select-Object Caption,FreeSpace,Size | Format-Table -AutoSize')
 "
 
-# --- Deterministic severity: highest local disk usage vs threshold ---
+# --- Deterministic severity: free space on the tightest local filesystem ---
 # The LLM writes the EXPLANATION; it never decides whether to page. Paging is
 # driven by this check alone, so a reworded verdict can't silence an alert.
-DISK_THRESHOLD="${HEALTHCHECK_DISK_PCT:-85}"
-# Validate before anything depends on it. `[ "$MAX_DISK_PCT" -ge "$DISK_THRESHOLD" ]`
-# with a non-numeric threshold is a shell ERROR, which evaluates false — the
-# script then logs "below threshold" and, with a working LLM, exits 0 on a full
-# disk. A typo in .env must not be able to disable the one deterministic alert.
-case "$DISK_THRESHOLD" in
-    ''|*[!0-9]*)
-        echo "WARNING: HEALTHCHECK_DISK_PCT='$DISK_THRESHOLD' is not an integer 0..100 — using 85" >> "$LOG_FILE"
-        DISK_THRESHOLD=85 ;;
-    *)
-        if [ "$DISK_THRESHOLD" -gt 100 ]; then
-            echo "WARNING: HEALTHCHECK_DISK_PCT=$DISK_THRESHOLD is above 100 (unreachable) — using 85" >> "$LOG_FILE"
-            DISK_THRESHOLD=85
-        fi ;;
-esac
-MAX_DISK_PCT=0
-MAX_DISK_FS=""
-while read -r pct fs; do
-    [ -n "$pct" ] || continue
-    case "$pct" in *[!0-9]*) continue ;; esac
-    if [ "$pct" -gt "$MAX_DISK_PCT" ]; then
-        MAX_DISK_PCT="$pct"
-        MAX_DISK_FS="$fs"
+#
+# What pages is the FREE SPACE left (HEALTHCHECK_DISK_FREE_GB, default 5), not
+# the share in use. A share of a fixed-size disk does not answer the question
+# this check exists for — is there room for tonight's work: 85% used leaves
+# 300 GB of a 2 TB disk and 19 GB of a 128 GB one. On a development box whose
+# build caches keep the system drive at 85-100%, the old 85% default paged
+# every morning for a month, and the morning the disk really filled — and cut
+# four nightly jobs off mid-write — read exactly like the thirty before it. An
+# alarm that always sounds says nothing. HEALTHCHECK_DISK_PCT still pages as
+# well, but only when you set it.
+#
+# Validate before anything depends on it. `[ "$x" -lt "$threshold" ]` with a
+# non-numeric threshold is a shell ERROR, which evaluates false — the script then
+# logs "below threshold" and, with a working LLM, exits 0 on a full disk. A typo
+# in .env must not be able to disable the one deterministic alert.
+# Args: <name> <value> <fallback> [<max>]; prints the value to use.
+disk_setting() {
+    case "$2" in
+        ''|*[!0-9]*)
+            echo "WARNING: $1='$2' is not a non-negative integer — using $3" >> "$LOG_FILE"
+            echo "$3"; return ;;
+    esac
+    if [ -n "${4:-}" ] && [ "$2" -gt "$4" ]; then
+        echo "WARNING: $1=$2 is above $4 (unreachable) — using $3" >> "$LOG_FILE"
+        echo "$3"; return
     fi
-done <<EOF
-$(df -P -l 2>/dev/null | awk -v ex="$HEALTHCHECK_DISK_EXCLUDE" '
-    NR > 1 && $5 ~ /%/ && $6 !~ ex { gsub(/%/, "", $5); print $5, $6 }')
+    echo "$2"
+}
+
+# Reads "<pct> <free_kb> <filesystem>" lines. Sets DX_MIN_KB / DX_MIN_PCT /
+# DX_MIN_FS — the TIGHTEST filesystem by free space, which is what decides — and
+# DX_MAX_PCT / DX_MAX_FS, the fullest one, for the opt-in percent threshold.
+disk_extremes() {
+    DX_MIN_KB=""
+    DX_MIN_PCT=0
+    DX_MIN_FS=""
+    DX_MAX_PCT=0
+    DX_MAX_FS=""
+    local pct kb fs
+    while read -r pct kb fs; do
+        case "$pct$kb" in ''|*[!0-9]*) continue ;; esac
+        if [ -z "$DX_MIN_KB" ] || [ "$kb" -lt "$DX_MIN_KB" ]; then
+            DX_MIN_KB="$kb"
+            DX_MIN_PCT="$pct"
+            DX_MIN_FS="$fs"
+        fi
+        if [ "$pct" -gt "$DX_MAX_PCT" ]; then
+            DX_MAX_PCT="$pct"
+            DX_MAX_FS="$fs"
+        fi
+    done
+}
+
+# `df -P` rows located by their capacity field (`NN%`), not by position: the
+# filesystem name can hold spaces (Git Bash lists `C:/Program Files/Git`), and
+# so can a mount point (`/Volumes/My Disk`) — counted from the left, either
+# shifted the columns and the row was dropped without a word.
+DF_ROWS='NR > 1 { for (i = NF; i > 1; i--) if ($i ~ /^[0-9]+%$/) break
+                  if (i < 2) next
+                  fs = $(i + 1); for (j = i + 2; j <= NF; j++) fs = fs " " $j
+                  if (ex != "" && fs ~ ex) next
+                  sub(/%/, "", $i); print $i, $(i - 1), prefix fs }'
+
+DISK_FREE_MIN_GB=$(disk_setting HEALTHCHECK_DISK_FREE_GB "${HEALTHCHECK_DISK_FREE_GB:-5}" 5)
+DISK_THRESHOLD=""
+if [ -n "${HEALTHCHECK_DISK_PCT:-}" ]; then
+    DISK_THRESHOLD=$(disk_setting HEALTHCHECK_DISK_PCT "$HEALTHCHECK_DISK_PCT" 85 100)
+fi
+disk_extremes <<EOF
+$(df -P -l 2>/dev/null | awk -v ex="$HEALTHCHECK_DISK_EXCLUDE" -v prefix="" "$DF_ROWS")
 EOF
+MIN_FREE_KB="$DX_MIN_KB"
+MIN_FREE_PCT="$DX_MIN_PCT"
+MIN_FREE_FS="$DX_MIN_FS"
+MAX_DISK_PCT="$DX_MAX_PCT"
+MAX_DISK_FS="$DX_MAX_FS"
 
 # --- Optional: remote Linux server via SSH ---
 # Set REMOTE_SSH_HOST in the bundle .env (read above) or in the process env
@@ -192,36 +240,27 @@ fi
 # alone, and the one place the remote figure appeared was a sentence the model
 # wrote. Same rule as above — the LLM explains, the measurement pages.
 #
-# The threshold defaults to the local one, so enabling a remote host does not
-# silently come with a different standard.
-REMOTE_DISK_THRESHOLD="${HEALTHCHECK_REMOTE_DISK_PCT:-$DISK_THRESHOLD}"
-case "$REMOTE_DISK_THRESHOLD" in
-    ''|*[!0-9]*)
-        echo "WARNING: HEALTHCHECK_REMOTE_DISK_PCT='$REMOTE_DISK_THRESHOLD' is not an integer 0..100 — using $DISK_THRESHOLD" >> "$LOG_FILE"
-        REMOTE_DISK_THRESHOLD="$DISK_THRESHOLD" ;;
-    *)
-        if [ "$REMOTE_DISK_THRESHOLD" -gt 100 ]; then
-            echo "WARNING: HEALTHCHECK_REMOTE_DISK_PCT=$REMOTE_DISK_THRESHOLD is above 100 (unreachable) — using $DISK_THRESHOLD" >> "$LOG_FILE"
-            REMOTE_DISK_THRESHOLD="$DISK_THRESHOLD"
-        fi ;;
-esac
-
-REMOTE_MAX_PCT=0
-REMOTE_MAX_FS=""
-while read -r pct fs; do
-    [ -n "$pct" ] || continue
-    case "$pct" in *[!0-9]*) continue ;; esac
-    if [ "$pct" -gt "$REMOTE_MAX_PCT" ]; then
-        REMOTE_MAX_PCT="$pct"
-        REMOTE_MAX_FS="$fs"
-    fi
-done <<EOF
-$(printf '%s\n' "$REMOTE_DATA" | awk -v host="${REMOTE_SSH_HOST:-remote}" '
-    NF >= 6 && $5 ~ /^[0-9]+%$/ { gsub(/%/, "", $5); print $5, host ":" $6 }')
+# The thresholds default to the local ones, so enabling a remote host does not
+# silently come with a different standard: free space in GB always, the percent
+# only when one is set.
+REMOTE_DISK_FREE_MIN_GB=$(disk_setting HEALTHCHECK_REMOTE_DISK_FREE_GB \
+    "${HEALTHCHECK_REMOTE_DISK_FREE_GB:-$DISK_FREE_MIN_GB}" "$DISK_FREE_MIN_GB")
+REMOTE_DISK_THRESHOLD=""
+if [ -n "${HEALTHCHECK_REMOTE_DISK_PCT:-$DISK_THRESHOLD}" ]; then
+    REMOTE_DISK_THRESHOLD=$(disk_setting HEALTHCHECK_REMOTE_DISK_PCT \
+        "${HEALTHCHECK_REMOTE_DISK_PCT:-$DISK_THRESHOLD}" "${DISK_THRESHOLD:-85}" 100)
+fi
+disk_extremes <<EOF
+$(printf '%s\n' "$REMOTE_DATA" | awk -v ex="" -v prefix="${REMOTE_SSH_HOST:-remote}:" "$DF_ROWS")
 $(printf '%s\n' "$WIN_DATA" | awk -v host="${WIN_REMOTE_HOST:-remote-windows}" '
     $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $1 + $2 > 0 {
-        printf "%d %s\n", ($1 * 100) / ($1 + $2), host ":C:" }')
+        printf "%d %d %s\n", ($1 * 100) / ($1 + $2), $2 * 1048576, host ":C:" }')
 EOF
+REMOTE_MIN_KB="$DX_MIN_KB"
+REMOTE_MIN_PCT="$DX_MIN_PCT"
+REMOTE_MIN_FS="$DX_MIN_FS"
+REMOTE_MAX_PCT="$DX_MAX_PCT"
+REMOTE_MAX_FS="$DX_MAX_FS"
 
 METRICS="$LOCAL_DATA
 
@@ -323,8 +362,19 @@ fi
 # deterministic checks — local disk, remote disk, the monitor dead-man switch
 # below and the LLM chain above; the LLM text is the alert body (truncated to
 # stay under Telegram's 4096-char limit).
-echo "Disk check: max ${MAX_DISK_PCT}% on ${MAX_DISK_FS:-?} (threshold ${DISK_THRESHOLD}%)" >> "$LOG_FILE"
-echo "Remote disk check: max ${REMOTE_MAX_PCT}% on ${REMOTE_MAX_FS:-none} (threshold ${REMOTE_DISK_THRESHOLD}%)" >> "$LOG_FILE"
+KB_PER_GB=1048576
+MIN_FREE_GB=$(( ${MIN_FREE_KB:-0} / KB_PER_GB ))
+REMOTE_MIN_GB=$(( ${REMOTE_MIN_KB:-0} / KB_PER_GB ))
+DISK_NOTE="no local filesystem measured"
+[ -n "$MIN_FREE_FS" ] && DISK_NOTE="$MIN_FREE_GB GB free on $MIN_FREE_FS ($MIN_FREE_PCT% used)"
+DISK_NOTE="$DISK_NOTE; threshold $DISK_FREE_MIN_GB GB"
+DISK_NOTE="$DISK_NOTE${DISK_THRESHOLD:+, fullest $MAX_DISK_PCT% on $MAX_DISK_FS vs $DISK_THRESHOLD%}"
+REMOTE_NOTE="none"
+[ -n "$REMOTE_MIN_FS" ] && REMOTE_NOTE="$REMOTE_MIN_GB GB free on $REMOTE_MIN_FS ($REMOTE_MIN_PCT% used)"
+REMOTE_NOTE="$REMOTE_NOTE; threshold $REMOTE_DISK_FREE_MIN_GB GB"
+REMOTE_NOTE="$REMOTE_NOTE${REMOTE_DISK_THRESHOLD:+${REMOTE_MAX_FS:+, fullest $REMOTE_MAX_PCT% on $REMOTE_MAX_FS vs $REMOTE_DISK_THRESHOLD%}}"
+echo "Disk check: $DISK_NOTE" >> "$LOG_FILE"
+echo "Remote disk check: $REMOTE_NOTE" >> "$LOG_FILE"
 
 # --- Dead-man switch for the task monitor ---
 # "A task that stopped firing has no failed run to notice" is the whole reason
@@ -395,12 +445,20 @@ fi
 
 # Everything worth waking somebody for, in one message.
 ALERTS=""
-if [ "$MAX_DISK_PCT" -ge "$DISK_THRESHOLD" ]; then
-    ALERTS="disk ${MAX_DISK_PCT}% on ${MAX_DISK_FS} (threshold ${DISK_THRESHOLD}%)"
+add_alert() { ALERTS="${ALERTS:+$ALERTS
+}$1"; }
+if [ -n "$MIN_FREE_FS" ] && [ "$MIN_FREE_KB" -lt $(( DISK_FREE_MIN_GB * KB_PER_GB )) ]; then
+    add_alert "disk: ${MIN_FREE_GB} GB free on ${MIN_FREE_FS} (threshold ${DISK_FREE_MIN_GB} GB)"
 fi
-if [ -n "$REMOTE_MAX_FS" ] && [ "$REMOTE_MAX_PCT" -ge "$REMOTE_DISK_THRESHOLD" ]; then
-    ALERTS="${ALERTS:+$ALERTS
-}remote disk ${REMOTE_MAX_PCT}% on ${REMOTE_MAX_FS} (threshold ${REMOTE_DISK_THRESHOLD}%)"
+if [ -n "$DISK_THRESHOLD" ] && [ -n "$MAX_DISK_FS" ] && [ "$MAX_DISK_PCT" -ge "$DISK_THRESHOLD" ]; then
+    add_alert "disk ${MAX_DISK_PCT}% on ${MAX_DISK_FS} (threshold ${DISK_THRESHOLD}%)"
+fi
+if [ -n "$REMOTE_MIN_FS" ] && [ "$REMOTE_MIN_KB" -lt $(( REMOTE_DISK_FREE_MIN_GB * KB_PER_GB )) ]; then
+    add_alert "remote disk: ${REMOTE_MIN_GB} GB free on ${REMOTE_MIN_FS} (threshold ${REMOTE_DISK_FREE_MIN_GB} GB)"
+fi
+if [ -n "$REMOTE_DISK_THRESHOLD" ] && [ -n "$REMOTE_MAX_FS" ] \
+        && [ "$REMOTE_MAX_PCT" -ge "$REMOTE_DISK_THRESHOLD" ]; then
+    add_alert "remote disk ${REMOTE_MAX_PCT}% on ${REMOTE_MAX_FS} (threshold ${REMOTE_DISK_THRESHOLD}%)"
 fi
 if [ -n "$MONITOR_ALERT" ]; then
     ALERTS="${ALERTS:+$ALERTS
@@ -451,7 +509,7 @@ RC=0
 "$PYTHON" "$BUNDLE_ROOT/cron/runs.py" record \
     --task ClaudeHealthcheck --rc "$RC" --artifact "$LOG_FILE" \
     --delivery "$DELIVERY" \
-    --note "disk ${MAX_DISK_PCT}% / threshold ${DISK_THRESHOLD}%; remote ${REMOTE_MAX_PCT}% on ${REMOTE_MAX_FS:-none} / threshold ${REMOTE_DISK_THRESHOLD}%${CHAIN_ALERT:+; LLM analysis skipped: provider chain down}" \
+    --note "disk: $DISK_NOTE; remote: $REMOTE_NOTE${CHAIN_ALERT:+; LLM analysis skipped: provider chain down}" \
     >>"$LOG_FILE" 2>&1 || true
 
 # The disk alert has fired (or not) on measured data by this point; only now

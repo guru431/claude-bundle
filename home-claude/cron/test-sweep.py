@@ -79,7 +79,6 @@ BUNDLE_ROOT = Path(__file__).resolve().parents[1]
 CRON_DIR = BUNDLE_ROOT / "cron"
 LOG_DIR = CRON_DIR / "logs"
 STATE_DIR = CRON_DIR / "state"
-TELEGRAM_SH = CRON_DIR / "telegram-send.sh"
 
 sys.path.insert(0, str(CRON_DIR / "hooks"))
 # ONE writer for FINDINGS.md (utils). This file used to carry its own
@@ -99,6 +98,7 @@ from runs import terminal_record  # noqa: E402
 
 sys.path.insert(0, str(CRON_DIR / "lib"))
 from env_names import TEMPLATE_NAMES  # noqa: E402
+import notify  # noqa: E402
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
@@ -1066,17 +1066,13 @@ def plan_suites(projects: list[Path], contracts: dict,
 
 
 def send_telegram(text: str) -> None:
-    bash = find_bash()
-    if not TELEGRAM_ENABLED or not TELEGRAM_SH.is_file() or not bash:
+    if not TELEGRAM_ENABLED:
         return
     # Telegram rejects messages over 4096 characters outright (HTTP 400): with a
     # dozen broken suites the summary would cross the limit and never arrive.
     if len(text) > 3900:
         text = text[:3900] + "\n… truncated, details in cron/logs/test-sweep_*.log"
-    try:
-        subprocess.run([bash, str(TELEGRAM_SH), text], timeout=60, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        log(f"telegram: not sent ({exc})")
+    notify.send(text, log=log)
 
 
 def load_state() -> dict:

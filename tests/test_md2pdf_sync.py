@@ -57,6 +57,7 @@ class FakeRun:
     def __init__(self, converter_rc: int = 0, stderr: bytes = b"md2pdf: doc.pdf (4096 bytes)"):
         self.converter_rc, self.stderr = converter_rc, stderr
         self.calls: list[tuple[list, dict]] = []
+        self.alerts: list[str] = []      # what notify.send was handed
 
     def __call__(self, cmd, **kwargs):
         self.calls.append((list(cmd), kwargs))
@@ -65,10 +66,6 @@ class FakeRun:
     @property
     def conversions(self):
         return [(c, k) for c, k in self.calls if "--pair" in c]
-
-    @property
-    def alerts(self) -> list[str]:
-        return [c[-1] for c, _ in self.calls if "--pair" not in c]
 
 
 @pytest.fixture()
@@ -80,6 +77,8 @@ def converter(sync, tmp_path: Path, monkeypatch) -> FakeRun:
     monkeypatch.setattr(sync, "MD2PDF", script)
     fake = FakeRun()
     monkeypatch.setattr(sync.subprocess, "run", fake)
+    monkeypatch.setattr(sync.notify, "send",
+                        lambda text, log=None, timeout=None: fake.alerts.append(text) or True)
     return fake
 
 
@@ -146,7 +145,6 @@ def test_a_failure_alert_names_the_documents_and_nothing_the_browser_printed(
     """The alert quoted md2pdf's stderr — browser output, and now the title of
     whatever page was printed instead: a local file URL with the user name in
     it. Only the documents' paths, relative to projects_root, leave the machine."""
-    monkeypatch.setattr(sync, "BASH", "bash")          # an alert channel exists
     converter.converter_rc = 1
     converter.stderr = (b"chrome.exe: printed a different page, titled "
                         b"'file:///C:/Users/me/AppData/Local/Temp/tmpk3j9x2.html'")

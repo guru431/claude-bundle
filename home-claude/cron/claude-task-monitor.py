@@ -57,10 +57,11 @@ LOG_DIR = CRON_DIR / "logs"
 STATE_PATH = CRON_DIR / "state" / "task-monitor-posix-seen.json"
 CHAIN_DEAD_PATH = CRON_DIR / "state" / "chain-dead.json"
 REGISTRY = CRON_DIR / "registry.yaml"
-TELEGRAM_SH = CRON_DIR / "telegram-send.sh"
 
 sys.path.insert(0, str(CRON_DIR / "hooks"))
-from utils import find_bash  # noqa: E402
+import utils  # noqa: E402,F401  (importing it loads the bundle .env, as before)
+sys.path.insert(0, str(CRON_DIR / "lib"))
+import notify  # noqa: E402
 
 sys.path.insert(0, str(CRON_DIR))
 from runs import STALE_SEEN_KEY, stale_alert, terminal_record  # noqa: E402
@@ -250,16 +251,7 @@ def save_seen(seen: dict) -> None:
 
 def send_telegram(text: str) -> bool:
     """True when the alert was delivered. A monitor that cannot deliver failed."""
-    bash = find_bash()
-    if not bash or not TELEGRAM_SH.is_file():
-        log("telegram-send.sh or bash not available — alert NOT delivered")
-        return False
-    try:
-        r = subprocess.run([bash, str(TELEGRAM_SH), text], timeout=120, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        log(f"telegram: not sent ({exc})")
-        return False
-    return r.returncode == 0
+    return notify.send(text, log=log)
 
 
 def main() -> int:

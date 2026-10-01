@@ -52,6 +52,13 @@ printf '%s' "$body" | grep -qF 'alert-line-two' || fail "second line missing: $b
 printf '%s' "$body" | grep -qF '"text": ""' && fail "text is EMPTY — the stdin bug is back"
 printf '%s' "$body" | grep -qF '"chat_id": "12345"' || fail "chat_id missing: $body"
 
+# --- Case 1b: with no argument the text comes from stdin (cron/lib/notify.py) ---
+rm -f "$TMP/captured"/part*.json
+printf 'stdin-line-one\nstdin-line-two' | bash "$SCRIPT" > /dev/null \
+    || fail "exit code non-zero on a message from stdin"
+body=$(cat "$TMP/captured"/part001.json)
+printf '%s' "$body" | grep -qF 'stdin-line-two' || fail "stdin text missing: $body"
+
 # --- Case 2: over the 4000-char API limit the tail is split off, not dropped ---
 rm -f "$TMP/captured"/part*.json
 long=$(printf 'x%.0s' $(seq 1 4200))

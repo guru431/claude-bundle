@@ -143,8 +143,9 @@ def test_a_second_alert_inside_the_cooldown_is_suppressed(hook, tmp_path: Path):
 RECORDER = (
     "import pathlib, sys\n"
     "out = pathlib.Path(__file__).with_name('sent.txt')\n"
+    "text = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()\n"
     "with open(out, 'a', encoding='utf-8') as fh:\n"
-    "    fh.write(sys.argv[1] + '\\n')\n"
+    "    fh.write(text + '\\n')\n"
 )
 
 
@@ -152,9 +153,9 @@ RECORDER = (
 def claude_home(tmp_path: Path) -> Path:
     """A full-tier layout whose telegram-send.sh only records what it was given.
 
-    The recorder is Python, and BASH_EXE points at this interpreter: the hook
-    runs `<bash> telegram-send.sh <message>`, so no real shell, network or bot
-    token is involved on any platform.
+    The recorder is Python, and BASH_EXE points at this interpreter: notify.send
+    runs `<bash> telegram-send.sh` with the message on stdin, so no real shell,
+    network or bot token is involved on any platform.
     """
     home = tmp_path / "claude-home"
     shutil.copytree(CRON_SRC, home / "cron")
@@ -261,6 +262,8 @@ def test_bash_is_the_one_find_bash_resolves(tmp_path: Path):
     home = tmp_path / "stub-home"
     hooks = home / "cron" / "hooks"
     hooks.mkdir(parents=True)
+    (home / "cron" / "lib").mkdir()
+    shutil.copy2(CRON_SRC / "lib" / "notify.py", home / "cron" / "lib" / "notify.py")
     (home / "cron" / "telegram-send.sh").write_text(RECORDER, encoding="utf-8")
     (hooks / "utils.py").write_text(
         "import sys\n"

@@ -67,7 +67,6 @@ sys.path.insert(0, str(Path(__file__).parent / "hooks"))
 from utils import (  # noqa: E402
     _env_int,
     _load_dotenv,
-    find_bash,
     masked,
     policy_summary,
     project_allowed,
@@ -76,6 +75,9 @@ from utils import (  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runs import terminal_record  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import notify  # noqa: E402
 
 _load_dotenv()
 
@@ -113,11 +115,6 @@ EXCLUDE_DIRS = {
 STATE_FILE = BUNDLE_ROOT / "cron" / "state" / "md2pdf-sync.json"
 LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
 LOG_FILE = LOG_DIR / f"md2pdf-sync_{datetime.now():%Y-%m-%d}.log"
-TELEGRAM = BUNDLE_ROOT / "cron" / "telegram-send.sh"
-# Absolute bash path so the Telegram alert works in session 0 (Password task),
-# where Git\bin is not on PATH — and on POSIX, where bash is just /bin/bash.
-# Override with BASH_EXE. None = no bash, alerts are skipped.
-BASH = find_bash()
 
 TG_LIMIT = 3800  # leave headroom under Telegram's 4096
 
@@ -266,7 +263,7 @@ def _sync(rec: dict) -> int:
 
     log(f"=== done: regenerated={len(regenerated)} skipped={skipped} failed={len(failed)} ===")
 
-    if failed and TELEGRAM.exists() and BASH:
+    if failed:
         # Which documents failed — not why. The reason is md2pdf's stderr:
         # browser output and, since md2pdf checks what it printed, the title of
         # whatever page came out instead, which is a local file URL with the
@@ -276,10 +273,7 @@ def _sync(rec: dict) -> int:
                      f"reasons are in cron/logs/{LOG_FILE.name}:\n{lines}")
         if len(msg) > TG_LIMIT:
             msg = msg[:TG_LIMIT].rsplit("\n", 1)[0] + "\n... (truncated)"
-        try:
-            subprocess.run([BASH, str(TELEGRAM), msg], timeout=30, check=False)
-        except Exception as e:  # noqa: BLE001
-            log(f"telegram-send failed: {e}")
+        notify.send(msg, log=log)
 
     # The run's terminal record (written by terminal_record). useful_items = PDFs
     # regenerated — normally zero on a quiet night, which is why the note carries

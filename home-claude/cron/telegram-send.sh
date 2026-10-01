@@ -1,6 +1,6 @@
 #!/bin/bash
 # Shared helper: send a message to Telegram via Bot API.
-# Usage: bash telegram-send.sh "your message text"
+# Usage: bash telegram-send.sh "your message text"   (or: ... | bash telegram-send.sh)
 # Plain text only (no Markdown).
 #
 # Required env vars:
@@ -33,13 +33,21 @@ if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
     exit 1
 fi
 
-MSG="$1"
+# The message from argv ($1) OR, with no argument, from stdin. stdin is what
+# Python callers use (cron/lib/notify.py): argv is visible in the process list
+# (ps / tasklist) for as long as the send takes, like the bot token that curl
+# -K - already keeps out of it.
+if [ -n "$1" ]; then
+    MSG="$1"
+else
+    MSG=$(cat)
+fi
 # Checked AFTER whitespace is stripped, because that is what the splitter below
 # sends (`fh.read().strip()`). A message of only spaces or newlines passed a bare
 # `-z "$MSG"` guard, came out of the splitter as chunks=[''], and reached the Bot
 # API as text:"" — a guaranteed HTTP 400 and status=1 instead of this Usage line.
 if [ -z "$(printf '%s' "$MSG" | tr -d '[:space:]')" ]; then
-    echo "Usage: telegram-send.sh 'message'" >&2
+    echo "Usage: telegram-send.sh 'message'  (or the text on stdin)" >&2
     exit 1
 fi
 

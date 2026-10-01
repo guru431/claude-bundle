@@ -31,8 +31,9 @@ the prompt, the answer or the transcript. The project name still goes through
 the privacy gate, so a project excluded by `bundle.local.yaml` is reported as "a
 project" rather than by name.
 
-Tier 2: delivery goes through `cron/telegram-send.sh`, so it needs the cron
-payload and TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in `~/.claude/.env`.
+Tier 2: delivery goes through `cron/lib/notify.py` (and from there
+`cron/telegram-send.sh`), so it needs the cron payload and
+TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in `~/.claude/.env`.
 
 Fail-open by construction: every failure path exits 0 with no output. A hook
 that breaks the session it reports on is worse than no hook.
@@ -41,7 +42,6 @@ Opt-in — see home-claude/settings.example-with-hooks.json.
 """
 import json
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -49,7 +49,7 @@ from pathlib import Path
 
 CLAUDE_HOME = Path(os.environ.get("CLAUDE_HOME") or (Path.home() / ".claude"))
 CRON_DIR = CLAUDE_HOME / "cron"
-TELEGRAM = CRON_DIR / "telegram-send.sh"
+NOTIFY = CRON_DIR / "lib" / "notify.py"
 # One small file per session that has been alerted on: the time of the last
 # message. Markers older than a week are swept whenever a new one is written.
 ALERT_MARKERS = CRON_DIR / "state" / "session-alerts"
@@ -215,7 +215,7 @@ def mark_alerted(marker: Path, now: float) -> None:
 
 
 def main() -> None:
-    if not TELEGRAM.is_file():
+    if not NOTIFY.is_file():
         quit_silently()                      # Tier 1 install — nothing to send with
 
     try:
@@ -239,9 +239,11 @@ def main() -> None:
     # are read: importing it loads ~/.claude/.env, which is where the template
     # documents them, and read earlier they only ever saw the client's env.
     sys.path.insert(0, str(CRON_DIR / "hooks"))
+    sys.path.insert(0, str(CRON_DIR / "lib"))
     try:
         from utils import (find_bash, project_allowed, project_from_payload,
                            safe_session_id)
+        import notify
     except Exception:
         quit_silently()
 
@@ -277,11 +279,9 @@ def main() -> None:
     # the cooldown and deliver the same news twice.
     mark_alerted(marker, now)
     message = f"Claude Code: {label} {what} after {minutes:.0f} min."
-    try:
-        subprocess.run([bash, str(TELEGRAM), message],
-                       capture_output=True, timeout=45)
-    except Exception:
-        pass                                 # a failed alert must not fail the hook
+    # 45 s is the hook's budget, not the sender's schedule. notify.send never
+    # raises: a failed alert must not fail the hook.
+    notify.send(message, log=lambda _line: None, timeout=45)
     quit_silently()
 
 

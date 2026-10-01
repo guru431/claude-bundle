@@ -137,7 +137,7 @@ _CODE_SIGNALS = (
     (r"\brequests\.(?:post|get|put|patch|delete)\b", "offbox"),
     (r"\burllib\.request\b|\bhttpx\.|\bhttp\.client\b", "offbox"),
     (r"(?m)^\s*curl\s|[^\w]curl\s+-", "offbox"),
-    (r"telegram-send\.sh|send_telegram|api\.telegram\.org", "offbox"),
+    (r"telegram-send\.sh|send_telegram|api\.telegram\.org|notify\.send", "offbox"),
     (r"\bllm_call\b|\bllm_call_ex\b|llm-call\.py", "offbox"),
     (r"\bgit\s+push\b|\bgit_push\b|\bgit_net\s+push\b", "offbox"),
     (r"\bssh\s+-", "offbox"),
@@ -148,7 +148,7 @@ _MONEY_SIGNALS = (r"\bllm_call\b|\bllm_call_ex\b|llm-call\.py",)
 # signal above proves only that much, so git-push-all.sh could declare
 # `offbox=your commits -> your git remotes` while it sent Telegram the name of
 # every repo it failed or held back, with the paths of the files that did it.
-_TELEGRAM_SIGNAL = r"telegram-send\.sh|send_telegram|api\.telegram\.org"
+_TELEGRAM_SIGNAL = r"telegram-send\.sh|send_telegram|api\.telegram\.org|notify\.send"
 
 
 def code_contradicts(path: Path, io: dict[str, str]) -> list[str]:

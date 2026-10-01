@@ -43,7 +43,6 @@ from utils import (  # noqa: E402
     config_report,
     dir_to_project,
     extract_first_json_object,
-    find_bash,
     is_dry_run,
     is_subagent_jsonl,
     llm_call_ex,
@@ -61,6 +60,9 @@ from untrusted import fence  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runs import last_known_good, terminal_record  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import notify  # noqa: E402
+
 # From utils, not re-derived here: one definition of "where Claude Code lives"
 # (see utils.CLAUDE_HOME) instead of four copies that can drift apart.
 PROJECTS_DIR = PROJECTS_BASE
@@ -72,11 +74,6 @@ LOG_DIR.mkdir(exist_ok=True)
 
 DATE = date.today().isoformat()
 LOG_FILE = LOG_DIR / f"memory-update_{DATE}.log"
-
-# Telegram alert (one-liner on a fully-depleted night). Full bash path so the
-# alert works in session 0 (Password task), where Git\bin is not on PATH.
-TELEGRAM = Path(__file__).resolve().parent / "telegram-send.sh"
-BASH = find_bash()
 
 # How long the optional cron/incident-extract.py may run (see
 # run_incident_extract): well inside the task's own timeout_hours.
@@ -128,12 +125,9 @@ def context_window(text: str, cap: int = CONTEXT_FILE_CAP) -> str:
 
 
 def send_telegram(msg: str) -> None:
-    if not (TELEGRAM.exists() and BASH):
-        return
-    try:
-        subprocess.run([BASH, str(TELEGRAM), msg], timeout=30, check=False)
-    except Exception as e:  # noqa: BLE001
-        log(f"telegram-send failed: {e}")
+    # Telegram alert (one-liner on a fully-depleted night); why it was not
+    # delivered goes to this run's log (cron/lib/notify.py).
+    notify.send(msg, log=log)
 
 
 def cap_newest_messages(bits: list[str], proj_name: str,
@@ -685,7 +679,7 @@ def run_incident_extract() -> None:
             "(drop your own script there to enable it)")
         return
     log("=== Incident Extract Phase ===")
-    # A ceiling, like every other child of this task (telegram-send has 30 s). A
+    # A ceiling, like every other child of this task (the alert send has one too). A
     # user script that hangs held the task forever: no terminal record, and the
     # scheduler dropped every later trigger of a task that was still "running".
     with open(LOG_FILE, "a", encoding="utf-8") as f:

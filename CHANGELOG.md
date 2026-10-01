@@ -65,6 +65,22 @@ The short list; UPGRADING.md has the steps.
 - **The Windows task monitor exits 1** when its session-0 path check cannot
   collect the tasks; that failure used to be silent.
 
+### One way to send an alert from Python: `cron/lib/notify.py`
+
+Every Python task that alerted called `telegram-send.sh` through its own
+wrapper, and the copies had drifted: a 30, 45 or 120 s timeout, the message in
+argv, `capture_output` (on Windows `run()` keeps reading the pipes after
+`kill()`, so the timeout came late), the exit code checked by some and not
+others. `notify.send(text) -> bool` is now the only caller of the sender: bash
+from `utils.find_bash()`, the text on stdin, output into a temp file, a timeout
+sized to the parts of the message, the whole process tree stopped on timeout,
+and True only on exit 0 — a failure is one log line, never an exception.
+`memory-update`, `md2pdf-sync`, `test-sweep`, `wiki-lint`, `wiki-pipeline`, the
+POSIX task monitor and the `session-telegram` hook use it;
+`telegram-send.sh` takes the text on stdin when called without an argument.
+`tests/test_notify.py` fails on any `*.py` that names `telegram-send.sh` in code
+again, and `check-io-matrix.py` counts `notify.send` as a Telegram send.
+
 ### CLAUDE.md: the rules every session needs, references on demand
 
 Following Anthropic's cost guide ("move instructions from CLAUDE.md to

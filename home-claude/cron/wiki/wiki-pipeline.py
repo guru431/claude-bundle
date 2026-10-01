@@ -48,16 +48,11 @@ if hasattr(sys.stderr, "reconfigure"):
 HERE = Path(__file__).resolve().parent      # <bundle>/cron/wiki
 BUNDLE_ROOT = HERE.parent.parent            # <bundle>
 LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
-# Full bash path so the alert works in session 0 (Password task), where Git\bin
-# is not on PATH. Absent on POSIX -> Telegram is skipped gracefully.
-TELEGRAM = BUNDLE_ROOT / "cron" / "telegram-send.sh"
 sys.path.insert(0, str(BUNDLE_ROOT / "cron" / "hooks"))
 import utils  # noqa: E402
-from utils import dry_run_last_night, find_bash, is_dry_run  # noqa: E402
-
-# BASH_EXE > PATH > the Git-for-Windows default. The hardcoded Windows path with
-# only an env-var escape hatch meant no alert ever went out on Linux/macOS.
-BASH = find_bash()
+from utils import dry_run_last_night, is_dry_run  # noqa: E402
+sys.path.insert(0, str(BUNDLE_ROOT / "cron" / "lib"))
+import notify  # noqa: E402
 
 # The three always-on wiki phases, in dependency order. (compile-kb is a
 # separate, off-by-default source and is intentionally not part of this chain.)
@@ -83,12 +78,8 @@ def log(msg: str) -> None:
 
 
 def send_telegram(msg: str) -> None:
-    if not (TELEGRAM.exists() and BASH):
-        return
-    try:
-        subprocess.run([BASH, str(TELEGRAM), msg], timeout=30, check=False)
-    except Exception as e:  # alerting must never break the run
-        log(f"telegram-send failed: {e}")
+    # notify.send never raises: alerting must never break the run.
+    notify.send(msg, log=log)
 
 
 # The line a phase logs, in preview, with what it WOULD have sent (JSON after it).

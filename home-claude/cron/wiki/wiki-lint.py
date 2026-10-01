@@ -18,7 +18,6 @@ Schedule: Sunday at 02:00.
 import difflib
 import json
 import os
-import subprocess
 import re
 import sys
 
@@ -33,12 +32,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (BUNDLE_ROOT, WIKI_ROOT, WIKI_NON_PAGES, LOG_MD,  # noqa: E402
-                   _unescape_blob, atomic_write_text, find_bash,
+                   _unescape_blob, atomic_write_text,
                    is_reserved_page_name, mark_phase_success, read_page,
                    sanitize_page_body, write_page)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from runs import record_run  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
+import notify  # noqa: E402
 
 # Same resolution as wiki-compile-kb.py: KB_SOURCE_DIR, then kb_sources/,
 # then the legacy kb_news/ (a private pipeline's name, kept only for
@@ -49,12 +51,7 @@ else:
     KBNEWS_DIR = next((BUNDLE_ROOT / n for n in ("kb_sources", "kb_news")
                        if (BUNDLE_ROOT / n).is_dir()),
                       BUNDLE_ROOT / "kb_sources")
-TELEGRAM_SCRIPT = BUNDLE_ROOT / "cron" / "telegram-send.sh"
 CRON_LOG_DIR = BUNDLE_ROOT / "cron" / "logs"
-
-# Absolute bash path (BASH_EXE > PATH > Git-for-Windows default) so the alert
-# works both in session 0, where Git\bin is not on PATH, and on POSIX.
-BASH = find_bash()
 
 DATE = datetime.now().strftime("%Y-%m-%d")
 
@@ -616,15 +613,7 @@ def send_telegram_alert(message: str):
     """Send an alert to Telegram on errors."""
     if not ENABLE_TELEGRAM_ALERTS:
         return
-    if TELEGRAM_SCRIPT.exists() and BASH:
-        try:
-            subprocess.run(
-                [BASH, str(TELEGRAM_SCRIPT), message],
-                timeout=30,
-                capture_output=True,
-            )
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+    notify.send(message)
 
 
 def fix_mechanical(pages: dict[str, list[Path]]) -> list[str]:

@@ -279,8 +279,8 @@ Edit `registry.yaml` to disable any others you don't want before running
 | `ClaudeHealthcheck` | Daily 09:00 | morning self-check |
 | `ClaudeTaskMonitor` | Daily 09:30 | alert on failed Task Scheduler jobs, and on one still running past its own `timeout_hours` (Windows only) |
 | `ClaudeTaskMonitorPosix` | Daily 09:30 | the same alert on Linux/macOS, from failed `systemd --user` units / launchd agents and tasks gone silent in the run ledger (off by default — enable it on a POSIX box) |
-| `ClaudeTestSweep` | Daily 05:15 | run every project's fast test suite; file a finding when one turns red (off by default; needs `projects_root`) |
-| `ClaudeTestSweepFull` | Weekly Sat 07:00 | the same sweep including `integration` tests (off by default; needs `projects_root`) |
+| `ClaudeTestSweep` | Daily 05:15 | run every project's fast test level — its [test contract](#the-test-sweep-and-the-test-contract), or a discovered pytest suite; file a finding when one turns red (off by default; needs `projects_root`) |
+| `ClaudeTestSweepFull` | Weekly Sat 07:00 | the same sweep at the full level — `integration` tests included (off by default; needs `projects_root`) |
 | `ClaudeWarmWindow` | Daily 01:00 /4h | ping the Claude 5h window (off by default — read the billing note in the script; set `CLAUDE_BIN` in `.env` if the `claude` CLI isn't on PATH in session 0) |
 
 Alerts go to Telegram when something is wrong, not as a success report — with
@@ -323,7 +323,7 @@ this table reflects it.
 | `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
 | `ClaudeMd2PdfSync` | on a failure, the paths of the documents that did not convert (relative to `projects_root`) → Telegram Bot API; the reasons stay in the local log. Projects the privacy policy denies are not walked. The render is local, except that the browser fetches any remote image a document links | no | rewrites the paired `*.pdf` in your working copies — which `ClaudeGitPushAll` commits when that task is on | off |
 | `ClaudeWikiLint` | a lint summary → Telegram Bot API, only with `WIKI_LINT_TELEGRAM=1` | no | rewrites vault pages, only with `--fix` | on (alerts off) |
-| `ClaudeTestSweep` / `ClaudeTestSweepFull` | a summary of which suites broke → Telegram Bot API. No LLM is involved and no test output goes to a provider; tails are masked for credentials before they are logged or sent | no | writes a finding into each affected project's `FINDINGS.md`, and deletes its own finding again when the suite recovers | off (needs `projects_root`) |
+| `ClaudeTestSweep` / `ClaudeTestSweepFull` | a summary of which suites broke → Telegram Bot API. No LLM is involved and no test output goes to a provider; tails are masked for credentials before they are logged or sent. It RUNS your projects' test suites — the commands under `tests:` in `bundle.local.yaml`, through bash, or a discovered pytest — and whatever those tests reach is theirs, not the sweep's | no | writes a finding into each affected project's `FINDINGS.md` (red, or over its time budget) and deletes its own finding again when the suite recovers; a test-contract error goes to the bundle's own `FINDINGS.md` | off (needs `projects_root`) |
 | `ClaudeAgentsMdSyncCheck` | the **whole** `CLAUDE.md` and `AGENTS.md` of every allowed project → your LLM provider. This is the widest per-project payload in the bundle: not a slice of a transcript but two complete rules files, including whatever hosts, paths and commands they name | yes (PAYG tokens; `AGENTS_SYNC_FIX_MODEL` can point the fix step at a costlier model) | **edits `AGENTS.md` in your working copies** and files a finding in their `FINDINGS.md` | off (needs `projects_root`) |
 
 Every row above that says "your LLM provider" carries one more thing when that
@@ -534,6 +534,112 @@ just get copied?" (For the pass/fail deploy check, use
 hook in the `settings.json` Claude Code loads is parsed and resolved, exit 1
 when one is broken; `--smoke` also runs each of the bundle's own hooks once.
 
+## The test sweep and the test contract
+
+`ClaudeTestSweep` (daily) and `ClaudeTestSweepFull` (weekly) run every
+project under `projects_root` — `cron/test-sweep.py`, no LLM involved. What
+they run is the project's **test contract** when it has one: its entry under
+`tests:` in `bundle.local.yaml`. The contract is the one place a project's
+test commands are written down — agents read it for their targeted and fast
+runs, the sweep for its nightly ones — so nobody assembles a command of their
+own. A project without an entry keeps the original behaviour: the sweep
+discovers its pytest suite (a pytest config or a `tests/` directory at the
+root or one level down) and runs a bare `pytest`, `-m "not manual"` on the
+weekly run.
+
+```yaml
+tests:
+  myapp:                       # a directory under projects_root
+    - name: main               # `main`, or a short name for a second suite
+      cwd: .                   # relative to the project; must stay inside it
+      runner: pytest           # pytest | bash | dotnet | pester | js
+      targeted: .venv/bin/python -m pytest {path} -q
+      fast: .venv/bin/python -m pytest -q
+      full: .venv/bin/python -m pytest -q -m "not manual" --timeout=300
+      budget_s: 60
+```
+
+Every key is required and no other is accepted (an extra key is a typo, such as
+`budjet_s`). The three levels: `targeted` runs one file or test (`{path}`) and
+is for agents only — the sweep validates it but never runs it; `fast` is what
+the daily sweep runs, held to `budget_s`; `full` is what the weekly sweep runs,
+`integration` included. `fast` or `full` may be `null` when the suite has no
+such level, not both. Project names match the way the privacy policy matches
+them (normalized), and the suite key is `<project>` for `main`, otherwise
+`<project>:<name>` — the same keys discovery uses, so a project's history and
+its open finding survive the move to a contract.
+
+How a command runs: through bash (`BASH_EXE`, as for the shell tasks) from
+`<project>/<cwd>`, with the bundle's own settings and credentials stripped from
+its environment and the sweep's interpreter first on `PATH`, so a bare `python`
+is a known one. For a `pytest` suite the sweep appends
+`-p no:cacheprovider --durations=5 --basetemp <dir>` — end the command with
+pytest's own arguments. Only local execution: no host, container or remote key
+exists, and a command that wants one has to do it itself.
+
+How the result is read, per runner:
+
+| Runner | What the sweep looks for |
+|---|---|
+| `pytest` | pytest's exit code and summary line; the pytest-timeout banner (`+++ Timeout +++`, `Failed: Timeout >`) means a hang |
+| `bash` | the last `TESTS_RESULT pass=N fail=N skip=N` line your runner prints |
+| `dotnet` | `Passed!/Failed! - Failed: N, Passed: N, Skipped: N` per assembly; `--blame-hang-timeout`'s inactivity line or `Test Run Aborted.` means a hang |
+| `pester` | `Tests Passed: N, Failed: N, Skipped: N`, or the markers of `cron/lib/run-pester.ps1` |
+| `js` | the vitest (`Tests  1 failed \| 12 passed`) or jest (`Tests: 1 failed, 12 passed`) summary |
+| anything else | the return code only |
+
+Any runner may print marker lines, one per line from its start:
+`TESTS_RESULT pass=N fail=N skip=N` (the total — it beats the runner's own
+summary), `TESTS_TIMEOUT <test> after=<N>s` (a hang), `TESTS_DURATION <seconds>s <part>`
+(feeds the over-budget finding) and `TESTS_ENV <reason>` (the run is impossible
+for a reason outside the code). A runner that exits 0 with failures in its
+summary is red.
+
+**A time limit per test, for every runner.** A hung test must fail in seconds
+instead of holding the run until the sweep's `TEST_SWEEP_TIMEOUT`: for pytest,
+`pytest-timeout` with `timeout = 30` in the config (and `--timeout=` on the
+`full` command when that level needs more); for Pester, call
+`cron/lib/run-pester.ps1`, which runs each `*.Tests.ps1` in a process of its
+own, kills one that outlives `-TimeoutSec` with its children and prints the
+markers above —
+
+```yaml
+      runner: pester
+      fast: powershell -NoProfile -ExecutionPolicy Bypass -File ~/.claude/cron/lib/run-pester.ps1 -Path tests -TimeoutSec 60
+```
+
+(adjust the path if the bundle is not deployed to `~/.claude`; under
+PowerShell 7 use `pwsh`); for a Bash runner, `timeout` per file and a
+`TESTS_TIMEOUT <file> after=<N>s` line when it fires; for `dotnet test`,
+`--blame-hang-timeout 30s --blame-hang-dump-type none`; for JS, the runner's
+`testTimeout`.
+
+Statuses and what the sweep does with them:
+
+| Status | Meaning | What happens |
+|---|---|---|
+| `ok` | green (within budget) | closes this sweep's "Tests are failing" finding when the suite was red |
+| `over-budget` | green, but `fast` took longer than `budget_s` (contract suites only) | on the SECOND such night in a row, ONE P3 "Tests over budget" finding in the project's `FINDINGS.md`, naming the five slowest tests or parts; closed by itself once the suite is back within budget. A red or `env` night neither counts nor resets the streak |
+| `failed`, `error`, `interrupted`, `usage`, `crash` | red | ONE P2 "Tests are failing" finding + a Telegram line, on the change of state |
+| `timeout` | hung — killed by the sweep, or a hang the runner reported | the same, naming the hung test |
+| `env`, `no-pytest`, `no-tests` | the run says nothing about the tests (a poisoned basetemp, a runner that is not there, a `TESTS_ENV <reason>` line) | no finding, and a red suite stays red until a real run says otherwise. A poisoned basetemp is reported to Telegram on every run that hits it; a missing runner or a `TESTS_ENV <reason>` line once, on entering the state |
+
+The full level has a state entry (`<suite>@full`) and a finding title
+(`Tests are failing (full): <suite>`) of its own: the daily run does not run
+the integration tests, so its green must not close what the weekly run found.
+A discovered suite keeps its single entry and title for both, as before.
+
+**Contract errors.** An entry the sweep cannot use — not a list, a missing or
+unknown key, an unknown runner, a `cwd` outside the project or not a directory,
+a `budget_s` that is not a positive whole number, a `targeted` without
+`{path}`, a project name that matches no directory, two entries for one
+project — files ONE P2 finding in the bundle's own `FINDINGS.md`
+(`~/.claude/FINDINGS.md`), rewritten only when the set of errors changes and
+closed by the first run that finds the contract valid. Until then the project
+falls back to discovery, and the run exits 1. A malformed `tests:` never makes
+the manifest "broken": it has nothing to do with what leaves the machine, so a
+typo in a test command cannot stop the wiki pipeline.
+
 ## Per-project privacy policy (bundle.local.yaml)
 
 Every **attributable** source the pipeline reads — JSONL transcripts,
@@ -551,7 +657,10 @@ memory":
 - `collect_plans: false` — the exception, see below.
 
 The same file also holds `project_map` / `known_projects` (moved out of
-`cron/hooks/utils.py` so they survive a reinstall). Preview exactly what
+`cron/hooks/utils.py` so they survive a reinstall), and two keys that are
+not policy: `projects_root` and `tests` — the
+[test contract](#the-test-sweep-and-the-test-contract), whose errors are
+reported by the sweep and never deny a project. Preview exactly what
 each source would send, per project, without spending a token or hitting
 the network:
 
@@ -571,7 +680,8 @@ and reported as an ERROR by every run and by `bundle-status.py`. A key within
 two edits of a known one — `skip_project:` for `skip_projects:` — is taken for
 that key misspelled, so the manifest counts as broken and every project is
 denied until it is fixed: a typo must not silently allow what you meant to
-exclude. `scripts/self-test.ps1` validates the same schema against both the
+exclude. A near miss of `tests` is the exception — it allows nothing, so it is
+reported and ignored. `scripts/self-test.ps1` validates the same schema against both the
 template and your deployed manifest, and fails on such a near miss. Entries in
 `allow_projects` / `skip_projects` are compared as normalized project names —
 the slugs the wiki's project folders carry — on both sides.

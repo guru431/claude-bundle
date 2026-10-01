@@ -76,7 +76,9 @@ claude-bundle/
 │       │                                credential table for every detector),
 │       │                                dotenv.sh (one .env parser for the shell tasks),
 │       │                                runtime.sh (which python / bash the shell tasks run),
-│       │                                env_names.py (the .env template's names, generated)
+│       │                                env_names.py (the .env template's names, generated),
+│       │                                run-pester.ps1 (Pester with a per-file timeout,
+│       │                                for a `pester` suite of the test contract)
 │       ├── hooks/session-{start,end}.py  inject wiki context / dump session
 │       ├── hooks/pre-compact.py        LLM-summarized handoff before compaction
 │       ├── hooks/precompact-handoff.py background handoff writer (spawned by pre-compact)
@@ -198,8 +200,10 @@ overnight reboots).
 A **nightly test sweep** (`cron/test-sweep.py`, off by default) stands in
 for the CI local projects never get: it runs every project's fast suite,
 files a finding in that project's `FINDINGS.md` when one turns red, and
-alerts once per change of state rather than every night. No LLM is
-involved. See [the test policy](home-claude/CLAUDE.md#test-policy-all-projects)
+alerts once per change of state rather than every night. A project can
+declare its suites — any runner, three levels, a time budget — under
+`tests:` in `bundle.local.yaml`; one without that entry gets its pytest
+suite discovered. No LLM is involved. See [the test policy](home-claude/CLAUDE.md#test-policy-all-projects)
 for the rules the suites themselves are held to.
 
 LLM calls go through `utils.py::llm_call()` with a configurable fallback

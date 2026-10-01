@@ -697,6 +697,49 @@ def test_an_unrelated_unknown_manifest_key_is_reported_not_denied(bundle_tree: P
     assert "ERRORS:" in utils.config_report()
 
 
+# ── `tests:` is the test sweep's, and never part of the privacy policy ─────
+
+def test_tests_contract_is_keyed_by_normalized_project_name(bundle_tree: Path, monkeypatch):
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(
+        "tests:\n  My-App:\n    - name: main\n", encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    contracts, errors = utils.tests_contract()
+    assert errors == []
+    assert contracts == {utils.normalize_project_name("My-App"): [{"name": "main"}]}
+
+
+@pytest.mark.parametrize("manifest, fragment", [
+    ("tests:\n  - myapp\n", "must be a mapping"),
+    ("tests:\n  myapp: []\n  MyApp: []\n", "are the same project"),
+    ("tests:\n  1: []\n", "not a usable project name"),
+])
+def test_a_malformed_tests_value_is_a_contract_error_not_a_denial(
+        bundle_tree: Path, monkeypatch, manifest: str, fragment: str):
+    """The privacy gate fails closed on a malformed policy field. `tests:` is
+    not one: a typo in a test command must not stop the wiki pipeline."""
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(
+        manifest + "skip_projects:\n  - secret\n", encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    contracts, errors = utils.tests_contract()
+    assert contracts == {} and fragment in " ".join(errors), errors
+    assert utils.manifest_broken() is False
+    assert utils.project_allowed("anything") is True
+    assert utils.project_allowed("secret") is False, "the policy itself still applies"
+
+
+def test_a_near_miss_of_tests_is_reported_not_denied(bundle_tree: Path, monkeypatch):
+    """`test:` within two edits of `tests` — but it allows nothing, so it
+    cannot be the fail-open the near-miss rule exists for."""
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text("test:\n  myapp: []\n", encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.manifest_broken() is False
+    assert any("near miss of 'tests'" in e for e in utils.config_errors())
+    assert utils.tests_contract() == ({}, [])
+
+
 # ── the privacy gate speaks ONE namespace: the normalized project name ─────
 
 @pytest.mark.parametrize("policy,raw", [

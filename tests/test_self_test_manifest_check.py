@@ -52,6 +52,13 @@ def test_an_unrelated_unknown_key_only_warns(tmp_path: Path):
     assert "unknown key(s): 1, notes_for_me" in r.stdout
 
 
+def test_a_near_miss_of_tests_only_warns(tmp_path: Path):
+    """The runtime does not deny on it either: `tests` is not a policy field."""
+    r = _check(tmp_path, "test:\n  myapp: []\ntests: {}\n")
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert "unknown key(s): test" in r.stdout
+
+
 def test_the_shipped_template_passes(tmp_path: Path):
     template = (ROOT / "config" / "bundle.local.example.yaml").read_text(encoding="utf-8")
     r = _check(tmp_path, template)

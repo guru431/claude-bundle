@@ -6,9 +6,30 @@ remembers them. In the meta-repo this was written for, a suite stayed red for
 two days and it was noticed by accident. The sweep closes exactly that gap:
 a machine finds the red, not a person.
 
+What to run is the project's TEST CONTRACT when it has one: its entry under
+`tests:` in bundle.local.yaml — a list of suites, each with a runner, the
+commands of its three levels and a time budget (validated by load_contract;
+format in docs/cron-architecture.md § "The test contract"). A project without
+one gets the original behaviour unchanged: pytest suites found by discovery.
+
 Modes:
-  (default)  the fast suite — whatever a project runs on a bare `pytest`
-  --full     plus `integration` (weekly): `-m "not manual"` overrides addopts
+  (default)  the fast level — a contract suite's `fast` command; for a
+             discovered suite whatever a project runs on a bare `pytest`
+  --full     the full level (weekly) — a contract suite's `full` command; for a
+             discovered suite plus `integration`: `-m "not manual"` overrides
+             addopts
+
+A contract suite's result is read per runner (parse_result): pytest, Bash
+(`TESTS_RESULT` marker), `dotnet test`, Pester (cron/lib/run-pester.ps1),
+vitest/jest; any other output — the return code only. A hang the runner
+reports (pytest-timeout, dotnet's blame-hang, the `TESTS_TIMEOUT` marker) is
+`timeout`, naming the test. A green `fast` slower than its `budget_s` two nights
+in a row files ONE P3 "over budget" finding with the five slowest parts, closed
+again once the suite is back within budget. The full level has its own state
+key (`<suite>@full`) and finding title, so a fast run, which does not run the
+integration tests, cannot close a full-level finding. A contract the sweep
+cannot use files ONE finding in the bundle's own FINDINGS.md, and the project
+falls back to discovery until it is fixed.
 
 The alert fires on a CHANGE of state (green → red/error/timeout), not on every
 red run: otherwise one unfixed failure sends a Telegram message every day and
@@ -29,21 +50,22 @@ ClaudeAgentsMdSyncCheck uses). Without it the task no-ops.
 
 Logs:  cron/logs/test-sweep_<date>.log
 State: cron/state/test-sweep.json (last status per suite)
-Exit:  1 if anything is red or the run environment was broken — the task
-       monitor sees the non-zero code.
+Exit:  1 if anything is red, the run environment was broken or the test
+       contract has errors — the task monitor sees the non-zero code.
 """
 
 # Declared I/O for scripts/check-io-matrix.py, which fails when this line and
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a masked summary of which suites broke -> Telegram Bot API money=no writes=FINDINGS.md of each affected project, DELETES the %TEMP%/sweep-run-<pid> trees of dead sweeps and KILLS abandoned pytest processes
+# bundle-io: offbox=a masked summary of which suites broke -> Telegram Bot API money=no writes=FINDINGS.md of each affected project and the bundle's own FINDINGS.md (test-contract errors), RUNS the test commands declared under `tests:` in bundle.local.yaml, DELETES the %TEMP%/sweep-run-<pid> trees of dead sweeps and KILLS abandoned pytest processes
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -66,9 +88,11 @@ sys.path.insert(0, str(CRON_DIR / "hooks"))
 # header is non-standard. The helpers below only build the TEXT of a finding;
 # the file handling is utils'.
 from utils import (PROJECTS_ROOT, _env_bool, _env_int,  # noqa: E402
-                   append_finding as file_finding,
+                   append_bundle_finding, append_finding as file_finding,
                    atomic_write_text, close_finding as drop_finding,
-                   find_bash, finding_is_open, mask_secrets)
+                   find_bash, finding_is_open, mask_secrets,
+                   normalize_project_name, tests_contract)
+import utils as bundle_utils  # noqa: E402  (BUNDLE_ROOT read at call time)
 
 sys.path.insert(0, str(CRON_DIR))
 from runs import terminal_record  # noqa: E402
@@ -130,8 +154,44 @@ CRASH = "crash"
 ALERTING = {"failed", "error", "interrupted", "usage", "timeout", CRASH}
 NEUTRAL = {"no-tests", "no-pytest", "env"}
 # Statuses that mean "the suite really is healthy" — used for the green marker
-# and for closing a finding that this sweep filed earlier.
-RECOVERED = {"ok"}
+# and for closing a finding that this sweep filed earlier. `over-budget` (a
+# contract suite that passed, only slower than its budget) is healthy tests: the
+# finding it earns is about time, filed separately (track_budget).
+RECOVERED = {"ok", "over-budget"}
+
+# ── the test contract (`tests:` in bundle.local.yaml) ────────────────────────
+RUNNERS = ("pytest", "bash", "dotnet", "pester", "js")
+# Every key is required and no other is accepted: an extra key is almost always
+# a typo (`budjet_s`), and a typo'd budget is a budget that silently does nothing.
+SUITE_KEYS = ("name", "cwd", "runner", "targeted", "fast", "full", "budget_s")
+_SUITE_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
+# The over-budget finding waits for the SECOND night in a row: one night is
+# noise (a neighbour task, a cold disk), and a finding per outlier would turn
+# FINDINGS.md into a diary.
+BUDGET_NIGHTS = 2
+CONTRACT_STATE_KEY = "__contract__"
+CONTRACT_FINDING = "Test contract: errors in bundle.local.yaml `tests:`"
+
+# Markers printed by runners and wrappers that are not pytest — a project's own
+# Bash runner, cron/lib/run-pester.ps1. One per line, from the start of the line.
+_RESULT_MARK = re.compile(r"^TESTS_RESULT pass=(\d+) fail=(\d+) skip=(\d+)\s*$", re.M)
+_TIMEOUT_MARK = re.compile(r"^TESTS_TIMEOUT\s+(.+?)\s*$", re.M)
+_ENV_MARK = re.compile(r"^TESTS_ENV\s+(.+?)\s*$", re.M)
+_DURATION_MARK = re.compile(r"^TESTS_DURATION\s+(\d+(?:\.\d+)?)s\s+(.+?)\s*$", re.M)
+_PYTEST_DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)s\s+(call|setup|teardown)\s+(\S.*?)\s*$", re.M)
+# pytest-timeout: the `thread` method (the only one on Windows) dumps the stacks
+# and then ends the WHOLE process — no summary line, exit 1, like a plain failure.
+_PYTEST_HANG = re.compile(r"^\++ Timeout \++\s*$|Failed: Timeout >", re.M)
+_TEST_FRAME = re.compile(r'File "([^"]+)", line (\d+), in (test\w*)')
+_NO_PYTEST = re.compile(r"No module named '?pytest'?\s*$", re.M)
+_DOTNET = re.compile(r"(?:Passed|Failed)!\s+-\s+Failed:\s+(\d+),\s+Passed:\s+(\d+),\s+Skipped:\s+(\d+)")
+# `--blame-hang-timeout`: vstest kills the hung testhost and still prints
+# `Passed!` for the tests that finished — the hang shows only in these lines.
+_DOTNET_HANG = re.compile(r"inactivity time of \d+ \w+ has elapsed|^Test Run Aborted\.", re.M)
+_PESTER = re.compile(r"Tests Passed: (\d+), Failed: (\d+), Skipped: (\d+)")
+# vitest: " Tests  1 failed | 12 passed (13)"; jest: "Tests:       1 failed, 12 passed, 13 total".
+_JS_TESTS = re.compile(r"^\s*Tests:?\s+(.*\d.*)$", re.M)
+_JS_COUNT = re.compile(r"(\d+) (passed|failed|skipped|todo)")
 
 
 def log(msg: str) -> None:
@@ -497,20 +557,12 @@ def child_env() -> dict:
     return env
 
 
-def run_suite(suite: Path, key: str, full: bool) -> dict:
-    interpreter = interpreter_for(suite)
-    if not has_pytest(interpreter):
-        return {"status": "no-pytest", "seconds": 0.0, "tail": "",
-                "note": f"pytest is not installed for {interpreter} — suite not run"}
-    basetemp, temp_note = ensure_basetemp(basetemp_for(key))
-    cmd = [interpreter, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-           "--durations=5", "--basetemp", str(basetemp)]
-    if full:
-        # Overrides the default `-m 'not integration and not manual'` from
-        # addopts: the CLI argument comes last and wins.
-        cmd += ["-m", "not manual"]
-    timeout = TIMEOUT_FULL if full else TIMEOUT_FAST
-    started = time.time()
+def _spawn(cmd: list[str], cwd: Path, timeout: int, env: dict,
+           **extra) -> tuple[int | None, str, str]:
+    """Run one suite; a return code of None means it was killed on timeout.
+
+    OSError (the interpreter or the directory vanished) goes to the caller.
+    """
     # A private process group per suite. Without it a grandchild that broadcasts
     # `GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)` kills the WHOLE console —
     # including the sweep: one sweep died twice in a day with 0xC000013A
@@ -522,17 +574,12 @@ def run_suite(suite: Path, key: str, full: bool) -> dict:
     # its own, `os.killpg(os.getpgid(pid))` would kill the sweep's own group.
     group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
              else {"start_new_session": True})
-    try:
-        proc = subprocess.Popen(cmd, cwd=str(suite), stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, env=child_env(), **group)
-    except OSError as exc:                      # interpreter or directory vanished
-        return {"status": "error", "seconds": round(time.time() - started, 1),
-                "tail": mask_secrets(str(exc)), "note": temp_note}
+    proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=env, **group, **extra)
     try:
         out_b, err_b = proc.communicate(timeout=timeout)
-        status = EXIT_STATUS.get(proc.returncode, CRASH)
-        out = (out_b or b"").decode("utf-8", errors="replace")
-        err = (err_b or b"").decode("utf-8", errors="replace")
+        return (proc.returncode, (out_b or b"").decode("utf-8", errors="replace"),
+                (err_b or b"").decode("utf-8", errors="replace"))
     except subprocess.TimeoutExpired:
         kill_tree(proc.pid)
         # Drain after the kill: otherwise a pipe pair is left open and the tail
@@ -541,9 +588,31 @@ def run_suite(suite: Path, key: str, full: bool) -> dict:
             out_b, err_b = proc.communicate(timeout=60)
         except subprocess.TimeoutExpired:
             out_b, err_b = b"", b""
-        out = (out_b or b"").decode("utf-8", errors="replace")
-        err = f"timeout after {timeout}s\n" + (err_b or b"").decode("utf-8", errors="replace")
-        status = "timeout"
+        return (None, (out_b or b"").decode("utf-8", errors="replace"),
+                f"timeout after {timeout}s\n" + (err_b or b"").decode("utf-8", errors="replace"))
+
+
+def run_suite(suite: Path, key: str, full: bool) -> dict:
+    """A suite found by discovery — a project without a test contract."""
+    interpreter = interpreter_for(suite)
+    if not has_pytest(interpreter):
+        return {"status": "no-pytest", "seconds": 0.0, "tail": "",
+                "note": f"pytest is not installed for {interpreter} — suite not run"}
+    basetemp, temp_note = ensure_basetemp(basetemp_for(key))
+    cmd = [interpreter, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+           "--durations=5", "--basetemp", str(basetemp)]
+    if full:
+        # Overrides the default `-m 'not integration and not manual'` from
+        # addopts: the CLI argument comes last and wins.
+        cmd += ["-m", "not manual"]
+    started = time.time()
+    try:
+        rc, out, err = _spawn(cmd, suite, TIMEOUT_FULL if full else TIMEOUT_FAST,
+                              child_env())
+    except OSError as exc:                      # interpreter or directory vanished
+        return {"status": "error", "seconds": round(time.time() - started, 1),
+                "tail": mask_secrets(str(exc)), "note": temp_note}
+    status = "timeout" if rc is None else EXIT_STATUS.get(rc, CRASH)
     # Classified on the FULL output, not the tail: the line about an unavailable
     # basetemp sits in the traceback of the very first test, while the last 12
     # lines hold only a `147 passed, 42 errors` summary — which cannot tell a
@@ -567,6 +636,239 @@ def summary_line(text: str) -> str:
     return ""
 
 
+# ── reading a contract suite's result, per runner ────────────────────────────
+
+def _counts(runner: str, text: str) -> tuple[int, int, int] | None:
+    """(passed, failed, skipped) out of a runner's output; None — not recognised.
+
+    The `TESTS_RESULT` marker wins over any runner's own summary: a wrapper that
+    prints it (run-pester.ps1, a project's Bash runner) knows better than the
+    lines it passed through.
+    """
+    marks = _RESULT_MARK.findall(text)
+    if marks:
+        p, f, s = marks[-1]
+        return int(p), int(f), int(s)
+    if runner == "dotnet":
+        rows = _DOTNET.findall(text)            # one line per test assembly
+        if rows:
+            return (sum(int(r[1]) for r in rows), sum(int(r[0]) for r in rows),
+                    sum(int(r[2]) for r in rows))
+    elif runner == "pester":
+        rows = _PESTER.findall(text)
+        if rows:
+            p, f, s = rows[-1]
+            return int(p), int(f), int(s)
+    elif runner == "js":
+        rows = _JS_TESTS.findall(text)
+        if rows:
+            found = {kind: int(n) for n, kind in _JS_COUNT.findall(rows[-1])}
+            if found:
+                return (found.get("passed", 0), found.get("failed", 0),
+                        found.get("skipped", 0) + found.get("todo", 0))
+    return None
+
+
+def _hung(runner: str, text: str) -> str | None:
+    """What hung, or None. A non-empty string even when no test is named."""
+    mark = _TIMEOUT_MARK.findall(text)
+    if mark:
+        return mark[-1]
+    if runner == "pytest" and _PYTEST_HANG.search(text):
+        frames = _TEST_FRAME.findall(text)
+        if frames:
+            path, line, func = frames[-1]
+            return f"{Path(path).name}:{line} {func}"
+        return "pytest-timeout (no test name in the stack)"
+    if runner == "dotnet" and _DOTNET_HANG.search(text):
+        m = re.search(r"The test running when the crash occurred:\s*\n\s*(\S+)", text)
+        return m.group(1) if m else "testhost killed by --blame-hang-timeout"
+    return None
+
+
+def parse_result(runner: str, rc: int | None, output: str) -> dict:
+    """A contract suite's status and summary, from its return code and output.
+
+    rc=None — the sweep killed it on timeout. For the runners that are not
+    pytest, failures in the summary beat the return code: a runner that exits 0
+    with `fail=3` is red.
+    """
+    text = output.replace("\r\n", "\n")
+    env = _ENV_MARK.findall(text)
+    if env:
+        return {"status": "env", "summary": env[-1], "note": env[-1], "env_kind": "other"}
+    if rc == 127:                               # bash: the runner was not found
+        note = "command not found (rc=127)"
+        return {"status": "env", "summary": note, "note": note, "env_kind": "other"}
+    if runner == "pytest" and rc == 1 and _NO_PYTEST.search(text):
+        # The same false finding run_suite's has_pytest check prevents: exit 1
+        # from an interpreter without pytest is not a red suite.
+        note = "pytest is not installed for the interpreter the command names"
+        return {"status": "no-pytest", "summary": note, "note": note}
+    counts = _counts(runner, text)
+    hung = _hung(runner, text)
+    if rc is None:
+        status = "timeout"
+    elif runner == "pytest":
+        status = EXIT_STATUS.get(rc, CRASH)
+    else:
+        status = "ok" if rc == 0 and not (counts and counts[1]) else "failed"
+    if hung:
+        status = "timeout"
+    if runner == "pytest":
+        summary = summary_line(text)
+    elif counts:
+        summary = f"{counts[0]} passed, {counts[1]} failed, {counts[2]} skipped"
+    else:
+        lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+        summary = f"rc={rc}" + (f": {lines[-1].strip()[:200]}" if lines else "")
+    return {"status": status, "summary": summary, "counts": counts, "hung": hung}
+
+
+def slowest(output: str, n: int = 5) -> list[str]:
+    """The slowest parts of a suite: pytest's `--durations` and TESTS_DURATION."""
+    text = output.replace("\r\n", "\n")
+    rows = [(float(s), f"{s}s {name} ({phase})")
+            for s, phase, name in _PYTEST_DURATION.findall(text)]
+    rows += [(float(s), f"{s}s {name}") for s, name in _DURATION_MARK.findall(text)]
+    return [label for _, label in sorted(rows, key=lambda r: -r[0])[:n]]
+
+
+# ── the contract ─────────────────────────────────────────────────────────────
+
+def suite_key(project: str, name: str) -> str:
+    """`<project>` for the suite called `main`, else `<project>:<name>`.
+
+    The same keys discovery produces, so a project's state history and its open
+    "Tests are failing" finding survive the move to a contract.
+    """
+    return project if name == "main" else f"{project}:{name}"
+
+
+def load_contract(project: str, raw, root: Path) -> tuple[list[dict], list[str]]:
+    """A project's suites from its `tests:` entry, and what is wrong with it.
+
+    Any error makes the whole entry unusable — the caller then falls back to
+    discovery for this project — rather than running the suites that happen to
+    be valid: half a contract would quietly drop a suite somebody declared.
+    """
+    if not isinstance(raw, list) or not raw:
+        return [], [f"tests.{project}: must be a non-empty list of suites"]
+    suites, errors, seen = [], [], set()
+    try:
+        real_root = root.resolve()
+    except OSError:
+        real_root = root
+    for i, s in enumerate(raw):
+        where = f"tests.{project}[{i}]"
+        if not isinstance(s, dict):
+            errors.append(f"{where}: a suite must be a mapping")
+            continue
+        missing = [k for k in SUITE_KEYS if k not in s]
+        if missing:
+            errors.append(f"{where}: missing key(s) {', '.join(missing)}")
+            continue
+        problems = []
+        unknown = sorted(str(k) for k in set(s) - set(SUITE_KEYS))
+        if unknown:
+            problems.append(f"unknown key(s) {', '.join(unknown)}")
+        name = s["name"]
+        if not isinstance(name, str) or not _SUITE_NAME_RE.fullmatch(name):
+            problems.append(f"name {name!r}: letters, digits and _.- only")
+        elif name in seen:
+            problems.append(f"name {name!r} is used twice")
+        if s["runner"] not in RUNNERS:
+            problems.append(f"runner {s['runner']!r} is not one of {'/'.join(RUNNERS)}")
+        budget = s["budget_s"]
+        if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+            problems.append(f"budget_s {budget!r}: a whole number of seconds > 0")
+        for level in ("fast", "full"):
+            if s[level] is not None and (not isinstance(s[level], str) or not s[level].strip()):
+                problems.append(f"{level}: a command string, or null for no such level")
+        if s["fast"] is None and s["full"] is None:
+            problems.append("fast and full are both null — the suite never runs")
+        if not isinstance(s["targeted"], str) or "{path}" not in s["targeted"]:
+            problems.append("targeted: a command with a {path} placeholder")
+        cwd = s["cwd"]
+        if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).anchor:
+            problems.append(f"cwd {cwd!r}: a directory relative to the project")
+        else:
+            try:
+                target = (root / cwd).resolve()
+                inside = target == real_root or real_root in target.parents
+            except OSError:
+                target, inside = root / cwd, False
+            if not inside:
+                problems.append(f"cwd {cwd!r} leaves the project directory")
+            elif not target.is_dir():
+                problems.append(f"cwd {cwd!r} is not a directory")
+        if problems:
+            errors.append(f"{where} ({name}): " + "; ".join(problems))
+            continue
+        seen.add(name)
+        suites.append({**s, "key": suite_key(project, name), "dir": root / cwd})
+    return ([] if errors else suites), errors
+
+
+def contract_env() -> dict:
+    """The environment a contract command runs in.
+
+    child_env() first — the bundle's own settings and credentials never reach a
+    project's suite. Then a bare `python` in a command means the sweep's own
+    interpreter: a task started before logon has no user PATH, and what `python`
+    would resolve to there is anybody's guess.
+    """
+    env = child_env()
+    py_dir = Path(sys.executable).parent
+    dirs = [str(py_dir)] + ([str(py_dir / "Scripts")] if os.name == "nt" else [])
+    env["PATH"] = os.pathsep.join(dirs + [env.get("PATH", "")])
+    # A test that starts pytest in a subprocess without --basetemp writes into
+    # the shared `pytest-of-<user>`, and a `pytest-current` left there under a
+    # token the user cannot clean up breaks every later pytest of the account.
+    # Nested runs go into this run's tree instead, which the sweep deletes.
+    nested = RUN_ROOT / "nested"
+    nested.mkdir(parents=True, exist_ok=True)
+    env["PYTEST_DEBUG_TEMPROOT"] = str(nested)
+    return env
+
+
+def run_contract(suite: dict, level: str) -> dict:
+    """One level of a contract suite: its command through bash, from its cwd."""
+    started = time.time()
+    bash = find_bash()
+    if not bash:
+        note = "bash not found — a contract command runs through bash (set BASH_EXE)"
+        return {"status": "env", "seconds": 0.0, "tail": "", "note": note,
+                "summary": note, "env_kind": "other"}
+    cmd, basetemp, temp_note = suite[level], None, None
+    if suite["runner"] == "pytest":
+        # Appended, so a pytest command has to END with pytest's own arguments.
+        basetemp, temp_note = ensure_basetemp(basetemp_for(suite["key"]))
+        cmd += (" -p no:cacheprovider --durations=5 --basetemp "
+                + shlex.quote(basetemp.as_posix()))
+    try:
+        rc, out, err = _spawn([bash, "-c", cmd], suite["dir"],
+                              TIMEOUT_FULL if level == "full" else TIMEOUT_FAST,
+                              contract_env(), stdin=subprocess.DEVNULL)
+    except OSError as exc:
+        return {"status": "error", "seconds": round(time.time() - started, 1),
+                "tail": mask_secrets(str(exc)), "note": temp_note}
+    text = out + err
+    parsed = parse_result(suite["runner"], rc, text)
+    status, note, env_kind = parsed["status"], parsed.get("note") or temp_note, parsed.get("env_kind")
+    if basetemp is not None and status == "failed" and is_env_failure(text, basetemp):
+        status, env_kind = "env", "basetemp"
+        note = note or f"{basetemp.name} was unavailable during cleanup — run is unreliable"
+    return {"status": status, "seconds": round(time.time() - started, 1),
+            "tail": mask_secrets("\n".join(text.replace("\r\n", "\n").strip().splitlines()[-12:])),
+            "note": note, "summary": parsed["summary"], "slowest": slowest(text),
+            "hung": parsed.get("hung"), "env_kind": env_kind}
+
+
+def _summary(res: dict) -> str:
+    return res.get("summary") or summary_line(res.get("tail") or "")
+
+
 def finding_marker(suite: str) -> str:
     """The signature this sweep stamps into the Context of every finding it files.
 
@@ -576,22 +878,28 @@ def finding_marker(suite: str) -> str:
     return f"auto-cron `ClaudeTestSweep`, `{suite}`,"
 
 
-def finding_title(suite: str) -> str:
+def finding_title(suite: str, full: bool = False) -> str:
     """The title utils.append_finding / close_finding key this sweep's entry on.
 
     One title per suite, so a transition between two red statuses (failed →
     timeout → failed) cannot pile up a second entry about the same broken suite,
     and a recovery closes exactly the entry the sweep filed.
+
+    A contract suite's full level has a title of its own (`full=True`): the
+    close matches the title exactly, and a shared one handed the weekly run's
+    finding to the next daily run, which does not even run the integration
+    tests. A discovered suite keeps its one title for both modes, as it always
+    had.
     """
-    return f"Tests are failing: {suite}"
+    return f"Tests are failing{' (full)' if full else ''}: {suite}"
 
 
-def has_open_finding(project_dir: Path, suite: str) -> bool:
+def has_open_finding(project_dir: Path, suite: str, full: bool = False) -> bool:
     """True when this sweep already has an open entry for this suite."""
-    return finding_is_open(project_dir / "FINDINGS.md", finding_title(suite))
+    return finding_is_open(project_dir / "FINDINGS.md", finding_title(suite, full))
 
 
-def close_finding(project_dir: Path, suite: str) -> bool:
+def close_finding(project_dir: Path, suite: str, full: bool = False) -> bool:
     """Delete this sweep's entry for a suite that has gone green again.
 
     FINDINGS.md holds `open` entries and nothing else (CLAUDE.md § Findings),
@@ -600,20 +908,161 @@ def close_finding(project_dir: Path, suite: str) -> bool:
     a permanent record of problems that no longer exist. Deleting is the
     documented close for a DONE finding — the trail stays in git log.
     """
-    return drop_finding(project_dir / "FINDINGS.md", finding_title(suite))
+    return drop_finding(project_dir / "FINDINGS.md", finding_title(suite, full))
 
 
-def append_finding(project_dir: Path, project: str, suite: str, res: dict) -> bool:
+def append_finding(project_dir: Path, project: str, suite: str, res: dict,
+                   full: bool = False, contract: bool = False) -> bool:
     """File ONE finding about a broken suite. True if it was written."""
-    detail = summary_line(res["tail"]) or res["status"]
+    if not contract:
+        detail = summary_line(res["tail"]) or res["status"]
+        return file_finding(
+            project_dir / "FINDINGS.md",
+            finding_title(suite),
+            f"{finding_marker(suite)} status `{res['status']}`, {res['seconds']}s",
+            f"the run returned: {detail}",
+            "reproduce with `pytest -q` in that directory and fix it, or mark the "
+            "test `integration`/`manual` if it needs an external environment",
+            priority="P2", project=project)
+    level = "full" if full else "fast"
+    cron = "ClaudeTestSweepFull" if full else "ClaudeTestSweep"
+    detail = _summary(res) or res["status"]
+    if res["status"] == "timeout":
+        what = (f"the suite hung: {res.get('hung') or detail}. The tail of its output, "
+                f"stack included, is in cron/logs/test-sweep_{DATE}.log")
+        proposal = ("find in the stack what the test waits for (network, a service, a "
+                    "subprocess, a lock) and fix it, or mark it `integration` by "
+                    "measurement. A per-test time limit (pytest-timeout `timeout = 30`, "
+                    "a per-file timeout for the other runners) should fail such a test "
+                    "in seconds instead of holding the run")
+    else:
+        what = f"the run returned: {detail}"
+        proposal = (f"reproduce with the suite's `{level}` command from its test contract "
+                    f"(`tests:` in bundle.local.yaml) and fix it, or mark the test "
+                    f"`integration`/`manual` if it needs an external environment")
     return file_finding(
-        project_dir / "FINDINGS.md",
-        finding_title(suite),
-        f"{finding_marker(suite)} status `{res['status']}`, {res['seconds']}s",
-        f"the run returned: {detail}",
-        "reproduce with `pytest -q` in that directory and fix it, or mark the "
-        "test `integration`/`manual` if it needs an external environment",
-        priority="P2", project=project)
+        project_dir / "FINDINGS.md", finding_title(suite, full),
+        f"auto-cron `{cron}`, `{suite}`, level `{level}`, status `{res['status']}`, "
+        f"{res['seconds']}s",
+        what, proposal, priority="P2", project=project)
+
+
+def budget_title(suite: str) -> str:
+    return f"Tests over budget: {suite}"
+
+
+def append_budget_finding(project_dir: Path, project: str, suite: str, res: dict,
+                          budget_s: int, nights: int) -> bool:
+    """`fast` slower than its budget `nights` nights in a row — P3, with culprits."""
+    slow = res.get("slowest") or []
+    culprits = "; ".join(f"`{s}`" for s in slow) if slow else (
+        "the runner prints no per-part times (`--durations` for pytest, "
+        "`TESTS_DURATION <seconds>s <name>` lines for a wrapper)")
+    return file_finding(
+        project_dir / "FINDINGS.md", budget_title(suite),
+        f"auto-cron `ClaudeTestSweep`, `{suite}`: level `fast` took {res['seconds']}s "
+        f"against a budget of {budget_s}s, {nights} nights in a row",
+        f"the slowest parts: {culprits}",
+        "speed up the tests over 1s or mark them `integration` by measurement "
+        "(test policy); do not raise the budget. This entry closes itself once the "
+        "suite is back within budget",
+        priority="P3", project=project)
+
+
+def track_budget(root: Path, project: str, key: str, res: dict, prev: dict,
+                 budget_s: int) -> dict:
+    """Nights over budget in a row and the finding about them → state fields.
+
+    `failed`/`timeout`/`env` say nothing about how long the suite takes: such a
+    night neither counts towards the streak nor resets it.
+    """
+    nights = prev.get("over_nights", 0)
+    has_finding = prev.get("budget_finding", False)
+    findings = root / "FINDINGS.md"
+    if res["status"] == "over-budget":
+        nights += 1
+        if nights >= BUDGET_NIGHTS and not has_finding:
+            # utils returns False both for "already open" and for "could not
+            # write"; only the first may stop the next night from trying again.
+            if append_budget_finding(root, project, key, res, budget_s, nights):
+                log(f"     over budget {nights} nights in a row — finding filed in "
+                    f"{project}/FINDINGS.md")
+            has_finding = finding_is_open(findings, budget_title(key))
+            if not has_finding:
+                log(f"     over-budget finding NOT written to {project}/FINDINGS.md")
+    elif res["status"] in ("ok", "no-tests"):
+        nights = 0
+        if has_finding:
+            if drop_finding(findings, budget_title(key)):
+                log(f"     back within budget — closed the finding in {project}/FINDINGS.md")
+            has_finding = finding_is_open(findings, budget_title(key))
+    fields = {}
+    if nights:
+        fields["over_nights"] = nights
+    if has_finding:
+        fields["budget_finding"] = True
+    return fields
+
+
+def update_contract_finding(errors: list[str], state: dict) -> None:
+    """Contract errors → ONE finding in the bundle's FINDINGS.md; fixed → closed.
+
+    Rewritten only when the SET of errors changes: otherwise the entry would get
+    a new date every night and never age for the monthly review.
+    """
+    sig = sorted(set(errors))
+    prev = (state.get(CONTRACT_STATE_KEY) or {}).get("errors", [])
+    if sig == prev:
+        return
+    target = bundle_utils.BUNDLE_ROOT / "FINDINGS.md"
+    drop_finding(target, CONTRACT_FINDING)
+    if not sig:
+        log("test contract errors fixed — the finding in the bundle's FINDINGS.md is closed")
+        state.pop(CONTRACT_STATE_KEY, None)
+        return
+    listed = "; ".join(f"`{e}`" for e in sig[:20]) + (" …" if len(sig) > 20 else "")
+    if not append_bundle_finding(
+            CONTRACT_FINDING,
+            "auto-cron `ClaudeTestSweep`, validating `tests:` in bundle.local.yaml",
+            f"{len(sig)} error(s); those projects fall back to pytest discovery "
+            f"until fixed: {listed}",
+            "fix the entries (format: docs/cron-architecture.md § \"The test "
+            "contract\"); the next run closes this finding",
+            priority="P2"):
+        log(f"test contract finding NOT written to {target}")
+        return
+    log(f"test contract: {len(sig)} error(s) — finding filed in {target}")
+    state[CONTRACT_STATE_KEY] = {"errors": sig, "date": DATE}
+
+
+def plan_suites(projects: list[Path], contracts: dict,
+                contract_errors: list[str]) -> list[tuple[str, Path, dict]]:
+    """(project, root, suite) for every project; contract errors are appended.
+
+    A suite is either a contract suite (validated) or `{"auto": True}` — a
+    pytest suite discovery found, run exactly as before the contract existed.
+    """
+    planned = []
+    for root in projects:
+        name = root.name
+        if name in SKIP_PROJECTS:
+            continue
+        raw = contracts.get(normalize_project_name(name))
+        if raw is not None:
+            suites, errors = load_contract(name, raw, root)
+            contract_errors += errors
+            if suites:
+                planned += [(name, root, s) for s in suites]
+                continue
+            log(f"--- {name}: the test contract is not usable — pytest discovery instead")
+        try:
+            found = find_suites(root)
+        except OSError as exc:                  # project directory unreadable
+            log(f"--- {name}: not read ({exc})")
+            continue
+        planned += [(name, root, {"key": f"{name}:{d.name}" if d != root else name,
+                                  "dir": d, "auto": True}) for d in found]
+    return planned
 
 
 def send_telegram(text: str) -> None:
@@ -676,19 +1125,37 @@ def _sweep(args, rec: dict) -> int:
         log(f"projects_root does not exist: {PROJECTS_ROOT} — nothing to sweep")
         return done(0, None, f"projects_root missing: {PROJECTS_ROOT}")
 
-    projects = [p for p in sorted(PROJECTS_ROOT.iterdir())
-                if p.is_dir() and not p.name.startswith(".")]
+    all_projects = [p for p in sorted(PROJECTS_ROOT.iterdir())
+                    if p.is_dir() and not p.name.startswith(".")]
+    projects = all_projects
     if args.project:
         projects = [p for p in projects if p.name == args.project]
         if not projects:
             log(f"project {args.project} not found under {PROJECTS_ROOT}")
             return done(4, None, f"project {args.project} not found")
 
+    level = "full" if args.full else "fast"
+    contracts, contract_errors = tests_contract()
+    planned = plan_suites(projects, contracts, contract_errors)
+    if not args.project:
+        # A contract for a directory that is not there is a typo'd project name,
+        # and a typo'd name is a contract that silently never runs.
+        present = {normalize_project_name(p.name) for p in all_projects}
+        contract_errors += [f"tests.{k}: no such project under projects_root"
+                            for k in sorted(set(contracts) - present)]
+    for err in contract_errors:
+        log(f"CONTRACT: {err}")
+    auto_keys = {s["key"] for _, _, s in planned if s.get("auto")}
+
     if not args.dry_run:
         for entry in reap_orphan_pytest():
             log(f"reaped an abandoned pytest ({entry})")
 
-    state, results, changed, recovered = load_state(), {}, [], []
+    state, results, changed, recovered, env_changed = load_state(), {}, [], [], []
+    # A partial run (--project) sees one project's contract only — it must not
+    # close the finding about the others.
+    if not args.dry_run and not args.project:
+        update_contract_finding(contract_errors, state)
 
     def carry_fast(key: str, res: dict) -> dict:
         """`fast_seconds` for this suite's state entry.
@@ -709,91 +1176,113 @@ def _sweep(args, rec: dict) -> int:
     # long night lost every result, including the red ones.
     deadline = time.time() + RUN_BUDGET_SECONDS
     skipped_for_time: list[str] = []
-    for root in projects:
-        name = root.name
-        if name in SKIP_PROJECTS:
+    for name, root, suite in planned:
+        key, auto = suite["key"], bool(suite.get("auto"))
+        if args.dry_run:
+            if auto:
+                log(f"{key}: {suite['dir']} ({interpreter_for(suite['dir'])})")
+            else:
+                log(f"{key} [{suite['runner']}]: {suite[level] or f'no {level} level'}")
             continue
-        try:
-            suites = find_suites(root)
-        except OSError as exc:                  # project directory unreadable
-            log(f"--- {name}: not read ({exc})")
+        if not auto and suite[level] is None:
+            continue                            # the suite has no such level
+        if time.time() >= deadline:
+            skipped_for_time.append(key)
             continue
-        for suite in suites:
-            key = f"{name}:{suite.name}" if suite != root else name
-            if args.dry_run:
-                log(f"{key}: {suite} ({interpreter_for(suite)})")
-                continue
-            if time.time() >= deadline:
-                skipped_for_time.append(key)
-                continue
-            res = run_suite(suite, key, args.full)
-            results[key] = res
-            mark = {"ok": "OK ", "no-tests": "N/A", "no-pytest": "N/A",
-                    "env": "ENV"}.get(res["status"], "RED")
-            log(f"{mark} {key}: {res['status']} in {res['seconds']}s "
-                f"— {summary_line(res['tail'])}")
-            if res.get("note"):
-                log(f"     environment: {res['note']}")
-            if res["status"] in ALERTING:
-                # The FAILED/ERROR lines specifically, not the last line of the
-                # tail: that one holds `1 failed, 259 passed`, which does not say
-                # WHICH test failed, so triage starts with a blind re-run.
-                named = [ln for ln in res["tail"].splitlines()
-                         if ln.startswith(("FAILED", "ERROR"))][:5]
-                for line in named or res["tail"].splitlines()[-1:]:
-                    log(f"     {line}")
-            previous = (state.get(key) or {}).get("status")
-            # Neither a finding nor an alert must take the whole sweep down:
-            # FINDINGS.md can be open, just deleted, or on an unreachable share —
-            # and then the remaining projects would simply never run.
-            if res["status"] in ALERTING and previous != res["status"]:
-                # Only ONE open entry per suite. Every transition between two
-                # red statuses (failed → timeout → failed) passes the change
-                # filter, and each used to append another entry about the same
-                # broken suite.
-                try:
-                    if has_open_finding(root, key):
-                        log(f"     finding already open for {key} — not filing a duplicate")
-                    else:
-                        # The alert goes out even when the entry could not be
-                        # written (utils reports that by returning False rather
-                        # than raising): the finding is the record, the alert is
-                        # the notification, and losing both to an unwritable
-                        # share is how a red suite stays unnoticed.
-                        if not append_finding(root, name, key, res):
-                            log(f"     finding NOT written to {name}/FINDINGS.md "
-                                f"— alerting anyway")
-                        changed.append((key, res))
-                except OSError as exc:
-                    log(f"     finding not written to {name}/FINDINGS.md: {exc}")
+        res = run_suite(suite["dir"], key, args.full) if auto else run_contract(suite, level)
+        if (not auto and not args.full and res["status"] == "ok"
+                and res["seconds"] > suite["budget_s"]):
+            res["status"] = "over-budget"
+        results[key] = res
+        # The full level of a contract suite keeps a state entry and a finding
+        # of its own: the daily fast run does not run the integration tests, so
+        # its green must not close what the weekly run found. A discovered
+        # suite keeps the one entry it always had.
+        full_level = args.full and not auto
+        skey = f"{key}@full" if full_level else key
+        mark = {"ok": "OK ", "over-budget": "OK ", "no-tests": "N/A", "no-pytest": "N/A",
+                "env": "ENV"}.get(res["status"], "RED")
+        log(f"{mark} {key}: {res['status']} in {res['seconds']}s "
+            f"— {_summary(res)}")
+        if res["status"] == "over-budget":
+            log(f"     budget {suite['budget_s']}s; slowest: "
+                f"{'; '.join(res.get('slowest') or []) or '—'}")
+        if res.get("note"):
+            log(f"     environment: {res['note']}")
+        if res["status"] in ALERTING:
+            if res.get("hung"):
+                log(f"     hung: {res['hung']}")
+            # The FAILED/ERROR lines specifically, not the last line of the
+            # tail: that one holds `1 failed, 259 passed`, which does not say
+            # WHICH test failed, so triage starts with a blind re-run.
+            named = [ln for ln in res["tail"].splitlines()
+                     if ln.startswith(("FAILED", "ERROR"))][:5]
+            for line in named or res["tail"].splitlines()[-1:]:
+                log(f"     {line}")
+        prev_entry = state.get(skey) or {}
+        previous = prev_entry.get("status")
+        # Neither a finding nor an alert must take the whole sweep down:
+        # FINDINGS.md can be open, just deleted, or on an unreachable share —
+        # and then the remaining projects would simply never run.
+        if res["status"] in ALERTING and previous != res["status"]:
+            # Only ONE open entry per suite. Every transition between two
+            # red statuses (failed → timeout → failed) passes the change
+            # filter, and each used to append another entry about the same
+            # broken suite.
+            try:
+                if has_open_finding(root, key, full_level):
+                    log(f"     finding already open for {key} — not filing a duplicate")
+                else:
+                    # The alert goes out even when the entry could not be
+                    # written (utils reports that by returning False rather
+                    # than raising): the finding is the record, the alert is
+                    # the notification, and losing both to an unwritable
+                    # share is how a red suite stays unnoticed.
+                    if not append_finding(root, name, key, res, full=full_level,
+                                          contract=not auto):
+                        log(f"     finding NOT written to {name}/FINDINGS.md "
+                            f"— alerting anyway")
                     changed.append((key, res))
-            elif res["status"] in RECOVERED and previous in ALERTING:
-                # Red → green. Nothing reported this before: Telegram stayed
-                # silent, so nobody learned the fix had worked, and the entry
-                # this sweep filed stayed open forever in a file whose whole
-                # contract is "open entries only".
-                recovered.append((key, res, previous))
-                try:
-                    if close_finding(root, key):
-                        log(f"     recovered — closed the finding in {name}/FINDINGS.md")
-                except OSError as exc:
-                    log(f"     finding not closed in {name}/FINDINGS.md: {exc}")
-            if res["status"] in NEUTRAL and previous in ALERTING:
-                # A suite that WAS red and now cannot be run at all — or not
-                # reliably — is not a recovery: the previous status is kept so
-                # the finding stays open, and the reason is named in the log
-                # rather than being announced as good news.
-                log(f"     {res['status']} — this run says nothing about the tests, so "
-                    f"the earlier '{previous}' stands; the finding stays open")
-                state[key] = {"status": previous, "seconds": res["seconds"],
-                              "date": DATE, "blocked_by": res["status"],
-                              **carry_fast(key, res)}
-                continue
-            state[key] = {"status": res["status"], "seconds": res["seconds"],
-                          "date": DATE, **carry_fast(key, res)}
+            except OSError as exc:
+                log(f"     finding not written to {name}/FINDINGS.md: {exc}")
+                changed.append((key, res))
+        elif res["status"] in RECOVERED and previous in ALERTING:
+            # Red → green. Nothing reported this before: Telegram stayed
+            # silent, so nobody learned the fix had worked, and the entry
+            # this sweep filed stayed open forever in a file whose whole
+            # contract is "open entries only".
+            recovered.append((key, res, previous))
+            try:
+                if close_finding(root, key, full_level):
+                    log(f"     recovered — closed the finding in {name}/FINDINGS.md")
+            except OSError as exc:
+                log(f"     finding not closed in {name}/FINDINGS.md: {exc}")
+        if (res["status"] == "env" and res.get("env_kind") == "other"
+                and "env" not in (previous, prev_entry.get("blocked_by"))):
+            # A runner that is not there, a TESTS_ENV marker: said once, on
+            # entering the state — not every morning for as long as it lasts.
+            env_changed.append((key, res))
+        if auto:
+            extra = carry_fast(key, res)
+        elif args.full:
+            extra = {}
+        else:
+            extra = track_budget(root, name, key, res, prev_entry, suite["budget_s"])
+        if res["status"] in NEUTRAL and previous in ALERTING:
+            # A suite that WAS red and now cannot be run at all — or not
+            # reliably — is not a recovery: the previous status is kept so
+            # the finding stays open, and the reason is named in the log
+            # rather than being announced as good news.
+            log(f"     {res['status']} — this run says nothing about the tests, so "
+                f"the earlier '{previous}' stands; the finding stays open")
+            state[skey] = {"status": previous, "seconds": res["seconds"],
+                           "date": DATE, "blocked_by": res["status"], **extra}
+            continue
+        state[skey] = {"status": res["status"], "seconds": res["seconds"],
+                       "date": DATE, **extra}
 
     if args.dry_run:
-        return 0
+        return 1 if contract_errors else 0
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     atomic_write_text(STATE_PATH, json.dumps(state, ensure_ascii=False, indent=1))
@@ -805,17 +1294,21 @@ def _sweep(args, rec: dict) -> int:
     env = [k for k, r in results.items() if r["status"] == "env"]
     # A fast run measures the budget; the weekly full run reports what the fast
     # runs measured (see carry_fast), because `--full` deliberately runs tests
-    # the 60s budget does not apply to.
+    # the 60s budget does not apply to. Discovered suites only: a contract suite
+    # declares its own budget_s and track_budget files the finding about it.
     if args.full:
         slow = [(k, (state.get(k) or {}).get("fast_seconds") or 0.0)
-                for k in results
+                for k in results if k in auto_keys
                 if ((state.get(k) or {}).get("fast_seconds") or 0.0) > 60]
     else:
         slow = [(k, r["seconds"]) for k, r in results.items()
-                if r["status"] == "ok" and r["seconds"] > 60]
+                if k in auto_keys and r["status"] == "ok" and r["seconds"] > 60]
     slow.sort(key=lambda x: -x[1])
+    over = [k for k, r in results.items() if r["status"] == "over-budget"]
     log(f"result: {len(results)} suite(s), red {len(red)}, "
-        f"broken environment {len(env)}, over the 60s budget {len(slow)}")
+        f"broken environment {len(env)}, over the 60s budget {len(slow)}"
+        + (f", over their contract budget {len(over)}" if over else "")
+        + (f", test contract errors {len(contract_errors)}" if contract_errors else ""))
     if skipped_for_time:
         log(f"run budget of {RUN_BUDGET_SECONDS}s reached — {len(skipped_for_time)} "
             f"suite(s) not run this time: {', '.join(skipped_for_time[:8])}"
@@ -836,7 +1329,8 @@ def _sweep(args, rec: dict) -> int:
                       + "\nMeasured by the daily fast sweep (CLAUDE.md § Test policy).")
     if changed:
         lines = [f"Tests broke ({DATE}):"]
-        lines += [f"• {k}: {r['status']} — {summary_line(r['tail'])}" for k, r in changed]
+        lines += [f"• {k}: {r['status']} — {r.get('hung') or _summary(r)}"
+                  for k, r in changed]
         lines.append("Findings filed in the projects' FINDINGS.md.")
         send_telegram("\n".join(lines))
     if recovered:
@@ -847,22 +1341,33 @@ def _sweep(args, rec: dict) -> int:
                   for k, r, was in recovered]
         lines.append("Their findings were closed automatically.")
         send_telegram("\n".join(lines))
-    if env:
+    # A discovered suite reports `env` for one reason only — the basetemp; a
+    # contract suite says which kind it is.
+    basetemp_env = [k for k in env if results[k].get("env_kind", "basetemp") == "basetemp"]
+    if basetemp_env:
         # A separate message and no findings: this is a broken run environment,
         # not the projects' tests. It is fixed by clearing permissions on a
         # directory, not by editing code.
-        send_telegram(f"ClaudeTestSweep {DATE}: the run is unreliable for {len(env)} "
-                      f"suite(s) — basetemp unavailable ({', '.join(env[:8])}). "
+        send_telegram(f"ClaudeTestSweep {DATE}: the run is unreliable for {len(basetemp_env)} "
+                      f"suite(s) — basetemp unavailable ({', '.join(basetemp_env[:8])}). "
                       f"The leftover %TEMP%/sweep-run-* directories belong to a process with "
                       f"an admin token; clear them with "
                       f"takeown /F ... /R /D Y && icacls ... /reset /T. No findings filed.")
+    if env_changed:
+        lines = [f"ClaudeTestSweep {DATE}: cannot run (the environment, not the code):"]
+        lines += [f"• {k}: {r.get('note') or _summary(r)}" for k, r in env_changed]
+        lines.append("No findings filed.")
+        send_telegram("\n".join(lines))
     # useful_items = suites actually run: zero means the sweep walked
     # projects_root and found nothing to test, which is a configuration
     # problem wearing a green exit code.
-    return done(1 if red or env else 0, len(results),
+    return done(1 if red or env or contract_errors else 0, len(results),
                 f"{len(results)} suite(s), {len(red)} red, {len(env)} env, "
                 f"{len(recovered)} recovered"
-                + (f"; over the 60s budget: {slow_names}" if slow else ""))
+                + (f"; over the 60s budget: {slow_names}" if slow else "")
+                + (f"; over their contract budget: {', '.join(over[:10])}" if over else "")
+                + (f"; {len(contract_errors)} test contract error(s)"
+                   if contract_errors else ""))
 
 
 if __name__ == "__main__":

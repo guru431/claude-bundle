@@ -246,7 +246,10 @@ if ($py) {
 import sys, yaml
 KNOWN = {'project_map', 'known_projects', 'skip_dirs', 'skip_projects',
          'allow_projects', 'skip_jsonl_projects', 'collect_plans',
-         'projects_root', 'dry_run_until'}
+         'projects_root', 'dry_run_until', 'tests'}
+# Not policy (utils.py::_MANIFEST_NONPOLICY_KEYS): a near miss of one is only an
+# unknown key, and a malformed value is test-sweep's contract error, not ours.
+NONPOLICY = {'tests'}
 d = yaml.safe_load(open(sys.argv[1], encoding='utf-8'))
 if d is None:
     sys.exit(0)
@@ -286,7 +289,8 @@ def edit_distance(a, b):
     return prev[-1]
 unknown = sorted(set(d) - KNOWN, key=str)
 near = [(k, n) for k in unknown
-        for n in sorted(x for x in KNOWN if edit_distance(str(k).lower(), x) <= 2)[:1]]
+        for n in sorted(x for x in KNOWN - NONPOLICY
+                        if edit_distance(str(k).lower(), x) <= 2)[:1]]
 if near:
     print('; '.join('%r is a near miss of %r - the pipeline denies EVERY project until it is fixed' % kn
                     for kn in near))

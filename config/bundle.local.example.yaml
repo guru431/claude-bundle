@@ -47,6 +47,50 @@ known_projects: []
 projects_root:
 #   projects_root: ~/projects
 
+# ── Test contract (read by ClaudeTestSweep / ClaudeTestSweepFull only) ───────
+# How each project's tests are run, declared ONCE: agents read it for their
+# targeted and fast runs, and the nightly sweep runs `fast` daily and `full`
+# weekly. A project with no entry keeps the old behaviour — the sweep discovers
+# its pytest suite. Keys are project directory names under projects_root,
+# matched the way the privacy policy matches names.
+#
+# Every suite key is required, and no other is accepted:
+#   name      `main` for the project's main suite, else a short name (A-Z a-z 0-9 _ . -)
+#   cwd       the suite's directory, relative to the project (must stay inside it)
+#   runner    pytest | bash | dotnet | pester | js — how the result is read
+#   targeted  one file or test, `{path}` stands for it (for agents; never run by the sweep)
+#   fast      the fast level, within budget_s; null = the suite has none
+#   full      the full level (integration included); null = the suite has none
+#   budget_s  the fast level's budget in seconds; two green nights over it in a
+#             row file a P3 finding with the five slowest parts
+#
+# Commands run through bash from <project>/<cwd>; a bare `python` is the
+# sweep's own interpreter. For a pytest suite the sweep APPENDS
+# `-p no:cacheprovider --durations=5 --basetemp <dir>`, so end the command with
+# pytest's own arguments. A runner other than pytest is read from its summary,
+# or from marker lines your runner prints: `TESTS_RESULT pass=N fail=N skip=N`,
+# `TESTS_TIMEOUT <test> after=<N>s`, `TESTS_DURATION <seconds>s <part>`,
+# `TESTS_ENV <reason>`. For Pester, call cron/lib/run-pester.ps1, which prints
+# them and kills a hung file. An entry the sweep cannot use is reported as ONE
+# finding in the bundle's own FINDINGS.md, and that project falls back to
+# discovery until it is fixed; it never affects the privacy policy below.
+tests: {}
+#   myapp:
+#     - name: main
+#       cwd: .
+#       runner: pytest
+#       targeted: .venv/bin/python -m pytest {path} -q
+#       fast: .venv/bin/python -m pytest -q
+#       full: .venv/bin/python -m pytest -q -m "not manual" --timeout=300
+#       budget_s: 60
+#     - name: scripts
+#       cwd: scripts
+#       runner: bash
+#       targeted: bash tests/run.sh {path}
+#       fast: bash tests/run.sh
+#       full: null
+#       budget_s: 30
+
 # ── Unified privacy policy (applied to EVERY source: JSONL, memory feedback, ──
 # ── plans, incidents/sessions — in BOTH the wiki flush and memory-update) ─────
 

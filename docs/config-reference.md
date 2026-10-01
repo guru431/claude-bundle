@@ -121,6 +121,7 @@ typo costs you a quiet night, not a leak. Descriptions live in
 | `skip_dirs` |
 | `skip_jsonl_projects` |
 | `skip_projects` |
+| `tests` |
 
 ## `cron/registry.yaml` task fields
 

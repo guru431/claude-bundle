@@ -233,8 +233,12 @@ _MANIFEST, _MANIFEST_BROKEN = _load_manifest()
 _MANIFEST_KNOWN_KEYS = {
     "project_map", "known_projects", "skip_dirs", "skip_projects",
     "allow_projects", "skip_jsonl_projects", "collect_plans",
-    "projects_root", "dry_run_until",
+    "projects_root", "dry_run_until", "tests",
 }
+# Keys that decide nothing about what leaves the machine. A malformed value — or
+# a near miss of the key — is reported, never a reason to deny every project:
+# a typo in a test command must not stop the wiki pipeline reading anything.
+_MANIFEST_NONPOLICY_KEYS = {"tests"}
 
 
 def _edit_distance(a: str, b: str) -> int:
@@ -258,7 +262,11 @@ def _edit_distance(a: str, b: str) -> int:
 for _unknown in sorted(set(_MANIFEST) - _MANIFEST_KNOWN_KEYS, key=str):
     _near = sorted(k for k in _MANIFEST_KNOWN_KEYS
                    if _edit_distance(str(_unknown).lower(), k) <= 2)
-    if _near:
+    if _near and not set(_near) - _MANIFEST_NONPOLICY_KEYS:
+        _msg = (f"bundle.local.yaml key '{_unknown}' is not a known key but is a "
+                f"near miss of '{_near[0]}' — it is ignored, so nothing reads it "
+                f"as '{_near[0]}'")
+    elif _near:
         _MANIFEST_BROKEN = True
         _msg = (f"bundle.local.yaml key '{_unknown}' is not a known key but is a "
                 f"near miss of '{_near[0]}' — every project denied until it is "
@@ -399,6 +407,44 @@ COLLECT_PLANS: bool = _manifest_bool("collect_plans", False)
 # used to split the consumers arbitrarily: filling in one file left half the
 # jobs working and produced no diagnostic at all.
 _MANIFEST_PROJECTS_ROOT: Path | None = _manifest_path("projects_root")
+
+
+def tests_contract() -> tuple[dict, list[str]]:
+    """`tests:` from bundle.local.yaml: ({normalized project name: suites}, errors).
+
+    The per-project test contract test-sweep.py runs instead of discovering a
+    pytest suite. Only the top level is checked here — a mapping of project
+    names; each suite is the sweep's to validate. Project names are matched the
+    way the privacy policy matches them (normalize_project_name), so the key
+    can be spelled as the wiki folder or as the working copy's directory.
+
+    NOT a policy field: a malformed value is returned as errors for the sweep to
+    report (one finding in the bundle's FINDINGS.md) and never marks the
+    manifest broken. A project whose entry is unusable — or that two entries
+    claim — gets no contract, and the sweep falls back to discovery for it.
+    """
+    raw = _MANIFEST.get("tests")
+    if raw is None:
+        return {}, []
+    if not isinstance(raw, dict):
+        return {}, [f"`tests` must be a mapping of project name -> list of suites, "
+                    f"got {type(raw).__name__}"]
+    out: dict = {}
+    errors: list[str] = []
+    claimed: dict[str, str] = {}
+    for name, suites in raw.items():
+        if not isinstance(name, str) or not name.strip() or _collapses_to_default(name):
+            errors.append(f"tests: {name!r} is not a usable project name")
+            continue
+        key = normalize_project_name(name)
+        if key in claimed:
+            errors.append(f"tests: '{claimed[key]}' and '{name}' are the same project "
+                          f"('{key}') — neither is used")
+            out.pop(key, None)
+            continue
+        claimed[key] = name
+        out[key] = suites
+    return out, errors
 
 
 def manifest_broken() -> bool:

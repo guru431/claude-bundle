@@ -678,7 +678,10 @@ def _hung(runner: str, text: str) -> str | None:
         frames = _TEST_FRAME.findall(text)
         if frames:
             path, line, func = frames[-1]
-            return f"{Path(path).name}:{line} {func}"
+            # Both separators: Path(...).name on POSIX keeps a whole
+            # `C:\proj\tests\x.py` as one name, and CI runs this on Linux.
+            name = re.split(r"[\\/]", path)[-1]
+            return f"{name}:{line} {func}"
         return "pytest-timeout (no test name in the stack)"
     if runner == "dotnet" and _DOTNET_HANG.search(text):
         m = re.search(r"The test running when the crash occurred:\s*\n\s*(\S+)", text)

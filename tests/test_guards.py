@@ -563,6 +563,48 @@ def test_bundle_finding_is_filed_once(bundle_tree: Path, monkeypatch):
     assert body.startswith("# Findings")
 
 
+def test_a_finding_with_a_masked_title_is_found_again(bundle_tree: Path, monkeypatch):
+    """The entry is written with the MASKED title and was looked up by the raw
+    one: a title quoting a key-shaped string never matched its own entry, so
+    every retry filed a duplicate and close_finding could not remove it."""
+    utils = _import_utils(monkeypatch, bundle_tree)
+    title = "gave up on " + "ghp_" + "A" * 24        # assembled: see _MUST_MATCH
+    assert utils.masked(title) != title, "the fixture must be a title the masker changes"
+    findings = bundle_tree / "FINDINGS.md"
+    assert utils.append_bundle_finding(title, "ctx", "what", "how") is True
+    assert utils.append_bundle_finding(title, "ctx", "what", "how") is False
+    assert utils.finding_is_open(findings, title)
+    assert utils.close_finding(findings, title) is True
+    assert "## " not in findings.read_text(encoding="utf-8")
+
+
+def test_a_quarantined_payload_survives_a_name_too_long_to_write(bundle_tree: Path,
+                                                                 monkeypatch, capsys):
+    """The file name carries the source id, and past MAX_PATH (a deep install on
+    Windows without LongPathsEnabled) the write failed inside a bare `except:
+    pass` — while the source was marked quarantined. The payload, its ONLY
+    surviving copy, was gone without a word."""
+    utils = _import_utils(monkeypatch, bundle_tree)
+    real_write = Path.write_text
+
+    def refuse_long_names(self, *args, **kwargs):
+        if "very-long-source" in self.name:
+            raise OSError(206, "The filename or extension is too long")
+        return real_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse_long_names)
+    utils.quarantine_raw("very-long-source", "retry-limit-reached", "the payload")
+    kept = list(utils.REJECTED_DIR.glob("*_retry-limit-reached.txt"))
+    assert [p.read_text(encoding="utf-8") for p in kept] == ["the payload"]
+
+    def disk_full(self, *args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", disk_full)
+    utils.quarantine_raw("other-source", "retry-limit-reached", "lost")
+    assert "it is lost" in capsys.readouterr().err
+
+
 # ── the off-box gate applies to the FIRST call, not just the fallback ───────
 
 def test_allow_offbox_zero_refuses_the_primary_provider(bundle_tree: Path,

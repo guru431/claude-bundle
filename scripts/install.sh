@@ -376,6 +376,12 @@ if [ "$profile" = full ]; then
     if [ -n "$bash_path" ] && "$PY" "$helper" set-env-if-empty "$env_dst" BASH_EXE "$bash_path"; then
         ok "pinned BASH_EXE=$bash_path in .env"
     fi
+    # The same bash for the scheduler units. They ran /bin/bash whatever this
+    # machine's bash is — 3.2 on macOS next to a Homebrew 5.x, absent on NixOS.
+    # Spelled /bin/bash when it IS that file (merged /usr), so the units an
+    # earlier install placed do not all read as changed.
+    bash_unit=/bin/bash
+    if [ -n "$bash_path" ] && ! [ "$bash_path" -ef /bin/bash ]; then bash_unit="$bash_path"; fi
 
     local_yaml="$pipeline_root/bundle.local.yaml"
     if [ -f "$local_yaml" ]; then
@@ -385,7 +391,12 @@ if [ "$profile" = full ]; then
         # A FRESH manifest only — never on a reinstall, which would silently mute
         # a working pipeline for a week. Until then every phase previews, so the
         # first night's transcripts do not leave the machine unread.
-        until_date="$("$PY" "$helper" open-dry-run-window "$local_yaml" 7)"
+        # Every helper call in this block is guarded. Under `set -eu` a failing
+        # `x="$(...)"` ended the install HERE — cron/ and wiki/ already copied, no
+        # .bundle-manifest.json yet, so uninstall.sh could not remove the result.
+        until_date="$("$PY" "$helper" open-dry-run-window "$local_yaml" 7)" || {
+            warn "could not set dry_run_until in $local_yaml - set it by hand to preview the first week"
+            until_date=""; }
         ok "created bundle.local.yaml from the template (project map + privacy policy)"
         if [ -n "$until_date" ]; then
             say "       dry_run_until: $until_date - every phase previews only until then"
@@ -394,7 +405,9 @@ if [ "$profile" = full ]; then
     printf 'bundle.local.yaml\n' >> "$preserved"
     # One value, two names: projects_root in the manifest is what you edit,
     # PROJECTS_ROOT in .env its shell-side spelling (the shell tasks cannot read YAML).
-    root_value="$("$PY" "$helper" yaml-get "$local_yaml" projects_root)"
+    root_value="$("$PY" "$helper" yaml-get "$local_yaml" projects_root)" || {
+        warn "could not read projects_root from $local_yaml - PROJECTS_ROOT in .env not generated"
+        root_value=""; }
     case "$root_value" in ''|null|'<'*) root_value="" ;; esac
     if [ -n "$root_value" ] && "$PY" "$helper" set-env-if-empty "$env_dst" PROJECTS_ROOT "$root_value"; then
         ok "generated PROJECTS_ROOT=$root_value in .env from bundle.local.yaml"
@@ -403,11 +416,14 @@ if [ "$profile" = full ]; then
     if [ "$scheduler" = none ]; then
         units_status="none - no systemd or launchd on this machine"
         warn "no systemd or launchd found: nothing will run the pipeline on a schedule."
+    elif ! units_dir="$("$PY" "$helper" units-dir "$scheduler")"; then
+        units_dir=""
+        units_status="not installed - the $scheduler units directory could not be resolved"
+        warn "could not resolve the $scheduler units directory: no unit was previewed or installed."
     else
-        units_dir="$("$PY" "$helper" units-dir "$scheduler")"
         gen="$here/scripts/gen-scheduler.py"
         set -- --target "$scheduler" --install-path "$pipeline_root" \
-               --registry "$pipeline_root/cron/registry.yaml" --python "$PY"
+               --registry "$pipeline_root/cron/registry.yaml" --python "$PY" --bash "$bash_unit"
         if [ "$install_units" = 0 ]; then
             say ""
             say "--- $scheduler units (preview; --install-units installs them) ---"
@@ -446,12 +462,16 @@ if [ "$profile" = full ]; then
                 rm -f "$old_dir/$name"
                 ok "retired $name (its task is no longer generated)"
             done < "$work/previous-units.tsv"
-            allow="$("$PY" "$helper" yaml-get "$local_yaml" allow_projects)"
-            case "$allow" in
-                ''|null|'[]')
-                    warn "privacy scope: allow_projects is empty in $local_yaml - ALL projects under"
-                    warn "  ~/.claude/projects are read and sent to your LLM provider once dry_run_until passes." ;;
-            esac
+            if ! allow="$("$PY" "$helper" yaml-get "$local_yaml" allow_projects)"; then
+                warn "privacy scope: could not read allow_projects from $local_yaml - check it by hand"
+                warn "  before dry_run_until passes: an empty list sends ALL projects to your LLM provider."
+            else
+                case "$allow" in
+                    ''|null|'[]')
+                        warn "privacy scope: allow_projects is empty in $local_yaml - ALL projects under"
+                        warn "  ~/.claude/projects are read and sent to your LLM provider once dry_run_until passes." ;;
+                esac
+            fi
             if [ "$scheduler" = systemd ]; then
                 if systemctl --user daemon-reload; then
                     enabled=0
@@ -570,7 +590,7 @@ else
     say "     \"$PY\" \"$pipeline_root/cron/bundle-status.py\" --hooks --settings \"$claude_home/settings.json\""
     if [ "$scheduler" != none ]; then
         say "  5. after editing the registry, see what the installed units still lack:"
-        say "     \"$PY\" \"$here/scripts/gen-scheduler.py\" --check --target $scheduler --python \"$PY\" \\"
+        say "     \"$PY\" \"$here/scripts/gen-scheduler.py\" --check --target $scheduler --python \"$PY\" --bash \"$bash_unit\" \\"
         say "       --install-path \"$pipeline_root\" --registry \"$pipeline_root/cron/registry.yaml\""
         say "     and apply it by re-running this installer with --install-units."
     fi

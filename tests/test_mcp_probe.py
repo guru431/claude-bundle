@@ -134,6 +134,18 @@ def test_a_server_that_dies_at_startup_reports_its_stderr(tmp_path, spawned, cap
     assert "FAIL" in out and "boom: missing API key" in out
 
 
+def test_a_non_string_argument_does_not_end_the_whole_run(tmp_path, spawned, capsys):
+    """A number in `args` is valid JSON. Popen raised TypeError on it — not the
+    OSError the probe catches — so one odd declaration took the run down with a
+    traceback instead of a line about that one server."""
+    mod = _load()
+    spec = _server(tmp_path, "numeric", ANSWERS)
+    spec["args"] = spec["args"] + [8080, True]
+    assert _probe_with_watchdog(mod, "numeric", spec, 10.0) is True
+    assert mod.probe("stringy", {"command": sys.executable, "args": "-V"}) is False
+    assert "`args` is not a list" in capsys.readouterr().out
+
+
 # ── F53: a wrapper behind a shell is still a wrapper ─────────────────────────
 
 @pytest.mark.parametrize("spec", [

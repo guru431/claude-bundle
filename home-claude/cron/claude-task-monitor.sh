@@ -335,14 +335,28 @@ ConvertTo-Json -InputObject ([PSCustomObject]@{ Mapped = $mapped; Tasks = $tasks
 DRIVE_RE = re.compile(r'(?:^|[\s"])([A-Za-z]):\\')
 UNC_RE = re.compile(r'(?:^|[\s"])\\\\(?![?.]\\)[^\\\s"]+\\[^\\\s"]')
 
-r = subprocess.run(['powershell', '-NoProfile', '-Command', ps_cmd],
-                   capture_output=True, timeout=60)
-out = r.stdout.decode('utf-8', errors='replace').strip()
-collected = json.loads(out) if out and out != 'null' else {}
-mapped = {str(letter).upper() for letter in (collected.get('Mapped') or [])}
-tasks = collected.get('Tasks') or []
-if isinstance(tasks, dict):
-    tasks = [tasks]
+# A collection that fails must SAY so. An uncaught timeout or a malformed JSON
+# reply ended this program with a traceback in the log and nothing on stdout —
+# which the shell reads as "no violation", the fail-silent the task-status stage
+# above already refuses. A line starting with ERROR is an alert, and exit 1.
+try:
+    r = subprocess.run(['powershell', '-NoProfile', '-Command', ps_cmd],
+                       capture_output=True, timeout=60)
+    out = r.stdout.decode('utf-8', errors='replace').strip()
+    if r.returncode != 0:
+        raise RuntimeError(f"PowerShell exited {r.returncode}: "
+                           + r.stderr.decode('utf-8', errors='replace').strip()[:200])
+    collected = json.loads(out) if out and out != 'null' else {}
+    if not isinstance(collected, dict):
+        raise ValueError(f"expected a JSON object, got {type(collected).__name__}")
+    mapped = {str(letter).upper() for letter in (collected.get('Mapped') or [])}
+    tasks = collected.get('Tasks') or []
+    if isinstance(tasks, dict):
+        tasks = [tasks]
+except Exception as exc:
+    print(f"ERROR: policy check failed ({type(exc).__name__}: {exc}) — mapped-drive and "
+          f"S4U-share tasks were NOT checked today")
+    mapped, tasks = set(), []
 
 on_mapped, s4u_on_share = [], []
 for t in tasks:
@@ -372,6 +386,8 @@ if [ -n "$POLICY_VIOL" ]; then
     echo "$POLICY_VIOL" >> "$LOG_FILE"
     ALERTS="${ALERTS:+$ALERTS
 }$POLICY_VIOL"
+    # Failing to MEASURE is the monitor's own failure (see MONITOR_RC above).
+    case "$POLICY_VIOL" in ERROR*) MONITOR_RC=1 ;; esac
 fi
 
 # --- Findings watch (stale >90 days, new P1 surge) ---

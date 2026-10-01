@@ -1,5 +1,5 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 REM Self-elevating wrapper around sync-tasks.ps1 (needs admin for Set-ScheduledTask).
 REM If not elevated, relaunch this .cmd via PowerShell Start-Process -Verb RunAs.
 REM
@@ -16,6 +16,12 @@ REM break quoting on the `set "ARGS=%*"` line below. That executes in the CALLER
 REM own context at the CALLER's privilege, crossing no boundary; the elevated side
 REM stays unreachable. Ordinary switches (no embedded quotes) round-trip intact.
 REM
+REM Delayed expansion is OFF where %* is read and ON only for the echo that writes
+REM it. It used to be on for the whole script, and then every '!' in an argument
+REM (or in this script's own path) was eaten as a !variable! reference before the
+REM value reached the file. Expanding !ARGS! does not re-parse the value, so '&'
+REM and '|' in it are still written as plain text.
+REM
 REM The temp file name is randomized: a fixed %TEMP%\sync-tasks-args.txt is a
 REM TOCTOU target that another process could pre-create or swap between our write
 REM and the elevated read.
@@ -25,7 +31,9 @@ if %errorlevel% equ 0 goto :elevated
 
 set "ARGS_FILE=%TEMP%\sync-tasks-args-%RANDOM%%RANDOM%.txt"
 set "ARGS=%*"
+setlocal enabledelayedexpansion
 >"%ARGS_FILE%" echo(!ARGS!
+endlocal
 
 REM -Wait + -PassThru: without them this returned instantly and the caller
 REM (install.ps1) could not distinguish success from a UAC cancel or a failed
@@ -50,7 +58,9 @@ if "%~1"=="--from-relaunch" goto :relaunched
 REM Already elevated and invoked directly: same file hand-off, no relaunch.
 set "ARGS_FILE=%TEMP%\sync-tasks-args-%RANDOM%%RANDOM%.txt"
 set "ARGS=%*"
+setlocal enabledelayedexpansion
 >"%ARGS_FILE%" echo(!ARGS!
+endlocal
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0sync-tasks.ps1" -ArgsFile "%ARGS_FILE%"
 set "RC=%errorlevel%"
 if exist "%ARGS_FILE%" del "%ARGS_FILE%" >nul 2>&1

@@ -22,6 +22,7 @@ tests/test_task_monitor_posix.py.
 from __future__ import annotations
 
 import json
+import re
 import socket
 from datetime import datetime
 from pathlib import Path
@@ -83,25 +84,38 @@ def read_registry(registry: Path) -> list[dict]:
     # only the literal "false", so on a box without PyYAML `enabled: no` read as
     # True and the monitor paged about a task the user had switched off and
     # nothing had deployed.
+    def value(line: str) -> str:
+        """The scalar after the first ':', without a trailing `# comment`.
+
+        `health_port: 8080  # probe` is valid YAML; read whole it was not a digit
+        string, so the port was None and the probe silently never ran — on
+        exactly the box without PyYAML. The rule of
+        admin/lib/registry-parse.ps1: a quoted value keeps its `#`.
+        """
+        val = line.split(":", 1)[1].strip()
+        if not val.startswith(("'", '"')):
+            val = re.sub(r"\s+#.*$", "", val)
+        return unwrap(val)
+
     falsy = {"false", "no", "off"}
     tasks: list[dict] = []
     cur: dict | None = None
     for raw in text.splitlines():
         stripped = raw.strip()
         if stripped.startswith("- name:"):
-            cur = {"name": unwrap(stripped.split(":", 1)[1])}
+            cur = {"name": value(stripped)}
             tasks.append(cur)
         elif cur is None:
             continue
         elif stripped.startswith("enabled:"):
-            cur["enabled"] = unwrap(stripped.split(":", 1)[1]).lower() not in falsy
+            cur["enabled"] = value(stripped).lower() not in falsy
         elif stripped.startswith("platform:"):
-            cur["platform"] = unwrap(stripped.split(":", 1)[1])
+            cur["platform"] = value(stripped)
         elif stripped.startswith("trigger:"):
-            cur["trigger"] = unwrap(stripped.split(":", 1)[1])
+            cur["trigger"] = value(stripped)
         elif stripped.startswith(("timeout_hours:", "health_port:")):
-            key, _, val = stripped.partition(":")
-            val = val.strip()
+            key = stripped.split(":", 1)[0]
+            val = value(stripped)
             cur[key] = int(val) if val.isdigit() else None
     return tasks
 
@@ -147,10 +161,16 @@ def chain_dead(path: Path = CHAIN_DEAD_PATH,
     Every job that reports it — both task monitors and the healthcheck — reads it
     here, so they cannot disagree about when an outage is over or what it says.
     """
+    def local_naive(dt: datetime) -> datetime:
+        # The writer stamps naive local time. A stamp with an offset (written by
+        # hand, or by anything else) made `now - last` raise TypeError OUTSIDE
+        # this try, and the monitor crashed instead of reporting the outage.
+        return dt.astimezone().replace(tzinfo=None) if dt.tzinfo else dt
+
     try:
         st = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-        last = datetime.fromisoformat(st["last_iso"])
-        first = datetime.fromisoformat(st.get("first_iso", st["last_iso"]))
+        last = local_naive(datetime.fromisoformat(st["last_iso"]))
+        first = local_naive(datetime.fromisoformat(st.get("first_iso", st["last_iso"])))
     except Exception:
         return None                      # no file / unreadable — nothing to report
     now = now or datetime.now()

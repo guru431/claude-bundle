@@ -8,7 +8,9 @@ of task names that exist nowhere.
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -224,6 +226,31 @@ def test_detail_is_accepted_through_the_args_file(tmp_path: Path):
     r = run_ps_file(SYNC, "-ArgsFile", args, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "-Verify" in r.stdout and name in r.stdout
+
+
+@windows_only
+def test_sync_cmd_writes_an_exclamation_mark_into_the_args_file(tmp_path: Path):
+    """With delayed expansion on for the whole script, `set "ARGS=%*"` ate every
+    `!` in an argument as half of a !variable! reference: `-User dom\\ain!user`
+    reached sync-tasks.ps1 as `dom\\ainuser`. The hand-off block of sync.cmd is
+    run as it is, without the elevation and the sync around it."""
+    text = (SYNC.parent / "sync.cmd").read_text(encoding="utf-8")
+    assert text.splitlines()[1].strip().lower() == "setlocal", \
+        "delayed expansion is on for the whole script again"
+    m = re.search(r'(?m)^set "ARGS=%\*"\r?\n.*?^endlocal\r?$', text, re.S)
+    assert m, "no args hand-off block in sync.cmd"
+    block = m.group(0)
+    harness = tmp_path / "handoff.cmd"
+    harness.write_bytes(("@echo off\nsetlocal\n"
+                         f'set "ARGS_FILE={tmp_path / "args.txt"}"\n'
+                         + block + "\n").replace("\r\n", "\n").replace("\n", "\r\n")
+                        .encode("ascii"))
+
+    r = subprocess.run([str(harness), "-User", "dom\\ain!user", "-Only", "ClaudeX"],
+                       capture_output=True, text=True, timeout=30)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "args.txt").read_text().strip() == "-User dom\\ain!user -Only ClaudeX"
 
 
 @windows_only

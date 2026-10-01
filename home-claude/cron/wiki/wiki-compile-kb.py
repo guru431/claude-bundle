@@ -426,8 +426,14 @@ def _compile_kb(rec: dict) -> int:
                 mark_processed(rel)
             if applied:
                 update_log(rel, applied)
-                total_created += len(applied)
-                log(f"  → {len(applied)} changes")
+                # Pages actually written. A `skipped` change (its fragment already
+                # on the page) wrote nothing, and counting it made a run of pure
+                # replays a green, useful one in the ledger.
+                written = [a for a in applied if not a.startswith("skipped:")]
+                total_created += len(written)
+                log(f"  → {len(written)} changes"
+                    + (f" ({len(applied) - len(written)} already on the page)"
+                       if len(written) < len(applied) else ""))
             else:
                 # changes was non-empty but normalize_wiki_path rejected every
                 # path → applied == []. Deterministic: a retry would produce the

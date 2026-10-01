@@ -89,6 +89,19 @@ def _ledger() -> list[dict]:
     return [r for r in rows if r.get("task") == "ClaudeMemoryUpdate"]
 
 
+def test_a_hanging_incident_extract_is_stopped(memory, cron_copy: Path, monkeypatch):
+    """The optional user script ran with no timeout, unlike every other child of
+    the task: one that hung held the task forever — no terminal record, and every
+    later trigger dropped while the scheduler saw it "running"."""
+    (cron_copy / "cron" / "incident-extract.py").write_text(
+        "import time\ntime.sleep(60)\n", encoding="utf-8")
+    monkeypatch.setattr(memory, "INCIDENT_EXTRACT_TIMEOUT", 0.3)
+
+    memory.run_incident_extract()
+
+    assert "killed after 0.3s" in memory.LOG_FILE.read_text(encoding="utf-8")
+
+
 def test_both_prompts_mask_credentials_before_they_leave(memory, monkeypatch):
     """WIKI_MASK_SECRETS is a promise about every request, not about one of two.
 

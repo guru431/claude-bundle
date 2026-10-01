@@ -376,6 +376,27 @@ def test_compile_kb_records_the_directory_it_read(bundle: Path):
     assert "kb_sources/articles/gears.md" in page and "kb_news" not in page, page
 
 
+def test_compile_kb_does_not_count_a_change_already_on_the_page(bundle: Path):
+    """A `skipped` change — its fragment already on the page — writes nothing, yet
+    it was counted into useful_items, and a night of pure replays went into the
+    ledger as useful work."""
+    page = bundle / "wiki" / "kb" / "concepts" / "Gear.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# Gear\n\nA toothed wheel. See [[index]].\n", encoding="utf-8")
+    _kb_article(bundle, "gears.md", b"Gears are toothed wheels.\n")
+    resp = bundle / "kb_gear_replay.json"
+    resp.write_text(json.dumps([{"path": "kb/concepts/Gear.md", "action": "append",
+                                 "content": "A toothed wheel. See [[index]].\n"}]),
+                    encoding="utf-8")
+
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-kb.py",
+             {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+
+    assert r.returncode == 0, f"compile-kb failed:\n{r.stdout}\n{r.stderr}"
+    assert "1 already on the page" in r.stdout, r.stdout
+    assert _ledger_rows("ClaudeWikiCompileKB")[-1]["useful_items"] == 0
+
+
 def test_compile_kb_renames_the_old_kb_news_entry_instead_of_adding_one(bundle: Path,
                                                                         monkeypatch):
     """Pages compiled before provenance named the real directory say `kb_news/…`.
@@ -1385,6 +1406,30 @@ def test_a_flush_that_crashed_tonight_does_not_excuse_todays_drafts(bundle: Path
         f"an old flush record excused a draft tonight's flush never took:\n{r.stdout}"
 
 
+def test_an_unreadable_flush_record_does_not_fail_the_run(bundle: Path):
+    """Not knowing when flush started decides nothing either way.
+
+    An unreadable ledger used to read as "no flush ran", and then every draft in
+    .pending was stuck — the one a session wrote a minute ago included — so a
+    read error failed the run and paged as a lost night.
+    """
+    (bundle / "wiki" / "daily" / "2026-01-01.md").unlink()
+    runs_dir = Path(os.environ["CLAUDE_BUNDLE_RUNS_DIR"])
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    (runs_dir / "runs-2001.jsonl").write_text(json.dumps({
+        "ts": "not a timestamp", "task": "ClaudeWikiFlush", "process_rc": 0,
+        "verdict": "green"}) + "\n", encoding="utf-8")
+    pending = bundle / "wiki" / "daily" / ".pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    (pending / "fresh.md").write_text("# Session fresh\nProject: myproject\n\n### USER\nhi\n",
+                                      encoding="utf-8")
+
+    r = _run(bundle / "cron" / "wiki" / "wiki-compile-sessions.py", {}, cwd=bundle)
+
+    assert r.returncode == 0, f"a ledger read error failed the run:\n{r.stdout}\n{r.stderr}"
+    assert ".pending not judged" in r.stdout, r.stdout
+
+
 _WIDGET_PAGE = json.dumps([{
     "path": "projects/myproject/widget-parser-fix.md", "action": "create",
     "content": "# Widget parser fix\n\nThe boundary check was off by one. "
@@ -1504,6 +1549,20 @@ def test_compile_shows_the_pages_the_data_links_to_without_frontmatter(bundle: P
     assert "BODY-OF-linked-old" in sent[0], "the cap cut the page the data links to"
     assert "daily/2020-01-0" not in sent[0] and "updated: 2020-01-0" not in sent[0], \
         "page frontmatter was sent to the provider"
+
+
+def test_a_link_to_a_same_named_page_of_another_project_is_a_backlink(bundle: Path,
+                                                                     monkeypatch):
+    """The self-link check compared stems only, and the same stem in two projects
+    is normal: `projects/a/setup` linking to `[[projects/b/setup]]` vanished from
+    "Linked from". A bare `[[setup]]` on a page named setup is still itself."""
+    index = _load_wiki_script(bundle, monkeypatch, "index_backlinks", "wiki-build-index.py")
+    projects = bundle / "wiki" / "projects"
+    for name, body in (("a", "[[projects/b/setup]] and [[setup]]"), ("b", "# Setup\n")):
+        (projects / name).mkdir(parents=True, exist_ok=True)
+        (projects / name / "setup.md").write_text(f"# Setup\n\n{body}\n", encoding="utf-8")
+
+    assert index.collect_backlinks().get("setup") == ["projects/a/setup"]
 
 
 def test_lint_walkers_skip_the_same_folders(bundle: Path, monkeypatch):

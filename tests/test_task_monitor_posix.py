@@ -91,13 +91,15 @@ def test_systemd_timestamp_parsing(stamp, expected):
     assert monitor._systemd_timestamp(stamp) == expected
 
 
-def test_launchd_reports_only_the_bundles_own_failing_agents(monkeypatch):
+@pytest.mark.parametrize("header", ["PID\tStatus\tLabel\n", ""])
+def test_launchd_reports_only_the_bundles_own_failing_agents(monkeypatch, header):
     """`launchctl list` is the whole machine; only our labels may be quoted.
 
     The probe itself is stubbed: what needs pinning is which lines become an
-    alert, not that a subprocess can be started.
+    alert, not that a subprocess can be started. Without the header line the
+    first agent used to be skipped unread.
     """
-    out = ("PID\tStatus\tLabel\n"
+    out = (header +
            "-\t1\tcom.claude-bundle.ClaudeOnPosix\n"
            "-\t1\tcom.someone-else.Backup\n"
            "-\t0\tcom.claude-bundle.ClaudeQuiet\n")

@@ -212,3 +212,23 @@ def test_units_dir_is_ambiguous_for_both_targets(gs, registry, tmp_path):
         gs.main(["--check", "--target", "both", "--registry", str(registry),
                  "--units-dir", str(tmp_path)])
     assert exc.value.code == 2
+
+
+def test_a_bash_task_runs_the_bash_it_is_given(gs, tmp_path):
+    """Bash tasks ran /bin/bash whatever was pinned in .env as BASH_EXE — 3.2 on
+    macOS beside a Homebrew 5.x, absent on NixOS. --bash names it, as --python
+    does for python tasks; /bin/bash stays the default."""
+    task = _task("Daily 02:00", kind="bash", script="<bundle-install-path>/x.sh")
+    assert gs.exec_argv(task, "/opt/claude")[0] == "/bin/bash"
+    assert gs.emit_systemd(task, "/opt/claude", tmp_path, bash="/opt/homebrew/bin/bash") is None
+    service = (tmp_path / "systemd" / "T.service").read_text(encoding="utf-8")
+    assert "ExecStart=/opt/homebrew/bin/bash /opt/claude/x.sh\n" in service, service
+
+
+def test_a_percent_in_the_description_is_not_a_specifier(gs, tmp_path):
+    """systemd expands specifiers in Description= as in ExecStart=, and only the
+    latter was escaped: "100% of %h" came out mangled or refused."""
+    task = _task("Daily 02:00", description="100% of %h")
+    assert gs.emit_systemd(task, "/opt/claude", tmp_path) is None
+    service = (tmp_path / "systemd" / "T.service").read_text(encoding="utf-8")
+    assert "Description=100%% of %%h\n" in service, service

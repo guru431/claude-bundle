@@ -78,6 +78,10 @@ LOG_FILE = LOG_DIR / f"memory-update_{DATE}.log"
 TELEGRAM = Path(__file__).resolve().parent / "telegram-send.sh"
 BASH = find_bash()
 
+# How long the optional cron/incident-extract.py may run (see
+# run_incident_extract): well inside the task's own timeout_hours.
+INCIDENT_EXTRACT_TIMEOUT = 1800
+
 # Per-project user-message cap, then total prompt cap.
 USER_MSG_CAP_PER_PROJECT = 8000
 PROMPT_TOTAL_CAP = 40000
@@ -681,12 +685,19 @@ def run_incident_extract() -> None:
             "(drop your own script there to enable it)")
         return
     log("=== Incident Extract Phase ===")
+    # A ceiling, like every other child of this task (telegram-send has 30 s). A
+    # user script that hangs held the task forever: no terminal record, and the
+    # scheduler dropped every later trigger of a task that was still "running".
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        rc = subprocess.run(
-            [sys.executable, str(extract)],
-            stdout=f,
-            stderr=subprocess.STDOUT,
-        ).returncode
+        try:
+            rc = subprocess.run(
+                [sys.executable, str(extract)],
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                timeout=INCIDENT_EXTRACT_TIMEOUT,
+            ).returncode
+        except subprocess.TimeoutExpired:
+            rc = f"killed after {INCIDENT_EXTRACT_TIMEOUT}s"
     log(f"=== End Incident Extract (rc={rc}) ===")
 
 

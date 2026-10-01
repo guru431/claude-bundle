@@ -65,7 +65,8 @@ if ($InstallPath -match '^\\\\') {
         Write-Host "[warn] ...but not for logon_type: s4u tasks: they have no network credentials to open the share," -ForegroundColor Yellow
         Write-Host "       and sync-tasks will skip them. Use logon_type: password for a bundle on a share." -ForegroundColor Yellow
     }
-} elseif ($InstallPath -match '^([A-Za-z]):\\') {
+} elseif ($InstallPath -match '^([A-Za-z]):(\\|$)') {
+    # `(\\|$)`: the TrimEnd above turns a drive root `C:\` into a bare `C:`.
     # Query the ACTUAL drive type (mirrors sync-tasks.ps1 / install.ps1). Don't
     # infer "mapped" from "not C:".
     #
@@ -122,39 +123,42 @@ $replaced  = ([regex]::Matches($before, '<(bundle-install-path|user)>').Count) -
 if ($replaced -eq 0) {
     Write-Host ""
     Write-Host "No placeholders found — registry already bootstrapped (or custom)." -ForegroundColor DarkGray
-    exit 0
-}
-
-Write-Host ""
-Write-Host "Placeholders to replace: $replaced" -ForegroundColor White
-if ($remaining -gt 0) { Write-Host "Still remaining after substitution: $remaining" -ForegroundColor Yellow }
-
-if ($DryRun) {
+    # Not an exit: a re-run on a bootstrapped registry is exactly how an empty
+    # PROJECTS_ROOT gets filled once .env or bundle.local.yaml appears later —
+    # the early exit skipped the block below for good.
+    if ($DryRun) { exit 0 }
+} else {
     Write-Host ""
-    Write-Host "DRY RUN — diff preview (first 20 changed lines):" -ForegroundColor Cyan
-    $beforeLines = $before -split "`n"
-    $afterLines  = $reg -split "`n"
-    $shown = 0
-    for ($i = 0; $i -lt $afterLines.Count -and $shown -lt 20; $i++) {
-        if ($i -lt $beforeLines.Count -and $beforeLines[$i] -ne $afterLines[$i]) {
-            Write-Host ("  - " + $beforeLines[$i].Trim()) -ForegroundColor Red
-            Write-Host ("  + " + $afterLines[$i].Trim()) -ForegroundColor Green
-            $shown++
+    Write-Host "Placeholders to replace: $replaced" -ForegroundColor White
+    if ($remaining -gt 0) { Write-Host "Still remaining after substitution: $remaining" -ForegroundColor Yellow }
+
+    if ($DryRun) {
+        Write-Host ""
+        Write-Host "DRY RUN — diff preview (first 20 changed lines):" -ForegroundColor Cyan
+        $beforeLines = $before -split "`n"
+        $afterLines  = $reg -split "`n"
+        $shown = 0
+        for ($i = 0; $i -lt $afterLines.Count -and $shown -lt 20; $i++) {
+            if ($i -lt $beforeLines.Count -and $beforeLines[$i] -ne $afterLines[$i]) {
+                Write-Host ("  - " + $beforeLines[$i].Trim()) -ForegroundColor Red
+                Write-Host ("  + " + $afterLines[$i].Trim()) -ForegroundColor Green
+                $shown++
+            }
         }
+        Write-Host ""
+        Write-Host "DRY RUN — no file written." -ForegroundColor Cyan
+        exit 0
     }
-    Write-Host ""
-    Write-Host "DRY RUN — no file written." -ForegroundColor Cyan
-    exit 0
+
+    # ── Write back (with a .bak backup) ──────────────────────────────────────
+    $backup = "$RegistryPath.bak"
+    Copy-Item $RegistryPath $backup -Force
+    # UTF-8 without BOM (YAML).
+    [System.IO.File]::WriteAllText($RegistryPath, $reg, [System.Text.UTF8Encoding]::new($false))
+
+    Write-Host "Wrote:  $RegistryPath" -ForegroundColor Green
+    Write-Host "Backup: $backup" -ForegroundColor DarkGray
 }
-
-# ── Write back (with a .bak backup) ──────────────────────────────────────────
-$backup = "$RegistryPath.bak"
-Copy-Item $RegistryPath $backup -Force
-# UTF-8 without BOM (YAML).
-[System.IO.File]::WriteAllText($RegistryPath, $reg, [System.Text.UTF8Encoding]::new($false))
-
-Write-Host "Wrote:  $RegistryPath" -ForegroundColor Green
-Write-Host "Backup: $backup" -ForegroundColor DarkGray
 
 # ── Generate .env::PROJECTS_ROOT from bundle.local.yaml::projects_root ───────
 # ONE VALUE, TWO NAMES. `projects_root:` in the manifest is the canon a human

@@ -437,14 +437,21 @@ function Get-CurrentMode($obj) {
     # SUBSTRING, so with CCR_PORT=3456 a URL on port 34567 read as `ccr` — and
     # status/menu named a backend the user is not on. Same for ollama.
     $portEnd = '(?![0-9])'
+    # The host as New-BackendUrl writes it into the URL: an IPv6 literal in
+    # brackets. Matched bare, `::1:11434` never met `[::1]:11434` (the `]` sits
+    # between them), and an IPv6 backend always read as `custom`.
+    function ConvertTo-AuthorityPattern([string]$h) {
+        if ($h.Contains(":")) { return [regex]::Escape("[$h]") }
+        return [regex]::Escape($h)
+    }
     try {
         $ccrHost, $ccrPort = Get-CcrHostPort
-        $ccrPattern = "(127\.0\.0\.1|localhost|$([regex]::Escape($ccrHost))):$ccrPort$portEnd"
+        $ccrPattern = "(127\.0\.0\.1|localhost|$(ConvertTo-AuthorityPattern $ccrHost)):$ccrPort$portEnd"
         if ($url -match $ccrPattern) { return "ccr$modelStr  ($url)" }
     } catch { }
     try {
         $ollamaHost, $ollamaPort = Get-OllamaHostPort
-        if ($url -match "$([regex]::Escape($ollamaHost)):$ollamaPort$portEnd") { return "ollama-local$modelStr  ($url)" }
+        if ($url -match "$(ConvertTo-AuthorityPattern $ollamaHost):$ollamaPort$portEnd") { return "ollama-local$modelStr  ($url)" }
     } catch { }
     if ($url -match "opencode\.ai")         { return "opencode-direct$modelStr  ($url)" }
     if ($url -match "minimax\.io|minimaxi") { return "minimax-direct$modelStr  ($url)" }

@@ -103,6 +103,25 @@ def test_without_pyyaml_the_port_is_still_probed(run_task_status, monkeypatch):
     assert "ClaudeDaemon: nothing listening on port 1" in out, out
 
 
+def test_without_pyyaml_an_inline_comment_is_not_part_of_the_value(tmp_path, monkeypatch):
+    """`health_port: 1  # probe` is valid YAML. The fallback parser read the whole
+    tail, `1  # probe` is not a digit string, and the probe silently never ran —
+    on exactly the box without PyYAML. A quoted value keeps its `#`, as in
+    admin/lib/registry-parse.ps1."""
+    monkeypatch.setitem(sys.modules, "yaml", None)
+    registry = tmp_path / "registry.yaml"
+    registry.write_text("tasks:\n"
+                        "  - name: ClaudeDaemon  # the service\n"
+                        "    trigger: AtStartup # boot\n"
+                        "    enabled: no   # parked\n"
+                        "    health_port: 1  # probe\n"
+                        "    platform: 'all#1'\n", encoding="utf-8")
+
+    assert monitor_checks.read_registry(registry) == [{
+        "name": "ClaudeDaemon", "trigger": "AtStartup", "enabled": False,
+        "health_port": 1, "platform": "all#1"}]
+
+
 def test_a_task_without_a_declared_port_is_left_to_its_exit_code(run_task_status):
     """An ordinary scheduled task has a real exit status; a probe would invent failures."""
     out = run_task_status([_task("ClaudeNightly", result=0, state="Ready")])
@@ -172,6 +191,20 @@ def test_a_down_chain_is_reported_once_per_outage(tmp_path):
     digest = monitor_checks.chain_dead_report(monday_seen, MONDAY + timedelta(hours=1),
                                               monday_path)
     assert digest and "still DOWN" in digest, digest
+
+
+def test_a_chain_stamp_with_an_offset_does_not_crash_the_monitor(tmp_path):
+    """The writer stamps naive local time; a stamp with an offset made `now - last`
+    raise TypeError outside the parse guard, and the monitor died instead of
+    reporting the outage."""
+    last = (WEDNESDAY - timedelta(hours=2)).astimezone()     # local time, with offset
+    path = tmp_path / "chain-dead.json"
+    path.write_text(json.dumps({"first_iso": last.isoformat(), "last_iso": last.isoformat(),
+                                "fails": 1}), encoding="utf-8")
+
+    found = monitor_checks.chain_dead(path, now=WEDNESDAY)
+
+    assert found and "last 2h ago" in found[0], found
 
 
 def test_an_outage_that_ended_is_forgotten_and_the_next_one_is_news(tmp_path):
@@ -258,6 +291,30 @@ def test_s4u_tasks_are_held_to_the_session_0_path_policy(monkeypatch, capsys):
 
     assert _flagged(out, "with a mapped-drive path") == ["PasswordMapped", "S4UMapped"], out
     assert _flagged(out, "S4U task with a UNC path") == ["S4UShare", "S4UShareExe"], out
+
+
+@pytest.mark.parametrize("reply", [
+    types.SimpleNamespace(returncode=0, stdout=b"{not json", stderr=b""),
+    types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"Get-ScheduledTask: access denied"),
+    subprocess.TimeoutExpired("powershell", 60),
+])
+def test_a_collection_that_fails_says_so(reply, monkeypatch, capsys):
+    """A timeout or a malformed reply ended this heredoc with a traceback in the
+    log and nothing on stdout, which the shell reads as "no violation": the
+    backstop went quiet exactly when it could not look. An ERROR line is an
+    alert, and the shell exits 1 on it."""
+    def collect(*_args, **_kwargs):
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(subprocess, "run", collect)
+    exec(compile(_heredoc("POLICY_VIOL"), f"{SCRIPT.name}:POLICY_VIOL", "exec"),
+         {"__name__": "__main__"})
+    out = capsys.readouterr().out
+    assert out.startswith("ERROR: policy check failed"), out
+    assert re.search(r'case "\$POLICY_VIOL" in ERROR\*\) MONITOR_RC=1', SCRIPT.read_text(
+        encoding="utf-8")), "the shell half no longer fails the run on it"
 
 
 def test_nothing_to_report_prints_nothing(monkeypatch, capsys):

@@ -46,6 +46,41 @@ foreach ($cp in @(0, 1251)) {{
     assert rows[1].startswith("cp=1251 ")
 
 
+@pytest.mark.integration   # ~1.3 s: two function definitions parsed out of a 900-line script
+def test_find_python_takes_the_deployed_pin_then_the_newest_install(tmp_path: Path):
+    """The fallback was two hard-coded paths, Python314 and Python313 under
+    Program Files: a 3.12, or a per-user install, was simply "not found". And a
+    deployment was checked with whatever `python` was on PATH, not the
+    interpreter its .env pins for the tasks."""
+    out = tmp_path / "found.txt"
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    for version in ("Python39", "Python312", "Python310"):
+        (tmp_path / "pf" / version).mkdir(parents=True)
+        (tmp_path / "pf" / version / "python.exe").write_bytes(b"")
+    code = define_functions(SELF_TEST, ["Invoke-Checked", "Find-Python"]) + f"""
+. {ps_quote(ROOT / "scripts" / "lib" / "dotenv.ps1")}
+function Get-Command {{ $null }}       # no python, python3 or py on PATH
+$env:CLAUDE_HOOK_PYTHON = $null
+$env:ProgramFiles = {ps_quote(tmp_path / "pf")}
+$env:LOCALAPPDATA = {ps_quote(tmp_path / "nowhere")}
+$script:haveDotEnv = $true
+$deployRoot = {ps_quote(deploy)}
+$deployed = $false
+$lines = @("newest=$(Find-Python)")
+$deployed = $true
+[System.IO.File]::WriteAllText({ps_quote(deploy / ".env")}, "PYTHON_EXE={sys.executable}`n")
+function Get-Command($name) {{ if ($name -eq {ps_quote(sys.executable)}) {{ [PSCustomObject]@{{ Source = $name }} }} }}
+$lines += "pinned=$(Find-Python)"
+[System.IO.File]::WriteAllLines({ps_quote(out)}, $lines, [System.Text.Encoding]::Unicode)
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert out.read_text(encoding="utf-16").splitlines() == [
+        f"newest={tmp_path / 'pf' / 'Python312' / 'python.exe'}",
+        f"pinned={sys.executable}"]
+
+
 @pytest.mark.integration   # the whole source-mode self-test, ~10 s
 def test_self_test_checks_the_deployment_under_claude_config_dir(tmp_path: Path):
     """F56: with no -InstallPath the self-test reported on ~/.claude even when

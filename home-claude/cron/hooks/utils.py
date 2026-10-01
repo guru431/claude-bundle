@@ -767,10 +767,21 @@ def quarantine_raw(source_id: str, reason: str, raw: str) -> None:
         # first. It goes BEFORE the reason because callers find these files by
         # the `*_<reason>.txt` tail (_preserve_corrupt_state's per-content dedup).
         uniq = uuid.uuid4().hex[:6]
-        (d / f"{stamp}_{uniq}_{safe}_{safe_reason}.txt").write_text(
-            masked(str(raw or "")), encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+        body = masked(str(raw or ""))
+        try:
+            (d / f"{stamp}_{uniq}_{safe}_{safe_reason}.txt").write_text(
+                body, encoding="utf-8", errors="replace")
+        except OSError:
+            # Without the source id. Past MAX_PATH (a deep install, Windows
+            # without LongPathsEnabled) the full name could not be written, and
+            # the payload was gone while its source was marked quarantined.
+            (d / f"{stamp}_{uniq}_{safe_reason}.txt").write_text(
+                body, encoding="utf-8", errors="replace")
+    except Exception as exc:
+        # Still best-effort — but loud. This is the ONLY copy of the payload.
+        print(f"WARNING: quarantine_raw could not save the payload of "
+              f"{str(source_id)[:120]!r} ({reason}): {exc} — it is lost",
+              file=sys.stderr)
 
 
 def mark_phase_success(phase: str) -> None:
@@ -778,7 +789,8 @@ def mark_phase_success(phase: str) -> None:
 
     Shares the state lock with state_add/state_remove: this is a read-modify-write
     of one shared file, so two phases finishing together would otherwise drop one
-    another's entry. The temp file is per-process for the same reason.
+    another's entry. Written through atomic_write_text, whose temp name is unique
+    per call: a pid-only name is shared by two threads of one process.
     """
     # A dry run must not stamp a heartbeat. `dry_run_until` promises the same
     # brake on EVERY phase, but the idle branches of flush/compile called this
@@ -803,9 +815,7 @@ def mark_phase_success(phase: str) -> None:
                 except Exception:
                     data = {}
             data[phase] = datetime.now().isoformat(timespec="seconds")
-            tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            tmp.replace(p)
+            atomic_write_text(p, json.dumps(data, indent=2))
         except Exception as e:
             print(f"WARNING: mark_phase_success({phase}) failed: {e}", file=sys.stderr)
 
@@ -1302,7 +1312,9 @@ def finding_is_open(path: Path, title: str) -> bool:
         existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
     except OSError:
         return False
-    return f"· {title} [" in existing
+    # The title as append_finding WROTE it — masked. Compared raw, a title that
+    # quotes a key-shaped string never matched its own entry.
+    return f"· {masked(title)} [" in existing
 
 
 def append_finding(path: Path, title: str, context: str, what: str,
@@ -1321,7 +1333,10 @@ def append_finding(path: Path, title: str, context: str, what: str,
              f"**Status:** open\n\n")
     try:
         existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
-        if f"· {title} [" in existing:
+        # Against the MASKED title, the form the entry is written in: the raw one
+        # never matched a title mask_secrets changes, and every retry filed a
+        # duplicate.
+        if f"· {masked(title)} [" in existing:
             return False
         m = re.search(r"(?m)^## ", existing)
         if existing.lstrip().startswith("# Findings") and m:
@@ -1350,7 +1365,8 @@ def close_finding(path: Path, title: str) -> bool:
     except OSError:
         return False
     pattern = re.compile(
-        r"(?ms)^## \d{4}-\d{2}-\d{2} · " + re.escape(title) + r" \[[^\]]*\]\n.*?(?=^## |\Z)")
+        r"(?ms)^## \d{4}-\d{2}-\d{2} · " + re.escape(masked(title))
+        + r" \[[^\]]*\]\n.*?(?=^## |\Z)")
     new = pattern.sub("", text)
     if new == text:
         return False
@@ -2484,16 +2500,21 @@ def mark_depleted(provider: str, reason: str) -> None:
     _DEPLETED_UNTIL[provider] = now + _depleted_ttl(provider, reason)
     if not PROVIDERS.get(provider, {}).get("offbox", True):
         return   # local-only: this process only, never the file — see above
-    try:
-        data = {p: {"ts": row["ts"], "reason": row["reason"]}
-                for p, row in _depleted_rows().items()}
-        data[provider] = {"ts": now, "reason": reason}
-        _DEPLETED_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _DEPLETED_PATH.with_name(f"{_DEPLETED_PATH.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(_DEPLETED_PATH)
-    except OSError:
-        pass   # best-effort: the in-process set still works
+    # Read-merge-write under a lock. Re-reading the file was not enough on its
+    # own: two tasks refused by different providers at the same moment both read
+    # it, each added its own row, and the second replace dropped the first — that
+    # provider was "alive" again for every other task of the night. Fail-open:
+    # a breaker is best-effort, and a busy lock must not cost the caller its call.
+    lock = _DEPLETED_PATH.with_name(_DEPLETED_PATH.name + ".lock")
+    with _file_lock(lock, wait=10.0, stale=60.0, fail_open=True,
+                    label="depleted lock", mode="os"):
+        try:
+            data = {p: {"ts": row["ts"], "reason": row["reason"]}
+                    for p, row in _depleted_rows().items()}
+            data[provider] = {"ts": now, "reason": reason}
+            atomic_write_text(_DEPLETED_PATH, json.dumps(data, indent=2))
+        except OSError:
+            pass   # best-effort: the in-process set still works
 
 
 CHAIN_DEAD_PATH = BUNDLE_ROOT / "cron" / "state" / "chain-dead.json"

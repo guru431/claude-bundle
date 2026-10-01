@@ -61,12 +61,17 @@ def collect_backlinks() -> dict[str, list[str]]:
             text = f.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        source = f.relative_to(WIKI_ROOT).with_suffix("").as_posix()
         for target in extract_wikilinks(text):
             stem = target.rsplit("/", 1)[-1]
-            if stem == f.stem:
-                continue  # a page linking to itself is not a backlink
-            backlinks.setdefault(stem, set()).add(
-                f.relative_to(WIKI_ROOT).with_suffix("").as_posix())
+            # A page linking to itself is not a backlink. A link with a path names
+            # one page, so it is a self-link only when it names THIS one: compared
+            # by stem, `projects/a/setup` → `[[projects/b/setup]]` was dropped, and
+            # the same stem in two projects is normal (see build_projects_index).
+            if (target.removesuffix(".md") == source if "/" in target
+                    else stem == f.stem):
+                continue
+            backlinks.setdefault(stem, set()).add(source)
     return {k: sorted(v) for k, v in backlinks.items()}
 
 

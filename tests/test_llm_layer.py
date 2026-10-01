@@ -18,6 +18,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import types
 from datetime import datetime, timedelta
@@ -269,6 +270,37 @@ def test_each_latch_keeps_its_own_timestamp(cron_copy: Path, clock):
     clock["t"] = t0 + 6 * 3600 + 60
     assert not _load_utils(cron_copy, "utils_latch_ts_next")._is_depleted("deepseek"), \
         "DeepSeek was still out six hours after its own 402"
+
+
+def test_two_refusals_at_the_same_moment_both_reach_the_file(cron_copy: Path, clock):
+    """mark_depleted re-read the file before writing, but did not lock it: two
+    tasks refused by different providers at once both read it, each added its
+    own row, and the second replace dropped the first — that provider was then
+    "alive" again for every other task of the night."""
+    first = _load_utils(cron_copy, "utils_race_first")
+    second = _load_utils(cron_copy, "utils_race_second")
+    first._load_depleted()                  # the startup read, outside the race
+    inside, release = threading.Event(), threading.Event()
+    read = first._depleted_rows
+
+    def paused_read():
+        rows = read()
+        inside.set()
+        release.wait(5)
+        return rows
+
+    first._depleted_rows = paused_read
+    writer = threading.Thread(target=first.mark_depleted, args=("deepseek", "402"))
+    writer.start()
+    assert inside.wait(5)
+    racer = threading.Thread(target=second.mark_depleted, args=("opencode", "429"))
+    racer.start()
+    racer.join(0.3)         # unlocked, the racer has written by now — and loses its row
+    release.set()
+    writer.join(5)
+    racer.join(5)
+
+    assert set(_depleted(cron_copy)) == {"deepseek", "opencode"}
 
 
 def test_a_transient_latch_lasts_minutes_and_a_config_one_hours(cron_copy: Path, clock):

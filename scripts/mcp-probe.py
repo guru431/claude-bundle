@@ -156,7 +156,14 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
         # sees something plausible instead of a literal and dies during config.
         env[key] = "probe-placeholder" if str(value).startswith("${") else str(value)
 
-    command = [spec.get("command", ""), *spec.get("args", [])]
+    # Strings, as is_wrapper reads them: a number or a bool in `args` is valid
+    # JSON, and Popen raised TypeError on it — not the OSError caught below — so
+    # one odd declaration ended the whole run instead of failing its own line.
+    args = spec.get("args") or []
+    if not isinstance(args, list):
+        print(f"{name:<14} FAIL — `args` is not a list in the declaration")
+        return False
+    command = [str(spec.get("command") or ""), *(str(a) for a in args)]
     if not command[0]:
         print(f"{name:<14} FAIL — no command in declaration")
         return False

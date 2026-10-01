@@ -136,14 +136,31 @@ function Invoke-Checked([scriptblock]$sb, [switch]$AllStreams) {
 function Find-Python {
     $cands = @()
     if ($env:CLAUDE_HOOK_PYTHON) { $cands += $env:CLAUDE_HOOK_PYTHON }
+    # A deployment is checked with the interpreter its tasks are pinned to.
+    $envFile = Join-Path $deployRoot '.env'
+    if ($deployed -and $script:haveDotEnv -and (Test-Path $envFile)) {
+        $pinned = Get-DotEnvValue -Path $envFile -Name 'PYTHON_EXE'
+        if ($pinned) { $cands += $pinned }
+    }
     $cands += @('python', 'python3')
     foreach ($c in $cands) {
         $cmd = Get-Command $c -ErrorAction SilentlyContinue
         if ($cmd) { return $cmd.Source }
     }
-    foreach ($p in @('C:\Program Files\Python314\python.exe', 'C:\Program Files\Python313\python.exe')) {
-        if (Test-Path $p) { return $p }
+    # The py launcher knows every registered install, wherever it lives. The
+    # fallback used to be two hard-coded paths (Python314, Python313 under
+    # Program Files), which a 3.12 or a per-user install never matched.
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        $exe = (Invoke-Checked { py -3 -c "import sys; print(sys.executable)" }) -split "`r?`n" |
+            Select-Object -Last 1
+        if ($script:lastRc -eq 0 -and $exe -and (Test-Path -LiteralPath $exe.Trim())) { return $exe.Trim() }
     }
+    # Last resort, no version pinned: the newest python3x under either default root.
+    $roots = @("$env:ProgramFiles\Python3*", "$env:LOCALAPPDATA\Programs\Python\Python3*")
+    $found = @(Get-Item -Path $roots -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'python.exe') } |
+        Sort-Object { [int]($_.Name -replace '\D', '') } -Descending)
+    if ($found.Count) { return (Join-Path $found[0].FullName 'python.exe') }
     return $null
 }
 $py = Find-Python

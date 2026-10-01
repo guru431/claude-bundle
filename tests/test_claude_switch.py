@@ -44,6 +44,22 @@ def test_status_survives_a_malformed_backend_host(tmp_path: Path, var: str, url:
     assert f"Before: custom  ({url})" in r.stdout, r.stdout
 
 
+@pytest.mark.parametrize("var, url, mode", [
+    ("OLLAMA_HOST", "http://[::1]:11434", "ollama-local"),
+    ("CCR_HOST", "http://[::1]:3456", "ccr"),
+])
+def test_status_names_a_backend_on_an_ipv6_host(tmp_path: Path, var: str, url: str, mode: str):
+    """New-BackendUrl writes an IPv6 host in brackets; Get-CurrentMode matched the
+    bare host, so `::1:11434` never met `[::1]:11434` and the mode read `custom`."""
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.local.json").write_text(
+        '{"env": {"ANTHROPIC_BASE_URL": "%s"}}' % url, encoding="utf-8")
+    r = _switch(project, "status", **{var: "::1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"Before: {mode}  ({url})" in r.stdout, r.stdout
+
+
 def test_the_menu_names_the_ccr_proxy_it_would_use(tmp_path: Path):
     """F54: the CCR line printed `${ccrHost}:${ccrPort}`, variables that only
     existed inside other functions — "any model via local proxy :"."""

@@ -209,7 +209,10 @@ def check_launchd(tasks: list[dict]) -> tuple[list[tuple[str, str]], str | None]
         return [], "launchctl list failed on this host"
     wanted = {t["name"] for t in tasks}
     problems: list[tuple[str, str]] = []
-    for line in out.splitlines()[1:]:
+    # Every line, the `PID Status Label` header included: the label filter below
+    # drops it, so a listing that starts straight with an agent of ours (no
+    # header) is not skipped on a guess about the format.
+    for line in out.splitlines():
         cols = line.split()
         if len(cols) < 3 or not cols[2].startswith(LAUNCHD_PREFIX):
             continue

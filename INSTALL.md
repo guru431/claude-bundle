@@ -814,7 +814,8 @@ Call the scripts through `bash`: a fresh clone does not mark them executable.
   `~/.config/systemd/user` (honouring `$XDG_CONFIG_HOME`) and are enabled, or to
   `~/Library/LaunchAgents` and are loaded. Python tasks run the verified
   interpreter, not whatever `/usr/bin/env python3` finds on the scheduler's
-  PATH. Units a previous install placed for a task that has since been removed
+  PATH, and bash tasks the `bash` on your PATH (`/bin/bash` when that is the
+  same file). Units a previous install placed for a task that has since been removed
   or disabled are disabled and deleted. `--enable-linger` runs
   `loginctl enable-linger`: without lingering, `--user` timers fire only while
   you are logged in, so nightly work silently never happens.
@@ -838,7 +839,8 @@ cp -r home-claude/hooks home-claude/wiki home-claude/cron home-claude/bin ~/.cla
 [ -f ~/.claude/bundle.local.yaml ] || cp config/bundle.local.example.yaml ~/.claude/bundle.local.yaml
 "${EDITOR:-nano}" ~/.claude/bundle.local.yaml ~/.claude/.env
 
-# 3. Units from the DEPLOYED registry, run by the interpreter that has the deps:
+# 3. Units from the DEPLOYED registry, run by the interpreter that has the deps
+# (and by the bash you pin as BASH_EXE in .env — /bin/bash when --bash is left out):
 PY="$(python3 -c 'import sys; print(sys.executable)')"
 "$PY" scripts/gen-scheduler.py --target systemd --install-path ~/.claude \
     --registry ~/.claude/cron/registry.yaml --python "$PY" --out-dir units
@@ -860,7 +862,7 @@ loginctl enable-linger "$USER"           # check: loginctl show-user "$USER" -p 
 # What is installed vs what the registry now generates. Writes nothing; exit 3 on
 # drift — `new`/`changed` units to copy in, `stale` ones (a removed or disabled
 # task) to disable and delete. Pass the same --install-path / --registry /
-# --python / --all you generated with ($PY as in step 3); install.sh prints its
+# --python / --bash / --all you generated with ($PY as in step 3); install.sh prints its
 # exact line at the end of every full install.
 "$PY" scripts/gen-scheduler.py --check --install-path ~/.claude \
     --registry ~/.claude/cron/registry.yaml --python "$PY"

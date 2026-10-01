@@ -771,15 +771,17 @@ def last_flush_start() -> datetime | None:
     "Recently" matters: a flush that CRASHES writes no record, and last night's
     start would then excuse every draft written since — the stalled night this
     check exists to report.
+
+    An unreadable ledger RAISES. It used to return None too — "no flush ran", so
+    every draft in .pending was stuck, the one written a minute ago included: a
+    read error failed the run and paged. The caller decides what not knowing
+    means.
     """
-    try:
-        rec = latest_by_task(read_latest_runs()).get("ClaudeWikiFlush")
-        if not rec:
-            return None
-        started = (datetime.fromisoformat(rec["ts"])
-                   - timedelta(seconds=float(rec.get("duration_s") or 0)))
-    except Exception:   # an unreadable ledger must not decide a verdict either way
+    rec = latest_by_task(read_latest_runs()).get("ClaudeWikiFlush")
+    if not rec:
         return None
+    started = (datetime.fromisoformat(rec["ts"])
+               - timedelta(seconds=float(rec.get("duration_s") or 0)))
     if datetime.now() - started > timedelta(hours=FLUSH_START_MAX_AGE_HOURS):
         return None
     return started
@@ -931,7 +933,14 @@ def _compile(rec: dict) -> int:
         # them and left them. A draft a session wrote after flush began — the
         # minutes between flush and compile of one night included — is simply
         # waiting for tomorrow, and counting it failed a healthy run.
-        stuck = stuck_pending(last_flush_start())
+        try:
+            stuck = stuck_pending(last_flush_start())
+        except Exception as exc:
+            # Not knowing when flush started decides nothing either way: no
+            # FAILED for drafts that may be minutes old, no claim they are fine.
+            log(f"WARNING: the run ledger is unreadable ({type(exc).__name__}: {exc}) "
+                f"— .pending not judged this run")
+            stuck = 0
         if stuck:
             note = (f"flush produced no daily: {stuck} file(s) still in .pending "
                     f"(raw material is there, nothing to compile)")

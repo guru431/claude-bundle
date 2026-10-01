@@ -293,6 +293,8 @@ def test_lite_merges_settings_leaves_out_wiki_and_uninstalls_cleanly(tmp_path):
     assert settings["hooks"] == {"Stop": []} and settings["language"] == "ru"
     assert "permissions" in settings, "the template keys were not merged in"
     assert (home / "commands" / "code-review-ext.md").is_file()
+    # CLAUDE.md points at these references, so lite must ship them too.
+    assert (home / "skills" / "rules-reference" / "test-policy.md").is_file()
     assert not (home / "commands" / "wiki.md").exists(), "/wiki needs cron/, which lite has none of"
     assert not (home / "commands" / "README.md").exists(), "every .md in commands/ is a command"
     assert "full tier only" in res.out

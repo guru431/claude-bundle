@@ -41,7 +41,7 @@ claude-bundle/
 ├── .gitignore, .gitattributes
 │
 ├── home-claude/                       ← copied into ~/.claude/
-│   ├── CLAUDE.md                       Karpathy rules + tool selection + encoding
+│   ├── CLAUDE.md                       the rules every session needs
 │   ├── settings.json                   permissions + plugins + language
 │   ├── settings.example-with-hooks.json reference wiring for every shipped hook
 │   ├── hooks/                          user-level hooks (all opt-in)
@@ -53,7 +53,8 @@ claude-bundle/
 │   │   ├── prompt-secret-warn.py       flag a credential pasted into a prompt
 │   │   ├── session-telegram.py         Telegram when a LONG task finishes/waits
 │   │   └── README.md
-│   ├── skills/                         user-level skill templates
+│   ├── skills/                         user-level skills
+│   │   ├── rules-reference/            long references CLAUDE.md points to
 │   │   ├── code-review-external/SKILL.md
 │   │   ├── code-selfcheck/             SKILL.md + catalog.example.json
 │   │   ├── personal-voice/SKILL.md
@@ -165,9 +166,10 @@ claude-bundle/
 
 | File | What it gives |
 |---|---|
-| `CLAUDE.md` | Karpathy coding discipline (Think/Simplicity/Surgical/Goal-driven), tool-selection rules (Glob/Grep/Read/Edit over Bash), Windows file-encoding rules (BOM for `.ps1`, no BOM for `.sh`), Findings pattern, Superpowers workflow, Codex coexistence note |
+| `CLAUDE.md` | The rules every session needs, nothing longer: Findings pattern, when to continue vs. stop and ask, tool-selection rules (Glob/Grep/Read/Edit over Bash), MCP declaration, Windows file-encoding rules (BOM for `.ps1`, no BOM for `.sh`, CRLF for `.cmd`), Karpathy coding discipline (Think/Simplicity/Surgical/Goal-driven), test policy, subagents/verification/tests cadence, Superpowers workflow, Codex coexistence note |
 | `settings.json` | Permissions allow-list, `enabledPlugins` for `superpowers` and `context7`, `language: ru` (change to your preference) |
 | `hooks/*.py` | Optional: a deny/ask rule table for Bash commands, `.ps1`/`.sh` encoding fixes, regenerate `.pdf` when the paired `.md` is edited; with the full tier also an ask before a credential file is read or written, a warning on a pasted credential, and a Telegram line when a long task finishes |
+| `skills/rules-reference/` | The long references behind `CLAUDE.md` — test policy, Windows shells and encodings, MCP servers, Task Scheduler — read on demand instead of loaded into every session |
 | `skills/*/SKILL.md` | Optional: `code-review-external` template (second-opinion review), `code-selfcheck` template (check your diff against your own anti-pattern catalog), `personal-voice` template (write text in your voice by register) |
 | `commands/code-review-ext.md` | Optional: `/code-review-ext` slash wrapper |
 
@@ -204,6 +206,7 @@ alerts once per change of state rather than every night. A project can
 declare its suites — any runner, three levels, a time budget — under
 `tests:` in `bundle.local.yaml`; one without that entry gets its pytest
 suite discovered. No LLM is involved. See [the test policy](home-claude/CLAUDE.md#test-policy-all-projects)
+(full text: [`rules-reference/test-policy.md`](home-claude/skills/rules-reference/test-policy.md))
 for the rules the suites themselves are held to.
 
 LLM calls go through `utils.py::llm_call()` with a configurable fallback

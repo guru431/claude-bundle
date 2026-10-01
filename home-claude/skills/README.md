@@ -1,14 +1,27 @@
 # User-level skills
 
-Three example skills, all **templates** — they need you to fill in paths /
-provide companion files before they do anything useful.
+Four skills. `rules-reference` works as shipped; the other three are
+**templates** — they need you to fill in paths / provide companion files before
+they do anything useful.
 
-A note that applies to all three: **a skill's data belongs next to the skill**,
+A note that applies to all of them: **a skill's data belongs next to the skill**,
 not inside whichever project produced it. Point a `SKILL.md` at
 `<some-project>/data.json` and the skill goes silently inert on every machine
 where that project is not cloned — you get the degrade path forever and no error
 saying why. `code-selfcheck` ships its catalog beside `SKILL.md` for exactly
 that reason.
+
+## rules-reference
+
+Pattern: keep `~/.claude/CLAUDE.md` to the rules every session needs, and move
+the long references — the reasons behind a rule, measurements, worked examples —
+into files a session reads only when the job calls for them (Anthropic's cost
+guide: move instructions from CLAUDE.md to skills).
+
+What ships: `test-policy.md`, `windows-shell.md`, `mcp-servers.md`,
+`task-scheduler.md`, each linked from the matching `CLAUDE.md` section, and a
+`SKILL.md` whose description triggers on those jobs. Nothing to fill in. Add a
+reference of your own as a file here plus a row in `SKILL.md`.
 
 ## code-review-external
 

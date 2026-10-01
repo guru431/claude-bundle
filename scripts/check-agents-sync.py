@@ -39,6 +39,7 @@ AGENTS_MD = ROOT / "codex" / "AGENTS.md"
 # with nothing comparing them. sections() indexes H2 AND H3 now.
 REQUIRED = [
     "Findings",
+    "When to continue",
     "File Operations",
     "Tool Selection Rules",
     "Declaring MCP servers",
@@ -61,6 +62,7 @@ REQUIRED = [
 # different home directory in each.
 COMPARED = [
     "Findings",
+    "When to continue",
     "Declaring MCP servers",
     "Coding Discipline",
     "Test policy",

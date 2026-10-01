@@ -55,7 +55,9 @@ preserve that discipline.
 │   │                                   (.ps1/.sh; ps1-bom-guard.py = old name),
 │   │                                   prompt secret warning, Telegram when a
 │   │                                   long task finishes or waits (Notification)
-│   ├── skills/                         3 skill templates (placeholders)
+│   ├── skills/                         4 skills: 3 templates (placeholders) +
+│   │                                   rules-reference (the long references
+│   │                                   home-claude/CLAUDE.md points to)
 │   ├── commands/                       2 slash commands (/wiki is full tier)
 │   ├── wiki/                           empty Karpathy vault skeleton
 │   ├── bin/
@@ -214,7 +216,7 @@ second copy of a rule, generate it or source it; do not paste it.
 
 | Change | Also update |
 |---|---|
-| New rule in `home-claude/CLAUDE.md` | If universal — also mirror into `codex/AGENTS.md`. The universal set is not prose here: it is `REQUIRED` in [`scripts/check-agents-sync.py`](scripts/check-agents-sync.py) (Findings, File Operations, Tool Selection Rules, Declaring MCP servers, Coding Discipline, Test policy, Secrets, Windows Task Scheduler, Error Recovery, File Encoding), and `COMPARED` in the same file is the subset whose wording must match rather than merely exist. This table used to name six of them, which is how two sections stayed unchecked in both directions — and the MCP section, present in both files, was checked by nothing. Claude-specific rules (slash commands, hooks, skills, plugin workflow) stay in `home-claude/CLAUDE.md` only. |
+| New rule in `home-claude/CLAUDE.md` | If universal — also mirror into `codex/AGENTS.md`. The universal set is not prose here: it is `REQUIRED` in [`scripts/check-agents-sync.py`](scripts/check-agents-sync.py) (Findings, When to continue, File Operations, Tool Selection Rules, Declaring MCP servers, Coding Discipline, Test policy, Secrets, Windows Task Scheduler, Error Recovery, File Encoding), and `COMPARED` in the same file is the subset whose wording must match rather than merely exist. This table used to name six of them, which is how two sections stayed unchecked in both directions — and the MCP section, present in both files, was checked by nothing. Claude-specific rules (slash commands, hooks, skills, plugin workflow) stay in `home-claude/CLAUDE.md` only. |
 | New skill in `home-claude/skills/` | Update `home-claude/skills/README.md`. If the skill ships a slash command, also add it to `home-claude/commands/`. The skill and slash-command counts the docs quote are checked by `scripts/check-doc-counts.py`. |
 | New hook in `home-claude/hooks/` | Update `home-claude/hooks/README.md`. Update `home-claude/settings.example-with-hooks.json` to show how to wire it. Do NOT add it to the default `home-claude/settings.json` — hooks are opt-in. The hook counts in README, INSTALL, this file and `hooks/README.md` are checked by `scripts/check-doc-counts.py`, which also defines what counts as a hook (`shipped_counts()`). |
 | New cron task in `home-claude/cron/registry.yaml` | The script itself goes under `home-claude/cron/<name>.{sh,py}`. Document the task briefly in `README.md` and `docs/cron-architecture.md` (the table of shipped tasks — keep its count in sync). |
@@ -401,7 +403,8 @@ much as config.
   file).
 - **PowerShell BOM** — if you edit `scripts/claude-switch.ps1` and it
   contains Cyrillic, add a UTF-8 BOM (see `home-claude/CLAUDE.md`
-  "File Encoding" section).
+  "File Encoding" section; the snippet is in
+  `home-claude/skills/rules-reference/windows-shell.md`).
 - **Shellcheck on Windows, two local-only traps.** Its default output
   carries em-dashes that a CP-1251 console cannot encode
   (`commitBuffer: invalid argument`) — hence `-f gcc` above. And a

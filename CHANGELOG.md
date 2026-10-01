@@ -53,6 +53,31 @@ The short list; UPGRADING.md has the steps.
   `-Verify` call — `self-test.ps1` did — needs the new number.
 - **`runs.py stale --json --seen <file>`** is now refused by argparse instead of
   silently ignoring `--seen`.
+- **`~/.claude/CLAUDE.md` is replaced by a shorter one** (383 → ~230 lines; the
+  installer backs up a changed one as usual). Nothing it required was dropped:
+  the long references moved to the new `rules-reference` skill.
+
+### CLAUDE.md: the rules every session needs, references on demand
+
+Following Anthropic's cost guide ("move instructions from CLAUDE.md to
+skills"), `home-claude/CLAUDE.md` keeps the rules and drops what made it long:
+the reasons behind the test policy, the MCP measurements and config examples,
+the Windows path, sandbox and encoding detail, and the Task Scheduler how-to now
+live in `home-claude/skills/rules-reference/` (`test-policy.md`,
+`windows-shell.md`, `mcp-servers.md`, `task-scheduler.md`), linked from the
+section they explain. `skills/` is installed by every profile, lite included,
+so no installer change was needed; `tests/test_rules_reference.py` holds every
+pointer to a shipped file.
+
+Two sections are new: **When to continue vs. stop and ask** (continue on an
+unambiguous, reversible step inside the request; stop on the user's decisions,
+hard-to-undo or production-touching steps and ambiguous readings; never ask
+what a command can answer; at most two attempts at a failing command) and
+**Subagents, verification, tests** (delegate only large independent parallel
+work, one review per batch, targeted tests along the way and the fast suite
+once at the end). The first is universal: it is mirrored into
+`codex/AGENTS.md` and compared by `scripts/check-agents-sync.py`. The `.cmd`
+rule now says CRLF, and why.
 
 ### A second sweep: the 28 findings the weekly auto-review filed
 

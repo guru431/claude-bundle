@@ -116,6 +116,8 @@ def test_a_lite_install_keeps_the_users_settings_and_leaves_out_wiki(tmp_path: P
     assert not (claude_home / "commands" / "wiki.md").exists()
     assert "commands/wiki.md" not in written
     assert (claude_home / "commands" / "code-review-ext.md").is_file()
+    # CLAUDE.md points at these references, so lite must ship them too.
+    assert "skills/rules-reference/test-policy.md" in written
     assert "skipped commands/wiki.md" in r.stdout and "full tier only" in r.stdout
     # Every .md in commands/ is a slash command: the README would be `/README`.
     assert not (claude_home / "commands" / "README.md").exists()

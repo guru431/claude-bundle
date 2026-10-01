@@ -174,8 +174,10 @@ of the bundle's hooks once.
 
 ### 5. (Optional) Adapt the skill templates
 
-All three shipped skills — `code-review-external`, `code-selfcheck` and
-`personal-voice` — are templates. Open each `SKILL.md` and replace the
+Three of the four shipped skills — `code-review-external`, `code-selfcheck` and
+`personal-voice` — are templates (the fourth, `rules-reference`, holds the long
+references `CLAUDE.md` points to and works as shipped). Open each template's
+`SKILL.md` and replace the
 `<placeholder>` paths (and, for `code-selfcheck`, copy
 `catalog.example.json` to `catalog.json` and put your own entries in it).
 Without that they describe a pattern but won't run anything concrete.

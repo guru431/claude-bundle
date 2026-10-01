@@ -1,464 +1,202 @@
 # CLAUDE.md — claude-bundle (this repo)
 
-Per-project instructions for agents working **on this repo** (extending,
-fixing, updating). Not to be confused with `home-claude/CLAUDE.md`,
-which is the global rules file the bundle ships to user machines.
+Instructions for agents working **on this repo**. Not to be confused with
+`home-claude/CLAUDE.md`, the global rules file the bundle ships to user
+machines. The reasoning and detail behind the rules below live in
+[`docs/maintaining.md`](docs/maintaining.md) — read it before touching the
+guards, CI, the sanitization hooks or `utils.py`.
 
 ## What this repo is
 
-A portable, sanitized Claude Code starter pack with two tiers:
+A portable, sanitized Claude Code starter pack in two tiers:
 
-- **Tier 1** — minimal `~/.claude/` config (CLAUDE.md, settings.json,
-  optional hooks/skills/commands). ~5 minutes to deploy.
-- **Tier 2** — adds Karpathy-style wiki vault skeleton, cron pipeline
+- **Tier 1** — minimal `~/.claude/` config (CLAUDE.md, settings.json, optional
+  hooks/skills/commands).
+- **Tier 2** — adds the Karpathy-style wiki vault skeleton, the cron pipeline
   (Windows Task Scheduler + LLM-driven session-to-wiki compilers),
-  `claude-switch.ps1` backend switcher, `codex/AGENTS.md` mirror.
+  `claude-switch.ps1` and the `codex/AGENTS.md` mirror.
 
-User-facing docs (README, INSTALL, AGENT-INSTRUCTIONS) also frame these
-as two **profiles**: **lite** (config only, no extra software — Tier 1
-*minus* the Python hooks) and **full** (Tier 1 + Tier 2). "lite/full"
-are synonyms layered on top of the tier names, not a third structure —
-keep the Tier 1 / Tier 2 split as the canonical one when editing.
-
-Maintained on a private Forgejo + Gitea pair; public GitHub release
-pending (a `github` remote may already be configured locally). MIT
-license.
+User-facing docs call them **lite** (Tier 1 minus the Python hooks) and
+**full** (Tier 1 + Tier 2) — synonyms, not a third structure; Tier 1 / Tier 2 is
+canonical. Maintained on a private Forgejo + Gitea pair, public GitHub release
+pending; MIT license.
 
 ## The cardinal rule — this is a PUBLIC repo
 
-**Nothing personal goes in. Ever.** Before every commit, run a grep
-sanity check (see "Verification" below). The bundle was extracted from
-a real working setup that contained:
-
-- API keys, tokens, passwords (DeepSeek, MiniMax, OpenCode Go, CCR,
-  Forgejo, Gitea, GitHub, Telegram, Zabbix, Mikrotik)
-- Hostnames and LAN IPs of the source machine and its servers
-- Domain names of personally-owned services
-- The full names of the source's 22 projects
-- Internal incident dates and references
-- The Windows username of the source machine's owner
-
-All of these were stripped during extraction. New additions must
-preserve that discipline.
+**Nothing personal goes in. Ever.** The bundle was extracted from a real setup
+that held API keys and tokens, hostnames and LAN IPs, personal domains, the
+names of the source's private projects, internal incident dates and the owner's
+Windows username — all stripped. Every addition keeps it that way; see
+§ Sanitization checklist.
 
 ## Structure
 
 ```
 .
 ├── README.md, INSTALL.md, AGENT-INSTRUCTIONS.md, CHANGELOG.md, UPGRADING.md, LICENSE
-├── home-claude/                       what gets copied into ~/.claude/
-│   ├── CLAUDE.md                       global rules ← edit here for tier-1 rule changes
-│   ├── settings.json                   permissions + plugins
-│   ├── settings.example-with-hooks.json  same permissions, hooks wired in
-│   ├── hooks/                          7 opt-in hooks: iptables + bash deny-list,
-│   │                                   sensitive-path ask, md2pdf, text encoding
-│   │                                   (.ps1/.sh; ps1-bom-guard.py = old name),
-│   │                                   prompt secret warning, Telegram when a
-│   │                                   long task finishes or waits (Notification)
-│   ├── skills/                         4 skills: 3 templates (placeholders) +
-│   │                                   rules-reference (the long references
-│   │                                   home-claude/CLAUDE.md points to)
-│   ├── commands/                       2 slash commands (/wiki is full tier)
-│   ├── wiki/                           empty Karpathy vault skeleton
-│   ├── bin/
-│   │   ├── _run-hidden.vbs             hidden-window Task Scheduler launcher
-│   │   └── md2pdf.py                   md → PDF converter (hook + ClaudeMd2PdfSync)
-│   └── cron/                           tier-2 pipeline
-│       ├── hooks/                       session-start/end, pre-compact,
-│       │                                precompact-handoff, untrusted, utils.py
-│       ├── lib/                         sourceable/importable shared code:
-│       │                                secret-scan.sh, secret_shapes.py, dotenv.sh,
-│       │                                runtime.sh (which python / bash), env_names.py
-│       │                                (generated: check-env-ref.py --emit-names)
-│       ├── wiki/                        flush, compile-sessions, compile-kb,
-│       │                                build-index, lint, conflict-resolve, grep,
-│       │                                pipeline
-│       ├── prompts/                     the LLM prompts those phases send
-│       ├── tests/                       shell tests: push guards, runtime.sh,
-│       │                                telegram-send.sh
-│       ├── admin/                       sync-tasks, save-cred (+ .cmd wrappers),
-│       │                                lib/registry-parse.ps1 (the Windows registry reader)
-│       ├── registry.yaml                the 17 scheduled tasks — source of truth
-│       ├── runs.py                      Semantic Artifact SLO ledger
-│       ├── bundle-status.py             read-only health snapshot; --hooks hook doctor
-│       ├── schtasks_status.py           Task Scheduler status parser
-│       ├── monitor_checks.py            what both task monitors share: registry
-│       │                                parser, port probe, LLM-chain report
-│       ├── claude-task-monitor.py       the POSIX task monitor
-│       ├── memory-update.py, log-retention.py, md2pdf-sync.py,
-│       ├── test-sweep.py, agents-md-sync-check.py, llm-call.py
-│       └── *.sh                         healthcheck, task-monitor, warm-window,
-│                                        git-push-all, github-push, telegram-send
-├── codex/
-│   ├── AGENTS.md                       universal-rules mirror for Codex CLI
-│   └── AGENTS-per-project.template.md
-├── scripts/
-│   ├── claude-switch.ps1               env-driven provider switcher
-│   ├── get-key.ps1                     reads one key from .env for apiKeyHelper
-│   ├── install.ps1                     guided full/lite installer (Windows)
-│   ├── install.sh, uninstall.sh        the same for macOS/Linux (lite, or
-│   │                                   --profile full; units with --install-units)
-│   ├── install-lite.sh                 = install.sh --profile lite
-│   ├── uninstall.ps1                   remove a deployment + its tasks
-│   ├── lib/                            bundle_install.py (install.sh's settings
-│   │                                   merge, manifest, diff, uninstall) and
-│   │                                   dotenv.ps1 (the one PowerShell .env parser)
-│   ├── gen-scheduler.py                systemd/launchd units from registry.yaml
-│   ├── bootstrap-registry.ps1          fill registry.yaml placeholders
-│   ├── self-test.ps1                   offline sanity check (one command)
-│   ├── mcp-probe.py                    MCP handshake + `--check-wrappers` audit
-│   ├── enable-guard.{sh,ps1}           activate the four .githooks/ secret guards
-│   └── check-*.py                      CI guards: doc-counts, registry, env-ref,
-│                                       agents-sync, io-matrix
-├── config/
-│   ├── llm-providers.example.env       env template (committed; no values)
-│   └── bundle.local.example.yaml       machine-local manifest template (project map + privacy policy)
-├── tests/                              pytest suite (offline, mock provider):
-│                                       pipeline, hooks, fail-closed guards, guard
-│                                       scripts, git hooks, installers, monitors, …
-├── VERSION, requirements.txt, requirements-dev.txt  semver stamp + runtime + test deps
-├── pytest.ini                          the reference impl of the test policy
-├── .githooks/{pre-commit,pre-merge-commit,commit-msg,pre-push}  secret guards (git config core.hooksPath .githooks)
-├── .github/workflows/ci.yml            compileall + JSON/YAML + secret-guard + doc/registry/
-│                                       env/mirror/io-matrix guards + shellcheck + pytest
-│                                       (Ubuntu and Windows) + PS parse/self-test CI
-├── docs/                               long-form docs referenced from
-│   ├── wiki-method.md                  rules files and INSTALL
-│   ├── cron-architecture.md
-│   ├── llm-routing.md
-│   ├── mcp-servers.md
-│   ├── decisions.md                    ADRs — why the bundle does NOT do X
-│   ├── examples/                       synthetic daily → page → index sample
-│   │                                   (mock-generated; the vault ships empty),
-│   │                                   plus mock-response.json — `wiki-pipeline.py
-│   │                                   --demo` runs it
-│   └── config-reference.md             generated index of all three kinds of
-│                                       config: env vars, bundle.local.yaml
-│                                       keys, registry.yaml task fields
-├── AGENTS.md                           per-project pointer for Codex CLI
-└── CLAUDE.md                           ← you are here
+├── home-claude/              what gets copied into ~/.claude/
+│   ├── CLAUDE.md             global rules (the payload) ← tier-1 rule changes
+│   ├── settings.json, settings.example-with-hooks.json
+│   ├── hooks/                7 opt-in hooks (bash deny-list, sensitive paths,
+│   │                         md2pdf, text encoding, prompt secrets, Telegram)
+│   ├── skills/               4 skills: 3 templates + rules-reference (the long
+│   │                         references home-claude/CLAUDE.md points to)
+│   ├── commands/             2 slash commands (/wiki is full tier)
+│   ├── wiki/                 empty Karpathy vault skeleton
+│   ├── bin/                  _run-hidden.vbs (Task Scheduler launcher), md2pdf.py
+│   └── cron/                 tier-2 pipeline
+│       ├── hooks/            session-start/end, pre-compact, untrusted, utils.py (the hub)
+│       ├── lib/              shared code: secret-scan.sh, secret_shapes.py,
+│       │                     dotenv.sh, runtime.sh, env_names.py (generated),
+│       │                     run-pester.ps1
+│       ├── wiki/             flush, compile-sessions, compile-kb, build-index,
+│       │                     lint, conflict-resolve, grep, pipeline
+│       ├── prompts/, tests/  LLM prompts; shell tests
+│       ├── admin/            sync-tasks, save-cred (+ .cmd), lib/registry-parse.ps1
+│       ├── registry.yaml     the scheduled tasks — source of truth
+│       └── *.py, *.sh        runs.py (ledger), bundle-status, monitors,
+│                             test-sweep, memory-update, healthcheck, push, …
+├── codex/                    AGENTS.md (universal-rules mirror) + per-project template
+├── scripts/                  claude-switch.ps1 (master copy), get-key.ps1,
+│                             install.{ps1,sh}, uninstall.{ps1,sh}, install-lite.sh,
+│                             lib/ (bundle_install.py, dotenv.ps1), gen-scheduler.py,
+│                             bootstrap-registry.ps1, self-test.ps1, mcp-probe.py,
+│                             enable-guard.{sh,ps1}, check-*.py (the five CI guards)
+├── config/                   llm-providers.example.env, bundle.local.example.yaml
+├── tests/                    pytest suite (offline, mock provider)
+├── VERSION, requirements*.txt, pytest.ini (reference impl of the test policy)
+├── .githooks/                pre-commit, pre-merge-commit, commit-msg, pre-push
+├── .github/workflows/ci.yml  Ubuntu + Windows CI
+├── docs/                     wiki-method, cron-architecture, llm-routing,
+│                             mcp-servers, decisions (ADRs), maintaining,
+│                             examples/, config-reference (generated)
+├── AGENTS.md                 per-project pointer for Codex CLI
+└── CLAUDE.md                 ← you are here
 ```
 
-This block is checked by `scripts/check-doc-counts.py` (it compares the
-first-level directory names against the real tree), so it cannot silently
-rot the way it did before — but the leaf entries are still discipline.
+`scripts/check-doc-counts.py` checks the first-level names of this block against
+the tree, and the hook / skill / slash-command counts against what ships.
 
-## Architecture — the parts you can't see from one file
+## Architecture in five lines
 
-**Two audiences, two rule files.** This `CLAUDE.md` governs work *on the
-repo*. `home-claude/CLAUDE.md` is a **payload** — the rules file that
-lands in a user's `~/.claude/`. Editing one never implies the other.
-`codex/AGENTS.md` is a structural mirror of `home-claude/CLAUDE.md`
-(universal sections only) and `scripts/check-agents-sync.py` fails CI
-when they drift.
-
-**`home-claude/cron/hooks/utils.py` is the hub.** Every Tier-2 script
-imports it, and it is where four separate concerns live: the machine-local
-manifest (`~/.claude/bundle.local.yaml`) and the `project_allowed()` /
-`working_copy_allowed()` privacy gate; the JSON state ledger with file
-locking, quarantine and per-source attempt counters; wiki page I/O
-(frontmatter parse/dump, `sources:` provenance, project-name slugging,
-reserved-name checks); and the LLM layer — the `PROVIDERS` table,
-`llm_call()` with its cross-process queue and fallback chain. A change
-here reaches all 17 tasks at once; that is the reason `tests/` mostly
-exercises this file.
-
-**Fail-closed is the design, not an accident.** A manifest that won't
-parse makes `project_allowed()` deny everything (and `manifest_broken()`
-say so loudly); a `local` provider pointed at a non-local endpoint
-refuses; `PROJECT_MAP` / `KNOWN_PROJECTS` ship empty so a fresh install
-reads nothing it wasn't told to. `tests/test_guards.py` is the executable
-statement of these invariants — if a change makes one of them
-fail-*open*, that test is the thing that must not be "fixed".
-
-**The nightly chain is ordered and re-entrant.** `wiki-pipeline.py`
-(`ClaudeWikiPipeline`, the DEFAULT task) runs `flush → compile → index` in one
-process, each phase a subprocess whose log folds into the pipeline log,
-`--dry-run` / `--no-llm` passed through to all of them. The three phases also
-exist as separate tasks, shipping `enabled: false`. Sessions enter as the JSONL
-transcripts under `~/.claude/projects/`, which flush reads itself; the opt-in
-`session-end` / `pre-compact` hooks add tails as drafts in `wiki/daily/.pending/`.
-
-What makes a re-run idempotent is the state ledger's (`wiki/.processed.json`)
-PER-SOURCE MARKERS, one per source, each recording what the run actually read:
-`project/name.jsonl@offset` for a transcript (the byte offset flush has read up
-to, so the next night reads only the delta), `project/rel@fp` for feedback,
-plans and incidents, and for compile `DATE@fp` over the whole daily plus
-`DATE#project@fp` over ONE project's section — only the sections without a
-marker are sent again. (This paragraph used to credit `source_hash` — a function
-no shipped script calls. A maintainer looking for the protection would have
-looked in the wrong place.) The ledger is written under an OS file lock
-(`_file_lock(mode="os")`), falling back to an exclusive-create lock file where
-the filesystem cannot lock. `compile-kb` is a separate, off-by-default source
-and is deliberately *not* in the chain.
-
-**`registry.yaml` is the only declaration of a scheduled task**, and
-three things are checked against it: `check-registry.py` (field/kind/
-trigger grammar, and that every `script:` path exists in the bundle),
-`check-doc-counts.py` (README + docs task counts), and
-`check-io-matrix.py`. That last one enforces a contract worth knowing
-before you add a task: **every task script must carry a machine-readable
-`# bundle-io: offbox=… money=… writes=…` header line**, and it must agree
-with the data/money matrix in `docs/cron-architecture.md` — whose "Default
-state" column must also agree with each task's `enabled:`. It is how the
-bundle can honestly answer "what does this send off my machine, and what
-does it cost" without reading 15 scripts.
-
-**One implementation per cross-cutting rule.** The credential shapes live
-once in `home-claude/cron/lib/secret_shapes.py` and are *generated* into
-`secret-scan.sh`, which the pre-commit hook, the pre-push hook and CI all
-source — three detectors, one table (`tests/test_guards.py` asserts the
-shell pattern is the generated one). Same idea for `lib/dotenv.sh`, and
-for `findings_header()` / `ideas_header()` in `utils.py`. When you need a
-second copy of a rule, generate it or source it; do not paste it.
+- **Two audiences, two rule files.** This file governs work on the repo;
+  `home-claude/CLAUDE.md` is the payload. Editing one never implies the other.
+- **`home-claude/cron/hooks/utils.py` is the hub** — manifest and privacy gate,
+  state ledger, wiki page I/O, LLM layer. A change there reaches every task.
+- **Fail-closed is the design.** A broken manifest denies every project;
+  `PROJECT_MAP` / `KNOWN_PROJECTS` ship empty. `tests/test_guards.py` states the
+  invariants — never "fix" it into fail-open.
+- **`registry.yaml` is the only declaration of a task**, and every task script
+  carries a `# bundle-io: offbox=… money=… writes=…` line that must match the
+  matrix in `docs/cron-architecture.md` (`check-io-matrix.py`).
+- **One implementation per cross-cutting rule** — generate or source a second
+  copy (`secret_shapes.py` → `secret-scan.sh`), never paste it.
 
 ## What lives where — when changing X, also touch Y
 
 | Change | Also update |
 |---|---|
-| New rule in `home-claude/CLAUDE.md` | If universal — also mirror into `codex/AGENTS.md`. The universal set is not prose here: it is `REQUIRED` in [`scripts/check-agents-sync.py`](scripts/check-agents-sync.py) (Findings, When to continue, File Operations, Tool Selection Rules, Declaring MCP servers, Coding Discipline, Test policy, Secrets, Windows Task Scheduler, Error Recovery, File Encoding), and `COMPARED` in the same file is the subset whose wording must match rather than merely exist. This table used to name six of them, which is how two sections stayed unchecked in both directions — and the MCP section, present in both files, was checked by nothing. Claude-specific rules (slash commands, hooks, skills, plugin workflow) stay in `home-claude/CLAUDE.md` only. |
-| New skill in `home-claude/skills/` | Update `home-claude/skills/README.md`. If the skill ships a slash command, also add it to `home-claude/commands/`. The skill and slash-command counts the docs quote are checked by `scripts/check-doc-counts.py`. |
-| New hook in `home-claude/hooks/` | Update `home-claude/hooks/README.md`. Update `home-claude/settings.example-with-hooks.json` to show how to wire it. Do NOT add it to the default `home-claude/settings.json` — hooks are opt-in. The hook counts in README, INSTALL, this file and `hooks/README.md` are checked by `scripts/check-doc-counts.py`, which also defines what counts as a hook (`shipped_counts()`). |
-| New cron task in `home-claude/cron/registry.yaml` | The script itself goes under `home-claude/cron/<name>.{sh,py}`. Document the task briefly in `README.md` and `docs/cron-architecture.md` (the table of shipped tasks — keep its count in sync). |
-| New `bundle.local.yaml` key (project map / privacy policy) | Load it in the manifest block of `home-claude/cron/hooks/utils.py`, honor it in EVERY source collector (`wiki-flush-sessions.py`, `memory-update.py`) via `project_allowed()`, document it in `config/bundle.local.example.yaml` AND `docs/cron-architecture.md` (privacy-policy section). |
-| New LLM provider for cron | Add it to the `PROVIDERS` table in `home-claude/cron/hooks/utils.py` (single source of truth), wire an `_llm_<name>()` caller, add the key to `config/llm-providers.example.env`, add a row to `docs/llm-routing.md`. |
-| New LLM provider in `scripts/claude-switch.ps1` | Add env var name to `config/llm-providers.example.env`. Document in `docs/llm-routing.md`. |
-| New offline check | Add it to `scripts/self-test.ps1` and, if it runs on Linux, to `.github/workflows/ci.yml`. |
-| New file structure section | Update the layout block in `README.md` AND in this file. |
-| Sanitization rule clarified | Add to "Sanitization checklist" below AND to `CHANGELOG.md`. |
-| A release changes what a re-install leaves alone | a step under `## Unreleased` in UPGRADING.md; a deprecated setting also gets `_CONFIG_DEPRECATIONS.append(("SETTING", advice))` where utils.py reads it, and stale hook wiring a branch in `bundle-status.py::stale_wiring` (`tests/test_upgrade_notes.py` checks both); rename `## Unreleased` when cutting the release |
+| New rule in `home-claude/CLAUDE.md` | If universal — mirror it into `codex/AGENTS.md`. The universal set is `REQUIRED` in [`scripts/check-agents-sync.py`](scripts/check-agents-sync.py) (Findings, When to continue, File Operations, Tool Selection Rules, Declaring MCP servers, Coding Discipline, Test policy, Secrets, Windows Task Scheduler, Error Recovery, File Encoding); `COMPARED` there is the subset whose wording must match. Claude-specific rules (slash commands, hooks, skills, plugin workflow) stay in `home-claude/CLAUDE.md` only; long references go to `home-claude/skills/rules-reference/`. |
+| New skill in `home-claude/skills/` | `home-claude/skills/README.md`; a slash command it ships also goes to `home-claude/commands/`. The counts the docs quote are checked by `check-doc-counts.py`. |
+| New hook in `home-claude/hooks/` | `home-claude/hooks/README.md` and `settings.example-with-hooks.json` — never the default `settings.json` (hooks are opt-in). Counts checked by `check-doc-counts.py` (`shipped_counts()`). |
+| New cron task in `registry.yaml` | Script under `home-claude/cron/`, its `# bundle-io:` line, `README.md` and the task table + matrix in `docs/cron-architecture.md`. |
+| New `bundle.local.yaml` key | Load it in the manifest block of `utils.py`; a privacy key is honored in EVERY source collector (`wiki-flush-sessions.py`, `memory-update.py`) via `project_allowed()`; document it in `config/bundle.local.example.yaml` and `docs/cron-architecture.md`; regenerate `docs/config-reference.md`. |
+| New LLM provider for cron | `PROVIDERS` in `utils.py` + an `_llm_<name>()` caller, the key in `config/llm-providers.example.env`, a row in `docs/llm-routing.md`. |
+| New provider in `scripts/claude-switch.ps1` | The env var in `config/llm-providers.example.env`, `docs/llm-routing.md` — and copy the master to every project that carries the switcher (one SHA-256 for all copies). |
+| New offline check | `scripts/self-test.ps1`, and `.github/workflows/ci.yml` if it runs on Linux. |
+| New top-level directory | The layout block in `README.md` AND here. |
+| Sanitization rule clarified | § Sanitization checklist below (or `docs/maintaining.md`) AND `CHANGELOG.md`. |
+| A release changes what a re-install leaves alone | A step under `## Unreleased` in `UPGRADING.md`; a deprecated setting also gets `_CONFIG_DEPRECATIONS.append(...)` where `utils.py` reads it, stale hook wiring a branch in `bundle-status.py::stale_wiring` (`tests/test_upgrade_notes.py` checks both). |
 
 ## FINDINGS.md / IDEAS.md in this repo
 
-Both files carry the CANONICAL header and nothing else — the exact text
-`cron/hooks/utils.py::findings_header()` / `ideas_header()` produce, which is
-what `append_bundle_finding` and `test-sweep.py` insert under. This repo used to
-carry a hand-written variant of its own, which is the one place a rule about
-"the header is the same in every project" must not be broken.
-
-Project-specific notes about the review cadence belong HERE, not in the header
-(`home-claude/CLAUDE.md` § Findings says so explicitly — "the file holds
-entries, not a chronicle of itself"):
-
-- Both files are `.gitignore`d — they are a working queue, not a deliverable.
-- Review both on the 1st of the month. Entries older than 90 days are stale;
-  `claude-task-monitor.sh` alerts on them when the full tier is running.
-- The verdicts on rejected ideas that bear on privacy or routing are published
-  in [`docs/decisions.md`](docs/decisions.md). `IDEAS-archive.md` is local and
-  never leaves the machine, so nothing that a reader needs may live only there.
+Both carry the canonical header and nothing else — the exact text of
+`utils.py::findings_header()` / `ideas_header()` (`home-claude/CLAUDE.md`
+§ Findings: the file holds entries, not a chronicle of itself). Both are
+`.gitignore`d — so the commit that closes a finding names it by its title.
+Review on the 1st of the month; entries past 90 days are stale. Verdicts on
+rejected ideas that bear on privacy or routing are published in
+[`docs/decisions.md`](docs/decisions.md): the archives never leave the machine.
 
 ## Sanitization checklist — pre-commit MUST-DO
 
-Keep a **local, untracked** file at `.sanitize-patterns` in this repo
-with one regex per line — the concrete strings you want to grep for
-(real usernames, hostnames, key prefixes, internal project names, ...).
-That file lives only on your machine; the public repo never sees it.
-
-`.sanitize-patterns` is already in [`.gitignore`](.gitignore).
-
-Format rules:
-- One regex per line. No comments, no blank lines — `grep -f` treats a
-  blank line as "match anything" and a `#` as a literal character.
-  If you want comments, put them in a separate `.sanitize-patterns.md`.
-- Escape regex metacharacters: `.` → `\.`, `$` → `\$`, `\` → `\\`.
-
-Run this before every commit. Zero matches is mandatory:
+Keep a **local, untracked** `.sanitize-patterns` (one regex per line, no
+comments, no blank lines) with the strings that must never be published —
+usernames, hostnames, key prefixes, private project names. Never commit it.
+Before every commit, zero matches:
 
 ```bash
 git diff --cached | grep -iEf .sanitize-patterns
 ```
 
-This grep is now **automated** by the `pre-commit` hook at
-[`.githooks/pre-commit`](.githooks/pre-commit) — it runs the denylist
-grep plus a generic scan for key/token formats (PEM, `ghp_`,
-`github_pat_`, `AKIA`, `sk-…`, JWT, Telegram bot tokens) and blocks
-commits of sensitive filenames (`.env`, `*.pem`, `id_rsa`, …).
-[`.githooks/pre-merge-commit`](.githooks/pre-merge-commit) runs the same
-checks for a merge, which `git merge` would otherwise commit unscanned. Two
-more hooks cover the channels it does not see:
-[`.githooks/commit-msg`](.githooks/commit-msg) scans the commit MESSAGE
-(`git log` publishes it verbatim) and
-[`.githooks/pre-push`](.githooks/pre-push) checks what a push would publish:
-file names, blob contents, commit and annotated-tag messages. A
-`.sanitize-patterns` line grep cannot compile blocks all of them rather than
-switching the denylist off. Activate all four once per clone — the one-command way is
-[`scripts/enable-guard.sh`](scripts/enable-guard.sh) (or
-`scripts/enable-guard.ps1`), which sets the hook path, restores the exec
-bit on each hook (POSIX git silently skips a non-executable one) and
-seeds a local `.sanitize-patterns.md` reference. The bare equivalent:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-A confirmed false positive can be bypassed with `git commit --no-verify`.
-
-If you don't yet have a `.sanitize-patterns` file: bootstrap one from
-your real environment. Suggested classes of regexes to include:
-
-- Your real Windows / Linux usernames
-- Your machine hostnames and LAN hostnames
-- Domain names of your personally-owned services
-- The actual prefix of every API key you use (first 6–8 chars are
-  enough to catch a paste)
-- The actual prefixes of any bot tokens / chat IDs in your messengers
-- LAN IPs of your private hosts (`192.168.x.y` specific values)
-- Names of internal projects or repos that are not yet public
-
-Do NOT commit `.sanitize-patterns` itself. It IS the leak it tries to
-prevent.
-
-If anything matches: **do not commit**. Either rewrite the line, or
-move the discussion to a non-tracked file.
-
-Also forbidden in committed files:
-
-- Real domain names of personally-owned services
-- Real LAN IPs (use `<host>`, `<server>`, or RFC1918 ranges in
-  documentation only when discussing IP classes generically)
-- Hardcoded paths to a specific developer's machine
-  (`C:\Users\<specific-name>`, `/home/<specific-name>`)
-- Names of internal projects, repos, or hosts not previously published
-- Dates that reference unpublished incidents
-- Any `.env` file with values — only `.example.env` templates with
-  empty values are committed
-
-The template `config/llm-providers.example.env` is the **only** env
-file that gets committed. Its values must all be empty.
-
-## Adding a new component — the pattern
-
-1. **Source**: read the original from wherever it lives in the
-   developer's private setup. Note every hardcoded value (paths,
-   keys, hostnames, project names, dates).
-2. **Sanitize**:
-   - Replace specific paths with relative paths from `<bundle-root>`,
-     or with `<placeholder>` tokens documented in nearby text.
-   - Replace keys/tokens with `os.environ.get('NAME')` or shell `${NAME}`.
-   - Document the env var in `config/llm-providers.example.env`.
-   - Replace specific project names with `<project>`, `<name>`, or empty
-     defaults the user fills in.
-   - Generalize anything tied to a specific past incident.
-3. **Write** into the bundle at the appropriate location.
-4. **Cross-link**: update the relevant table in this file, plus
-   `README.md`, `INSTALL.md`, and the matching `docs/*.md` if any.
-5. **Grep**: run the sanity check above.
-6. **Commit**: include a `CHANGELOG.md` entry noting what was added and
-   what sanitization was applied.
+The four `.githooks/` run this plus a generic token-format scan on commits,
+merges, commit messages and pushes. Activate them once per clone with
+`scripts/enable-guard.sh` (or `.ps1`); a confirmed false positive may use
+`--no-verify`. Never committed: personal domains, real LAN IPs, a developer's
+home path, unpublished project or host names, dates of unpublished incidents,
+any `.env` with values — `config/llm-providers.example.env` (all values empty)
+is the only env file in the repo. How to bootstrap the denylist and what each
+hook covers: `docs/maintaining.md`, which also has the pattern for adding a
+component (source → sanitize → write → cross-link → grep → CHANGELOG).
 
 ## Commands
 
 Setup once: `pip install -r requirements.txt -r requirements-dev.txt`
-(Python 3.10+). Everything below runs from the repo root and is
-**offline** — no LLM key, no network. Nothing here touches your real
-`~/.claude/`.
+(Python 3.10+). Everything below runs from the repo root, offline, and never
+touches your real `~/.claude/`.
 
 | What | Command |
 |---|---|
-| One test file (a targeted run; the test levels are below the table) | `python -m pytest tests/test_pipeline.py -q` |
+| One test file (targeted) | `python -m pytest tests/test_pipeline.py -q` |
+| Fast suite (60 s budget; on Windows only with `-n auto`) | `python -m pytest -q -n auto` |
 | All five CI guards | `python scripts/check-registry.py && python scripts/check-doc-counts.py && python scripts/check-env-ref.py && python scripts/check-io-matrix.py && python scripts/check-agents-sync.py` |
 | Shell lint (CI parity — gates on warnings) | `{ git ls-files '*.sh'; git ls-files '.githooks/*'; } \| xargs shellcheck --severity=warning -e SC1091 -f gcc` |
 | Secret-format scan (same lib as pre-commit) | `. home-claude/cron/lib/secret-scan.sh && git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/'` |
 | Denylist grep (mandatory before every commit) | `git diff --cached \| grep -iEf .sanitize-patterns` |
 | Python compiles | `python -m compileall -q home-claude/cron home-claude/hooks home-claude/bin` |
-| Windows offline check (JSON/YAML/hooks/placeholders) | `powershell -File scripts/self-test.ps1` |
-| PowerShell parse-check | see the `powershell` job in `.github/workflows/ci.yml` |
-| Wiki pipeline end-to-end, spends nothing | `WIKI_LLM_PROVIDER=mock python home-claude/cron/wiki/wiki-pipeline.py --dry-run` |
-| The pipeline on the shipped example, spends nothing | `python home-claude/cron/wiki/wiki-pipeline.py --demo` |
-| The shell tests — push guards, `runtime.sh`, `telegram-send.sh` (by hand, as CI runs them) | `for t in home-claude/cron/tests/test_*.sh; do bash "$t"; done` |
+| Windows offline check | `powershell -File scripts/self-test.ps1` |
+| PowerShell parse-check | the `powershell` job in `.github/workflows/ci.yml` |
+| Wiki pipeline, spends nothing | `WIKI_LLM_PROVIDER=mock python home-claude/cron/wiki/wiki-pipeline.py --dry-run`, or `--demo` on the shipped example |
+| Shell tests (push guards, `runtime.sh`, `telegram-send.sh`) | `for t in home-claude/cron/tests/test_*.sh; do bash "$t"; done` |
 
 **Test levels.** The commands of each level — targeted, fast, full — are
-declared once, in the test contract the maintainer's machine keeps outside
-this repository (the `tests` field of its project registry), which its
-nightly test sweep and its agents read; they are not repeated here. What the
-levels mean is `pytest.ini`, deliberately the reference implementation of the
-test policy the bundle ships (`home-claude/CLAUDE.md` § test policy): a bare
-`pytest` is the fast suite with a 60 s budget, which on Windows it meets only
-spread over the cores (`-n auto`, pytest-xdist); `integration` and `manual`
-are deselected by default; every test is limited to 30 s (pytest-timeout,
-`timeout = 30`), which a slower level lifts with its own `--timeout`; and
-`testpaths` is mandatory. `--durations=N` is the measurement behind "mark
-`integration` **by measurement**" and goes on the command line. `CI=1` turns
-on CI's two gates (below). Keep `pytest.ini` that way — it is documentation as
-much as config.
+declared once, in the test contract the maintainer's machine keeps outside this
+repository; they are not repeated here. What the levels mean is `pytest.ini`,
+the reference implementation of the shipped test policy: bare `pytest` = the
+fast suite (60 s); `integration` and `manual` are deselected; every test is
+limited to 30 s (`timeout = 30`, a slower level passes its own `--timeout`);
+`testpaths` is mandatory; "mark `integration` by measurement" means
+`--durations=N`. `CI=1` turns a skipped dependency and a fast-suite call over 3 s
+into failures. Keep `pytest.ini` that way — it is documentation as much as
+config.
 
 ## Local verification
 
-- **Grep sanity** — mandatory, see the table and § Sanitization above.
-- **Hook smoke test** — `tests/test_hooks.py` drives every hook in the fast
-  suite (see below). Against a deployment's real wiring:
-  `python ~/.claude/cron/bundle-status.py --hooks --smoke`.
-- **The suite leaves the checkout as it found it.** `tests/conftest.py`
-  sandboxes every run, and a run that created, changed or deleted anything under
-  `home-claude/cron/logs`, `home-claude/cron/state`, `home-claude/wiki` or
-  `home-claude/FINDINGS.md`, or left its `%TEMP%/sweep-run-<pid>` behind, FAILS.
-  It compares with the start of the run, so the logs of a pipeline you ran by
-  hand are fine — but not one run from this checkout while the suite runs.
-- **Bash tests on Windows need Git for Windows.** Every test that runs bash
-  takes it from the one `bash` fixture in `tests/conftest.py`, which FAILS on
-  Windows when no Git Bash is found (`System32\bash.exe`, the WSL launcher,
-  does not count) — a skip there would leave the shell half of a Windows-first
-  bundle unverified on Windows.
-- **`claude-switch.ps1`** — run with `status` (it should not modify any
-  file).
-- **PowerShell BOM** — if you edit `scripts/claude-switch.ps1` and it
-  contains Cyrillic, add a UTF-8 BOM (see `home-claude/CLAUDE.md`
-  "File Encoding" section; the snippet is in
-  `home-claude/skills/rules-reference/windows-shell.md`).
-- **Shellcheck on Windows, two local-only traps.** Its default output
-  carries em-dashes that a CP-1251 console cannot encode
-  (`commitBuffer: invalid argument`) — hence `-f gcc` above. And a
-  working-tree `.sh` left over from before `.gitattributes` can still be
-  CRLF (`git ls-files --eol` shows `i/lf w/crlf`), which shellcheck
-  reports as SC1017 on every line. The index is LF and CI is unaffected;
-  fix the local copy with `rm <file> && git checkout -- <file>`.
-- **Exec bits are pinned** — CI fails on any change to the set
-  `{.githooks/commit-msg, .githooks/pre-commit, .githooks/pre-merge-commit,
-  .githooks/pre-push, home-claude/cron/github-push.sh,
-  scripts/enable-guard.sh}`. Adding or dropping `+x` is an intentional
-  decision, not a side effect.
-
-CI (`.github/workflows/ci.yml`) runs two jobs. **Ubuntu** (matrix: 3.10 and
-3.x, so the declared minimum is actually exercised): Python compileall, JSON
-validity, YAML parse + `script:` path guard, all five guard scripts, the
-exec-bit and encoding guards, the generated-table checks (secret-scan.sh and
-`docs/config-reference.md` must match their generators), the secret-format
-guard (also scanning `.github/`), shellcheck over every tracked shell script,
-`cron/tests/*.sh`, and pytest — the fast suite and `-m integration`.
-**Windows** (`powershell + pytest (windows)`): a PowerShell parse-check under
-BOTH pwsh 7 and Windows PowerShell 5.1 — the scripts execute under 5.1, so
-parsing them only with 7 let 7-only syntax through — `scripts/self-test.ps1`
-with requirements.txt installed, and the same two pytest runs. Every pytest run
-in CI sets `CI=1`, which `tests/conftest.py` turns into two gates: a skip for a
-missing dependency — at collection, in setup or in the call — is a failure, and
-so is a fast-suite test whose call takes over 3 seconds.
-
-Hook smoke-testing is now `tests/test_hooks.py` (cross-platform, in the fast
-suite), so it is no longer a local-only check; `self-test.ps1` still runs its
-own two-payload version on Windows. Keep CI independent of any specific LLM
-provider — anyone forking the repo should be able to run it.
+- Denylist grep and the pre-commit hooks — mandatory (§ Sanitization checklist).
+- The suite must leave the checkout as it found it — logs, state, wiki and
+  `home-claude/FINDINGS.md` are compared before and after (`tests/conftest.py`).
+- Bash tests on Windows need Git for Windows; the WSL launcher does not count.
+- `claude-switch.ps1 status` modifies nothing; `.ps1` files with non-ASCII text
+  keep their UTF-8 BOM, `.ps1`/`.cmd` keep CRLF, `.sh` LF.
+- Exec bits are pinned by CI — adding or dropping `+x` is a decision.
+- The traps behind each of these, and what CI runs on Ubuntu and Windows:
+  `docs/maintaining.md`.
 
 ## Mirror / remote setup
 
-- **Forgejo (primary)** — `origin` points here. Push to `main`.
-  Concrete URL is set via `git remote add origin <url>`; the URL
-  itself is not committed (it's machine-local).
-- **Gitea (mirror)** — pull-mirror (~8h interval). Catches up from
-  Forgejo automatically. Do NOT push here.
-- **GitHub (public)** — release pending; a `github` remote may already
-  be configured locally (add it with `git remote add github <url>`, URL
-  not committed). The bundle is meant for public consumption; the private
-  Forgejo+Gitea is just the working environment.
+`origin` is the primary Forgejo; push to `main` there. The Gitea mirror pulls
+on its own (~8 h) — never push to it. A `github` remote (public release) may be
+configured locally. Remote URLs are machine-local and never committed.
 
 ## Do NOT
 
-- Add any path containing the source machine's drive letter, username,
-  or hostname.
+- Add any path containing the source machine's drive letter, username, or
+  hostname.
 - Add any LLM provider key as a default in source code.
-- Add a hook to `home-claude/settings.json` directly — keep them opt-in
-  in `settings.example-with-hooks.json`.
+- Add a hook to `home-claude/settings.json` directly — keep them opt-in in
+  `settings.example-with-hooks.json`.
 - Push to `main` if the grep sanity check has any matches.
-- Add `home-claude/wiki/projects/<slug>/*.md` content from a real wiki —
-  the vault must ship empty.
+- Add `home-claude/wiki/projects/<slug>/*.md` content from a real wiki — the
+  vault must ship empty.
 - Add a real entry to `PROJECT_MAP` / `KNOWN_PROJECTS` in
   `home-claude/cron/hooks/utils.py` — both must stay empty templates.

@@ -490,10 +490,13 @@ def test_the_title_guard_agrees_with_the_installed_browser(md2pdf, tmp_path, mon
     with pytest.raises(RuntimeError) as refused:
         md2pdf._print_once(browser, (tmp_path / "never-there.html").as_uri(),
                            error_page, 60, md2pdf.comparable_title("Маршрут поездки (v2)"))
-    # Edge and Chrome on Windows print the error page and exit 0, so there it is
-    # the title check that refuses it. A browser that exits non-zero on a failed
-    # load is refused one step earlier, which is just as good an outcome.
-    assert "different page" in str(refused.value) or "rc=" in str(refused.value), refused.value
+    # Edge and Chrome on Windows used to print the error page and exit 0, so
+    # there it is the title check that refuses it. A browser that exits non-zero
+    # on a failed load is refused one step earlier, and one that exits 0 without
+    # writing a file (current Edge) by the "printed nothing" check — each just as
+    # good an outcome.
+    assert any(why in str(refused.value)
+               for why in ("different page", "rc=", "printed nothing")), refused.value
 
 
 # ── one time budget for the whole run ───────────────────────────────────────

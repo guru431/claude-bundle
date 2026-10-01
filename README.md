@@ -155,6 +155,7 @@ claude-bundle/
     ├── mcp-servers.md                 declaring MCP servers: HTTP / direct path, never npx -y
     ├── llm-routing.md                 claude-switch vs utils.py::llm_call
     ├── decisions.md                   why the bundle does NOT do certain things
+    ├── maintaining.md                 for contributors: architecture, sanitization, CI
     ├── examples/                      a synthetic daily → page → index sample, plus
     │                                  mock-response.json — `wiki-pipeline.py --demo` runs it
     └── config-reference.md            generated index of every env var it reads

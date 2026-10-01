@@ -56,6 +56,14 @@ The short list; UPGRADING.md has the steps.
 - **`~/.claude/CLAUDE.md` is replaced by a shorter one** (383 → ~230 lines; the
   installer backs up a changed one as usual). Nothing it required was dropped:
   the long references moved to the new `rules-reference` skill.
+- **POSIX units run the bash on your PATH** (`BASH_EXE`), not a hard-coded
+  `/bin/bash`; on macOS with a Homebrew bash the units read `changed` until the
+  next `install.sh --profile full --install-units`.
+- **`bundle.local.yaml` takes an optional `tests:` key** (the test contract,
+  below). A near miss of it (`test:`, `tasks:`) is reported and ignored — it is
+  not a privacy key, so it denies nothing.
+- **The Windows task monitor exits 1** when its session-0 path check cannot
+  collect the tasks; that failure used to be silent.
 
 ### CLAUDE.md: the rules every session needs, references on demand
 
@@ -78,6 +86,73 @@ work, one review per batch, targeted tests along the way and the fast suite
 once at the end). The first is universal: it is mirrored into
 `codex/AGENTS.md` and compared by `scripts/check-agents-sync.py`. The `.cmd`
 rule now says CRLF, and why.
+
+The repository's own `CLAUDE.md` — read by every session that works on the
+bundle — goes the same way, 464 → ~200 lines: the rules, the layout map and the
+"what lives where" table stay; the architecture background, the sanitization
+detail, the verification traps and the CI description move to the new
+`docs/maintaining.md`.
+
+### The test sweep reads a per-project test contract
+
+`bundle.local.yaml` takes a `tests:` key: per project, a list of suites with a
+runner (`pytest`, `bash`, `dotnet`, `pester`, `js`), a `cwd`, the commands of
+three levels (`targeted`, `fast`, `full`) and a `budget_s`. `ClaudeTestSweep`
+runs each suite's `fast` level and `ClaudeTestSweepFull` its `full` level,
+locally through bash. Results are read per runner, and a hang the runner reports
+(pytest-timeout, dotnet blame-hang, a `TESTS_TIMEOUT` line) becomes `timeout`,
+naming the test. A green `fast` level over its budget two nights running files
+one P3 finding with the five slowest parts and closes it once the suite is back
+within budget; the full level has its own state entry and finding title. An
+unusable contract files one finding in the bundle's own `FINDINGS.md` and the
+project falls back to discovery. The new `cron/lib/run-pester.ps1` runs Pester
+with a timeout per file and prints the markers the sweep reads. Projects without
+a contract are swept exactly as before. Remote hosts and the maintainer's
+nightly-log reader were deliberately left out.
+
+### A third sweep: the findings of 2026-09-26
+
+`ClaudeCodeReviewWeekly` filed 22 findings on 2026-09-26, one more came from
+the flaky-test fix. Twenty-one are fixed, each with a regression test that fails
+on the code it replaces; two were declined after checking them against the code,
+with the reasoning in the local archive:
+
+- a P1 "shell injection through the healthcheck heredoc" — a line `LLM_EOF`
+  inside `${METRICS}` cannot end the heredoc: bash finds the terminator while
+  parsing the script, and an expanded value is never parsed again (reproduced
+  with a payload that tries both the terminator and `$(…)`);
+- a lock re-entered by `_parse_llm_json`'s reformat call — every caller parses
+  AFTER `llm_call` has returned and released the queue.
+
+**Nothing is lost in silence any more.** A quarantined payload whose file name
+is too long for the filesystem is saved under a short name instead of vanishing
+behind `except: pass`; a finding whose title the masker changes is found again
+(it was refiled on every retry and could not be closed); two providers refused
+at the same moment both reach `depleted.json` (it is locked now); an unreadable
+run ledger no longer fails the compile night as "lost"; and a compile-kb change
+already on the page no longer counts as useful work in the ledger.
+
+**Monitors that could not see.** The Windows monitor's session-0 path check
+crashed into an empty alert on a timeout or a malformed reply — it now says so
+and exits 1; a `chain-dead.json` stamp with a time-zone offset no longer crashes
+either monitor; the registry reader used without PyYAML drops a trailing
+`# comment` (`health_port: 8080  # probe` was never probed); the POSIX monitor
+no longer skips the first line of `launchctl list` on a guess about its header.
+
+**Installers and the scheduler.** `bootstrap-registry.ps1` re-run on a
+bootstrapped registry still fills an empty `PROJECTS_ROOT`, and a drive root
+(`C:\`) is recognised as a drive. `sync.cmd` keeps a `!` in an argument (delayed
+expansion is on only for the echo that writes the args file). `install.sh`
+survives a failing helper instead of ending a full install without a manifest.
+`gen-scheduler.py` takes `--bash` and doubles `%` in `Description=`. The
+optional `cron/incident-extract.py` gets a 30-minute ceiling.
+
+**Smaller.** `mcp-probe.py` reports a non-string or non-list `args` as that
+server's failure instead of ending the run; `claude-switch.ps1` recognises an
+ollama or ccr backend on an IPv6 host (`[::1]`); `self-test.ps1` finds Python
+through the deployment's `PYTHON_EXE`, the `py` launcher and the newest
+`Python3x` instead of two hard-coded versions; backlinks keep a link to a
+same-named page of another project.
 
 ### A second sweep: the 28 findings the weekly auto-review filed
 

@@ -69,7 +69,7 @@ installer generates the first from the second.
 | `OPENCODE_GO_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `PROJECTS_ROOT` | declared | `home-claude/cron/git-push-all.sh`, `home-claude/cron/github-push.sh`, `home-claude/cron/hooks/utils.py`, `home-claude/cron/md2pdf-sync.py` |
 | `PYTHON` | not in .env (internal) | `home-claude/cron/claude-healthcheck.sh`, `home-claude/cron/claude-task-monitor.sh`, `home-claude/cron/claude-warm-window.sh`, `home-claude/cron/git-push-all.sh`, `home-claude/cron/telegram-send.sh` |
-| `PYTHON_EXE` | declared | `home-claude/cron/admin/sync-tasks.ps1`, `home-claude/cron/hooks/pre-compact.py`, `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh`, `home-claude/cron/md2pdf-sync.py`, `scripts/install.ps1` |
+| `PYTHON_EXE` | declared | `home-claude/cron/admin/sync-tasks.ps1`, `home-claude/cron/hooks/pre-compact.py`, `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh`, `home-claude/cron/md2pdf-sync.py`, `scripts/install.ps1`, `scripts/self-test.ps1` |
 | `REMOTE_SSH_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 | `SESSION_START_MAX_CHARS` | optional (commented) | `home-claude/cron/hooks/session-start.py` |
 | `SYNC_CHECK_PRIVATE_HOSTS` | optional (commented) | `home-claude/cron/agents-md-sync-check.py` |

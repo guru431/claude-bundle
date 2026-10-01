@@ -65,6 +65,16 @@ The short list; UPGRADING.md has the steps.
 - **The Windows task monitor exits 1** when its session-0 path check cannot
   collect the tasks; that failure used to be silent.
 
+### A finding is found by its heading, not by a substring
+
+`utils.finding_is_open` and `utils.append_finding` looked for `· <title> [`
+anywhere in FINDINGS.md, so another entry that only QUOTED the title — a
+code-review Evidence line, a fenced example — counted as "already open" and the
+real finding was never filed. Both now compare the titles of the OPEN entries:
+`## <date> · <title> [Px]` lines outside a code fence whose last status is not
+done/superseded/wontfix/deferred. A new entry goes before the first such line,
+never into a fenced block. `tests/test_findings_writer.py`.
+
 ### One way to send an alert from Python: `cron/lib/notify.py`
 
 Every Python task that alerted called `telegram-send.sh` through its own

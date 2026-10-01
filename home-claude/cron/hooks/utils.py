@@ -1352,15 +1352,52 @@ def quarantined_count(section: str) -> int:
 # inserted before the first `## `. They also disagreed on masking, on atomicity
 # and on how a duplicate is detected. One function now, used by the pipeline,
 # test-sweep and agents-md-sync-check alike.
+#
+# An entry is a `## <date> · <title> [Px]` line OUTSIDE a code fence, and only
+# an open one counts. Looking for the title anywhere in the file let another
+# entry that QUOTES it (a code-review Evidence line) mute the real finding for
+# good, and a `## ` line inside a fenced example was taken for an entry.
+_FINDING_TITLE_RE = re.compile(r"^##\s+\d{4}-\d{2}-\d{2}\s+·\s+(.+?)(?:\s+\[[^\]]*\])?\s*$")
+_FINDING_STATUS_RE = re.compile(r"(?mi)^\*\*Status:\*\*[ \t]*(.*)$")
+_FINDING_CLOSED_RE = re.compile(r"(?i)^(?:done|superseded)\b|\b(?:wontfix|deferred)\b")
+
+
+def _finding_offsets(text: str) -> list[int]:
+    """Offsets of the `## ` lines that lie outside ``` / ~~~ fences."""
+    offsets, in_fence, pos = [], False, 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+        elif not in_fence and line.startswith("## "):
+            offsets.append(pos)
+        pos += len(line)
+    return offsets
+
+
+def _open_finding_titles(text: str) -> set[str]:
+    """Titles of the open entries (date and priority stripped)."""
+    bounds = _finding_offsets(text)
+    titles = set()
+    for start, end in zip(bounds, bounds[1:] + [len(text)]):
+        block = text[start:end]
+        m = _FINDING_TITLE_RE.match(block.split("\n", 1)[0])
+        statuses = _FINDING_STATUS_RE.findall(block)
+        # The LAST status line is the entry's own; one above it may be a quote.
+        if m and not (statuses and _FINDING_CLOSED_RE.search(statuses[-1].strip())):
+            titles.add(m.group(1).strip())
+    return titles
+
+
 def finding_is_open(path: Path, title: str) -> bool:
-    """Whether FINDINGS.md at `path` already carries an entry with this title."""
+    """Whether FINDINGS.md at `path` already carries an open entry with this title."""
     try:
         existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
     except OSError:
         return False
     # The title as append_finding WROTE it — masked. Compared raw, a title that
     # quotes a key-shaped string never matched its own entry.
-    return f"· {masked(title)} [" in existing
+    return masked(title) in _open_finding_titles(existing)
 
 
 def append_finding(path: Path, title: str, context: str, what: str,
@@ -1368,9 +1405,11 @@ def append_finding(path: Path, title: str, context: str, what: str,
                    project: str | None = None) -> bool:
     """File ONE finding at the top of `path`. True if it was written.
 
-    Deduped on the title, because the alternative to an unbounded retry loop must
-    not be an unbounded pile of identical findings. Everything written is masked:
-    a finding quotes program output, and program output quotes credentials.
+    Deduped on the titles of the OPEN entries, because the alternative to an
+    unbounded retry loop must not be an unbounded pile of identical findings.
+    Inserted before the first entry outside a code fence. Everything written is
+    masked: a finding quotes program output, and program output quotes
+    credentials.
     """
     entry = (f"## {today_str()} · {masked(title)} [{priority}]\n"
              f"**Context:** {masked(context)}\n"
@@ -1382,11 +1421,11 @@ def append_finding(path: Path, title: str, context: str, what: str,
         # Against the MASKED title, the form the entry is written in: the raw one
         # never matched a title mask_secrets changes, and every retry filed a
         # duplicate.
-        if f"· {masked(title)} [" in existing:
+        if masked(title) in _open_finding_titles(existing):
             return False
-        m = re.search(r"(?m)^## ", existing)
-        if existing.lstrip().startswith("# Findings") and m:
-            head, body = existing[:m.start()].rstrip("\n") + "\n\n", existing[m.start():]
+        first = _finding_offsets(existing)[:1]
+        if existing.lstrip().startswith("# Findings") and first:
+            head, body = existing[:first[0]].rstrip("\n") + "\n\n", existing[first[0]:]
         elif existing.lstrip().startswith("# Findings"):
             head, body = existing.rstrip("\n") + "\n\n", ""
         else:

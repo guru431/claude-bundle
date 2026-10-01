@@ -614,14 +614,27 @@ def ideas_header(project: str) -> str:
 # and a file named secrets.py there would shadow the stdlib module of that name
 # for every library in the process (urllib3 imports it).
 sys.path.insert(0, str(BUNDLE_ROOT / "cron" / "lib"))
-from secret_shapes import mask as _mask_secrets  # noqa: E402
+from secret_shapes import mask as _mask_shapes  # noqa: E402
+# Exact VALUES as well as shapes: a key whose format the table does not know is
+# invisible by shape. The values are the secrets in the bundle's .env (or the
+# file SECRET_VAULT_FILE names); without that file this is a no-op.
+from vault_values import mask as _mask_vault  # noqa: E402
+
+
+def _mask_secrets(text: str) -> str:
+    # Values first (`[REDACTED-VAULT:<NAME>]`), shapes second: the other way
+    # round a shape would eat part of a key and leave its tail in the text.
+    if not isinstance(text, str):
+        return text
+    return _mask_shapes(_mask_vault(text))
 
 
 def mask_secrets(text: str) -> str:
     """Mask credential-looking strings before they are logged or sent onward.
 
-    Thin re-export of cron/lib/secret_shapes.py::mask so callers keep importing
-    it from utils (where every other shared helper lives).
+    The exact values of the keys in the bundle's .env first, then every shape of
+    cron/lib/secret_shapes.py — re-exported here so callers keep importing it
+    from utils (where every other shared helper lives).
     """
     return _mask_secrets(text)
 

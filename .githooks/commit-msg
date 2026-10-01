@@ -36,7 +36,20 @@ fail=0
 # NUL-interleaved bytes make every grep below see either binary or nothing.
 # -a: GNU grep drops a line it cannot decode, and a message line carrying a
 # CP1251 word and a token would have vanished before the scan.
-body=$(secret_scan_decode < "$msg_file" | grep -av '^#' || true)
+#
+# rc 1 from grep — every line was a comment, the body is empty; rc 2 — grep did
+# not run, and an empty body would then be scanned as "clean". The decode is
+# buffered separately so its own failure is read too.
+if ! decoded=$(secret_scan_decode < "$msg_file"); then
+  echo "BLOCKED: the commit message could not be read — it was NOT scanned."
+  exit 1
+fi
+cm_rc=0
+body=$(printf '%s\n' "$decoded" | grep -av '^#') || cm_rc=$?
+if [ "$cm_rc" -gt 1 ]; then
+  echo "BLOCKED: grep failed (rc $cm_rc) — the commit message was NOT scanned."
+  exit 1
+fi
 
 if ! hits=$(printf '%s\n' "$body" | secret_scan_text); then
   echo "BLOCKED: possible secret/token format in the commit message:"
@@ -53,8 +66,13 @@ if ! secret_scan_denylist "$repo_root/.sanitize-patterns" "$pat"; then
   echo "  would be OFF for this message. Fix the pattern, or move the file aside."
   fail=1
 elif [ -s "$pat" ]; then
-  # The body is already decoded text, so a plain grep is the whole check.
-  hits=$(printf '%s\n' "$body" | grep -naiEf "$pat" || true)
+  # The body is already decoded text, so a plain grep is the whole check — one
+  # ERE rather than `-f` (GNU grep 3.0 aborts on `-i` with `-f`), status read.
+  dl_rc=0
+  hits=$(printf '%s\n' "$body" | grep -naiE -e "$(secret_scan_denylist_ere "$pat")") || dl_rc=$?
+  if [ "$dl_rc" -gt 1 ]; then
+    hits="scan-error: grep failed (rc $dl_rc), the message was NOT checked"
+  fi
   if [ -n "$hits" ]; then
     echo "BLOCKED: personal data (matched .sanitize-patterns) in the commit message:"
     printf '%s\n' "$hits" | sed 's/^/  /'

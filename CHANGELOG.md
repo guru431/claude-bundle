@@ -64,6 +64,10 @@ The short list; UPGRADING.md has the steps.
   not a privacy key, so it denies nothing.
 - **The Windows task monitor exits 1** when its session-0 path check cannot
   collect the tasks; that failure used to be silent.
+- **`git-push-all.sh` and `github-push.sh` check outgoing commits against the
+  key VALUES in `~/.claude/.env`**; a repository that carries one is FAILED
+  instead of pushed. Logs and payloads show such a value as
+  `[REDACTED-VAULT:<NAME>]`.
 
 ### A finding is found by its heading, not by a substring
 
@@ -74,6 +78,30 @@ real finding was never filed. Both now compare the titles of the OPEN entries:
 `## <date> · <title> [Px]` lines outside a code fence whose last status is not
 done/superseded/wontfix/deferred. A new entry goes before the first such line,
 never into a fenced block. `tests/test_findings_writer.py`.
+
+### Secret gates fail closed; keys are also detected by VALUE
+
+The commit/push guards read a failed git or grep as "clean": `|| true` cannot
+tell grep's rc 1 ("no match") from rc 2 ("could not run"), and in `git … | tr`
+the status was tr's. Now a scan that did not read its input says so with a
+`scan-error:` line and blocks — `_secret_scan_sel` in `cron/lib/secret-scan.sh`,
+git's status through fd 4 in `secret_scan_git_paths` and the suspect pass, every
+step of `secret_scan_range` / `secret_scan_range_paths` checked, `git log
+--ignore-missing` for messages. pre-commit, commit-msg, pre-push (rev-list with
+`--ignore-missing`, typed-object count, unreadable tags and blobs), git-push-all
+and github-push block on such a failure; the denylist passes in pre-commit and
+commit-msg join the patterns into one ERE, out of reach of the GNU grep 3.0
+abort on `-i` with `-f`. Every `|| true` left behind git or grep in a gate file
+carries `# rc-ok: <why>` (`tests/test_secret_gates_rc.py`).
+
+Four more key shapes: VK (`vk1.a.`), Yandex OAuth (`y0_`), Google refresh
+tokens (`1//0`) and Airtable PATs (`pat….<hex64>`).
+
+New `cron/lib/vault_values.py`: the exact values of the secret-named keys in the
+bundle's `.env` (or the file `SECRET_VAULT_FILE` names) are struck out by
+`mask_secrets` as `[REDACTED-VAULT:<NAME>]` and block git-push-all and
+github-push when an outgoing commit carries one — reported by the key's name,
+never its value. It catches a key whose format no shape knows. No file — no-op.
 
 ### One way to send an alert from Python: `cron/lib/notify.py`
 

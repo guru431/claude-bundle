@@ -1,6 +1,7 @@
 """One .env fixture, every parser in the bundle, compared character by character.
 
-The bundle reads `.env` in four languages: cron/hooks/utils.py::_load_dotenv
+The bundle reads `.env` in four languages (and a second Python reader,
+cron/lib/vault_values.py, for the key values the gates guard): cron/hooks/utils.py::_load_dotenv
 (Python), cron/lib/dotenv.sh (bash), scripts/lib/dotenv.ps1 (PowerShell) and
 bin/_run-hidden.vbs (VBScript — the Task Scheduler launcher). They had drifted on
 nearly every edge a real file has: a BOM, CRLF, an indented `export`,
@@ -25,6 +26,7 @@ marker comments — the launcher itself is exercised in tests/test_run_hidden.py
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import os
 import re
@@ -187,7 +189,19 @@ def _vbscript(tmp_path: Path, monkeypatch) -> dict:
                 (line.partition(" ") for line in out.read_text(encoding="ascii").splitlines()))
 
 
-LEGS = {"python": _python, "bash": _bash, "powershell": _powershell, "vbscript": _vbscript}
+def _vault_values(tmp_path: Path, monkeypatch) -> dict:
+    """cron/lib/vault_values.py reads the same .env for the key VALUES it guards
+    (the masker, the outgoing gates); a key it parsed differently would be a
+    secret it does not see."""
+    spec = importlib.util.spec_from_file_location(
+        "vault_values_parity", ROOT / "home-claude" / "cron" / "lib" / "vault_values.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.read_env(FIXTURE.read_text(encoding="utf-8", errors="replace"))
+
+
+LEGS = {"python": _python, "bash": _bash, "powershell": _powershell, "vbscript": _vbscript,
+        "vault_values": _vault_values}
 
 
 def _describe(key: str, want, got) -> str:
@@ -201,6 +215,7 @@ def _describe(key: str, want, got) -> str:
 @pytest.mark.parametrize("parser", [
     "python",
     "bash",
+    "vault_values",
     pytest.param("powershell", marks=[
         pytest.mark.integration,
         pytest.mark.skipif(POWERSHELL is None, reason="no PowerShell host")]),

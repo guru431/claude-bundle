@@ -33,7 +33,12 @@ fi
 # --diff-filter=AR: a rename (`git mv safe.txt .env`) is an R, not an A.
 # secret_scan_git_paths, not a bare `--name-only`: git quotes a non-ASCII path by
 # default (`"\320\277…/.env"`), and the name table never matched the quoted form.
-added=$(secret_scan_git_paths diff --cached --name-only --diff-filter=AR || true)
+# A git that could not list the names is a block, not "no new files".
+if ! added=$(secret_scan_git_paths diff --cached --name-only --diff-filter=AR); then
+  echo "BLOCKED: git could not list the staged file names — the name check did not run."
+  added=""
+  fail=1
+fi
 if [ -n "$added" ] && ! bad=$(printf '%s\n' "$added" | secret_scan_paths); then
   echo "BLOCKED: refusing to commit sensitive file(s):"
   printf '%s\n' "$bad" | sed 's/^/  /'
@@ -41,15 +46,25 @@ if [ -n "$added" ] && ! bad=$(printf '%s\n' "$added" | secret_scan_paths); then
 fi
 
 # Collect staged diff once (exclude the hook itself to avoid self-matching)
-diff_content=$(git -c core.quotePath=false diff --cached --unified=0 -- . ':(exclude).githooks/' 2>/dev/null \
-  || git -c core.quotePath=false diff --cached --unified=0)
+# A diff git could not produce blocks: an empty one would scan as "clean".
+if ! diff_content=$(git -c core.quotePath=false diff --cached --unified=0 -- . ':(exclude).githooks/' 2>/dev/null \
+  || git -c core.quotePath=false diff --cached --unified=0); then
+  echo "BLOCKED: git could not produce the staged diff — the content checks did not run."
+  diff_content=""
+  fail=1
+fi
 # ADDED lines only, for the same reason secret_scan_diff filters them: a commit
 # that REMOVES a leaked string must not be blocked, or the leak could never be
 # remediated. Step 3 below used to grep the whole diff, '-' lines included — so
 # the one commit that cleans a hostname out of the tree matched its own
 # denylist and was refused, leaving `--no-verify` (which also disables step 2)
 # as the only way through. '+++' is a file header, not content.
-added_content=$(printf '%s\n' "$diff_content" | grep -aE '^\+' | grep -avE '^\+\+\+' || true)
+# One awk and its status read: two greps behind `|| true` turned a failed grep
+# into "nothing added", and the denylist pass below then read nothing.
+if ! added_content=$(printf '%s\n' "$diff_content" | awk '/^\+/ && !/^\+\+\+/'); then
+  echo "BLOCKED: the added lines could not be extracted — the denylist check did not run."
+  fail=1
+fi
 
 # The personal denylist is read HERE rather than in step 3, because step 2b
 # below needs it too — a binary or UTF-16 file has to be checked against both
@@ -65,7 +80,7 @@ fi
 # 2) High-confidence secret/token formats (generic, very low false-positive)
 # Shared with the nightly cron/git-push-all.sh sweep — one source of truth for
 # the regex lives in home-claude/cron/lib/secret-scan.sh (already sourced above).
-hits=$(printf '%s\n' "$diff_content" | secret_scan_diff || true)
+hits=$(printf '%s\n' "$diff_content" | secret_scan_diff || true)   # rc-ok: the verdict is the output — a hit or a scan-error line
 if [ -n "$hits" ]; then
   echo "BLOCKED: possible secret/token format in staged changes:"
   printf '%s\n' "$hits" | sed 's/^/  /'
@@ -93,7 +108,15 @@ fi
 # never get `+` lines; step 2b reads those), so the decoding scanner would only
 # add process spawns to every commit. -a for the reason secret_scan_diff gives.
 if [ -s "$pat" ]; then
-  hits=$(printf '%s\n' "$added_content" | grep -naiEf "$pat" || true)
+  # One ERE, not `grep -f`: GNU grep 3.0 (Git for Windows) aborts (rc 134) on
+  # `-i` together with `-f` — see secret_scan_denylist_ere in the library. And
+  # the status read: rc 2 or 134 is "not checked", never "no match".
+  dl_rc=0
+  hits=$(printf '%s\n' "$added_content" \
+    | grep -naiE -e "$(secret_scan_denylist_ere "$pat")") || dl_rc=$?
+  if [ "$dl_rc" -gt 1 ]; then
+    hits="scan-error: grep failed (rc $dl_rc), the staged changes were NOT checked"
+  fi
   if [ -n "$hits" ]; then
     echo "BLOCKED: personal data (matched .sanitize-patterns) in staged changes:"
     printf '%s\n' "$hits" | sed 's/^/  /'

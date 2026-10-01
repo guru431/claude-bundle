@@ -635,3 +635,60 @@ def test_a_line_that_is_not_valid_utf8_is_still_scanned(tmp_path: Path):
                         'secret_scan_diff < cp1251.diff; echo "diff rc=$?"', env=env)
     out = _out(cp)
     assert "text rc=1" in out and "diff rc=1" in out, out
+
+
+# ── fail-closed: a grep or git that fails is not a clean scan ───────────────
+
+def test_grep_that_fails_is_a_scan_error_not_a_clean_scan(tmp_path: Path):
+    """grep answers 2 for "could not run", and `|| true` read it as 1, "no match".
+
+    The failure is planted as a shell function `grep`, which shadows the command
+    in subshells too.
+    """
+    broken = "grep() { cat > /dev/null; return 2; }\n"
+    cp = _lib(tmp_path, broken + 'printf "plain text\n" | secret_scan_text; echo "rc=$?"')
+    out = _out(cp)
+    assert "rc=1" in out and "scan-error" in out, out
+    cp = _lib(tmp_path, broken + 'printf "a/.env\n" | secret_scan_paths; echo "rc=$?"')
+    out = _out(cp)
+    assert "rc=2" in out and "scan-error" in out, out
+
+
+def test_git_that_fails_is_not_an_empty_path_list(tmp_path: Path):
+    """In `git … | tr` the status was tr's: an index.lock or a full disk read
+    as "no names"."""
+    env = {**_git_env(tmp_path), "GIT_DIR": str(tmp_path / "no-such-git-dir")}
+    cp = _lib(tmp_path, 'secret_scan_git_paths diff --cached --name-only; echo "rc=$?"', env=env)
+    out = _out(cp)
+    assert "rc=2" in out and "scan-error" in out, out
+
+
+@integration
+def test_a_range_git_cannot_walk_is_a_scan_error(tmp_path: Path):
+    """rev-list failing inside a pipeline handed the scanner nothing, and a
+    range nobody had read came back rc 0."""
+    env = _git_env(tmp_path)
+    cp = _lib(tmp_path, """
+git init -q repo && cd repo || exit 1
+git commit -q --allow-empty -m init || exit 1
+secret_scan_range no-such-ref; echo "range rc=$?"
+secret_scan_range_paths no-such-ref; echo "paths rc=$?"
+""", env=env)
+    out = _out(cp)
+    assert "range rc=1" in out and "paths rc=1" in out and "scan-error" in out, out
+
+
+@integration
+def test_github_push_blocks_a_key_value_by_name_not_value(published: Repo, tmp_path: Path):
+    """A key with no known shape is seen only by its VALUE from .env — and named
+    by its key: the value in the gate's own output would be the same leak."""
+    value = "Zq9" * 10
+    vault = tmp_path / "keys.env"
+    vault.write_text(f"ALPHA_API_KEY={value}\n", encoding="utf-8")
+    published.write("app.cfg", f"k = {value}\n")
+    published.plant("cfg")
+    published.env["SECRET_VAULT_FILE"] = str(vault)
+    cp = _check_only(published)
+    out = _out(cp)
+    assert cp.returncode != 0, out
+    assert "ALPHA_API_KEY" in out and value not in out, out

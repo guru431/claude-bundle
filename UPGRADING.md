@@ -78,6 +78,17 @@ form.
   through PowerShell, which rejects the example's quoted form. Write each entry
   in exec form: `"command": "<python-exe>", "args": ["<claude-home>/hooks/bash-guard.py"]`.
 
+### Key values in `.env` are now guarded
+
+`git-push-all.sh` and `github-push.sh` compare every outgoing commit with the
+exact values of the secret-named keys in `~/.claude/.env` (`*_KEY`, `*_TOKEN`,
+`*_SECRET`, `*_PASSWORD`, …; 20+ characters, no paths or URLs). A repository
+whose unpushed commits carry one is FAILED and named in the log by the key,
+never the value — rewrite that history and rotate the key. A value the remote
+branch already holds does not block git-push-all again. The masker strikes the
+same values out of logs, FINDINGS and LLM payloads. Nothing to do unless your
+keys live in another file: then set `SECRET_VAULT_FILE` to it.
+
 ### Windows task registry
 
 Then run `sync.cmd` once (step 4 above).

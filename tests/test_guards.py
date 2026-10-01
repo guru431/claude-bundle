@@ -209,6 +209,10 @@ SECRET_FIXTURES = {
     "jwt": "eyJ" + "a" * 20 + "." + "b" * 20 + "." + "c" * 20,
     "gcp-key-id": '"private_key_id": "' + "0" * 40 + '"',
     "telegram": "1234567890:" + "A" * 35,
+    "vk": "vk1.a." + "Vk7_" * 16,
+    "yandex-oauth": "y0_" + "_Ya5-" * 10,
+    "google-refresh": "1//0" + "Gr8-" * 12,
+    "airtable-pat": "pat" + "Ab3Cd4Ef5Gh6Ij" + "." + "0a1b2c3d" * 8,
 }
 
 
@@ -278,6 +282,7 @@ _MUST_NOT_MATCH = [
     "kiosk-mode-launcher-2024",               # mask() turned this into `kio[REDACTED]`
     "Python 3.10.0.1",                        # the `10.` branch had 3 octets
     "artifact 1693526400:" + "a" * 40,        # a timestamp plus a sha1
+    "xy0" + "_prediction_with_a_very_long_identifier_name_here",   # `y0_` mid-identifier
 ]
 _MUST_MATCH = [
     "ghp_" + "A" * 24, "ghs_" + "A" * 24, "ghu_" + "B" * 24,

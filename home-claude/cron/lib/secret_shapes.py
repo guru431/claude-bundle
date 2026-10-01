@@ -193,6 +193,24 @@ SHAPES: tuple[Shape, ...] = (
            r"[0-9]{8,10}:[A-Za-z0-9_-]{35}([^A-Za-z0-9_-]|$)",
            py=r"\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])",
            redaction="[REDACTED-TELEGRAM-TOKEN]", bounded=True),
+    # Four vendor prefixes that no shape knew: a VK access token, a Yandex OAuth
+    # token, a Google OAuth refresh token and an Airtable personal access token.
+    # Each went through every detector until a key index was checked against
+    # this table. `y0_` and `1//0` need their left boundary most: without it the
+    # tail of an identifier (`xy0_…`) or a run of base64 holding `1//0` would read
+    # as a key.
+    _shape("vk-token",
+           r"vk1\.a\.[A-Za-z0-9_-]{60,}",
+           redaction="[REDACTED-VK-TOKEN]", bounded=True),
+    _shape("yandex-oauth-token",
+           r"y0_[A-Za-z0-9_-]{40,}",
+           redaction="[REDACTED-OAUTH-TOKEN]", bounded=True),
+    _shape("google-refresh-token",
+           r"1//0[A-Za-z0-9_-]{40,}",
+           redaction="[REDACTED-OAUTH-TOKEN]", bounded=True),
+    _shape("airtable-pat",
+           r"pat[A-Za-z0-9]{14}\.[0-9a-f]{64}",
+           redaction="[REDACTED-AIRTABLE-TOKEN]", bounded=True),
     # NOT a secret format, so it never blocks a commit — but an internal address
     # copied into the AGENTS.md of a repo with a public remote is exactly the
     # class of thing this bundle exists to keep out of public files.

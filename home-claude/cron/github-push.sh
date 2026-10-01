@@ -64,7 +64,7 @@ GH_URL="$(git remote get-url github)"
 echo "=== github-push: $(basename "$REPO") [$BRANCH] → $GH_URL ==="
 
 # --- what would leave: range github/<branch>..<branch> ---
-git fetch github "$BRANCH" --quiet 2>/dev/null || true
+git fetch github "$BRANCH" --quiet 2>/dev/null || true   # rc-ok: a stale or missing github/<branch> only widens the range scanned below
 if git rev-parse "github/$BRANCH" >/dev/null 2>&1; then
   RANGE="github/$BRANCH..$BRANCH"
   N=$(git rev-list --count "$RANGE")
@@ -98,9 +98,15 @@ fi
 SCAN_RANGE="${RANGE:-$BRANCH}"
 # Unquoted by construction — secret_scan_objects reads paths from the object
 # walk, which git never C-quotes the way `--name-only` quotes a non-ASCII name.
-added=$(secret_scan_range_paths "$SCAN_RANGE")
-
 fail=0
+# A name list that could not be built blocks: under `set -e` the failure used
+# to end the script with no word of why, and an empty list would read as "no
+# sensitive names" for names nobody had read.
+if ! added=$(secret_scan_range_paths "$SCAN_RANGE"); then
+  echo "BLOCKED: the file names of the publication could not be listed (see above)."
+  added=""
+  fail=1
+fi
 
 # 1) sensitive filenames (allow *.example* templates and *.pub public keys)
 # The one shared table (secret_shapes.py → cron/lib/secret-scan.sh), which also
@@ -140,6 +146,44 @@ elif [ -n "$hits" ]; then
   printf '%s\n' "$hits" | sed 's/^/  /'      # e.g. the "N blob(s) over 1 MiB" note
 fi
 rm -f "$pat"
+
+# 3b) Key VALUES from .env — detection by value on top of the shape table. A
+#     provider key whose format the table does not know is invisible by shape;
+#     an exact occurrence of a live value is a hit with no false positive. One
+#     process for the whole range, the report names the KEY only: values are
+#     never printed or written to a temp file (cron/lib/vault_values.py). No
+#     file — the step stays silent; the file exists but Python does not run —
+#     block: "not checked" is not "clean". No "already published" exemption
+#     here: this is the gate to a PUBLIC remote.
+VAULT_FILE="${SECRET_VAULT_FILE:-$BUNDLE_ROOT/.env}"
+if [ -f "$VAULT_FILE" ]; then
+  # The shared resolver: an interpreter counts only once it has run (the
+  # Windows Store `python3` stub is found on PATH and runs nothing).
+  PYTHON=""
+  # `set +e` around it: the resolver probes candidates that may not exist, and
+  # this script runs under `set -e`.
+  if [ -f "$SCRIPT_DIR/lib/runtime.sh" ]; then
+    set +e
+    # shellcheck source=lib/runtime.sh
+    . "$SCRIPT_DIR/lib/runtime.sh"
+    set -e
+  fi
+  PYTHON_BIN="$PYTHON"
+  if [ -z "$PYTHON_BIN" ]; then
+    echo "BLOCKED: no python found — the publication was NOT checked against the key values in $VAULT_FILE."; fail=1
+  else
+    vrc=0
+    # SCAN_RANGE is a rev list and must word-split.
+    # shellcheck disable=SC2086
+    vhits=$("$PYTHON_BIN" "$SCRIPT_DIR/lib/vault_values.py" --vault "$VAULT_FILE" range -- $SCAN_RANGE) || vrc=$?
+    if [ "$vrc" -ne 0 ]; then
+      echo "BLOCKED: a key value from $(basename "$VAULT_FILE") in the publication (or the check did not run, rc $vrc):"
+      printf '%s\n' "$vhits" | sed 's/^/  /'; fail=1
+    elif [ -n "$vhits" ]; then
+      printf '%s\n' "$vhits" | sed 's/^/  /'
+    fi
+  fi
+fi
 
 # 4) per-project PATH denylist (.github-push-deny) — hard-fail by PATH, not by
 #    content. For files that must NEVER leave for a public remote (PII corpora,

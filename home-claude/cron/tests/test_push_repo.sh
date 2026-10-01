@@ -278,6 +278,29 @@ reset_counters; push_repo "$R19" "r19" "Auto-commit: test"
 [ "$pushed" = "1" ] || fail "T19: a clean repository with one large blob was not pushed (failed=$failed)"
 grep -q "NOT scanned" "$LOG_FILE" || fail "T19: the note about the unscanned blob is missing from the log"
 
+# === Test 19b: a key VALUE from .env blocks by NAME; a published one does not; no file is silent ===
+# Values with no key shape: only the detection by value sees them.
+vv1="Zq9Zq9Zq9Zq9Zq9Zq9Zq9Zq9"; vv2="Wk4-Wk4-Wk4-Wk4-Wk4-Wk4-"
+printf 'ALPHA_API_KEY=%s\nBETA_TOKEN=%s\n' "$vv1" "$vv2" > "$TMP/vault.env"
+export SECRET_VAULT_FILE="$TMP/vault.env"
+R19b="$TMP/r19b"; mkrepo "$R19b"
+printf 'a = %s\n' "$vv2" > "$R19b/app.cfg"; git -C "$R19b" add -A; git -C "$R19b" commit -qm legacy
+git -C "$R19b" push -q origin "$(br "$R19b")"                       # already published
+printf 'b = 1\n' >> "$R19b/app.cfg"; git -C "$R19b" commit -qam edit
+: > "$LOG_FILE"
+reset_counters; push_repo "$R19b" "r19b" "Auto-commit: test"
+[ "$pushed" = "1" ] || fail "T19b: an edit next to an already-published value was blocked (failed=$failed)"
+printf 'c = %s\n' "$vv1" > "$R19b/new.cfg"; git -C "$R19b" add -A; git -C "$R19b" commit -qm new
+: > "$LOG_FILE"
+reset_counters; push_repo "$R19b" "r19b" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T19b: a new .env value was pushed"
+grep -q "vault value ALPHA_API_KEY: new.cfg" "$LOG_FILE" || fail "T19b: the log does not name the key"
+grep -qF "$vv1" "$LOG_FILE" && fail "T19b: the log carries the value itself"
+export SECRET_VAULT_FILE="$TMP/no-such.env"
+reset_counters; push_repo "$R19b" "r19b" "Auto-commit: test"
+[ "$pushed" = "1" ] || fail "T19b: with no vault file the push was blocked (failed=$failed)"
+unset SECRET_VAULT_FILE
+
 # === Test 20: what .env sets reaches the sweep — a whole run, not the lib ===
 # The helpers resolve their settings when the script starts, and the main body
 # loads .env only after them — while dotenv_load never overrides a variable that
@@ -304,4 +327,4 @@ grep -q "^python .*runs\.py record" "$TMP/stubs.log" \
 [ "$(git -C "$P/app" rev-parse HEAD)" = "$(git -C "$P/app" rev-parse "origin/$(br "$P/app")")" ] \
     || fail "T20: the change was not pushed"
 
-echo "PASS: push_repo (20 scenarios)"
+echo "PASS: push_repo (21 scenarios)"

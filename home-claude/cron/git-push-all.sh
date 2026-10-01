@@ -122,8 +122,20 @@ guard_staged_sensitive() {
     fi
     # Unquoted paths (secret_scan_git_paths): git C-quotes a non-ASCII name by
     # default, and the anchored table never matched `"\320\277…/.env"`.
-    staged=$(secret_scan_git_paths diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
-        | secret_scan_paths)
+    # The list and the verdict are read separately: in one pipe a git that
+    # failed (index.lock, a full disk) handed the table nothing, and "no
+    # sensitive paths" came out for names nobody had read. rc 1 is a hit; rc 2
+    # is a scan that did not run — both fail the repo.
+    local listed rc=0
+    if ! listed=$(secret_scan_git_paths diff --cached --name-only --diff-filter=ACMR 2>/dev/null); then
+        echo "[$label] SECRET-SCAN: git could not list the staged names — repo FAILED, nothing committed (fail closed)" >> "$LOG_FILE"
+        return 1
+    fi
+    staged=$(printf '%s\n' "$listed" | secret_scan_paths) || rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "[$label] SECRET-SCAN: the staged names could not be checked — repo FAILED, nothing committed (fail closed)" >> "$LOG_FILE"
+        return 1
+    fi
     [ -z "$staged" ] && return 0
     if [ "$swept" = "1" ]; then
         while IFS= read -r p; do
@@ -155,7 +167,19 @@ guard_protected_deletions() {
     fi
     # Unquoted paths, for the same reason as above: a FINDINGS.md under a
     # non-ASCII folder was quoted, matched nothing, and its deletion was committed.
-    deleted=$(secret_scan_git_paths diff --cached --name-only --diff-filter=D 2>/dev/null | grep -E "$PROTECTED_RE")
+    # A deletion list git did not produce is not "no deletions": the deletion of
+    # a FINDINGS.md would ride into the auto-commit. git's and grep's codes are
+    # read separately for that reason.
+    local listed rc=0
+    if ! listed=$(secret_scan_git_paths diff --cached --name-only --diff-filter=D 2>/dev/null); then
+        echo "[$label] the staged deletions could not be listed (git failed) — repo FAILED, nothing committed (fail closed)" >> "$LOG_FILE"
+        return 1
+    fi
+    deleted=$(printf '%s\n' "$listed" | grep -aE "$PROTECTED_RE") || rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "[$label] the deletion check did not run (grep rc=$rc) — repo FAILED, nothing committed (fail closed)" >> "$LOG_FILE"
+        return 1
+    fi
     [ -z "$deleted" ] && return 0
     echo "[$label] PROTECTED deletion blocked from auto-commit:" >> "$LOG_FILE"
     echo "$deleted" | sed 's/^/    /' >> "$LOG_FILE"
@@ -209,8 +233,15 @@ guard_secrets() {
     # committed here and stopped only by the outgoing scan — with the commit
     # already made. secret_scan_changed_binaries reads those whole, as
     # .githooks/pre-commit does.
-    local bin_hits
-    hits=$(git -c core.quotePath=false diff --cached --unified=0 2>/dev/null | secret_scan_diff)
+    #
+    # The diff is its own command with its code read: in the pipe a git that
+    # failed handed the scanner empty input, and it honestly found nothing.
+    local bin_hits diff
+    if ! diff=$(git -c core.quotePath=false diff --cached --unified=0 2>/dev/null); then
+        hits="scan-error: git diff --cached failed, so the staged changes were NOT scanned"
+    else
+        hits=$(printf '%s\n' "$diff" | secret_scan_diff)
+    fi
     bin_hits=$(secret_scan_changed_binaries index "")
     hits="${hits:+$hits${bin_hits:+
 }}$bin_hits"
@@ -264,6 +295,35 @@ guard_secrets_preview() {
     return 0
 }
 
+# Values from .env in an outgoing range (cron/lib/vault_values.py): detection by
+# VALUE on top of the shape table — a provider key whose format the table does
+# not know is invisible by shape. One Python process per range; the values never
+# leave it, in argv or in a temp file, and a hit is reported by the key's NAME.
+# A value the tree <published ref> already holds does not block: publishing it
+# again reveals nothing new, and without the exemption every edit to such a file
+# would fail the repo every night.
+# No file → the step stays silent (a machine with no keys to guard, the tests).
+# The file exists but Python does not run → a scan error, not "clean".
+# The file is SECRET_VAULT_FILE, or the bundle's own .env.
+# Args: <range> [<published ref>]. Prints hit lines; rc 0 clean (notes and
+# already-published values only print), 1 a hit, 2 not checked.
+vault_value_scan() {
+    local vault="${SECRET_VAULT_FILE:-$SCRIPT_DIR/../.env}" out rc=0
+    [ -f "$vault" ] || return 0
+    local args=(--vault "$vault" range)
+    if [ -n "${2:-}" ] && git rev-parse -q --verify "${2}^{commit}" >/dev/null 2>&1; then
+        args+=(--published "$2")
+    fi
+    # The range is a rev LIST and must word-split.
+    # shellcheck disable=SC2086
+    out=$("$PYTHON" "$SCRIPT_DIR/lib/vault_values.py" "${args[@]}" -- $1) || rc=$?
+    [ -n "$out" ] && printf '%s\n' "$out"
+    if [ "$rc" -gt 1 ] && ! printf '%s\n' "$out" | grep -q '^scan-error:'; then
+        echo "scan-error: the .env value check did not run (rc $rc), so the range was NOT checked"
+    fi
+    return "$rc"
+}
+
 # Outgoing-commit guard: scan everything this push would publish, not just the
 # diff we are about to stage. guard_secrets only ever sees the staged tree, so a
 # repo with a CLEAN working tree and an unpushed commit — committed by hand, by
@@ -291,8 +351,14 @@ guard_outgoing_secrets() {
     # file names in the check, a repository that has tracked an `.npmrc` for
     # years would have failed on every such branch.
     local range="$branch --not --remotes=$remote"
-    local names hits blocked=0
-    names=$(secret_scan_range_paths "$range" | secret_scan_paths)
+    local names paths hits blocked=0
+    # The path list and the table's verdict read separately: a name list that
+    # could not be built is "names not checked", never "no names".
+    if ! paths=$(secret_scan_range_paths "$range" 2>>"$LOG_FILE"); then
+        names="scan-error: the file names of the outgoing commits could not be listed"
+    else
+        names=$(printf '%s\n' "$paths" | secret_scan_paths) || true   # rc-ok: the verdict is the output — offending names or a scan-error line
+    fi
     if [ -n "$names" ]; then
         echo "[$label] SENSITIVE file name(s) in OUTGOING commits — push blocked:" >> "$LOG_FILE"
         printf '%s\n' "$names" | sed 's/^/    /' >> "$LOG_FILE"
@@ -313,6 +379,17 @@ guard_outgoing_secrets() {
         blocked=1
     fi
     [ -n "$hits" ] && printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
+    # The exact VALUES of the keys in .env, over the same range: a key whose
+    # format the shape table does not know is invisible to the pass above.
+    local vout vrc=0
+    vout=$(vault_value_scan "$range" "$remote/$branch" 2>>"$LOG_FILE") || vrc=$?
+    if [ "$vrc" -ne 0 ]; then
+        echo "[$label] a key VALUE from .env in OUTGOING commits (or the check did not run) — push blocked:" >> "$LOG_FILE"
+        blocked=1
+    elif [ -n "$vout" ]; then
+        echo "[$label] .env value check (not blocking):" >> "$LOG_FILE"
+    fi
+    [ -n "$vout" ] && printf '%s\n' "$vout" | sed 's/^/    /' >> "$LOG_FILE"
     [ "$blocked" -eq 0 ] && return 0
     # In dry-run the guard runs for the preview only — there is nothing to alert about.
     if [ "$DRY_RUN" != "1" ] && [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
@@ -420,7 +497,7 @@ push_repo() {
     # force-push on origin leaves refs/remotes/origin/<branch> stale, the hashes
     # match, and a needed push is silently skipped. Skipped in dry-run to stay
     # side-effect free; errors (offline/no remote) ignored so the sweep goes on.
-    [ "$DRY_RUN" = "1" ] || git_net fetch -q "$remote" "$branch" >> "$LOG_FILE" 2>&1 || true
+    [ "$DRY_RUN" = "1" ] || git_net fetch -q "$remote" "$branch" >> "$LOG_FILE" 2>&1 || true   # rc-ok: a stale remote ref widens the scanned range, never narrows it
     local local_hash remote_hash
     local_hash=$(git rev-parse "$branch" 2>/dev/null)
     remote_hash=$(git rev-parse "$remote/$branch" 2>/dev/null)

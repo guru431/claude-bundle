@@ -79,18 +79,40 @@ pat="$tmpdir/patterns"
 # `awk NF>1` keeps only objects that carry a name: blobs and trees (their path)
 # and annotated tags (the tag name); commits print bare. Both vars must
 # word-split, hence the SC2086 directives.
+#
+# --ignore-missing, and the status checked: the remote sha comes from the
+# TARGET, and after a push made from somewhere else (the web UI, another clone)
+# this clone may not have it. rev-list then died on `bad object`, `|| true`
+# read that as "no new objects", and a `git push -f` went out unscanned. An
+# unknown exclusion is now dropped — the scan grows to "minus what the remote's
+# refs have", never shrinks — and any other failure blocks.
+rl_rc=0
 if [ -n "$excludes" ]; then
   # shellcheck disable=SC2086
-  git rev-list --objects $shas --not $excludes 2>/dev/null | awk 'NF>1' > "$objects" || true
+  git rev-list --objects --ignore-missing $shas --not $excludes > "$tmpdir/revs" || rl_rc=$?
 else
   # shellcheck disable=SC2086
-  git rev-list --objects $shas 2>/dev/null | awk 'NF>1' > "$objects" || true
+  git rev-list --objects $shas > "$tmpdir/revs" || rl_rc=$?
+fi
+if [ "$rl_rc" -ne 0 ] || ! awk 'NF>1' "$tmpdir/revs" > "$objects"; then
+  echo "BLOCKED: git rev-list could not list the objects of this push (rc=$rl_rc) — nothing was scanned." >&2
+  echo "         Fix the repository, or push with --no-verify if you checked by hand." >&2
+  exit 1
 fi
 
 # One batch-check pass instead of `git cat-file -t` per object (that is a
 # process spawn each, and a first push has thousands). Every step below reads
 # its objects out of this one typed listing: `<sha> <type> <size> <path>`.
-secret_scan_objects "$objects" > "$typed"
+# One known type per listed object, or nothing was scanned: a batch-check that
+# died half-way leaves `paste` padding the rest with nothing, and those blobs
+# never reached the list below.
+if ! secret_scan_objects "$objects" > "$typed" \
+  || [ "$(wc -l < "$objects" | tr -d ' ')" != \
+       "$(awk '$2 ~ /^(blob|tree|commit|tag)$/' "$typed" | wc -l | tr -d ' ')" ]; then
+  echo "BLOCKED: git cat-file could not type the objects of this push — nothing was scanned." >&2
+  echo "         Fix the repository, or push with --no-verify if you checked by hand." >&2
+  exit 1
+fi
 awk -v max="$max_blob_bytes" '$2 == "blob" && $3 <= max {print $1}' "$typed" > "$blobs"
 count=0
 if [ -s "$blobs" ]; then
@@ -151,7 +173,13 @@ fi
 # for the same reason commit messages are read without their author.
 awk '$2 == "tag"' "$typed" > "$tmpdir/tags"
 while read -r tag_sha _type _size tag_name; do
-  git cat-file tag "$tag_sha" 2>/dev/null | sed '1,/^$/d' > "$tmpdir/tag-message" || true
+  # A tag that could not be read is not one with an empty message.
+  if ! git cat-file tag "$tag_sha" > "$tmpdir/tag-raw" 2>/dev/null \
+    || ! sed '1,/^$/d' "$tmpdir/tag-raw" > "$tmpdir/tag-message"; then
+    echo "BLOCKED: tag $tag_name could not be read, so its message was NOT scanned."
+    fail=1
+    continue
+  fi
   if ! hits=$(secret_scan_text < "$tmpdir/tag-message"); then
     echo "BLOCKED: possible secret/token format in the message of tag $tag_name:"
     printf '%s\n' "$hits" | sed 's/^/  /'
@@ -177,7 +205,10 @@ done < "$tmpdir/tags"
 # character there, never matched, the precise pass never ran, and a
 # `--no-verify` commit carrying it was published. UTF-16 is the default of `>`
 # and `Out-File` in Windows PowerShell 5.1, the shell this bundle is written for.
-secret_scan_suspects "$blobs" "$pat" "$tmpdir" > "$tmpdir/suspects"
+if ! secret_scan_suspects "$blobs" "$pat" "$tmpdir" > "$tmpdir/suspects"; then
+  echo "BLOCKED: the suspect list could not be written — the blobs of this push were NOT scanned." >&2
+  exit 1
+fi
 if [ ! -s "$tmpdir/suspects" ]; then
   rm -rf "$tmpdir"
   trap - EXIT INT TERM
@@ -206,7 +237,12 @@ while read -r sha _type _size path; do
   # Read once, checked against both tables. secret_scan_text decodes UTF-16 and
   # scans binary content as bytes — `grep -I` used to call such a blob "clean"
   # right after step 3 had flagged it, and the push went through in silence.
-  git cat-file blob "$sha" > "$tmpdir/blob" 2>/dev/null || true
+  # A blob that could not be read (full disk) is not an empty one.
+  if ! git cat-file blob "$sha" > "$tmpdir/blob" 2>/dev/null; then
+    echo "BLOCKED: $path (blob $sha) could not be read, so it was NOT scanned."
+    fail=1
+    continue
+  fi
   if ! hits=$(secret_scan_text < "$tmpdir/blob"); then
     echo "BLOCKED: possible secret/token format in $path (blob $sha):"
     printf '%s\n' "$hits" | sed 's/^/  /'

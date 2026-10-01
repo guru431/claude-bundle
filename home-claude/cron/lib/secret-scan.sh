@@ -50,13 +50,22 @@
 #                                `git log -p`, which shows no diff for a merge
 #                                commit and therefore missed an evil merge.
 #   secret_scan_range_paths    — the path of every blob a rev range introduces.
+#
+# A scan that could not READ what it was given — no temp file, a full disk, a
+# failed git call — says so with a `scan-error: …` line and a non-zero status,
+# exactly like a hit. "Nothing was read" must never come out as "clean". The
+# same holds for grep itself: rc 1 is "no match", rc 2 is "could not run", and
+# a bare `|| true` read the two alike. Every verdict grep goes through
+# _secret_scan_sel, and every `|| true` left behind a git or grep call in the
+# gate files carries `# rc-ok: <why>` (tests/test_secret_gates_rc.py).
 
 # High-confidence secret/token formats: PEM and PGP private keys, GitHub
 # PATs/tokens (all five prefixes), GitLab PATs, AWS access keys (AKIA/ASIA/…)
 # and named secret keys, Slack tokens and webhooks, OpenAI-style keys, Stripe
 # live keys, Google API keys, SendGrid, HuggingFace and npm tokens, CCR keys,
 # database URLs carrying an inline password, Azure account keys, JWTs, GCP
-# service account keys, and Telegram bot tokens.
+# service account keys, Telegram bot tokens, VK and Yandex OAuth tokens, Google
+# refresh tokens and Airtable personal access tokens.
 #
 # Prefix shapes carry an explicit left boundary — `(^|[^A-Za-z0-9_-])` — so
 # `sk-…` no longer fires inside `task-management-system-v2` and `ccr-…` no
@@ -70,7 +79,7 @@
 # tests/test_guards.py fails if the two ever differ. The literal is kept because
 # a POSIX shell hook must work with no Python on PATH — but it is a COPY, and
 # the copy is checked. Regenerate it, never hand-edit it.
-SECRET_SCAN_PATTERN='-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----|(^|[^A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}|(^|[^A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9_-])(AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}|aws_secret_access_key[[:space:]]*=[[:space:]]*[A-Za-z0-9/+=]{40}|(^|[^A-Za-z0-9_-])xox[baprse]-[A-Za-z0-9-]{10,}|hooks\.slack\.com/services/[A-Za-z0-9/+]{20,}|(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])[sr]k_live_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9_-])AIza[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])hf_[A-Za-z0-9]{30,}|(^|[^A-Za-z0-9_-])npm_[A-Za-z0-9]{36}|(^|[^A-Za-z0-9_-])ccr-[A-Za-z0-9]{8,}|(postgres|postgresql|mysql|mongodb\+srv|mongodb|redis|amqp)://[^:@/[:space:]]+:[^@/[:space:]]+@|AccountKey=[A-Za-z0-9+/=]{40,}|(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|"private_key_id"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"|(^|[^A-Za-z0-9_-])[0-9]{8,10}:[A-Za-z0-9_-]{35}([^A-Za-z0-9_-]|$)'
+SECRET_SCAN_PATTERN='-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----|(^|[^A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}|(^|[^A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9_-])(AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}|aws_secret_access_key[[:space:]]*=[[:space:]]*[A-Za-z0-9/+=]{40}|(^|[^A-Za-z0-9_-])xox[baprse]-[A-Za-z0-9-]{10,}|hooks\.slack\.com/services/[A-Za-z0-9/+]{20,}|(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])[sr]k_live_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9_-])AIza[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])hf_[A-Za-z0-9]{30,}|(^|[^A-Za-z0-9_-])npm_[A-Za-z0-9]{36}|(^|[^A-Za-z0-9_-])ccr-[A-Za-z0-9]{8,}|(postgres|postgresql|mysql|mongodb\+srv|mongodb|redis|amqp)://[^:@/[:space:]]+:[^@/[:space:]]+@|AccountKey=[A-Za-z0-9+/=]{40,}|(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|"private_key_id"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"|(^|[^A-Za-z0-9_-])[0-9]{8,10}:[A-Za-z0-9_-]{35}([^A-Za-z0-9_-]|$)|(^|[^A-Za-z0-9_-])vk1\.a\.[A-Za-z0-9_-]{60,}|(^|[^A-Za-z0-9_-])y0_[A-Za-z0-9_-]{40,}|(^|[^A-Za-z0-9_-])1//0[A-Za-z0-9_-]{40,}|(^|[^A-Za-z0-9_-])pat[A-Za-z0-9]{14}\.[0-9a-f]{64}'
 
 # Sensitive FILE NAMES. Also DERIVED — `python cron/lib/secret_shapes.py paths`
 # and `… paths-allow` print these two lines, and tests/test_guards.py asserts it.
@@ -93,10 +102,34 @@ SENSITIVE_PATH_ALLOW='\.env(\.[A-Za-z0-9_-]+)?\.(example|sample|template|dist)$|
 # NEVER put this on a line carrying a real credential.
 SECRET_SCAN_ALLOW='secret-scan:allow'
 
+_secret_scan_sel() {
+    # `grep "$@"` whose FAILURE cannot pass for "no match". Lines on stdin (or
+    # the file among the arguments) → the selected lines on stdout, status 0.
+    # When grep itself fails — rc 2 for a pattern it cannot compile or an I/O
+    # error, 134 for the abort GNU grep 3.0 is known for — whatever it printed
+    # is followed by a `scan-error:` line. Every caller blocks on any output, and
+    # the stage after it (`grep -v` for the allow marker) lets that line through.
+    # A bare `grep … || true` read rc 2 exactly like rc 1, and a scan that never
+    # ran said "clean".
+    _ssel_rc=0
+    _ssel_out=$(grep "$@") || _ssel_rc=$?
+    [ -z "$_ssel_out" ] || printf '%s\n' "$_ssel_out"
+    if [ "$_ssel_rc" -gt 1 ]; then
+        printf 'scan-error: grep failed (rc %s), so the content was NOT fully scanned\n' "$_ssel_rc"
+    fi
+    unset _ssel_rc _ssel_out
+    return 0
+}
+
 secret_scan_diff() {
     # Take diff text from stdin when piped, else read the staged diff.
+    # A staged diff git could not produce is an error, not an empty diff.
     if [ -t 0 ]; then
-        _ssd_diff=$(git diff --cached --unified=0 2>/dev/null || true)
+        if ! _ssd_diff=$(git diff --cached --unified=0 2>/dev/null); then
+            printf 'scan-error: git diff --cached failed, so the staged changes were NOT scanned\n'
+            unset _ssd_diff
+            return 1
+        fi
     else
         _ssd_diff=$(cat)
     fi
@@ -117,7 +150,8 @@ secret_scan_diff() {
     _ssd_hits=$(printf '%s\n' "$_ssd_diff" | awk '
         /^\+\+\+ /  { path = substr($0, 5); sub(/^b\//, "", path); next }
         /^\+/       { print path ": " $0 }' \
-        | grep -aE -e "$SECRET_SCAN_PATTERN" | grep -avF -e "$SECRET_SCAN_ALLOW" || true)
+        | _secret_scan_sel -aE -e "$SECRET_SCAN_PATTERN" \
+        | _secret_scan_sel -avF -e "$SECRET_SCAN_ALLOW" || true)   # rc-ok: the verdict is the output; grep failures arrive as scan-error lines
     if [ -n "$_ssd_hits" ]; then
         printf '%s\n' "$_ssd_hits"
         return 1
@@ -146,16 +180,26 @@ secret_scan_decode() {
     # this so they see the same text a human editor shows.
     # No `trap` here on purpose: this is a sourced library function, and a trap
     # set inside it would replace whatever the calling hook had installed.
+    #
+    # Non-zero when the input could not be buffered or passed on — a full disk
+    # or a missing temp directory. The caller must not read the (empty or cut)
+    # output as the content.
     _ssdec_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-decode.$$")
-    cat > "$_ssdec_tmp"
+    if ! cat > "$_ssdec_tmp" 2>/dev/null; then
+        rm -f "$_ssdec_tmp"
+        unset _ssdec_tmp
+        return 1
+    fi
     _ssdec_enc=$(_secret_scan_bom "$_ssdec_tmp")
+    _ssdec_rc=0
     if [ -n "$_ssdec_enc" ] && iconv -f "$_ssdec_enc" -t UTF-8 < "$_ssdec_tmp" > "$_ssdec_tmp.u8" 2>/dev/null; then
-        cat "$_ssdec_tmp.u8"
+        cat "$_ssdec_tmp.u8" || _ssdec_rc=$?
     else
-        cat "$_ssdec_tmp"
+        cat "$_ssdec_tmp" || _ssdec_rc=$?
     fi
     rm -f "$_ssdec_tmp" "$_ssdec_tmp.u8"
     unset _ssdec_tmp _ssdec_enc
+    return "$_ssdec_rc"
 }
 
 secret_scan_denylist_ere() {
@@ -190,12 +234,20 @@ _secret_scan_grep() {
         unset _ssg_tmp _ssg_ere
         return 0
     fi
-    secret_scan_decode > "$_ssg_tmp"
     # Every verdict below is taken on the content WITHOUT its NUL bytes: the very
     # bytes secret_scan_suspects greps in its one stream over many blobs, which
     # is what lets a caller skip a blob that stream did not flag. (`grep -I`, the
     # old binary test, looks for a NUL in the first buffer only.)
-    tr -d '\000' < "$_ssg_tmp" > "$_ssg_tmp.nonul"
+    # Both writes checked: a temp file that could not be written (full disk, no
+    # temp directory) was read back empty — no output, rc 0, "clean" for content
+    # nobody had read.
+    if ! secret_scan_decode > "$_ssg_tmp" 2>/dev/null \
+        || ! tr -d '\000' < "$_ssg_tmp" > "$_ssg_tmp.nonul" 2>/dev/null; then
+        rm -f "$_ssg_tmp" "$_ssg_tmp.nonul"
+        unset _ssg_tmp _ssg_ere
+        printf 'scan-error: the content could not be buffered in a temp file, so it was NOT scanned\n'
+        return 1
+    fi
     if ! cmp -s "$_ssg_tmp" "$_ssg_tmp.nonul"; then
         # BINARY — the content had NUL bytes. `grep -I` answered "no match" for
         # such content, so a key inside a SQLite file or a BOM-less UTF-16 dump
@@ -203,20 +255,22 @@ _secret_scan_grep() {
         # the very same blob. Now scanned as bytes with the NULs removed and
         # reported as the match alone: a binary "line" can be megabytes of
         # noise. The allow marker cannot apply — nobody writes it into a binary.
+        # rc-ok below and in the text branch: _secret_scan_sel turns a failed
+        # grep into a scan-error line, and any line here is a hit.
         if [ "$1" = token ]; then
-            _ssg_hits=$(grep -aoE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp.nonul" || true)
+            _ssg_hits=$(_secret_scan_sel -aoE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp.nonul" || true)   # rc-ok: see above
         else
-            _ssg_hits=$(grep -aoiE -e "$_ssg_ere" "$_ssg_tmp.nonul" || true)
+            _ssg_hits=$(_secret_scan_sel -aoiE -e "$_ssg_ere" "$_ssg_tmp.nonul" || true)   # rc-ok: see above
         fi
         if [ -n "$_ssg_hits" ]; then
             _ssg_hits=$(printf '%s\n' "$_ssg_hits" | LC_ALL=C tr -c '[:print:]\n' '?' \
                 | sed 's/^/binary content, NULs removed (check by hand): /')
         fi
     elif [ "$1" = token ]; then
-        _ssg_hits=$(grep -naE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp.nonul" \
-            | grep -avF -e "$SECRET_SCAN_ALLOW" || true)
+        _ssg_hits=$(_secret_scan_sel -naE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp.nonul" \
+            | _secret_scan_sel -avF -e "$SECRET_SCAN_ALLOW" || true)   # rc-ok: see above
     else
-        _ssg_hits=$(grep -naiE -e "$_ssg_ere" "$_ssg_tmp.nonul" || true)
+        _ssg_hits=$(_secret_scan_sel -naiE -e "$_ssg_ere" "$_ssg_tmp.nonul" || true)   # rc-ok: see above
     fi
     rm -f "$_ssg_tmp" "$_ssg_tmp.nonul"
     unset _ssg_tmp
@@ -258,9 +312,25 @@ secret_scan_denylist() {
     # each one disabled a pattern or the whole list without a word: UTF-16 (`>`
     # in Windows PowerShell 5.1), a UTF-8 BOM glued to the first pattern, CRLF
     # endings, and blank lines, which `grep -f` reads as "match every line".
-    secret_scan_decode < "$1" | tr -d '\r' \
-        | sed "1s/^$(printf '\357\273\277')//" \
-        | grep -avE '^[[:space:]]*$' > "$2" || true
+    #
+    # Decoded into a file of its own first, and grep's status read: rc 1 (every
+    # line blank) is an empty denylist, but a decode that failed or a grep that
+    # did not run left a short list — fewer patterns, and nobody told.
+    if ! secret_scan_decode < "$1" > "$2.dec" 2>/dev/null; then
+        rm -f "$2.dec"
+        printf 'secret-scan: %s could not be read in full\n' "$1" >&2
+        return 2
+    fi
+    _ssdl_rc=0
+    tr -d '\r' < "$2.dec" | sed "1s/^$(printf '\357\273\277')//" \
+        | grep -avE '^[[:space:]]*$' > "$2" || _ssdl_rc=$?
+    rm -f "$2.dec"
+    if [ "$_ssdl_rc" -gt 1 ]; then
+        : > "$2"
+        printf 'secret-scan: %s could not be filtered (grep rc %s)\n' "$1" "$_ssdl_rc" >&2
+        unset _ssdl_rc
+        return 2
+    fi
     # grep compiles every pattern before it reads a byte, so a probe on /dev/null
     # fails exactly when the real scans would.
     _ssdl_rc=0
@@ -308,11 +378,19 @@ secret_scan_changed_binaries() {
     shift 2
     _sscb_base=HEAD
     [ "$_sscb_mode" = index ] && _sscb_base=--cached
-    _sscb_list=$(git -c core.quotePath=false diff "$_sscb_base" --numstat -z --no-renames \
-        --diff-filter=AM -- "$@" 2>/dev/null \
-        | tr '\000' '\n' | awk -F '\t' '$1 == "-" && $2 == "-" { sub(/^-\t-\t/, ""); print }')
     _sscb_fail=0
     _sscb_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-binary.$$")
+    # The list goes through a file so git's own status is read: in the pipe it
+    # was awk's, and a failed diff meant "no binary files" — nothing scanned.
+    if ! git -c core.quotePath=false diff "$_sscb_base" --numstat -z --no-renames \
+            --diff-filter=AM -- "$@" > "$_sscb_tmp" 2>/dev/null; then
+        rm -f "$_sscb_tmp"
+        printf 'scan-error: git diff --numstat failed, so binary files were NOT scanned\n'
+        unset _sscb_mode _sscb_pat _sscb_base _sscb_tmp _sscb_fail
+        return 1
+    fi
+    _sscb_list=$(tr '\000' '\n' < "$_sscb_tmp" \
+        | awk -F '\t' '$1 == "-" && $2 == "-" { sub(/^-\t-\t/, ""); print }')
     while IFS= read -r _sscb_f; do
         [ -n "$_sscb_f" ] || continue
         _sscb_rc=0
@@ -354,18 +432,42 @@ secret_scan_git_paths() {
     # entirely (quotePath=false alone still quotes a tab, a backslash or a double
     # quote); a newline inside a path is the one thing a line-based caller still
     # cannot represent.
+    #
+    # Returns 2 (a `scan-error:` line on stderr, stdout stays a pure path list)
+    # when git failed: in `git … | tr` the status was tr's, so an index.lock or
+    # a full disk gave an empty list — "no sensitive names" for names nobody
+    # read. The status travels out of the pipe on fd 4, which works in any
+    # POSIX sh (no pipefail, no PIPESTATUS).
     _ssgp_cmd="$1"
     shift
-    git -c core.quotePath=false "$_ssgp_cmd" -z "$@" | tr '\000' '\n'
-    unset _ssgp_cmd
+    { _ssgp_rc=$( { { git -c core.quotePath=false "$_ssgp_cmd" -z "$@"; printf '%s' "$?" >&4; } \
+        | tr '\000' '\n' >&3; } 4>&1 ); } 3>&1
+    if [ "${_ssgp_rc:-1}" != 0 ]; then
+        printf 'scan-error: git %s failed (rc %s), so the path list is NOT complete\n' \
+            "$_ssgp_cmd" "${_ssgp_rc:-?}" >&2
+        unset _ssgp_cmd _ssgp_rc
+        return 2
+    fi
+    unset _ssgp_cmd _ssgp_rc
 }
 
 secret_scan_paths() {
     # Newline-separated repository paths on stdin — unquoted, see
-    # secret_scan_git_paths. Prints the offenders and returns non-zero when any
-    # path must not be committed.
-    _ssp_hits=$(grep -aiE -e "$SENSITIVE_PATH_PATTERN" \
-        | grep -aivE -e "$SENSITIVE_PATH_ALLOW" || true)
+    # secret_scan_git_paths. Prints the offenders and returns 1 when any path
+    # must not be committed. A grep that failed prints a `scan-error:` line and
+    # returns 2: an unread list is not a clean one.
+    _ssp_rc=0
+    _ssp_hits=$(grep -aiE -e "$SENSITIVE_PATH_PATTERN") || _ssp_rc=$?
+    if [ "$_ssp_rc" -le 1 ] && [ -n "$_ssp_hits" ]; then
+        _ssp_hits=$(printf '%s\n' "$_ssp_hits" | grep -aivE -e "$SENSITIVE_PATH_ALLOW") \
+            || _ssp_rc=$?
+    fi
+    if [ "$_ssp_rc" -gt 1 ]; then
+        printf 'scan-error: grep failed (rc %s), so the file names were NOT checked\n' "$_ssp_rc"
+        unset _ssp_hits _ssp_rc
+        return 2
+    fi
+    unset _ssp_rc
     if [ -n "$_ssp_hits" ]; then
         printf '%s\n' "$_ssp_hits"
         unset _ssp_hits
@@ -393,20 +495,31 @@ secret_scan_messages() {
     # %B and not the default format: the author line is identity metadata that
     # repeats across a whole, already-public history, and `.sanitize-patterns`
     # rightly names the username it carries.
+    #
+    # --ignore-missing: a push over a commit this clone never fetched (made in
+    # the web UI, say) hands pre-push a remote sha that is not here. git log
+    # then failed on it, `|| true` read the failure as "no messages", and the
+    # hook passed without reading a single one. Now the unknown exclusion is
+    # dropped — the list grows, never shrinks — and any other failure is an
+    # error, not a clean result.
     _ssm_pat="$1"
     shift
     _ssm_fail=0
-    _ssm_msgs=$(git log --format='%H%n%B%n' "$@" 2>/dev/null || true)
+    if ! _ssm_msgs=$(git log --ignore-missing --format='%H%n%B%n' "$@" 2>/dev/null); then
+        printf 'scan-error: git log could not list the commit messages, so they were NOT scanned\n'
+        _ssm_fail=1
+        _ssm_msgs=""
+    fi
     if [ -n "$_ssm_msgs" ]; then
-        _ssm_hits=$(printf '%s\n' "$_ssm_msgs" | grep -naE -e "$SECRET_SCAN_PATTERN" \
-            | grep -avF -e "$SECRET_SCAN_ALLOW" || true)
+        _ssm_hits=$(printf '%s\n' "$_ssm_msgs" | _secret_scan_sel -naE -e "$SECRET_SCAN_PATTERN" \
+            | _secret_scan_sel -avF -e "$SECRET_SCAN_ALLOW" || true)   # rc-ok: grep failures arrive as scan-error lines
         if [ -n "$_ssm_hits" ]; then
             printf '%s\n' "$_ssm_hits" | sed 's/^/commit message: /'
             _ssm_fail=1
         fi
         if [ -n "$_ssm_pat" ] && [ -s "$_ssm_pat" ]; then
             _ssm_hits=$(printf '%s\n' "$_ssm_msgs" \
-                | grep -naiE -e "$(secret_scan_denylist_ere "$_ssm_pat")" || true)
+                | _secret_scan_sel -naiE -e "$(secret_scan_denylist_ere "$_ssm_pat")" || true)   # rc-ok: grep failures arrive as scan-error lines
             if [ -n "$_ssm_hits" ]; then
                 printf '%s\n' "$_ssm_hits" | sed 's/^/commit message (.sanitize-patterns): /'
                 _ssm_fail=1
@@ -437,17 +550,19 @@ secret_scan_suspects() {
     #     non-ASCII denylist entry takes two bytes per character there and never
     #     matched the stream, so the precise pass never ran and the push went out;
     #   * anything that says the stream was not read whole — a blob list that
-    #     does not come back in order, or grep failing — makes every blob a
-    #     suspect.
-    : > "$3/suspect-utf16"
-    : > "$3/suspect-hits"
+    #     does not come back in order, git or grep failing, a scratch file that
+    #     could not be written — makes every blob a suspect.
+    # Non-zero only when even that answer could not be written out: the caller
+    # must then treat the scan as not done.
+    : > "$3/suspect-utf16" || return 1
+    : > "$3/suspect-hits" || return 1
     [ -s "$1" ] || return 0
     # Where each blob sits in the `cat-file --batch` stream, as line numbers, and
     # which blobs open with a BOM. Counted in bytes from each header's size,
     # because a blob can itself hold a line that looks exactly like a header.
     # NULs become \001 for awk, whose implementations disagree about NUL bytes;
     # the line structure is the same as in the NUL-stripped stream grep reads.
-    git cat-file --batch < "$1" 2>/dev/null | tr '\000' '\001' \
+    if ! git cat-file --batch < "$1" 2>/dev/null | tr '\000' '\001' \
         | LC_ALL=C awk -v bom="$3/suspect-utf16" '
             left <= 0 {
                 if (split($0, h, " ") < 3 || h[2] == "missing") next
@@ -461,27 +576,37 @@ secret_scan_suspects() {
                 }
                 left -= length($0) + 1
                 if (left <= 0) print id, first, NR
-            }' > "$3/suspect-ranges"
-    if ! cut -d ' ' -f 1 "$3/suspect-ranges" | cmp -s - "$1"; then
+            }' > "$3/suspect-ranges" \
+        || ! cut -d ' ' -f 1 "$3/suspect-ranges" | cmp -s - "$1"; then
         cat "$1"
-        return 0
+        return
     fi
-    _sss_rc=0
-    git cat-file --batch < "$1" 2>/dev/null | tr -d '\000' \
-        | grep -naoE -e "$SECRET_SCAN_PATTERN" > "$3/suspect-hits" || _sss_rc=$?
-    if [ "$_sss_rc" -le 1 ] && [ -n "$2" ] && [ -s "$2" ]; then
+    # Both the grep status and git's: the stream is read anew here, and a
+    # cat-file that died half-way handed grep a short stream — rc 1, "no
+    # suspects" for blobs nobody read. git's status leaves the pipe on fd 4.
+    _sss_ok=1
+    _sss_git=$( { { git cat-file --batch < "$1" 2>/dev/null; printf '%s' "$?" >&4; } | tr -d '\000' \
+        | grep -naoE -e "$SECRET_SCAN_PATTERN" >> "$3/suspect-hits"; } 4>&1 ) \
+        || [ $? -eq 1 ] || _sss_ok=0
+    [ "$_sss_git" = 0 ] || _sss_ok=0
+    if [ "$_sss_ok" = 1 ] && [ -n "$2" ] && [ -s "$2" ]; then
         # No -o here: a pattern that can match the empty string prints nothing
         # with -o, while the precise pass reports every line it matches.
-        git cat-file --batch < "$1" 2>/dev/null | tr -d '\000' \
-            | grep -naiE -e "$(secret_scan_denylist_ere "$2")" >> "$3/suspect-hits" || _sss_rc=$?
+        _sss_git=$( { { git cat-file --batch < "$1" 2>/dev/null; printf '%s' "$?" >&4; } | tr -d '\000' \
+            | grep -naiE -e "$(secret_scan_denylist_ere "$2")" >> "$3/suspect-hits"; } 4>&1 ) \
+            || [ $? -eq 1 ] || _sss_ok=0
+        [ "$_sss_git" = 0 ] || _sss_ok=0
     fi
-    if [ "$_sss_rc" -gt 1 ]; then
-        unset _sss_rc
+    if [ "$_sss_ok" = 0 ]; then
+        unset _sss_ok _sss_git
         cat "$1"
-        return 0
+        return
     fi
-    unset _sss_rc
-    cut -d: -f1 "$3/suspect-hits" | sort -n -u > "$3/suspect-lines"
+    unset _sss_ok _sss_git
+    if ! cut -d: -f1 "$3/suspect-hits" | sort -n -u > "$3/suspect-lines"; then
+        cat "$1"
+        return
+    fi
     # Both inputs ascend, so one merge maps every hit line to its blob; a hit on
     # a header line falls between two ranges and maps to none.
     { awk 'FILENAME == ARGV[1] { n++; id[n] = $1; lo[n] = $2; hi[n] = $3; next }
@@ -513,12 +638,18 @@ secret_scan_range() {
     #   * every commit MESSAGE (nothing scanned those before; a token pasted
     #     into a commit body reached the remote unread).
     # Returns non-zero and prints `path: line` for each hit.
+    #
+    # Every step that writes a scratch file or calls git is checked, and a
+    # failure is a `scan-error:` line plus a non-zero status. Unchecked, a full
+    # disk or a git that died turned each empty or cut file into "nothing to
+    # scan" — rc 0 for a range nobody had read.
     _ssr_range="$1"
     _ssr_skip="${2:-}"
     _ssr_pat="${3:-}"
     _ssr_fail=0
+    _ssr_err=""
     _ssr_dir=$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-range.$$")
-    mkdir -p "$_ssr_dir"
+    mkdir -p "$_ssr_dir" 2>/dev/null || _ssr_err="no scratch directory"
 
     # 1) Commit messages.
     # $_ssr_range is a rev LIST and must word-split.
@@ -527,11 +658,27 @@ secret_scan_range() {
         _ssr_fail=1
     fi
 
-    # 2) Blobs. `awk NF>1` keeps only objects that carry a path.
+    # 2) Blobs. `awk NF>1` keeps only objects that carry a path. The typed list
+    # must hold one known type per listed object — a batch-check that died
+    # half-way leaves `paste` padding the rest with nothing.
     # Same reason as above.
     # shellcheck disable=SC2086
-    git rev-list --objects $_ssr_range 2>/dev/null | awk 'NF>1' > "$_ssr_dir/objects" || true
-    secret_scan_objects "$_ssr_dir/objects" > "$_ssr_dir/typed"
+    [ -n "$_ssr_err" ] || git rev-list --objects $_ssr_range > "$_ssr_dir/revs" 2>/dev/null \
+        || _ssr_err="git rev-list could not list the objects"
+    [ -n "$_ssr_err" ] || awk 'NF>1' "$_ssr_dir/revs" > "$_ssr_dir/objects" 2>/dev/null \
+        || _ssr_err="the object list could not be written"
+    [ -n "$_ssr_err" ] || secret_scan_objects "$_ssr_dir/objects" > "$_ssr_dir/typed" 2>/dev/null \
+        || _ssr_err="the object types could not be written"
+    [ -n "$_ssr_err" ] \
+        || [ "$(wc -l < "$_ssr_dir/objects" | tr -d ' ')" = \
+             "$(awk '$2 ~ /^(blob|tree|commit|tag)$/' "$_ssr_dir/typed" | wc -l | tr -d ' ')" ] \
+        || _ssr_err="the object types could not be read"
+    if [ -n "$_ssr_err" ]; then
+        printf 'scan-error: %s for %s, so its files were NOT scanned\n' "$_ssr_err" "$_ssr_range"
+        rm -rf "$_ssr_dir"
+        unset _ssr_range _ssr_skip _ssr_pat _ssr_dir _ssr_err
+        return 1
+    fi
     _ssr_over=$(awk '$2 == "blob" && $3 > 1048576' "$_ssr_dir/typed" | wc -l | tr -d ' ')
     if [ "${_ssr_over:-0}" -gt 0 ]; then
         # Say so rather than skipping in silence: "scanned everything under
@@ -546,16 +693,32 @@ secret_scan_range() {
     awk -v skip="$_ssr_skip" '$2 == "blob" && $3 <= 1048576 {
         p = $0; sub(/^[^ ]+ [^ ]+ [^ ]+ /, "", p)
         if (skip == "" || index(p, skip) != 1) print $1
-    }' "$_ssr_dir/typed" > "$_ssr_dir/blobs"
-    secret_scan_suspects "$_ssr_dir/blobs" "$_ssr_pat" "$_ssr_dir" > "$_ssr_dir/suspects"
+    }' "$_ssr_dir/typed" > "$_ssr_dir/blobs" 2>/dev/null \
+        || _ssr_err="the blob list could not be written"
+    [ -n "$_ssr_err" ] \
+        || secret_scan_suspects "$_ssr_dir/blobs" "$_ssr_pat" "$_ssr_dir" > "$_ssr_dir/suspects" 2>/dev/null \
+        || _ssr_err="the suspect list could not be written"
     : > "$_ssr_dir/suspect-typed"
-    if [ -s "$_ssr_dir/suspects" ]; then
+    if [ -z "$_ssr_err" ] && [ -s "$_ssr_dir/suspects" ]; then
         awk 'NR == FNR { s[$1] = 1; next } ($1 in s)' "$_ssr_dir/suspects" "$_ssr_dir/typed" \
-            > "$_ssr_dir/suspect-typed"
+            > "$_ssr_dir/suspect-typed" 2>/dev/null \
+            || _ssr_err="the suspect list could not be written"
+    fi
+    if [ -n "$_ssr_err" ]; then
+        printf 'scan-error: %s for %s, so its files were NOT scanned\n' "$_ssr_err" "$_ssr_range"
+        : > "$_ssr_dir/suspect-typed"
+        _ssr_fail=1
     fi
     while read -r _ssr_sha _ssr_type _ssr_size _ssr_path; do
-        # Read once, scanned by both tables.
-        git cat-file blob "$_ssr_sha" > "$_ssr_dir/blob" 2>/dev/null || true
+        # Read once, scanned by both tables. A blob that did not come back
+        # whole is an error, not an empty file.
+        if ! git cat-file blob "$_ssr_sha" > "$_ssr_dir/blob" 2>/dev/null \
+            || [ "$(wc -c < "$_ssr_dir/blob" | tr -d ' ')" != "$_ssr_size" ]; then
+            printf 'scan-error: %s (blob %s) could not be read, so it was NOT scanned\n' \
+                "$_ssr_path" "$_ssr_sha"
+            _ssr_fail=1
+            continue
+        fi
         if ! _ssr_hits=$(secret_scan_text < "$_ssr_dir/blob"); then
             _secret_scan_prefix "$_ssr_path" "$_ssr_hits"
             _ssr_fail=1
@@ -568,7 +731,7 @@ secret_scan_range() {
     done < "$_ssr_dir/suspect-typed"
 
     rm -rf "$_ssr_dir"
-    unset _ssr_range _ssr_skip _ssr_pat _ssr_dir _ssr_over _ssr_sha _ssr_type _ssr_size _ssr_path _ssr_hits
+    unset _ssr_range _ssr_skip _ssr_pat _ssr_dir _ssr_err _ssr_over _ssr_sha _ssr_type _ssr_size _ssr_path _ssr_hits
     return "$_ssr_fail"
 }
 
@@ -577,11 +740,25 @@ secret_scan_range_paths() {
     # introduces, whatever its size — the file NAMES a publication carries.
     # From the object walk and not `git log --name-only`, which lists nothing for
     # a merge commit: a `.env` born on a merge was invisible to the name gate.
+    #
+    # Non-zero, with a `scan-error:` line on stderr (stdout stays a pure path
+    # list), when the list could not be built: a caller must read that as
+    # "names not checked", never as "no names".
     _ssrp_tmp=$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/secret-paths.$$")
+    _ssrp_rc=0
     # A rev LIST, word-split on purpose.
     # shellcheck disable=SC2086
-    git rev-list --objects $1 2>/dev/null | awk 'NF>1' > "$_ssrp_tmp" || true
-    secret_scan_objects "$_ssrp_tmp" | awk '$2 == "blob"' | cut -d ' ' -f 4- | sort -u
-    rm -f "$_ssrp_tmp"
+    if git rev-list --objects $1 > "$_ssrp_tmp.revs" 2>/dev/null \
+        && awk 'NF>1' "$_ssrp_tmp.revs" > "$_ssrp_tmp" 2>/dev/null \
+        && secret_scan_objects "$_ssrp_tmp" > "$_ssrp_tmp.typed" 2>/dev/null \
+        && [ "$(wc -l < "$_ssrp_tmp" | tr -d ' ')" = \
+             "$(awk '$2 ~ /^(blob|tree|commit|tag)$/' "$_ssrp_tmp.typed" | wc -l | tr -d ' ')" ]; then
+        awk '$2 == "blob"' "$_ssrp_tmp.typed" | cut -d ' ' -f 4- | sort -u
+    else
+        printf 'scan-error: the file names of %s could not be listed\n' "$1" >&2
+        _ssrp_rc=1
+    fi
+    rm -f "$_ssrp_tmp" "$_ssrp_tmp.revs" "$_ssrp_tmp.typed"
     unset _ssrp_tmp
+    return "$_ssrp_rc"
 }

@@ -15,7 +15,8 @@
   that was half of a 48 s run, and the suite left its 60 s budget. The price is
   that the files share a process: global state one file leaves behind is seen
   by the next (the current directory is restored before each file). A file's
-  TESTS_DURATION runs from its start to its result, without the process start.
+  TESTS_DURATION and its -TimeoutSec both run from its own start, without the
+  process start and the Pester import (those have a -TimeoutSec of their own).
 
   Prints the markers cron/test-sweep.py reads:
     TESTS_DURATION <seconds>s <file>    - each file's time (for the over-budget finding)
@@ -119,9 +120,11 @@ for (`$i = $from; `$i -lt `$files.Count; `$i++) {
         $p = Start-Process $hostExe -NoNewWindow -PassThru `
             -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc `
             -RedirectStandardOutput $out -RedirectStandardError $err
-        # The current file is the last one with a marker; before the first
-        # marker it is $from, so importing Pester runs under the limit too.
-        $cur = $from
+        # The current file is the last one with a marker. Before the first
+        # marker the process is starting and importing Pester: that runs under
+        # a limit of its own, not the first file's - on a busy CI runner it once
+        # ate the whole -TimeoutSec of a test that takes under a second.
+        $cur = $from - 1
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $timedOut = $false
         while (-not $p.WaitForExit(200)) {

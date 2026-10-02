@@ -102,7 +102,11 @@ process. The per-file timeout stays: a hung file is killed with its children and
 the files after it continue in a new process; a process that dies mid-file is
 that file's failure. The price — files share global state (the current
 directory is restored before each). Ported from the meta-repo with its test,
-`test_pester_wrapper_files_share_a_process_but_not_its_failures`.
+`test_pester_wrapper_files_share_a_process_but_not_its_failures`. Unlike the
+meta-repo's copy, a file's `-TimeoutSec` runs from the file's own start: the
+process start-up and the Pester import have a limit of their own. Counted
+against the first file of a process, they timed out a sub-second test on a busy
+GitHub runner (`pass=0 fail=3` where `pass=1 fail=2` was due).
 
 ### Ported back from the meta-repo: no hands for `claude -p`, one more privacy gate, the push sweep's git failures
 

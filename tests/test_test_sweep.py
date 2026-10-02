@@ -1031,6 +1031,12 @@ def test_dry_run_shows_the_contract_and_fails_on_its_errors(sweep_env, monkeypat
 # ── the Pester wrapper ───────────────────────────────────────────────────────
 
 PESTER = CRON / "lib" / "run-pester.ps1"
+# -TimeoutSec of the wrapper tests: what a hung file waits out, and what a
+# one-line file must fit into. On GitHub's Windows runner a fresh PowerShell
+# spends 7-16 s in the first Invoke-Pester ("Preparing modules for first use."
+# over the hundreds of modules the image ships), charged to the first file of
+# every process; 15 s timed such a file out twice.
+PESTER_TIMEOUT = 40
 
 
 def test_pester_wrapper_ships_with_a_bom_and_crlf():
@@ -1082,14 +1088,13 @@ def test_pester_wrapper_kills_a_hung_file(tmp_path):
         "Describe 'hang' { It 'sleeps' { Start-Sleep -Seconds 120 } }\n", encoding="utf-8")
 
     res = subprocess.run([host, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                          str(PESTER), "-Path", str(tmp_path), "-TimeoutSec", "15"],
+                          str(PESTER), "-Path", str(tmp_path), "-TimeoutSec", str(PESTER_TIMEOUT)],
                          capture_output=True, timeout=180, check=False)
     out = res.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
 
     assert res.returncode == 1, out
-    assert "TESTS_TIMEOUT Hang.Tests.ps1 after=15s" in out, out
-    # Ok runs first in the process started after the kill: the start-up and the
-    # Pester import are not its time (on CI they once timed it out).
+    assert f"TESTS_TIMEOUT Hang.Tests.ps1 after={PESTER_TIMEOUT}s" in out, out
+    # Ok runs first in the process started after the kill (see PESTER_TIMEOUT).
     assert out.strip().splitlines()[-1] == "TESTS_RESULT pass=1 fail=2 skip=0", out
     parsed = sweep.parse_result("pester", res.returncode, out)
     assert parsed["status"] == "timeout"
@@ -1115,13 +1120,13 @@ def test_pester_wrapper_files_share_a_process_but_not_its_failures(tmp_path):
         "Describe 'd' { It 'fails' { 1 | Should -Be 2 } }\n", encoding="utf-8")
 
     res = subprocess.run([host, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                          str(PESTER), "-Path", str(tmp_path), "-TimeoutSec", "15"],
+                          str(PESTER), "-Path", str(tmp_path), "-TimeoutSec", str(PESTER_TIMEOUT)],
                          capture_output=True, timeout=180, check=False)
     out = res.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
 
     assert res.returncode == 1, out
     assert "FAILED: B.Tests.ps1" in out, out
-    assert "TESTS_TIMEOUT C.Tests.ps1 after=15s" in out, out
+    assert f"TESTS_TIMEOUT C.Tests.ps1 after={PESTER_TIMEOUT}s" in out, out
     # D is red, not timed out: either way it adds one to `fail`.
     assert "TESTS_TIMEOUT B.Tests.ps1" not in out and "TESTS_TIMEOUT D.Tests.ps1" not in out, out
     for name in ("A", "B", "C", "D"):

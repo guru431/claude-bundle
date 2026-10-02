@@ -122,8 +122,8 @@ for (`$i = $from; `$i -lt `$files.Count; `$i++) {
             -RedirectStandardOutput $out -RedirectStandardError $err
         # The current file is the last one with a marker. Before the first
         # marker the process is starting and importing Pester: that runs under
-        # a limit of its own, not the first file's - on a busy CI runner it once
-        # ate the whole -TimeoutSec of a test that takes under a second.
+        # a limit of its own, not the first file's, so a file's timeout runs
+        # from its own start, as its TESTS_DURATION does.
         $cur = $from - 1
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $timedOut = $false

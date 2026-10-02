@@ -83,6 +83,17 @@ The short list; UPGRADING.md has the steps.
 - **Both task monitors report changes that have not reached their remote for
   48 hours** — only while `ClaudeGitPushAll` is enabled.
 
+### `run-pester.ps1`: one process per suite, not per file
+
+A fresh PowerShell process pays ~3 s for importing Pester and warming up the
+first `Invoke-Pester`; for a suite of seven files that was half of a 48 s run,
+and the suite left its 60 s budget. The files now run one by one in a single
+process. The per-file timeout stays: a hung file is killed with its children and
+the files after it continue in a new process; a process that dies mid-file is
+that file's failure. The price — files share global state (the current
+directory is restored before each). Ported from the meta-repo with its test,
+`test_pester_wrapper_files_share_a_process_but_not_its_failures`.
+
 ### Ported back from the meta-repo: no hands for `claude -p`, one more privacy gate, the push sweep's git failures
 
 A two-week comparison of the files the bundle shares with the meta-repo it is

@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1057,8 +1058,7 @@ def _pester_host() -> str | None:
     return shutil.which("powershell.exe")
 
 
-@pytest.mark.integration   # each file is its own PowerShell process importing Pester
-def test_pester_wrapper_kills_a_hung_file(tmp_path):
+def _pester_host_or_skip() -> str:
     host = _pester_host()
     if not host:
         pytest.skip("no PowerShell host")
@@ -1068,6 +1068,12 @@ def test_pester_wrapper_kills_a_hung_file(tmp_path):
          " { exit 0 } else { exit 1 }"], capture_output=True, timeout=60, check=False)
     if probe.returncode != 0:
         pytest.skip("Pester >= 5.5 is not installed")
+    return host
+
+
+@pytest.mark.integration   # a PowerShell process importing Pester, then a hung file's timeout
+def test_pester_wrapper_kills_a_hung_file(tmp_path):
+    host = _pester_host_or_skip()
     (tmp_path / "Ok.Tests.ps1").write_text(
         "Describe 'ok' { It 'passes' { 1 | Should -Be 1 } }\n", encoding="utf-8")
     (tmp_path / "Red.Tests.ps1").write_text(
@@ -1086,6 +1092,38 @@ def test_pester_wrapper_kills_a_hung_file(tmp_path):
     parsed = sweep.parse_result("pester", res.returncode, out)
     assert parsed["status"] == "timeout"
     assert any("Ok.Tests.ps1" in s for s in sweep.slowest(out))
+
+
+@pytest.mark.integration   # three PowerShell processes, then a hung file's timeout
+def test_pester_wrapper_files_share_a_process_but_not_its_failures(tmp_path):
+    """The files run in one process; a file that hangs it or kills it takes
+    neither the results of the files before it nor the run of those after."""
+    host = _pester_host_or_skip()
+    # Sorted by name: green, a dead process, a hang, red.
+    (tmp_path / "A.Tests.ps1").write_text(
+        "Describe 'a' { It 'passes' { $global:RunPesterPid = $PID; 1 | Should -Be 1 } }\n",
+        encoding="utf-8")
+    (tmp_path / "B.Tests.ps1").write_text(
+        "Describe 'b' { It 'crashes' {"
+        " if ($global:RunPesterPid -ne $PID) { throw 'A ran in another process' }"
+        " [Environment]::Exit(3) } }\n", encoding="utf-8")
+    (tmp_path / "C.Tests.ps1").write_text(
+        "Describe 'c' { It 'sleeps' { Start-Sleep -Seconds 120 } }\n", encoding="utf-8")
+    (tmp_path / "D.Tests.ps1").write_text(
+        "Describe 'd' { It 'fails' { 1 | Should -Be 2 } }\n", encoding="utf-8")
+
+    res = subprocess.run([host, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                          str(PESTER), "-Path", str(tmp_path), "-TimeoutSec", "15"],
+                         capture_output=True, timeout=180, check=False)
+    out = res.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
+
+    assert res.returncode == 1, out
+    assert "FAILED: B.Tests.ps1" in out
+    assert "TESTS_TIMEOUT C.Tests.ps1 after=15s" in out
+    assert "TESTS_TIMEOUT B.Tests.ps1" not in out
+    for name in ("A", "B", "C", "D"):
+        assert re.search(rf"^TESTS_DURATION \d+\.\d+s {name}\.Tests\.ps1$", out, re.M), name
+    assert out.strip().splitlines()[-1] == "TESTS_RESULT pass=1 fail=3 skip=0"
 
 
 @pytest.mark.integration

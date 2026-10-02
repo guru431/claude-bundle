@@ -608,9 +608,10 @@ summary is red.
 instead of holding the run until the sweep's `TEST_SWEEP_TIMEOUT`: for pytest,
 `pytest-timeout` with `timeout = 30` in the config (and `--timeout=` on the
 `full` command when that level needs more); for Pester, call
-`cron/lib/run-pester.ps1`, which runs each `*.Tests.ps1` in a process of its
-own, kills one that outlives `-TimeoutSec` with its children and prints the
-markers above —
+`cron/lib/run-pester.ps1`, which runs the `*.Tests.ps1` files one by one in a
+single PowerShell process (importing Pester once, not once per file), kills the
+process when a file outlives `-TimeoutSec` — with its children — continues with
+the next file in a new one, and prints the markers above —
 
 ```yaml
       runner: pester

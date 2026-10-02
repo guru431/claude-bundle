@@ -166,5 +166,7 @@ syntax through), `scripts/self-test.ps1` with requirements.txt installed, and
 the same two pytest runs. Every pytest run in CI sets `CI=1`, which
 `tests/conftest.py` turns into two gates: a skip for a missing dependency — at
 collection, in setup or in the call — is a failure, and so is a fast-suite test
-whose call takes over 3 seconds. Keep CI independent of any LLM provider:
+whose call takes over 3 seconds twice in a row (a slow call runs once more with
+fresh fixtures: a shared runner's one-off stall is a warning, not a red run).
+Keep CI independent of any LLM provider:
 anyone forking the repo must be able to run it.

@@ -200,7 +200,26 @@ def test_on_ci_a_check_that_did_not_run_or_ran_slow_fails(pytester, monkeypatch)
     # errors: the module skipped at import, the fixture skipped in setup
     result.assert_outcomes(passed=1, failed=1, errors=2)
     result.stdout.fnmatch_lines(["*Skips are failures on CI*"])
-    result.stdout.fnmatch_lines(["*over the 0.05s*"])
+    result.stdout.fnmatch_lines(["*over the 0.05s*The first run took*"])
+
+
+def test_on_ci_a_call_slow_only_once_is_the_runners_stall(pytester, monkeypatch):
+    """GitHub's Windows runner once took 3.8 s over a test that takes 0.01 s
+    anywhere else: a slow call runs again, and only a second slow one fails."""
+    monkeypatch.setenv("CI", "1")
+    result = _session(pytester, monkeypatch, """
+        import time
+
+        runs = []
+
+        def test_stalls_once(tmp_path):
+            (tmp_path / "unit").mkdir()   # fails on a tmp_path left over from the first run
+            runs.append(tmp_path)
+            if len(runs) == 1:
+                time.sleep(0.15)
+    """, "\n_SLOW_CALL_SECONDS = 0.05\n")
+    result.assert_outcomes(passed=1, warnings=1)
+    result.stdout.fnmatch_lines(["*when run again: counted as the runner's stall*"])
 
 
 def test_without_bash_a_shell_test_fails_on_windows(pytester, monkeypatch):

@@ -45,6 +45,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from _pytest.runner import runtestprotocol
 
 # tests/test_suite_sandbox.py runs this very file in sessions of their own.
 pytest_plugins = ["pytester"]
@@ -273,7 +274,11 @@ _CI_SKIP_NOTE = ("\n\nCI installs requirements.txt, so a missing import here mea
 # test that had not changed. A test that is slow for a reason — a sleep, a real
 # timeout, a round-trip to a host — is over three seconds on any runner. Only
 # the call is timed: a module-scoped fixture's setup belongs to every test of
-# the module, not to the first one.
+# the module, not to the first one. And the slowness has to repeat: GitHub's
+# shared Windows runner stalls now and then, and a test that only writes a few
+# files under tmp_path once took 3.8 s there (0.01 s anywhere else) — so a slow
+# call runs once more, and only a second slow call fails (see
+# pytest_runtest_protocol below).
 _SLOW_CALL_SECONDS = 3.0
 
 
@@ -303,10 +308,42 @@ def pytest_runtest_makereport(item, call):
           and report.duration > _SLOW_CALL_SECONDS
           and not any(item.get_closest_marker(m) for m in ("integration", "manual"))):
         report.outcome = "failed"
+        report.slow_call = True
         report.longrepr = (
             f"the call took {report.duration:.1f}s — over the {_SLOW_CALL_SECONDS:g}s a "
             f"fast-suite test may take on CI. home-claude/CLAUDE.md § Test policy: a "
             f"test over a second is either made fast or marked `integration`.")
+
+
+# Not named pytest_runtest_protocol: the hookwrapper below has that name, and a
+# second def of it in one module would silently replace the first.
+@pytest.hookimpl(tryfirst=True, specname="pytest_runtest_protocol")
+def pytest_runtest_protocol_retimed(item, nextitem):
+    """On CI, a test failed by nothing but the slow-call gate runs once more —
+    setup, call and teardown, with fresh fixtures — and the second run is the one
+    reported. A test that is slow for a reason is slow again; a runner's stall
+    is not, and then the first time shows up as a warning instead of a red CI.
+    """
+    if not _on_ci():
+        return None
+    ihook = item.ihook
+    ihook.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
+    reports = runtestprotocol(item, nextitem=nextitem, log=False)
+    failed = [r for r in reports if r.failed]
+    if failed and all(getattr(r, "slow_call", False) for r in failed):
+        first = failed[0].duration
+        reports = runtestprotocol(item, nextitem=nextitem, log=False)
+        call = next((r for r in reports if r.when == "call"), None)
+        if call is not None and getattr(call, "slow_call", False):
+            call.longrepr = f"{call.longrepr} The first run took {first:.1f}s."
+        elif call is not None and call.passed:
+            item.warn(pytest.PytestWarning(
+                f"the call took {first:.1f}s, over the {_SLOW_CALL_SECONDS:g}s gate, and "
+                f"{call.duration:.1f}s when run again: counted as the runner's stall"))
+    for report in reports:
+        ihook.pytest_runtest_logreport(report=report)
+    ihook.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
+    return True
 
 
 @pytest.hookimpl(hookwrapper=True)

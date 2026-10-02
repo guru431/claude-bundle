@@ -83,6 +83,16 @@ The short list; UPGRADING.md has the steps.
 - **Both task monitors report changes that have not reached their remote for
   48 hours** — only while `ClaudeGitPushAll` is enabled.
 
+### CI: a slow call has to be slow twice
+
+On CI (`CI=1`) `tests/conftest.py` fails a fast-suite test whose call takes over
+3 s. GitHub's shared Windows runner stalls now and then, and the gate turned
+red on tests that do not change: one that only writes a few files under
+`tmp_path` took 3.8 s there and 0.01 s anywhere else. A slow call now runs once
+more — setup, call and teardown, with fresh fixtures — and only a second slow
+call fails, naming both times; a fast second run leaves a warning in the
+summary. `tests/test_suite_sandbox.py::test_on_ci_a_call_slow_only_once_is_the_runners_stall`.
+
 ### `run-pester.ps1`: one process per suite, not per file
 
 A fresh PowerShell process pays ~3 s for importing Pester and warming up the

@@ -167,8 +167,8 @@ fast suite (60 s); `integration` and `manual` are deselected; every test is
 limited to 30 s (`timeout = 30`, a slower level passes its own `--timeout`);
 `testpaths` is mandatory; "mark `integration` by measurement" means
 `--durations=N`. `CI=1` turns a skipped dependency and a fast-suite call over 3 s
-into failures. Keep `pytest.ini` that way — it is documentation as much as
-config.
+(twice in a row — a slow call is re-run once) into failures. Keep `pytest.ini`
+that way — it is documentation as much as config.
 
 ## Local verification
 

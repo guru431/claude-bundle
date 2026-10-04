@@ -153,22 +153,26 @@ def test_a_failed_analysis_says_what_kind_of_failure_it_was(cron_copy: Path, tmp
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("chain_down, monitor_on", [(True, False), (True, True), (False, True)])
+@pytest.mark.parametrize("chain_down, monitor_on, llm_ok", [
+    (True, False, True), (True, True, True), (False, True, True),
+    (True, False, False), (True, True, False)])
 def test_an_llm_outage_morning_says_it_once(cron_copy: Path, tmp_path: Path, bash: str,
-                                            chain_down: bool, monitor_on: bool):
-    """With the chain known to be down the analysis is not attempted, and the
-    outage is reported by exactly one job.
+                                            chain_down: bool, monitor_on: bool, llm_ok: bool):
+    """The outage is reported by exactly one job, and the analysis is still tried.
 
     Before: "healthcheck: LLM analysis failed" at 09:00, then "LLM chain is DOWN"
     in the verdict, then the monitor's list of the tasks the outage failed at
     09:30 — three messages about one event, and the healthcheck itself exited 1,
-    which the monitor then reported as a fourth.
+    which the monitor then reported as a fourth. The fix for that skipped the
+    call whenever the chain had failed within a day, and the file knows nothing
+    about recovery: a one-minute outage at night silenced the morning's analysis.
     """
     cron = cron_copy / "cron"
     llm_mark = tmp_path / "llm-called"
     _stub(cron / "llm-call.py",
           "import sys\nfrom pathlib import Path\nsys.stdin.read()\n"
-          f"Path({str(llm_mark)!r}).write_text('x')\nprint('OK')\n")
+          f"Path({str(llm_mark)!r}).write_text('x')\n"
+          + ("print('OK')\n" if llm_ok else "sys.exit(3)\n"))
     (cron / "registry.yaml").write_text(registry(monitor_on, monitor_on), encoding="utf-8")
     if chain_down:
         now = datetime.now()
@@ -181,8 +185,7 @@ def test_an_llm_outage_morning_says_it_once(cron_copy: Path, tmp_path: Path, bas
     res, messages, log = run_healthcheck(cron, tmp_path, bash)
 
     assert res.returncode == 0, f"{res.stderr}\n{log}"
-    assert llm_mark.exists() == (not chain_down), \
-        f"LLM analysis {'ran' if llm_mark.exists() else 'did not run'} with chain_down={chain_down}"
+    assert llm_mark.exists(), "the analysis was not attempted"
     assert not any("LLM analysis failed" in m for m in messages), messages
     if chain_down and not monitor_on:
         assert len(messages) == 1 and "LLM chain is DOWN (deepseek: 403)" in messages[0], messages

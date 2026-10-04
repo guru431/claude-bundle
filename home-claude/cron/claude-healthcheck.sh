@@ -268,35 +268,6 @@ $REMOTE_DATA
 
 $WIN_DATA"
 
-# --- Is the LLM chain already known to be down? ---
-# utils.record_chain_dead() writes cron/state/chain-dead.json whenever EVERY
-# provider fails, and alerts nobody from there — a night is a hundred calls
-# meeting the same shut door. monitor_checks.chain_dead() is the one reading of
-# that file (fresh = last failure within a day), shared with both task monitors.
-#
-# Asked BEFORE the analysis: with the chain down, the call below meets the same
-# door, and its failure paged on its own ("LLM analysis failed") on the very
-# morning the outage itself was being reported — two messages about one event,
-# plus an exit 1 the task monitor then reported as a third.
-CHAIN_ALERT=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$BUNDLE_ROOT" 2>>"$LOG_FILE" <<'PYSCRIPT'
-import sys
-from pathlib import Path
-
-cron = Path(sys.argv[1]) / "cron"
-sys.path.insert(0, str(cron))
-try:
-    from monitor_checks import chain_dead
-except Exception:
-    sys.exit(0)                      # no shared module — nothing to judge
-found = chain_dead(cron / "state" / "chain-dead.json")
-if found:
-    print(found[0])
-PYSCRIPT
-)
-if [ -n "$CHAIN_ALERT" ]; then
-    echo "LLM chain: $CHAIN_ALERT" >> "$LOG_FILE"
-fi
-
 # --- Send collected metrics to the LLM for analysis ---
 # cron/prompts/healthcheck.md ships with the bundle; if it's missing the
 # inline default below is used.
@@ -317,8 +288,7 @@ PROMPT=""
 # phrased as an instruction, a process named like one) is indirect prompt
 # injection aimed at the analyzing model. Same fencing the pipeline applies to
 # session text elsewhere, see cron/hooks/untrusted.py.
-if [ -z "$CHAIN_ALERT" ]; then
-    ANALYSIS=$("$PYTHON" "$(dirname "$0")/llm-call.py" 600 2>>"$LOG_FILE" <<LLM_EOF
+ANALYSIS=$("$PYTHON" "$(dirname "$0")/llm-call.py" 600 2>>"$LOG_FILE" <<LLM_EOF
 ${PROMPT:-Analyze the following healthcheck metrics. Report any anomalies, low disk space, missing services or unusual load. Be concise.}
 
 METRICS:
@@ -326,18 +296,48 @@ METRICS:
 ${METRICS}
 LLM_EOF
 )
-    rc=$?
-else
-    # Not this job's failure, and not a second page: the outage itself is
-    # reported once — by the task monitor, or further down when none runs here.
-    ANALYSIS="(LLM analysis skipped — the provider chain is down; disk severity below is measured, not inferred)"
-    rc=0
-fi
+rc=$?
 
 echo "$ANALYSIS" >> "$LOG_FILE"
 
+# --- Is the LLM chain down? ---
+# utils.record_chain_dead() writes cron/state/chain-dead.json whenever EVERY
+# provider fails, and alerts nobody from there — a night is a hundred calls
+# meeting the same shut door. monitor_checks.chain_dead() is the one reading of
+# that file (fresh = last failure within a day), shared with both task monitors.
+#
+# Asked AFTER the analysis, which is always attempted. A failed call then pages
+# nothing of its own ("LLM analysis failed") when the chain is down — that would
+# be a second message about one event, plus an exit 1 the task monitor reported
+# as a third. Asked before, as it was, the answer also skipped the call: the
+# file knows nothing about recovery, so a one-minute outage at night silenced
+# the morning's analysis for a whole day. A failure of this very call is
+# recorded by utils before the question is asked, so it counts.
+CHAIN_ALERT=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$BUNDLE_ROOT" 2>>"$LOG_FILE" <<'PYSCRIPT'
+import sys
+from pathlib import Path
+
+cron = Path(sys.argv[1]) / "cron"
+sys.path.insert(0, str(cron))
+try:
+    from monitor_checks import chain_dead
+except Exception:
+    sys.exit(0)                      # no shared module — nothing to judge
+found = chain_dead(cron / "state" / "chain-dead.json")
+if found:
+    print(found[0])
+PYSCRIPT
+)
+if [ -n "$CHAIN_ALERT" ]; then
+    echo "LLM chain: $CHAIN_ALERT" >> "$LOG_FILE"
+fi
+
 LLM_FAILED=0
-if [ $rc -ne 0 ] || [ -z "$ANALYSIS" ]; then
+if { [ $rc -ne 0 ] || [ -z "$ANALYSIS" ]; } && [ -n "$CHAIN_ALERT" ]; then
+    # Not this job's failure, and not a second page: the outage itself is
+    # reported once — by the task monitor, or further down when none runs here.
+    ANALYSIS="(LLM analysis unavailable — the provider chain is down; disk severity below is measured, not inferred)"
+elif [ $rc -ne 0 ] || [ -z "$ANALYSIS" ]; then
     # Report the LLM failure, but do NOT exit here. The disk check below is the
     # deterministic half of this script, and it used to sit *behind* this exit:
     # a depleted provider silenced the disk alert entirely, which is exactly
@@ -509,7 +509,7 @@ RC=0
 "$PYTHON" "$BUNDLE_ROOT/cron/runs.py" record \
     --task ClaudeHealthcheck --rc "$RC" --artifact "$LOG_FILE" \
     --delivery "$DELIVERY" \
-    --note "disk: $DISK_NOTE; remote: $REMOTE_NOTE${CHAIN_ALERT:+; LLM analysis skipped: provider chain down}" \
+    --note "disk: $DISK_NOTE; remote: $REMOTE_NOTE${CHAIN_ALERT:+; provider chain down}" \
     >>"$LOG_FILE" 2>&1 || true
 
 # The disk alert has fired (or not) on measured data by this point; only now

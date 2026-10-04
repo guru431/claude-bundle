@@ -312,6 +312,24 @@ def test_basetemp_passed_to_pytest(tmp_path, monkeypatch):
     assert given.name == "proj-sub" and given.parent == sweep.RUN_ROOT
     # Nested pytest runs too: only contract suites had their temproot moved.
     assert Path(seen["kwargs"]["env"]["PYTEST_DEBUG_TEMPROOT"]).parent == sweep.RUN_ROOT
+    # And no stdin: it was DEVNULL for contract suites only.
+    assert seen["kwargs"]["stdin"] == subprocess.DEVNULL
+
+
+def test_a_full_disk_is_the_environment_not_a_red_suite(tmp_path, monkeypatch):
+    """Hundreds of ERRORs in the setup of tmp_path, where pytest could not make
+    its directory, read as a broken suite and filed a finding in the project."""
+    _fake_popen(monkeypatch, returncode=1,
+                out=b"E   OSError: [Errno 28] No space left on device\n42 errors in 3.00s\n")
+    res = sweep.run_suite(tmp_path, "demo", full=False)
+    assert (res["status"], res["env_kind"], res["note"]) == ("env", "other", sweep.DISK_FULL_NOTE)
+
+
+def test_a_suites_output_in_the_ansi_code_page_is_still_readable():
+    """Python on Windows writes to a pipe in the locale's code page."""
+    name = "test_кириллица"
+    assert sweep._decode(name.encode("cp1251")) == name
+    assert sweep._decode(name.encode("utf-8")) == name
 
 
 def test_cleanup_removes_run_dirs_and_keeps_the_named_one(tmp_path, monkeypatch):
@@ -893,6 +911,36 @@ def test_over_budget_two_nights_files_one_p3_and_closes_itself(contract):
     assert "Tests over budget" not in body and "Tests are failing" not in body
     state = json.loads(sweep.STATE_PATH.read_text(encoding="utf-8"))
     assert "over_nights" not in state["demo"] and "budget_finding" not in state["demo"]
+
+
+def test_a_budget_finding_deleted_by_hand_is_filed_again(contract):
+    """The flag `budget_finding` stayed set after the entry was deleted by hand,
+    and the sweep kept quiet until the suite once fitted its budget again."""
+    project, sent, plan, calls, script = contract
+    script += [_contract_res("ok", 90.0), _contract_res("ok", 95.0), _contract_res("ok", 99.0)]
+    sweep.main([])
+    sweep.main([])
+    assert "Tests over budget: demo" in _findings(project)
+    (project / "FINDINGS.md").write_text("# Findings — demo\n", encoding="utf-8")
+
+    sweep.main([])
+
+    assert _findings(project).count("Tests over budget: demo") == 1
+
+
+def test_the_state_survives_a_sweep_that_dies_mid_run(contract):
+    """Written once after the loop, the state of the suites already run was lost
+    with the process: their findings stayed open after the next green run, and
+    the next red one filed a duplicate."""
+    project, sent, plan, calls, script = contract
+    plan["contracts"]["demo"] = [_suite(), _suite(name="second")]
+    script.append(_contract_res("failed", 3.0))     # the second suite finds the script empty
+
+    with pytest.raises(IndexError):
+        sweep.main([])
+
+    state = json.loads(sweep.STATE_PATH.read_text(encoding="utf-8"))
+    assert state["demo"]["status"] == "failed"
 
 
 def test_the_full_level_has_its_own_state_and_finding(contract):

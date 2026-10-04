@@ -130,9 +130,9 @@ if collect is schtasks_status.collect:
     NOTES.append('WMI/CIM unavailable — statuses collected via the schtasks '
                  'fallback. Usually a wedged WmiPrvSE: kill the process.')
 
-# Result 0 = success, 267009 = still running, 267011 = not yet run, 267014 = terminated by user
+# Result 0 = success, 267009 = still running, 267011 = not yet run, 267014 = terminated
 OK_CODES = {0, 267009, 267011, 267014}
-RUNNING = 267009
+RUNNING, TERMINATED = 267009, 267014
 
 
 # task name -> its registry entry: timeout_hours for the hung check below,
@@ -170,6 +170,22 @@ def hung_since(task, now):
     except (ValueError, TypeError, KeyError):
         return None
     return started if now - started > timedelta(hours=hours) else None
+
+
+def killed_on_schedule(task):
+    """True for 267014 ("terminated") on a registry task with a calendar trigger.
+
+    For a service (AtStartup/AtLogOn) or a foreign task, 267014 is a stop by
+    hand. For a Daily/Weekly/Monthly task it is almost always Task Scheduler
+    killing it at its ExecutionTimeLimit — the timeout_hours ceiling — and the
+    registry promises that such a task "shows up as a failed run". With 267014
+    in OK_CODES it read as healthy instead.
+    """
+    if task['LastResult'] != TERMINATED:
+        return False
+    trigger = str(REGISTRY.get(task['Name'], {}).get('trigger') or '')
+    return trigger.split(' ', 1)[0] in ('Daily', 'Weekly', 'Monthly')
+
 
 # Tasks excluded from monitoring — from the environment, so a deployment can
 # suppress a noisy neighbour without editing a shipped script. Comma-separated.
@@ -209,7 +225,7 @@ for t in tasks:
         t['_port_down'] = down[0][1]
     elif stuck is not None:
         t['_stuck_hours'] = TIMEOUTS[t['Name']]
-    elif code in OK_CODES or t['LastRun'] == 'never':
+    elif (code in OK_CODES and not killed_on_schedule(t)) or t['LastRun'] == 'never':
         # Healthy now, so an earlier alert is forgotten and the NEXT failure is
         # news even under the same LastRun. A boot service restarted by hand
         # keeps its boot-time LastRun: without this, its second crash would only
@@ -263,7 +279,9 @@ if failures:
                          f"should have killed it; every later trigger is being "
                          f"dropped [{tag}]")
         else:
-            lines.append(f"{f['Name']}: exit {f['LastResult']} (last run: {f['LastRun']}) [{tag}]")
+            killed = (' — killed by Task Scheduler (its timeout_hours ceiling, or /end)'
+                      if f['LastResult'] == TERMINATED else '')
+            lines.append(f"{f['Name']}: exit {f['LastResult']}{killed} (last run: {f['LastRun']}) [{tag}]")
             entry = REGISTRY.get(f['Name'], {})
             if entry.get('kind') in ('bash', 'python'):
                 lines += monitor_checks.stderr_tail(STDERR_DIR, entry.get('script'), f['LastRun'])
@@ -311,21 +329,35 @@ fi
 # recommends to Password tasks — is just as unreachable, and such a task can
 # never run. PRIMARY enforcement is in cron/admin/sync-tasks.ps1, which refuses
 # both at registration; this check is a daily backstop for a registration older
-# than that rule, or one made by hand. It detects mapped drives by their ACTUAL
-# type (Win32_LogicalDisk DriveType=4 = network) rather than inferring "mapped"
-# from "not C:" — so a valid local D:/E:/... install never trips a false alarm.
+# than that rule, or one made by hand. Mapped drives are the persistent mappings
+# in HKCU:\Network plus this session's drive table (Get-PSDrive with a UNC
+# DisplayRoot), never inferred from "not C:" — so a valid local D:/E:/...
+# install never trips a false alarm. Win32_LogicalDisk DriveType=4 was used here
+# before and saw nothing: this monitor is itself a Password task in session 0,
+# where no drive is mapped, so the violation branch could never fire. HKCU is
+# loaded for a batch logon and the persistent mappings are visible there; it is
+# also a local lookup, where the CIM query can hang on an unreachable share.
 #
 # PowerShell only COLLECTS — the mapped letters, and the logon type, executable
 # and arguments of every managed Password/S4U task — and Python decides. The
 # decision is the part with edge cases, and inside a PowerShell pipeline no test
 # could reach it (tests/test_task_monitor_win.py feeds this heredoc a collection).
 echo "TRACE: stage=policy $(date '+%H:%M:%S')" >> "$LOG_FILE"
-POLICY_VIOL=$("$PYTHON" - 2>>"$LOG_FILE" <<'PYSCRIPT'
+# -X utf8, and UTF-8 from PowerShell: a task name or path outside the console
+# code page otherwise garbles, or kills the print with an encode error.
+POLICY_VIOL=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - 2>>"$LOG_FILE" <<'PYSCRIPT'
 import subprocess, json, re
 
 ps_cmd = r"""
-$mapped = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=4' -ErrorAction SilentlyContinue |
-    Where-Object { $_.DeviceID } | ForEach-Object { $_.DeviceID.TrimEnd(':').ToUpper() })
+[Console]::OutputEncoding=[System.Text.Encoding]::UTF8
+# Mapped drive letters: persistent (HKCU:\Network) + this session's (Get-PSDrive).
+$set = @{}
+Get-ChildItem 'HKCU:\Network' -ErrorAction SilentlyContinue |
+    ForEach-Object { $set[$_.PSChildName.ToUpper()] = $true }
+Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+    Where-Object { $_.DisplayRoot -like '\\*' } |
+    ForEach-Object { $set[$_.Name.ToUpper()] = $true }
+$mapped = @($set.Keys)
 $tasks = @(Get-ScheduledTask | Where-Object {
     $_.Description -like '*managed-by-registry*' -and
     @('Password', 'S4U') -contains "$($_.Principal.LogonType)"

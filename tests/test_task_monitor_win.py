@@ -129,6 +129,21 @@ def test_a_task_without_a_declared_port_is_left_to_its_exit_code(run_task_status
     assert "ClaudeNightly" not in out, out
 
 
+def test_a_calendar_task_killed_by_the_scheduler_is_a_failure(run_task_status):
+    """267014 ("terminated") sat in OK_CODES, so a Daily task killed at its
+    timeout_hours ceiling read as healthy — while the registry promises that it
+    "shows up as a failed run". A task outside the registry keeps the old reading:
+    for it 267014 is a stop by hand."""
+    out = run_task_status([_task("ClaudeNightly", result=267014, state="Ready"),
+                           _task("SomebodysTask", result=267014, state="Ready")])
+
+    line = next((ln for ln in out.splitlines() if ln.startswith("ClaudeNightly:")), "")
+    assert "exit 267014 — killed by Task Scheduler" in line, out
+    pattern = re.search(r"grep -cE '([^']+)'", SCRIPT.read_text(encoding="utf-8")).group(1)
+    assert re.search(pattern, line), f"TASK_FAIL_COUNT does not count: {line}"
+    assert "SomebodysTask" not in out, out
+
+
 def test_a_service_that_recovers_and_dies_again_is_news_again(run_task_status, monkeypatch):
     """Alert once per failure — and a second crash is a second failure.
 
@@ -327,7 +342,13 @@ def test_nothing_to_report_prints_nothing(monkeypatch, capsys):
 # PowerShell functions outrank cmdlets, so these stand in for the two queries the
 # collection makes: no real task and no real drive is read.
 FAKE_CMDLETS = r"""
-function Get-CimInstance { [PSCustomObject]@{ DeviceID = 'Z:' } }
+function Get-ChildItem($Path) {
+    if ("$Path" -eq 'HKCU:\Network') { [PSCustomObject]@{ PSChildName = 'z' } }
+}
+function Get-PSDrive {
+    [PSCustomObject]@{ Name = 'Y'; DisplayRoot = '\\host\share' }
+    [PSCustomObject]@{ Name = 'C'; DisplayRoot = $null }
+}
 function New-FakeTask($name, $logon, $execute, $arguments, $description) {
     [PSCustomObject]@{
         TaskName = $name; Description = $description
@@ -340,6 +361,7 @@ function Get-ScheduledTask {
     $vbs = '//B //nologo "C:\b\bin\_run-hidden.vbs" bash '
     New-FakeTask 'S4UMapped' 'S4U' 'wscript.exe' ($vbs + '"Z:\b\cron\a.sh"') $ours
     New-FakeTask 'S4UShare' 'S4U' 'wscript.exe' ($vbs + '"\\host\share\cron\b.sh"') $ours
+    New-FakeTask 'PasswordSessionMapped' 'Password' 'wscript.exe' ($vbs + '"Y:\b\cron\f.sh"') $ours
     New-FakeTask 'PasswordShare' 'Password' 'wscript.exe' ($vbs + '"\\host\share\cron\c.sh"') $ours
     New-FakeTask 'InteractiveMapped' 'Interactive' 'wscript.exe' ($vbs + '"Z:\b\cron\d.sh"') $ours
     New-FakeTask 'ForeignS4UShare' 'S4U' 'x.exe' '"\\host\share\e"' 'somebody else'
@@ -368,7 +390,10 @@ def test_the_powershell_collection_selects_s4u_tasks(monkeypatch, capsys):
          {"__name__": "__main__"})
     out = capsys.readouterr().out
 
-    assert _flagged(out, "with a mapped-drive path") == ["S4UMapped"], out
+    # Z: is a persistent mapping (HKCU:\Network), Y: one of this session only.
+    # The query used before (Win32_LogicalDisk DriveType=4) saw neither from
+    # session 0, where this monitor itself runs.
+    assert _flagged(out, "with a mapped-drive path") == ["PasswordSessionMapped", "S4UMapped"], out
     assert _flagged(out, "S4U task with a UNC path") == ["S4UShare"], out
 
 

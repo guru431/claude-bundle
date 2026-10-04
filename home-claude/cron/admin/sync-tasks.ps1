@@ -25,7 +25,9 @@
 #                                        # result; -Detail adds what Task Scheduler
 #                                        # holds next to what the registry asks for
 #
-# Exit codes: 0 = everything applied, 2 = at least one task FAILED to register,
+# Exit codes: 0 = everything applied, 1 = refused before syncing (no registry or
+#             launcher, not elevated, an -Only name the registry does not have),
+#             2 = at least one task FAILED to register,
 #             3 = at least one task was SKIPPED (invalid trigger, missing target,
 #             mapped drive, foreign task) — a partial sync must not read as success,
 #             4 = -Verify found something wrong with the CURRENT state (a task
@@ -150,6 +152,10 @@ if ($ArgsFile) {
         }
     }
 }
+# `-Only A,B` on a direct `powershell -File` call: in that mode the comma builds
+# no array, so [string[]]$Only got ONE string 'A,B', no task matched it, and the
+# sync finished empty with exit 0. The -ArgsFile path above splits already.
+$Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 # ── default log path: %TEMP%\sync-tasks_<timestamp>.log ──────────────────────
 # A DRY RUN changes nothing and therefore has nothing to keep a record of. It
@@ -230,9 +236,16 @@ if (-not (Test-Path -LiteralPath $script:_registryParser)) {
 # the past reads as a missed run, so registering at 14:00 could fire a "Daily
 # 02:30" nightly job immediately after the sync. Only the time-of-day is
 # compared for idempotency, so moving the date changes nothing else.
-function Get-CalendarStart([int]$h, [int]$m) {
+#
+# Except for a repeating trigger: <Repetition> lives inside the same trigger and
+# ticks only from StartBoundary on, so rolling it to tomorrow silenced a
+# `repeat_every` watcher for the rest of the day after every daytime
+# re-registration. Today's boundary lets the scheduler pick the next tick
+# itself; the one catch-up run StartWhenAvailable may add is harmless for a task
+# that repeats every few minutes or hours anyway.
+function Get-CalendarStart([int]$h, [int]$m, [bool]$repeating = $false) {
     $t = (Get-Date).Date.AddHours($h).AddMinutes($m)
-    if ($t -le (Get-Date)) { $t = $t.AddDays(1) }
+    if ($t -le (Get-Date) -and -not $repeating) { $t = $t.AddDays(1) }
     return $t.ToString('s')
 }
 
@@ -288,7 +301,7 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
     if ($rep) { $rep += "`n      " }
     if ($spec -match '^Daily\s+(\d{1,2}):(\d{2})$') {
         $h = [int]$Matches[1]; $m = [int]$Matches[2]
-        $start = Get-CalendarStart $h $m
+        $start = Get-CalendarStart $h $m ([bool]$repeatEvery)
         return @"
 <CalendarTrigger>
       <StartBoundary>$start</StartBoundary>
@@ -315,7 +328,7 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
         if (-not $dow) {
             throw "Unknown day-of-week '$dowRaw' in trigger '$spec' (expected Mon/Tue/Wed/Thu/Fri/Sat/Sun or full names)"
         }
-        $start = Get-CalendarStart $h $m
+        $start = Get-CalendarStart $h $m ([bool]$repeatEvery)
         return @"
 <CalendarTrigger>
       <StartBoundary>$start</StartBoundary>
@@ -329,7 +342,7 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
     }
     if ($spec -match '^Monthly\s+day=(\d{1,2})\s+(\d{1,2}):(\d{2})$') {
         $d = [int]$Matches[1]; $h = [int]$Matches[2]; $m = [int]$Matches[3]
-        $start = Get-CalendarStart $h $m
+        $start = Get-CalendarStart $h $m ([bool]$repeatEvery)
         return @"
 <CalendarTrigger>
       <StartBoundary>$start</StartBoundary>
@@ -350,6 +363,9 @@ function Build-TaskXml([hashtable]$task, [string]$wantedExec, [string]$wantedArg
     $hidden  = if ($task.hidden)  { 'true' } else { 'false' }
     $enabled = if ($task.enabled) { 'true' } else { 'false' }
     $runlevel = if ($task.runlevel -eq 'highest') { 'HighestAvailable' } else { 'LeastPrivilege' }
+    # 'InteractiveToken' is the Task-XML schema's name; CIM returns the same task
+    # as 'Interactive' (enum 3), which is why the main loop compares $logonType,
+    # not this string.
     $xmlLogonType = if ($logonType -eq 'Password') { 'Password' }
         elseif ($logonType -eq 'S4U') { 'S4U' }
         else { 'InteractiveToken' }
@@ -468,10 +484,26 @@ function Build-Action([hashtable]$task, [string]$launcher) {
 }
 
 # ── compare current vs wanted ────────────────────────────────────────────────
+# The day(s) of month of a Monthly trigger, from the task's XML ('' = none).
+# A Monthly trigger registered through -Xml comes back from CIM as a faceless
+# MSFT_TaskTrigger on some builds, without DaysOfMonth: `Monthly day=1` ->
+# `day=2` printed `[unchanged]`, and the task kept firing on the old day until
+# the next -Force.
+function Get-XmlMonthDays([string]$xml) {
+    if (-not $xml) { return '' }
+    $x = [xml]$xml
+    return (@($x.Task.Triggers.CalendarTrigger.ScheduleByMonth.DaysOfMonth.Day | Where-Object { $_ }) -join ',')
+}
 function Get-CurrentSummary([string]$name) {
     $t = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     if (-not $t) { return $null }
+    # One more Export-ScheduledTask only for the faceless trigger, not per task.
+    $monthDays = ''
+    if ("$(($t.Triggers | Select-Object -First 1).CimClass.CimClassName)" -eq 'MSFT_TaskTrigger') {
+        try { $monthDays = Get-XmlMonthDays (Export-ScheduledTask -InputObject $t -ErrorAction Stop) } catch {}
+    }
     return @{
+        monthDays = $monthDays
         exists = $true
         execute = ($t.Actions | Select-Object -First 1).Execute
         args = ($t.Actions | Select-Object -First 1).Arguments
@@ -630,6 +662,14 @@ function Get-SessionZeroProblem([hashtable]$task, [string]$launcher, [string]$wa
     return $null
 }
 
+# Is it ours? ONE predicate for the removal path (-Unregister) and the
+# foreign-task guard of the sync. The syncer writes the description as
+# "$marker | ...", so the marker must lead: matched anywhere (-like), somebody
+# else's task that merely mentions the marker counted as ours to delete.
+function Test-ManagedDescription([string]$description, [string]$marker) {
+    return [bool]($description -and $marker -and $description.StartsWith($marker))
+}
+
 # ── main ─────────────────────────────────────────────────────────────────────
 $reg = Parse-RegistryYaml $RegistryPath
 $launcher = $reg.launcher
@@ -642,6 +682,17 @@ if ($launcher -match '<[^>]+>') {
     Write-Host "ERROR: registry still contains placeholders (e.g. '$launcher')." -ForegroundColor Red
     Write-Host "       Replace <bundle-install-path> / <user> in $RegistryPath before running." -ForegroundColor Red
     exit 1
+}
+# An -Only name the registry does not have is a typo or a stale name: such a task
+# was skipped in silence, and the sync reported success without touching what it
+# was called for. For every mode below.
+if ($Only) {
+    $registryNames = @($reg.tasks | ForEach-Object { $_.name })
+    $unknown = @($Only | Where-Object { $registryNames -notcontains $_ })
+    if ($unknown) {
+        Write-Host "ERROR: -Only: not in the registry: $($unknown -join ', ')" -ForegroundColor Red
+        exit 1
+    }
 }
 # ── -Unregister: registry-driven removal ─────────────────────────────────────
 # The counterpart of the sync. Without it the only documented way to remove the
@@ -660,7 +711,7 @@ if ($Unregister) {
         if ($Only -and ($Only -notcontains $task.name)) { continue }
         $cur = Get-ScheduledTask -TaskName $task.name -ErrorAction SilentlyContinue
         if (-not $cur) { Write-Host ("[absent   ] " + $task.name) -ForegroundColor DarkGray; $absent++; continue }
-        if ("$($cur.Description)" -notlike "*$marker*") {
+        if (-not (Test-ManagedDescription "$($cur.Description)" $marker)) {
             Write-Host ("[skipped: foreign task] " + $task.name + " — no '" + $marker + "' marker, not deleting") -ForegroundColor DarkYellow
             $foreign++
             continue
@@ -863,7 +914,7 @@ foreach ($task in $reg.tasks) {
     # else: Register-ScheduledTask -Force would silently replace it, breaking the
     # documented "tasks outside the registry are left alone" contract. Taking one
     # over must be a deliberate act (-Adopt).
-    if ($current -and -not $Adopt -and ("$($current.description)" -notlike "*$marker*")) {
+    if ($current -and -not $Adopt -and -not (Test-ManagedDescription "$($current.description)" $marker)) {
         Write-Host ("[skipped: foreign task] " + $task.name + " — existing task has no '" + $marker + "' marker; not overwriting. Re-run with -Adopt to take it over.") -ForegroundColor DarkYellow
         $summary.skipped++
         continue
@@ -881,6 +932,7 @@ foreach ($task in $reg.tasks) {
     $trigger_needs_change = $false
     $triggertype_needs_change = $false
     $dow_needs_change = $false
+    $dom_needs_change = $false
     $delay_needs_change = $false
     $restart_needs_change = $false
     $repeat_needs_change = $false
@@ -939,6 +991,11 @@ foreach ($task in $reg.tasks) {
             $wantedDow = $dowBits[$Matches[1].Substring(0,3).ToLower()]
             if ($wantedDow) { $dow_needs_change = ([int]$current.daysOfWeek -ne [int]$wantedDow) }
         }
+        # Day of month for Monthly (CIM may not carry it - see Get-XmlMonthDays).
+        # An export that could not be read invents no difference, as above.
+        if ($task.trigger -match '^Monthly\s+day=(\d{1,2})\s' -and $current.monthDays) {
+            $dom_needs_change = ($current.monthDays -ne "$([int]$Matches[1])")
+        }
         # Compare time-of-day for calendar triggers (Daily/Weekly/Monthly HH:MM).
         if ($task.trigger -match '(\d{1,2}):(\d{2})\s*$') {
             $wantedTime = '{0:D2}:{1}' -f [int]$Matches[1], $Matches[2]
@@ -969,6 +1026,7 @@ foreach ($task in $reg.tasks) {
             triggerTime = @($trigger_needs_change,     $task.trigger,           "$($current.startBoundary)")
             triggerType = @($triggertype_needs_change, $wantedTriggerType,      "$($current.triggerType)")
             daysOfWeek  = @($dow_needs_change,         $task.trigger,           "$($current.daysOfWeek)")
+            daysOfMonth = @($dom_needs_change,         $task.trigger,           "$($current.monthDays)")
             delay       = @($delay_needs_change,       $wantedDelay,            "$($current.bootDelay)")
             restart     = @($restart_needs_change,     "$wantedRestartCount/$wantedRestartInterval", "$($current.restartCount)/$($current.restartInterval)")
             repetition  = @($repeat_needs_change,      "$wantedRepeatEvery/$wantedRepeatFor",        "$($current.repeatInterval)/$($current.repeatDuration)")

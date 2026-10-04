@@ -134,6 +134,53 @@ foreach ($c in @(@('AtStartup', ''), @('AtLogOn', ''), @('AtStartup', 'PT8H'),
     ], r.stdout
 
 
+def test_a_repeating_calendar_trigger_is_not_rolled_to_tomorrow(tmp_path: Path):
+    """A slot already passed today rolls to tomorrow — except for a trigger with
+    repeat_every: its <Repetition> ticks only from StartBoundary on, so rolling
+    it silenced the task until the next day after every daytime sync."""
+    code = define_functions(SYNC, ["Get-CalendarStart"]) + r"""
+function Get-Date { [datetime]'2026-10-04T14:00:00' }
+Write-Output ("once=" + (Get-CalendarStart 1 0))
+Write-Output ("repeating=" + (Get-CalendarStart 1 0 $true))
+Write-Output ("later=" + (Get-CalendarStart 20 0 $true))
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.split() == ["once=2026-10-05T01:00:00", "repeating=2026-10-04T01:00:00",
+                                "later=2026-10-04T20:00:00"], r.stdout
+
+
+def test_the_day_of_a_monthly_trigger_is_read_from_the_task_xml(tmp_path: Path):
+    """CIM may hand a Monthly trigger back as a bare MSFT_TaskTrigger without its
+    day, and `day=1` -> `day=2` printed `[unchanged]`."""
+    code = define_functions(SYNC, ["Build-XmlTrigger", "Get-RepeatDuration", "Get-CalendarStart",
+                                   "Build-TaskXml", "Get-XmlMonthDays"]) + r"""
+$task = @{ name = 'T'; user = 'someone'; hidden = $true; enabled = $true; runlevel = 'limited'; timeout_hours = 1 }
+foreach ($spec in @('Monthly day=2 03:00', 'Daily 03:00')) {
+    $xml = Build-TaskXml $task 'cmd.exe' '/c exit 0' 'probe' 'Password' (Build-XmlTrigger $spec '' '' '')
+    Write-Output ("{0}|{1}" -f $spec, (Get-XmlMonthDays $xml))
+}
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    rows = [line.split("|") for line in r.stdout.splitlines() if "|" in line]
+    assert rows == [["Monthly day=2 03:00", "2"], ["Daily 03:00", ""]], r.stdout
+
+
+def test_a_task_is_ours_only_when_the_marker_leads_its_description(tmp_path: Path):
+    """One predicate for -Unregister and the foreign-task guard. Matched anywhere,
+    a task that merely mentioned the marker was ours to delete."""
+    code = define_functions(SYNC, ["Test-ManagedDescription"]) + r"""
+foreach ($d in @('managed-by-registry | Nightly job', 'Mine. See managed-by-registry docs', '', $null)) {
+    Write-Output ("[{0}]={1}" -f $d, (Test-ManagedDescription $d 'managed-by-registry'))
+}
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert [line.rsplit("=", 1)[1] for line in r.stdout.splitlines() if "=" in line] == \
+        ["True", "False", "False", "False"], r.stdout
+
+
 def test_task_xml_carries_the_logon_type(tmp_path: Path):
     code = define_functions(SYNC, ["Build-TaskXml"]) + r"""
 $task = @{ name = 'T'; user = 'someone'; hidden = $true; enabled = $true; runlevel = 'limited'; timeout_hours = 1 }
@@ -292,3 +339,22 @@ def test_verify_leaves_no_transcript_behind(tmp_path: Path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert name in r.stdout
     assert list(temp.glob("sync-tasks_*.log")) == []
+
+
+@windows_only
+@pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
+def test_an_only_name_the_registry_lacks_is_refused(tmp_path: Path):
+    """A typo'd -Only name was skipped in silence and the sync exited 0 without
+    touching what it was called for. `A,B` on a direct -File call is split."""
+    name = f"ClaudeBundleTest-{uuid.uuid4().hex[:12]}"
+    reg = _deployment(tmp_path, (
+        f"  - name: {name}\n"
+        f"    script: {tmp_path / 'job.sh'}\n"
+        "    trigger: Daily 02:00\n"
+        "    timeout_hours: 1\n"
+        "    enabled: false\n"))
+    env = dict(os.environ, TEMP=str(tmp_path), TMP=str(tmp_path))
+    r = run_ps_file(SYNC, "-Verify", "-RegistryPath", reg, "-Only", f"{name},NoSuchTask", env=env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    # Only the unknown name is listed: the known one was split off and found.
+    assert re.search(r"not in the registry: NoSuchTask\s*$", r.stdout, re.M), r.stdout

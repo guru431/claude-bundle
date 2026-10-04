@@ -86,6 +86,49 @@ The short list; UPGRADING.md has the steps.
   30 and 90 s by default (`TELEGRAM_RETRY_GAPS`; empty = one attempt), so a
   failed send now takes up to ~4 minutes before it reports; `notify.send` waits
   for the whole schedule.
+- **`sync-tasks.ps1`**: an `-Only` name the registry does not have exits 1; a
+  same-named task whose description does not START with the marker is foreign
+  (`-Adopt` to take it over). **`ClaudeTaskMonitor`** reports a calendar task
+  Task Scheduler killed (`267014`), which it used to count as a success.
+
+### Ported from the meta-repo: the scheduler contour
+
+The comparison of the files the bundle shares with the meta-repo, for the
+scheduler's: syncer, task monitor, healthcheck, test sweep. Each fix comes with
+a test that fails on the code it replaces.
+
+- **`sync-tasks.ps1`.** A `repeat_every` task on a calendar trigger is no longer
+  rolled to tomorrow by a daytime sync — its repetition ticks only from the
+  start boundary, so it went silent for the rest of the day. The day of a
+  Monthly trigger is read from the task's XML, since CIM may return it as a bare
+  `MSFT_TaskTrigger`: `day=1` → `day=2` printed `[unchanged]`. An `-Only` name the
+  registry lacks is exit 1 instead of an empty, successful sync, and `-Only A,B`
+  on a direct `powershell -File` call is split. `-Unregister` and the
+  foreign-task guard share one predicate: the marker has to lead the
+  description, not merely appear in it.
+- **`claude-task-monitor.sh`.** `267014` ("terminated") on a registry task with a
+  Daily/Weekly/Monthly trigger is a failure — almost always Task Scheduler
+  killing it at its `timeout_hours` ceiling, which the registry header promised
+  would show up as a failed run. The session-0 path check found mapped drives
+  through `Win32_LogicalDisk DriveType=4`, which sees none from session 0, where
+  the monitor itself runs: the violation branch could never fire. It now reads
+  the persistent mappings in `HKCU:\Network` and the session's `Get-PSDrive`
+  table, and runs under `-X utf8` with UTF-8 output from PowerShell.
+- **`claude-healthcheck.sh`** always attempts the analysis. It used to skip the
+  call while `chain-dead.json` held a failure from the last day, and that file
+  knows nothing about recovery: a one-minute outage at night silenced the
+  morning's analysis. The chain is now asked after the call; a failed call with
+  the chain down still pages nothing of its own.
+- **`test-sweep.py`.** A full disk (`Errno 28`, `could not create numbered dir`)
+  is `env`, not a red suite with a finding. Every suite gets stdin from
+  `DEVNULL` (contract suites alone did), and output that is not UTF-8 is read
+  as cp1251 rather than turned into `?????`. The over-budget finding is filed
+  again when it was deleted by hand while the suite is still over budget. The
+  state is saved after every suite, so a sweep that dies mid-run keeps what it
+  learned.
+- **`registry.yaml`** documents `restart_count` — Task Scheduler restarts a
+  failed START, not a process that exited non-zero — and `set "VAR="` for
+  `kind: exec` through `cmd /c`, where `set VAR= &&` sets VAR to a space.
 
 ### Ported from the meta-repo: alert retries, the fence, wiki and memory fixes
 

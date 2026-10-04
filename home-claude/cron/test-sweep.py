@@ -158,6 +158,17 @@ NEUTRAL = {"no-tests", "no-pytest", "env"}
 # contract suite that passed, only slower than its budget) is healthy tests: the
 # finding it earns is about time, filed separately (track_budget).
 RECOVERED = {"ok", "over-budget"}
+# A run that hit a full disk, not the code: hundreds of ERRORs in the setup of
+# `tmp_path`, where pytest could not create its directory. That is `env` — the run
+# says nothing about the tests — not a finding filed in the project.
+_DISK_FULL_MARKERS = ("[Errno 28]", "No space left on device", "[WinError 112]",
+                      "could not create numbered dir")
+DISK_FULL_NOTE = "disk full (ENOSPC) — run is unreliable"
+
+
+def disk_full(output: str) -> bool:
+    return any(m in output for m in _DISK_FULL_MARKERS)
+
 
 # ── the test contract (`tests:` in bundle.local.yaml) ────────────────────────
 RUNNERS = ("pytest", "bash", "dotnet", "pester", "js")
@@ -565,8 +576,22 @@ def child_env() -> dict:
     return env
 
 
-def _spawn(cmd: list[str], cwd: Path, timeout: int, env: dict,
-           **extra) -> tuple[int | None, str, str]:
+def _decode(data: bytes | None) -> str:
+    """UTF-8, or the Windows ANSI code page when the bytes are not UTF-8.
+
+    Python on Windows writes to a pipe in the locale's code page (cp1251 on a
+    Russian system, for one), Git Bash and node in UTF-8. Decoding UTF-8 with
+    replacement turned every non-ASCII test name into `?????` in the log, the
+    findings and Telegram.
+    """
+    data = data or b""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("cp1251", errors="replace")
+
+
+def _spawn(cmd: list[str], cwd: Path, timeout: int, env: dict) -> tuple[int | None, str, str]:
     """Run one suite; a return code of None means it was killed on timeout.
 
     OSError (the interpreter or the directory vanished) goes to the caller.
@@ -582,12 +607,15 @@ def _spawn(cmd: list[str], cwd: Path, timeout: int, env: dict,
     # its own, `os.killpg(os.getpgid(pid))` would kill the sweep's own group.
     group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
              else {"start_new_session": True})
-    proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, env=env, **group, **extra)
+    # stdin is DEVNULL for every suite, not whatever the task was handed: under
+    # the hidden launcher there may be no such handle at all, and a runner that
+    # reads stdin (xdist's execnet bootstrap, an interactive prompt) would wait
+    # forever. It used to be set for contract suites only.
+    proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, **group)
     try:
         out_b, err_b = proc.communicate(timeout=timeout)
-        return (proc.returncode, (out_b or b"").decode("utf-8", errors="replace"),
-                (err_b or b"").decode("utf-8", errors="replace"))
+        return proc.returncode, _decode(out_b), _decode(err_b)
     except subprocess.TimeoutExpired:
         kill_tree(proc.pid)
         # Drain after the kill: otherwise a pipe pair is left open and the tail
@@ -596,8 +624,7 @@ def _spawn(cmd: list[str], cwd: Path, timeout: int, env: dict,
             out_b, err_b = proc.communicate(timeout=60)
         except subprocess.TimeoutExpired:
             out_b, err_b = b"", b""
-        return (None, (out_b or b"").decode("utf-8", errors="replace"),
-                f"timeout after {timeout}s\n" + (err_b or b"").decode("utf-8", errors="replace"))
+        return None, _decode(out_b), f"timeout after {timeout}s\n" + _decode(err_b)
 
 
 def run_suite(suite: Path, key: str, full: bool) -> dict:
@@ -625,15 +652,21 @@ def run_suite(suite: Path, key: str, full: bool) -> dict:
     # basetemp sits in the traceback of the very first test, while the last 12
     # lines hold only a `147 passed, 42 errors` summary — which cannot tell a
     # broken environment from broken tests.
-    if status == "failed" and is_env_failure(out + err, basetemp):
+    env_kind = None
+    if status in ("failed", "error", CRASH) and disk_full(out + err):
+        status, env_kind, temp_note = "env", "other", DISK_FULL_NOTE
+    elif status == "failed" and is_env_failure(out + err, basetemp):
         status = "env"
         temp_note = (temp_note or
                      f"{basetemp.name} was unavailable during cleanup — run is unreliable")
     # The tail goes to the log, to FINDINGS.md and to Telegram, and a failing
     # test happily prints whatever it was handed — including a .env's contents.
     tail = mask_secrets("\n".join((out + err).strip().splitlines()[-12:]))
-    return {"status": status, "seconds": round(time.time() - started, 1),
-            "tail": tail, "note": temp_note}
+    res = {"status": status, "seconds": round(time.time() - started, 1),
+           "tail": tail, "note": temp_note}
+    if env_kind:
+        res["env_kind"] = env_kind
+    return res
 
 
 def summary_line(text: str) -> str:
@@ -853,14 +886,18 @@ def run_contract(suite: dict, level: str) -> dict:
     try:
         rc, out, err = _spawn([bash, "-c", cmd], suite["dir"],
                               TIMEOUT_FULL if level == "full" else TIMEOUT_FAST,
-                              contract_env(), stdin=subprocess.DEVNULL)
+                              contract_env())
     except OSError as exc:
         return {"status": "error", "seconds": round(time.time() - started, 1),
                 "tail": mask_secrets(str(exc)), "note": temp_note}
     text = out + err
     parsed = parse_result(suite["runner"], rc, text)
     status, note, env_kind = parsed["status"], parsed.get("note") or temp_note, parsed.get("env_kind")
-    if basetemp is not None and status == "failed" and is_env_failure(text, basetemp):
+    if status in ("failed", "error", CRASH) and disk_full(text):
+        # `other`, not a kind of its own: reported once, on entering the state,
+        # like a runner that is not there — and never as a finding.
+        status, env_kind, note = "env", "other", DISK_FULL_NOTE
+    elif basetemp is not None and status == "failed" and is_env_failure(text, basetemp):
         status, env_kind = "env", "basetemp"
         note = note or f"{basetemp.name} was unavailable during cleanup — run is unreliable"
     return {"status": status, "seconds": round(time.time() - started, 1),
@@ -979,13 +1016,18 @@ def track_budget(root: Path, project: str, key: str, res: dict, prev: dict,
 
     `failed`/`timeout`/`env` say nothing about how long the suite takes: such a
     night neither counts towards the streak nor resets it.
+
+    Filed on every night over budget, not only while `budget_finding` is unset:
+    a resolved finding is deleted by hand, the flag stays, and the sweep kept
+    quiet until the suite once fitted its budget again. No duplicate — the
+    filing dedupes on the titles of the open entries.
     """
     nights = prev.get("over_nights", 0)
     has_finding = prev.get("budget_finding", False)
     findings = root / "FINDINGS.md"
     if res["status"] == "over-budget":
         nights += 1
-        if nights >= BUDGET_NIGHTS and not has_finding:
+        if nights >= BUDGET_NIGHTS:
             # utils returns False both for "already open" and for "could not
             # write"; only the first may stop the next night from trying again.
             if append_budget_finding(root, project, key, res, budget_s, nights):
@@ -1086,6 +1128,22 @@ def load_state() -> dict:
         return json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def save_state(state: dict) -> None:
+    """Write the state after EVERY suite, best effort.
+
+    It used to be written once, after the loop: a sweep that died mid-run (a
+    full disk, a killed process) left the findings it had filed for the red
+    suites with the OLD state, so the next green run did not close them
+    (previous=ok) and the next red one filed a duplicate. The write goes to the
+    same disk as the log, so a failure is a log line, not the end of the sweep.
+    """
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(STATE_PATH, json.dumps(state, ensure_ascii=False, indent=1))
+    except OSError as exc:
+        log(f"state not written: {exc}")
 
 
 def main(argv=None) -> int:
@@ -1277,9 +1335,11 @@ def _sweep(args, rec: dict) -> int:
                 f"the earlier '{previous}' stands; the finding stays open")
             state[skey] = {"status": previous, "seconds": res["seconds"],
                            "date": DATE, "blocked_by": res["status"], **extra}
+            save_state(state)
             continue
         state[skey] = {"status": res["status"], "seconds": res["seconds"],
                        "date": DATE, **extra}
+        save_state(state)
 
     if args.dry_run:
         return 1 if contract_errors else 0

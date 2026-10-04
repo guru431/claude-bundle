@@ -137,6 +137,16 @@ Then run `sync.cmd` once (step 4 above).
 - **AtStartup / AtLogOn tasks of kind bash or python** are registered with the
   launcher's `bash-daemon` / `python-daemon` mode, which skips the new stderr
   capture (`cron/logs/task-stderr/`); `sync.cmd` reports them `updated` once.
+- **A same-named task is ours only when its description STARTS with the
+  marker** (`managed-by-registry | …`, which is what the syncer writes). A task
+  whose description carries the marker somewhere else — edited by hand — is now
+  foreign: `-Unregister` keeps it and the sync skips it until `-Adopt`.
+- **`sync.cmd -Only <name>` with a name the registry does not have exits 1**
+  instead of syncing nothing and reporting success. Check scripts that pass
+  `-Only`.
+- **A calendar task that Task Scheduler killed (`267014`) is reported** by
+  `ClaudeTaskMonitor` — normally its `timeout_hours` ceiling. It used to count as
+  a success. Expect it once for any such task whose last run ended that way.
 - **Uninstalling a first install made by an older `install.ps1`:** that
   manifest recorded the bootstrapped registry as the installer's own file, and
   `uninstall.ps1` would delete it. Re-run the installer once before you ever

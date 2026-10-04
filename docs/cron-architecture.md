@@ -385,8 +385,10 @@ independent of the model:
   and alerts when the monitor has not recorded a run in 30 hours. Silent when
   that task is disabled or absent.
 - **The LLM chain is down**: every provider failed within the last day
-  (`cron/state/chain-dead.json`). The analysis is then skipped rather than
-  sent into a known outage, and the alert is left to the task monitor when
+  (`cron/state/chain-dead.json`). The analysis is still attempted — the file
+  knows nothing about recovery, and skipping the call silenced a whole
+  morning's analysis after a one-minute outage at night — but a failed call
+  then pages nothing of its own. The alert is left to the task monitor when
   one runs on this platform — it reports each outage once, not every
   morning — so the healthcheck raises it itself only where no monitor would.
 
@@ -629,10 +631,10 @@ Statuses and what the sweep does with them:
 | Status | Meaning | What happens |
 |---|---|---|
 | `ok` | green (within budget) | closes this sweep's "Tests are failing" finding when the suite was red |
-| `over-budget` | green, but `fast` took longer than `budget_s` (contract suites only) | on the SECOND such night in a row, ONE P3 "Tests over budget" finding in the project's `FINDINGS.md`, naming the five slowest tests or parts; closed by itself once the suite is back within budget. A red or `env` night neither counts nor resets the streak |
+| `over-budget` | green, but `fast` took longer than `budget_s` (contract suites only) | on the SECOND such night in a row, ONE P3 "Tests over budget" finding in the project's `FINDINGS.md`, naming the five slowest tests or parts; filed again the next night when deleted by hand while the suite is still over; closed by itself once the suite is back within budget. A red or `env` night neither counts nor resets the streak |
 | `failed`, `error`, `interrupted`, `usage`, `crash` | red | ONE P2 "Tests are failing" finding + a Telegram line, on the change of state |
 | `timeout` | hung — killed by the sweep, or a hang the runner reported | the same, naming the hung test |
-| `env`, `no-pytest`, `no-tests` | the run says nothing about the tests (a poisoned basetemp, a runner that is not there, a `TESTS_ENV <reason>` line) | no finding, and a red suite stays red until a real run says otherwise. A poisoned basetemp is reported to Telegram on every run that hits it; a missing runner or a `TESTS_ENV <reason>` line once, on entering the state |
+| `env`, `no-pytest`, `no-tests` | the run says nothing about the tests (a poisoned basetemp, a full disk, a runner that is not there, a `TESTS_ENV <reason>` line) | no finding, and a red suite stays red until a real run says otherwise. A poisoned basetemp is reported to Telegram on every run that hits it; a full disk, a missing runner or a `TESTS_ENV <reason>` line once, on entering the state |
 
 The full level has a state entry (`<suite>@full`) and a finding title
 (`Tests are failing (full): <suite>`) of its own: the daily run does not run
@@ -823,6 +825,8 @@ Paths are relative to the pipeline root (`~/.claude` on a default install).
 `ClaudeTaskMonitor` runs daily at 09:30 and alerts on a task with a non-zero
 `Last Result` (the registry's own, and any other task outside Task Scheduler's
 Microsoft and Windows folders, marked ORPHAN), one still running past its
-`timeout_hours`, a Password/S4U task that
+`timeout_hours`, a registry task with a calendar trigger that Task Scheduler
+killed (`267014` — its `timeout_hours` ceiling, or `/end`; for a service or a
+foreign task that code stays a normal stop), a Password/S4U task that
 breaks the path policy, a declared `health_port` that is closed, or a down LLM
 chain.

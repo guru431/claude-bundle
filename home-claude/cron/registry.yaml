@@ -89,6 +89,21 @@
 #   mounted, desktop not yet up — so a task that needs either races them and
 #   dies with a path-not-found. Ignored for calendar triggers.
 #
+# ── Optional restart fields (restart_count / restart_interval) ─────────────
+#   restart_count: 3 + restart_interval: PT1M (the default once a count is set)
+#   become <RestartOnFailure>. Task Scheduler restarts a task whose START failed
+#   — a boot task that raced the network, say. A process that started and then
+#   exited non-zero is not a failure to it: the task is recorded as completed and
+#   is NOT restarted. A service that must come back after it exits needs a loop
+#   in its own action, or a watcher that probes its `health_port`.
+#
+# ── kind: exec through cmd /c — quote every `set` ──────────────────────────
+#   `cmd /c set VAR= && next` does not clear VAR: the value is everything up to
+#   the `&&`, trailing space included, so VAR becomes " ". Write
+#   `set "VAR=" && set "OTHER=value" && next`. And do not end the line with
+#   `& popd` or another command after the real one: cmd exits with the code of
+#   the LAST command, so a failure would reach Task Scheduler as success.
+#
 # ── Optional repetition fields (repeat_every / repeat_for) ─────────────────
 #   Attach a repetition pattern to a calendar trigger so the task re-fires
 #   throughout the day after its initial start time. Both are ISO-8601

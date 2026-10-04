@@ -45,10 +45,14 @@ if [ -n "$added" ] && ! bad=$(printf '%s\n' "$added" | secret_scan_paths); then
   fail=1
 fi
 
-# Collect staged diff once (exclude the hook itself to avoid self-matching)
+# Collect staged diff once. `.githooks/` is scanned like everything else: it
+# used to be excluded "to avoid self-matching" on the token table, and the
+# exclusion took the personal denylist with it — yet the hooks are published
+# with the rest of the repository, a host name written into one included.
+# Neither table matches the hooks today; a line that must look like a token
+# takes the per-line `secret-scan:allow` marker, like every detector fixture.
 # A diff git could not produce blocks: an empty one would scan as "clean".
-if ! diff_content=$(git -c core.quotePath=false diff --cached --unified=0 -- . ':(exclude).githooks/' 2>/dev/null \
-  || git -c core.quotePath=false diff --cached --unified=0); then
+if ! diff_content=$(git -c core.quotePath=false diff --cached --unified=0); then
   echo "BLOCKED: git could not produce the staged diff — the content checks did not run."
   diff_content=""
   fail=1
@@ -97,7 +101,7 @@ fi
 # binary blobs, would have stopped the same content one step later.
 # secret_scan_changed_binaries picks the binary files out with one
 # `git diff --numstat` and reads each one whole, decoded, against both tables.
-if ! bin_hits=$(secret_scan_changed_binaries index "$pat" . ':(exclude).githooks/'); then
+if ! bin_hits=$(secret_scan_changed_binaries index "$pat"); then
   echo "BLOCKED: possible secret or personal data in a staged binary or UTF-16 file:"
   printf '%s\n' "$bin_hits" | sed 's/^/  /'
   fail=1

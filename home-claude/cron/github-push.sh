@@ -134,6 +134,10 @@ fi
 #    A denylist that exists but cannot be used — a line grep cannot compile —
 #    blocks. `grep -f` exits 2 on such a line, the old `|| true` read that as
 #    "no match", and the whole denylist was silently off.
+#
+#    `.githooks/` is not skipped: the skip ("the hooks document token formats")
+#    switched the personal denylist off for the hooks too, and they are published
+#    to the public remote with whatever was written into them.
 sp="$REPO/.sanitize-patterns"
 pat=$(mktemp 2>/dev/null || echo "$REPO/.sanitize-patterns.tmp")
 if ! secret_scan_denylist "$sp" "$pat"; then
@@ -141,7 +145,7 @@ if ! secret_scan_denylist "$sp" "$pat"; then
 elif [ ! -f "$sp" ]; then
   echo "WARN: no .sanitize-patterns in $(basename "$REPO") — personal-denylist check skipped"
 fi
-if ! hits=$(secret_scan_range "$SCAN_RANGE" ".githooks/" "$pat"); then
+if ! hits=$(secret_scan_range "$SCAN_RANGE" "" "$pat"); then
   echo "BLOCKED: possible secret/token or personal data (.sanitize-patterns) in the publication:"
   printf '%s\n' "$hits" | sed 's/^/  /'; fail=1
 elif [ -n "$hits" ]; then

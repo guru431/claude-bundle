@@ -196,7 +196,7 @@ done < "$tmpdir/tags"
 # reads them all in a few `cat-file --batch` streams instead of a dozen process
 # spawns per blob (~160ms each on Windows — minutes on a first push), and step 4
 # spends the precise pass on its answer alone. Deliberately OVER-eager: it
-# ignores the allow marker and the .githooks/ exclusion, so a false alarm costs
+# ignores the allow marker and the placeholder filter, so a false alarm costs
 # one precise pass, never a wrong verdict — and a clean push exits right now.
 #
 # A blob that opens with a UTF-16 BOM is always a suspect. This step used to
@@ -230,10 +230,6 @@ fi
 # is lost when it exits.
 awk 'NR == FNR { s[$1] = 1; next } $2 == "blob" && ($1 in s)' "$tmpdir/suspects" "$typed" > "$tmpdir/suspect-typed"
 while read -r sha _type _size path; do
-  # .githooks/ documents token FORMATS on purpose — same exclusion as
-  # pre-commit and the CI secret guard.
-  case "$path" in .githooks/*) continue ;; esac
-
   # Read once, checked against both tables. secret_scan_text decodes UTF-16 and
   # scans binary content as bytes — `grep -I` used to call such a blob "clean"
   # right after step 3 had flagged it, and the push went through in silence.

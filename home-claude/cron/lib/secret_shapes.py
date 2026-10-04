@@ -92,6 +92,13 @@ def _shape(name, ere, py=None, roles=("scan", "mask", "leak"),
                  redaction, bounded)
 
 
+# Scheme and user of a connection string — shared by the `db-url-credentials`
+# shape and the placeholder list (`uri_placeholder_ere`), so the two cannot
+# drift apart.
+_DB_URL_HEAD_ERE = (r"(postgres|postgresql|mysql|mongodb\+srv|mongodb|redis|amqp)://"
+                    r"[^:@/[:space:]]+:")
+
+
 # Order matters for masking only: the specific formats run before the generic
 # `name = value` rule, so a recognised token gets a named marker rather than the
 # anonymous one.
@@ -163,9 +170,10 @@ SHAPES: tuple[Shape, ...] = (
            redaction="[REDACTED-API-KEY]", bounded=True),
     # A connection string carries the password inline; the generic `name = value`
     # rule below never sees it because the password has no name of its own.
+    # The shell gates drop a match whose password is a textbook placeholder —
+    # see URI_PLACEHOLDER_PASSWORDS.
     _shape("db-url-credentials",
-           r"(postgres|postgresql|mysql|mongodb\+srv|mongodb|redis|amqp)://"
-           r"[^:@/[:space:]]+:[^@/[:space:]]+@",
+           _DB_URL_HEAD_ERE + r"[^@/[:space:]]+@",
            py=r"(?:postgres|postgresql|mysql|mongodb\+srv|mongodb|redis|amqp)://"
               r"[^:@/\s]+:[^@/\s]+@",
            redaction="[REDACTED-DB-URL]"),
@@ -211,6 +219,43 @@ SHAPES: tuple[Shape, ...] = (
     _shape("airtable-pat",
            r"pat[A-Za-z0-9]{14}\.[0-9a-f]{64}",
            redaction="[REDACTED-AIRTABLE-TOKEN]", bounded=True),
+    # Seven more vendor prefixes that passed every detector: OpenCode console,
+    # Groq, NVIDIA, Jina, Tavily and Replicate keys and a Google OAuth client
+    # secret. (OpenRouter, MiniMax and Helicone keys start with `sk-` and are
+    # already caught by `openai-style-key`.) `oc_sk_` needs its left boundary
+    # most: without it the tail of `alloc_sk_buffer_…` in any kernel source
+    # would read as a key.
+    _shape("opencode-console-key",
+           r"oc_sk_[A-Za-z0-9_-]{24,}",
+           redaction="[REDACTED-API-KEY]", bounded=True),
+    _shape("groq-key",
+           r"gsk_[A-Za-z0-9]{48,}",
+           redaction="[REDACTED-API-KEY]", bounded=True),
+    _shape("nvidia-key",
+           r"nvapi-[A-Za-z0-9_-]{60,}",
+           redaction="[REDACTED-API-KEY]", bounded=True),
+    _shape("jina-key",
+           r"jina_[A-Za-z0-9]{40,}",
+           redaction="[REDACTED-API-KEY]", bounded=True),
+    _shape("tavily-key",
+           r"tvly-([a-z]+-)?[A-Za-z0-9]{24,}",
+           py=r"tvly-(?:[a-z]+-)?[A-Za-z0-9]{24,}",
+           redaction="[REDACTED-API-KEY]", bounded=True),
+    _shape("replicate-token",
+           r"r8_[A-Za-z0-9]{37,}",
+           redaction="[REDACTED-API-KEY]", bounded=True),
+    _shape("google-oauth-secret",
+           r"GOCSPX-[A-Za-z0-9_-]{24,}",
+           redaction="[REDACTED-GOOGLE-OAUTH-SECRET]", bounded=True),
+    # A WireGuard private key is 32 bytes of base64 (43 characters and `=`),
+    # indistinguishable from any other base64 hash on its own, so the shape holds
+    # on to the field name: `option private_key '…'` (OpenWrt UCI) and
+    # `PrivateKey = …` (wg-quick). The last character before `=` carries 4 data
+    # bits and 2 zero bits — hence its class.
+    _shape("wireguard-private-key",
+           r"(private_key|PrivateKey)[^A-Za-z0-9]{0,6}[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=",
+           py=r"(?:private_key|PrivateKey)[^A-Za-z0-9]{0,6}[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=",
+           redaction="[REDACTED-WIREGUARD-KEY]"),
     # NOT a secret format, so it never blocks a commit — but an internal address
     # copied into the AGENTS.md of a repo with a public remote is exactly the
     # class of thing this bundle exists to keep out of public files.
@@ -244,6 +289,21 @@ SHAPES: tuple[Shape, ...] = (
            roles=("leak",),
            redaction="[REDACTED]", bounded=True),
 )
+
+
+# Placeholder passwords in a connection string. `postgres://user:password@localhost`
+# is the textbook README example, and anything that generates text — a code
+# review, a summary of an article — quotes it all the time; every such quote
+# stopped the nightly push. ERE has no lookahead for "any password but these",
+# so the shell gates remove such a match AFTER grep (secret_scan_drop_placeholders):
+# a line stays a hit when anything else on it still matches. The list is short
+# and exact ON PURPOSE — it weakens the guard, and every entry must be something
+# that is not a password: a few placeholder words, asterisks, a `<placeholder>`
+# and a `$VAR` / `${VAR}` reference (the password class above admits both).
+# Shell-only, so POSIX ERE; nothing compiles it in Python.
+URI_PLACEHOLDER_PASSWORDS: tuple[str, ...] = (
+    "pass", "password", "passwd", "pwd", "secret", "changeme", r"\*+",
+    r"<[A-Za-z0-9_.-]*>", r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
 
 
 # ── Sensitive FILE NAMES (a different question from "does this line look like a
@@ -385,6 +445,11 @@ def shell_ere() -> str:
     return "|".join(_bound_ere(s) for s in shapes("scan"))
 
 
+def uri_placeholder_ere() -> str:
+    """`SECRET_SCAN_URI_PLACEHOLDER`: a connection string with a placeholder password."""
+    return _DB_URL_HEAD_ERE + "(" + "|".join(URI_PLACEHOLDER_PASSWORDS) + ")@"
+
+
 def scan_regex() -> re.Pattern:
     """Python equivalent of the shell scan pattern (for tests and tooling)."""
     return re.compile("|".join(f"(?:{_bound_py(s)})" for s in shapes("scan")))
@@ -421,5 +486,7 @@ if __name__ == "__main__":  # prints whichever generated table the guard needs
         print(sensitive_path_ere())
     elif which == "paths-allow":
         print(sensitive_path_allow_ere())
+    elif which == "placeholder":
+        print(uri_placeholder_ere())
     else:
         print(shell_ere())

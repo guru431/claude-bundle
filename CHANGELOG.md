@@ -90,6 +90,50 @@ The short list; UPGRADING.md has the steps.
   same-named task whose description does not START with the marker is foreign
   (`-Adopt` to take it over). **`ClaudeTaskMonitor`** reports a calendar task
   Task Scheduler killed (`267014`), which it used to count as a success.
+- **Eight more key shapes** block commits and pushes and are masked: OpenCode
+  console, Groq, NVIDIA, Jina, Tavily and Replicate keys, Google OAuth client
+  secrets and WireGuard private keys. A repository that already carries one
+  fails the push guards on the next commit that touches the file — except the
+  nightly sweep, which lets a token through when the remote branch already
+  holds it.
+- **The hooks scan `.githooks/` too**, so the personal denylist now reads the
+  hooks a repository publishes; github-push.sh no longer skips them either.
+
+### Ported from the meta-repo: the secret gates
+
+The comparison of the secret-gate files the bundle shares with the meta-repo.
+Each fix comes with a test that fails on the code it replaces.
+
+- **`git-push-all.sh` failed every repository whose `.env` is gitignored** —
+  nearly all of them: the exclusion `:!.env` names an ignored path explicitly,
+  `git add` exits 1, and the exit code is checked since the merge/rebase port
+  in this release. The top-level `.env` is now excluded as `:(exclude,glob)**/.env`
+  (same set, rc 0).
+- **Sensitive names: the full table for NEW paths only.** The staged guard
+  applied it to every staged state, so an edit of a tracked `*.key` or `.npmrc`
+  failed the repo every night; now the `.env` family counts in any state and
+  the rest only when added or renamed. The outgoing name check lets through a
+  path the remote branch already has (the `.env` family excepted), and tracked
+  `.env.example` / `.env.template` edits are committed instead of hanging
+  uncommitted behind the `.env.*` pathspec.
+- **A token the remote branch already holds no longer blocks the nightly push**:
+  every new blob of a file that has carried one for months used to fail the repo.
+  A hit passes only when each of its tokens is found in `<remote>/<branch>`
+  (`hit_is_published`); a new token, a scan error, or a first push of the branch
+  still blocks.
+- **Placeholder passwords in connection strings pass.** `postgres://user:password@`
+  from a README, `<password>`, `***`, `$VAR` / `${VAR}`: a short, exact list
+  (`URI_PLACEHOLDER_PASSWORDS`, generated into `SECRET_SCAN_URI_PLACEHOLDER`) is
+  dropped after grep by `secret_scan_drop_placeholders`; anything else on the
+  line keeps it a hit.
+- **commit-msg scans `#` lines when git keeps them.** With `-F` or `-m` git
+  stores a `#` line as written; only the editor template (recognised by git's
+  own hint) and everything under the scissors line are skipped now.
+- **`.githooks/` is no longer excluded** from pre-commit, pre-push and
+  github-push.sh: the exclusion was for the token table, and it switched the
+  personal denylist off for the hooks as well.
+- Eight key shapes (above); `test_guard_protected.sh` checks that the guard
+  fails closed without the scan library.
 
 ### Ported from the meta-repo: the scheduler contour
 

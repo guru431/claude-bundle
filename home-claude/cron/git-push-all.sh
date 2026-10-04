@@ -93,7 +93,16 @@ PROTECTED_RE='(^|/)(FINDINGS\.md|AGENTS\.md|CLAUDE\.md|registry\.yaml|project-kn
 # behind inside a project, and a nightly commit of it publishes a half-written
 # copy of the document. Both spellings of each: without the `**/` form a pattern
 # matches at the top level only, and without the bare one never at the top.
-SWEEP_EXCLUDES=(':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' ':!.md2pdf-*' ':!**/.md2pdf-*')
+# The top-level `.env` is the exception, spelled in glob magic: an exclusion with
+# no wildcard is an explicit mention of the path to git, and when that `.env` is
+# in .gitignore (nearly everywhere) `git add` stages everything else and exits 1
+# — which the exit-code check below reads as a failed stage, so every such repo
+# went FAILED. In glob mode `**/` also matches zero directories: same set, rc 0.
+SWEEP_EXCLUDES=(':(exclude,glob)**/.env' ':!.env.*' ':!**/.env' ':!**/.env.*' ':!.md2pdf-*' ':!**/.md2pdf-*')
+
+# The `.env` family alone, for a staged path in ANY state — see
+# staged_sensitive_paths for why the full table is not applied to every state.
+SENSITIVE_ENV_RE='(^|/)\.env(\.[^/]+)?$'
 
 # Sensitive paths, from the shared table (cron/lib/secret-scan.sh, generated out
 # of secret_shapes.py). Three private copies of this list used to exist and they
@@ -112,6 +121,34 @@ SWEEP_EXCLUDES=(':!.env' ':!.env.*' ':!**/.env' ':!**/.env.*' ':!.md2pdf-*' ':!*
 # are unstaged again before the repo is failed, because staging them was this
 # run's doing: left in the index, gitignoring the file would not have fixed the
 # next night. Returns non-zero so the caller counts the repo as failed.
+#
+# Which staged names count, as two lists (staged_sensitive_paths below):
+#   ACMR + the .env family — a file in ANY state: a `.env` is never legitimately
+#                            tracked, so this one can be strict;
+#   AR   + the full table  — a NEW path only (added or renamed). Applied to every
+#                            state, the full table failed, every night, a
+#                            repository that legitimately TRACKS a `*.key` or an
+#                            `.npmrc`: an edit of such a file is an M, not an A.
+# Templates (`.env.example` and friends) pass both: the sweep stages edits to the
+# tracked ones itself. Non-zero — the names could not be listed or checked.
+staged_sensitive_paths() {
+    local acmr ar narrow wide rc=0
+    acmr=$(secret_scan_git_paths diff --cached --name-only --diff-filter=ACMR 2>/dev/null) || return 2
+    ar=$(secret_scan_git_paths diff --cached --name-only --diff-filter=AR 2>/dev/null) || return 2
+    narrow=$(printf '%s\n' "$acmr" | grep -aiE -e "$SENSITIVE_ENV_RE") || rc=$?
+    [ "$rc" -le 1 ] || return 2
+    if [ -n "$narrow" ]; then
+        rc=0
+        narrow=$(printf '%s\n' "$narrow" | grep -aivE -e "$SENSITIVE_PATH_ALLOW") || rc=$?
+        [ "$rc" -le 1 ] || return 2
+    fi
+    rc=0
+    wide=$(printf '%s\n' "$ar" | secret_scan_paths) || rc=$?
+    [ "$rc" -le 1 ] || return 2
+    printf '%s\n%s\n' "$narrow" "$wide" | grep -v '^$' | sort -u
+    return 0
+}
+
 guard_staged_sensitive() {
     local label="$1" swept="${2:-0}"
     local staged p
@@ -124,16 +161,10 @@ guard_staged_sensitive() {
     # default, and the anchored table never matched `"\320\277…/.env"`.
     # The list and the verdict are read separately: in one pipe a git that
     # failed (index.lock, a full disk) handed the table nothing, and "no
-    # sensitive paths" came out for names nobody had read. rc 1 is a hit; rc 2
-    # is a scan that did not run — both fail the repo.
-    local listed rc=0
-    if ! listed=$(secret_scan_git_paths diff --cached --name-only --diff-filter=ACMR 2>/dev/null); then
-        echo "[$label] SECRET-SCAN: git could not list the staged names — repo FAILED, nothing committed (fail closed)" >> "$LOG_FILE"
-        return 1
-    fi
-    staged=$(printf '%s\n' "$listed" | secret_scan_paths) || rc=$?
-    if [ "$rc" -gt 1 ]; then
-        echo "[$label] SECRET-SCAN: the staged names could not be checked — repo FAILED, nothing committed (fail closed)" >> "$LOG_FILE"
+    # sensitive paths" came out for names nobody had read — a list that could
+    # not be built or checked fails the repo.
+    if ! staged=$(staged_sensitive_paths); then
+        echo "[$label] SECRET-SCAN: the staged names could not be listed or checked — repo FAILED, nothing committed (fail closed)" >> "$LOG_FILE"
         return 1
     fi
     [ -z "$staged" ] && return 0
@@ -273,7 +304,9 @@ guard_secrets_preview() {
     hits="${hits:+$hits${bin_hits:+
 }}$bin_hits"
     untracked=$(secret_scan_git_paths ls-files --others --exclude-standard -- "${SWEEP_EXCLUDES[@]}" 2>/dev/null)
-    bad=$( { secret_scan_git_paths diff HEAD --name-only --diff-filter=ACMR -- "${SWEEP_EXCLUDES[@]}"
+    # New paths only, as in staged_sensitive_paths: an edit of a tracked `*.key`
+    # is not a sensitive name entering the repository.
+    bad=$( { secret_scan_git_paths diff HEAD --name-only --diff-filter=AR -- "${SWEEP_EXCLUDES[@]}"
              printf '%s\n' "$untracked"; } 2>/dev/null | secret_scan_paths)
     if [ -n "$bad" ]; then
         echo "[$label] [DRY] sensitive path(s) in the working tree — the real run WOULD FAIL this repo:" >> "$LOG_FILE"
@@ -324,6 +357,26 @@ vault_value_scan() {
     return "$rc"
 }
 
+# 0 — every token on the hit line $2 is already in the tree $1: the remote holds
+# it, and publishing it again reveals nothing. 1 — anything else: a token the
+# tree lacks, a line with no token at all (`scan-error:`), a git grep that
+# failed. Only an exact "every one was found" counts as published.
+# Args: <published ref> <hit line>
+hit_is_published() {
+    local ref="$1" toks tok
+    toks=$(printf '%s\n' "$2" | grep -aoE -e "$SECRET_SCAN_PATTERN") || return 1
+    [ -n "$toks" ] || return 1
+    while IFS= read -r tok; do
+        # A bounded branch consumes the character before the token (on the hit
+        # line, the `:` after the line number), the Telegram branch the one after
+        # it as well. Trimming one such character leaves a substring of the token.
+        tok=${tok#[!A-Za-z0-9_-]}
+        tok=${tok%[!A-Za-z0-9_-]}
+        [ -n "$tok" ] && git grep -q -F -e "$tok" "$ref" -- 2>/dev/null || return 1
+    done < <(printf '%s\n' "$toks")
+    return 0
+}
+
 # Outgoing-commit guard: scan everything this push would publish, not just the
 # diff we are about to stage. guard_secrets only ever sees the staged tree, so a
 # repo with a CLEAN working tree and an unpushed commit — committed by hand, by
@@ -359,6 +412,26 @@ guard_outgoing_secrets() {
     else
         names=$(printf '%s\n' "$paths" | secret_scan_paths) || true   # rc-ok: the verdict is the output — offending names or a scan-error line
     fi
+    # The remote branch, when it exists, is what has already been published: an
+    # edit of a file it holds, a key it already carries, is not a NEW
+    # publication. Without that, every edit of a tracked `*.key`, or of a file
+    # that has carried a token on the remote for months, failed the repo every
+    # night — the outgoing walk sees each new blob of such a file. A first push
+    # of the branch is checked whole.
+    local published_ref=""
+    git rev-parse -q --verify "$remote/$branch^{commit}" >/dev/null 2>&1 && published_ref="$remote/$branch"
+    if [ -n "$names" ] && [ -n "$published_ref" ]; then
+        # The .env family counts in any state, as in staged_sensitive_paths.
+        # MSYS_NO_PATHCONV: Git Bash rewrites `origin/main:path` into a list of
+        # Windows paths (`origin\main;path`), and cat-file found nothing.
+        names=$(printf '%s\n' "$names" | while IFS= read -r p; do
+            case "$p" in ''|scan-error:*) printf '%s\n' "$p"; continue ;; esac
+            if printf '%s\n' "$p" | grep -qaiE -e "$SENSITIVE_ENV_RE" \
+                || ! MSYS_NO_PATHCONV=1 git cat-file -e "$published_ref:$p" 2>/dev/null; then
+                printf '%s\n' "$p"
+            fi
+        done | grep -v '^$')
+    fi
     if [ -n "$names" ]; then
         echo "[$label] SENSITIVE file name(s) in OUTGOING commits — push blocked:" >> "$LOG_FILE"
         printf '%s\n' "$names" | sed 's/^/    /' >> "$LOG_FILE"
@@ -374,9 +447,34 @@ guard_outgoing_secrets() {
     # Its exit status decides, not whether it printed: it also prints a NOTE when
     # a blob over 1 MiB was not scanned, and gating on output turned that note
     # into a blocked push — a repository with one large asset failed every night.
+    #
+    # A hit whose every token the remote branch already holds is logged and let
+    # through (hit_is_published); a note stays a note. Anything else — a new
+    # token, a `scan-error:` line, a failure with nothing to show for it — blocks.
     if ! hits=$(secret_scan_range "$range"); then
-        echo "[$label] SECRET-shaped token in OUTGOING commits — push blocked:" >> "$LOG_FILE"
-        blocked=1
+        local line n kept="" published=""
+        if [ -n "$published_ref" ]; then
+            while IFS= read -r line; do
+                [ -n "$line" ] || continue
+                n=${line#note: }
+                n=${n%" blob(s) over 1 MiB were NOT scanned"}
+                case "$n" in
+                    ''|*[!0-9]*) ;;
+                    *) [ "$line" = "note: $n blob(s) over 1 MiB were NOT scanned" ] && continue ;;
+                esac
+                if hit_is_published "$published_ref" "$line"; then
+                    published="$published$line"$'\n'
+                else
+                    kept="$kept$line"$'\n'
+                fi
+            done <<< "$hits"
+        fi
+        if [ -n "$published" ] && [ -z "$kept" ]; then
+            echo "[$label] already on $published_ref — publishing it again does not block:" >> "$LOG_FILE"
+        else
+            echo "[$label] SECRET-shaped token in OUTGOING commits — push blocked:" >> "$LOG_FILE"
+            blocked=1
+        fi
     fi
     [ -n "$hits" ] && printf '%s\n' "$hits" | sed 's/^/    /' >> "$LOG_FILE"
     # The exact VALUES of the keys in .env, over the same range: a key whose
@@ -531,6 +629,23 @@ push_repo() {
             # commit" — a green night with the work still on the box.
             if ! git add --all -- "${SWEEP_EXCLUDES[@]}" >> "$LOG_FILE" 2>&1; then
                 echo "[$label] FAILED to stage (git add rc!=0: no space / index.lock / permissions?)" >> "$LOG_FILE"
+                restore_index "$label" "$index_file" "$index_saved"
+                failed=$((failed + 1))
+                failed_repos="${failed_repos:+$failed_repos, }$label"
+                return
+            fi
+            # Tracked templates (`.env.example`, `.env.*.example`, `.env.template`,
+            # `.env.sample`) are excluded by the `.env.*` pathspec above along with
+            # the real thing: an edit to one stayed uncommitted for good. Only what
+            # is already tracked is staged (ls-files) — in recent git a pathspec
+            # nothing matches is an error.
+            local tpl=() p
+            while IFS= read -r p; do
+                [ -n "$p" ] && tpl+=(":(literal)$p")
+            done < <(secret_scan_git_paths ls-files -- '.env.*' '**/.env.*' 2>/dev/null \
+                | grep -aiE -e "$SENSITIVE_PATH_ALLOW")
+            if [ "${#tpl[@]}" -gt 0 ] && ! git add -u -- "${tpl[@]}" >> "$LOG_FILE" 2>&1; then
+                echo "[$label] FAILED to stage the tracked .env templates (git add -u rc!=0)" >> "$LOG_FILE"
                 restore_index "$label" "$index_file" "$index_saved"
                 failed=$((failed + 1))
                 failed_repos="${failed_repos:+$failed_repos, }$label"

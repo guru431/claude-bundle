@@ -366,4 +366,67 @@ reset_counters; push_repo "$TMP/no-such-dir" "r24" "Auto-commit: test"
 [ "$failed" = "1" ] || fail "T24: cd failure was not FAILED (failed=$failed skipped=$skipped)"
 cd "$TMP" || exit 1
 
-echo "PASS: push_repo (25 scenarios)"
+# === Test 25: a gitignored .env is the normal case, not a failed stage ===
+# An exclusion with no wildcard (':!.env') is an explicit mention of an ignored
+# path to git: `git add` staged everything else and exited 1, and since the exit
+# code is checked every repo with .env in .gitignore went FAILED.
+R25="$TMP/r25"; mkrepo "$R25"
+echo .env > "$R25/.gitignore"; git -C "$R25" add -A; git -C "$R25" commit -qm gi
+git -C "$R25" push -q origin "$(br "$R25")"
+echo "SECRET=abc" > "$R25/.env"; echo code25 > "$R25/app25.py"
+: > "$LOG_FILE"
+reset_counters; push_repo "$R25" "r25" "Auto-commit: test"
+[ "$failed" = "0" ] || fail "T25: a gitignored .env failed the stage (failed=$failed)"
+[ "$pushed" = "1" ] || fail "T25: the repo was not pushed (pushed=$pushed)"
+git -C "$R25" show --name-only --format= HEAD | grep -qx 'app25.py' || fail "T25: app25.py not committed"
+
+# === Test 26: an edit of a TRACKED sensitive-named file is committed and pushed ===
+# The full name table on every staged state failed, every night, a repository
+# that legitimately tracks a `*.key`: an edit is an M, not a new name.
+R26="$TMP/r26"; mkrepo "$R26"
+echo "public test key" > "$R26/site.key"; git -C "$R26" add -A; git -C "$R26" commit -qm key
+git -C "$R26" push -q origin "$(br "$R26")"
+echo "rotated test key" > "$R26/site.key"
+reset_counters; push_repo "$R26" "r26" "Auto-commit: test"
+[ "$pushed" = "1" ] || fail "T26: an edit of a tracked .key was blocked (failed=$failed)"
+# A NEW sensitive name is still refused.
+echo "another" > "$R26/other.key"
+reset_counters; push_repo "$R26" "r26" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T26: a new .key was not refused (failed=$failed pushed=$pushed)"
+
+# === Test 27: tracked .env templates are committed; the real .env is not ===
+# The `.env.*` pathspec excluded the templates too, and their edits stayed
+# uncommitted for good.
+R27="$TMP/r27"; mkrepo "$R27"; mkdir -p "$R27/sub"
+echo 'KEY=' > "$R27/.env.example"; echo 'KEY=' > "$R27/sub/.env.template"
+git -C "$R27" add -A; git -C "$R27" commit -qm tpl; git -C "$R27" push -q origin "$(br "$R27")"
+echo 'KEY=changeme' > "$R27/.env.example"; git -C "$R27" add .env.example    # by hand
+echo 'KEY=changeme' > "$R27/sub/.env.template"                               # not staged
+echo 'SECRET=abc' > "$R27/.env"
+reset_counters; push_repo "$R27" "r27" "Auto-commit: test"
+{ [ "$failed" = "0" ] && [ "$pushed" = "1" ]; } || fail "T27: templates failed the repo (failed=$failed pushed=$pushed)"
+F27=$(git -C "$R27" show --name-only --format= HEAD)
+printf '%s\n' "$F27" | grep -qx '.env.example'      || fail "T27: .env.example not committed"
+printf '%s\n' "$F27" | grep -qx 'sub/.env.template' || fail "T27: sub/.env.template not committed"
+printf '%s\n' "$F27" | grep -qx '.env'              && fail "T27: .env reached the commit"
+
+# === Test 28: a token the remote already holds does not block an edit ===
+# The outgoing walk sees every new blob of a file, so one edit of a file that has
+# carried a token on the remote for months failed the repo every night.
+R28="$TMP/r28"; mkrepo "$R28"
+printf 'a = 1\ntoken = "ghp_%s"\n' "0123456789abcdefghij0123456789" > "$R28/legacy.py"
+git -C "$R28" add -A; git -C "$R28" commit -qm legacy
+git -C "$R28" push -q origin "$(br "$R28")"                      # already published
+printf 'b = 2\n' >> "$R28/legacy.py"; git -C "$R28" commit -qam edit
+: > "$LOG_FILE"
+reset_counters; push_repo "$R28" "r28" "Auto-commit: test"
+[ "$pushed" = "1" ] || fail "T28: an edit next to a published token was blocked (failed=$failed)"
+grep -q "already on origin/" "$LOG_FILE" || fail "T28: the log does not say the token was already published"
+# A NEW token next to it still blocks.
+printf 'token2 = "ghp_%s"\n' "9876543210abcdefghij9876543210" >> "$R28/legacy.py"
+git -C "$R28" commit -qam new
+reset_counters; push_repo "$R28" "r28" "Auto-commit: test"
+[ "$failed" = "1" ] || fail "T28: a new token was pushed (pushed=$pushed)"
+cd "$TMP" || exit 1
+
+echo "PASS: push_repo (29 scenarios)"

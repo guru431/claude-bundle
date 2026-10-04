@@ -11,6 +11,9 @@
 #   SENSITIVE_PATH_PATTERN     — repository paths that must never be committed
 #   SENSITIVE_PATH_ALLOW       — `.env.example` and friends, which may be committed
 #   SECRET_SCAN_ALLOW          — inline marker that exempts a single line
+#   SECRET_SCAN_URI_PLACEHOLDER — a connection string with a placeholder password
+#   secret_scan_drop_placeholders — drop hit lines whose only match is such a
+#                                placeholder (every token scanner below applies it)
 #   secret_scan_decode         — copy stdin to stdout, transcoding UTF-16 to
 #                                UTF-8 first when the input carries a UTF-16 BOM.
 #                                The one place that knows about UTF-16, so every
@@ -65,7 +68,9 @@
 # live keys, Google API keys, SendGrid, HuggingFace and npm tokens, CCR keys,
 # database URLs carrying an inline password, Azure account keys, JWTs, GCP
 # service account keys, Telegram bot tokens, VK and Yandex OAuth tokens, Google
-# refresh tokens and Airtable personal access tokens.
+# refresh tokens, Airtable personal access tokens, OpenCode console, Groq,
+# NVIDIA, Jina, Tavily and Replicate keys, Google OAuth client secrets and
+# WireGuard private keys (by field name).
 #
 # Prefix shapes carry an explicit left boundary — `(^|[^A-Za-z0-9_-])` — so
 # `sk-…` no longer fires inside `task-management-system-v2` and `ccr-…` no
@@ -79,7 +84,7 @@
 # tests/test_guards.py fails if the two ever differ. The literal is kept because
 # a POSIX shell hook must work with no Python on PATH — but it is a COPY, and
 # the copy is checked. Regenerate it, never hand-edit it.
-SECRET_SCAN_PATTERN='-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----|(^|[^A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}|(^|[^A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9_-])(AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}|aws_secret_access_key[[:space:]]*=[[:space:]]*[A-Za-z0-9/+=]{40}|(^|[^A-Za-z0-9_-])xox[baprse]-[A-Za-z0-9-]{10,}|hooks\.slack\.com/services/[A-Za-z0-9/+]{20,}|(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])[sr]k_live_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9_-])AIza[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])hf_[A-Za-z0-9]{30,}|(^|[^A-Za-z0-9_-])npm_[A-Za-z0-9]{36}|(^|[^A-Za-z0-9_-])ccr-[A-Za-z0-9]{8,}|(postgres|postgresql|mysql|mongodb\+srv|mongodb|redis|amqp)://[^:@/[:space:]]+:[^@/[:space:]]+@|AccountKey=[A-Za-z0-9+/=]{40,}|(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|"private_key_id"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"|(^|[^A-Za-z0-9_-])[0-9]{8,10}:[A-Za-z0-9_-]{35}([^A-Za-z0-9_-]|$)|(^|[^A-Za-z0-9_-])vk1\.a\.[A-Za-z0-9_-]{60,}|(^|[^A-Za-z0-9_-])y0_[A-Za-z0-9_-]{40,}|(^|[^A-Za-z0-9_-])1//0[A-Za-z0-9_-]{40,}|(^|[^A-Za-z0-9_-])pat[A-Za-z0-9]{14}\.[0-9a-f]{64}'
+SECRET_SCAN_PATTERN='-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----|(^|[^A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}|(^|[^A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9_-])(AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}|aws_secret_access_key[[:space:]]*=[[:space:]]*[A-Za-z0-9/+=]{40}|(^|[^A-Za-z0-9_-])xox[baprse]-[A-Za-z0-9-]{10,}|hooks\.slack\.com/services/[A-Za-z0-9/+]{20,}|(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])[sr]k_live_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9_-])AIza[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])hf_[A-Za-z0-9]{30,}|(^|[^A-Za-z0-9_-])npm_[A-Za-z0-9]{36}|(^|[^A-Za-z0-9_-])ccr-[A-Za-z0-9]{8,}|(postgres|postgresql|mysql|mongodb\+srv|mongodb|redis|amqp)://[^:@/[:space:]]+:[^@/[:space:]]+@|AccountKey=[A-Za-z0-9+/=]{40,}|(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|"private_key_id"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"|(^|[^A-Za-z0-9_-])[0-9]{8,10}:[A-Za-z0-9_-]{35}([^A-Za-z0-9_-]|$)|(^|[^A-Za-z0-9_-])vk1\.a\.[A-Za-z0-9_-]{60,}|(^|[^A-Za-z0-9_-])y0_[A-Za-z0-9_-]{40,}|(^|[^A-Za-z0-9_-])1//0[A-Za-z0-9_-]{40,}|(^|[^A-Za-z0-9_-])pat[A-Za-z0-9]{14}\.[0-9a-f]{64}|(^|[^A-Za-z0-9_-])oc_sk_[A-Za-z0-9_-]{24,}|(^|[^A-Za-z0-9_-])gsk_[A-Za-z0-9]{48,}|(^|[^A-Za-z0-9_-])nvapi-[A-Za-z0-9_-]{60,}|(^|[^A-Za-z0-9_-])jina_[A-Za-z0-9]{40,}|(^|[^A-Za-z0-9_-])tvly-([a-z]+-)?[A-Za-z0-9]{24,}|(^|[^A-Za-z0-9_-])r8_[A-Za-z0-9]{37,}|(^|[^A-Za-z0-9_-])GOCSPX-[A-Za-z0-9_-]{24,}|(private_key|PrivateKey)[^A-Za-z0-9]{0,6}[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]='
 
 # Sensitive FILE NAMES. Also DERIVED — `python cron/lib/secret_shapes.py paths`
 # and `… paths-allow` print these two lines, and tests/test_guards.py asserts it.
@@ -102,15 +107,24 @@ SENSITIVE_PATH_ALLOW='\.env(\.[A-Za-z0-9_-]+)?\.(example|sample|template|dist)$|
 # NEVER put this on a line carrying a real credential.
 SECRET_SCAN_ALLOW='secret-scan:allow'
 
+# A connection string whose password is a textbook placeholder —
+# `postgres://user:password@localhost` from somebody's README, `<password>`, a
+# shell-variable reference. Anything that generates text quotes it all the time, and each
+# quote stopped the nightly push. ERE cannot say "any password but these", so
+# secret_scan_drop_placeholders removes such a match AFTER grep. DERIVED:
+# `python cron/lib/secret_shapes.py placeholder`, compared byte for byte by
+# tests/test_guards.py — the list weakens the guard, so the copy must not widen.
+SECRET_SCAN_URI_PLACEHOLDER='(postgres|postgresql|mysql|mongodb\+srv|mongodb|redis|amqp)://[^:@/[:space:]]+:(pass|password|passwd|pwd|secret|changeme|\*+|<[A-Za-z0-9_.-]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)@'
+
 _secret_scan_sel() {
     # `grep "$@"` whose FAILURE cannot pass for "no match". Lines on stdin (or
     # the file among the arguments) → the selected lines on stdout, status 0.
     # When grep itself fails — rc 2 for a pattern it cannot compile or an I/O
     # error, 134 for the abort GNU grep 3.0 is known for — whatever it printed
     # is followed by a `scan-error:` line. Every caller blocks on any output, and
-    # the stage after it (`grep -v` for the allow marker) lets that line through.
-    # A bare `grep … || true` read rc 2 exactly like rc 1, and a scan that never
-    # ran said "clean".
+    # the stages after it (`grep -v` for the allow marker,
+    # secret_scan_drop_placeholders) let that line through. A bare `grep … ||
+    # true` read rc 2 exactly like rc 1, and a scan that never ran said "clean".
     _ssel_rc=0
     _ssel_out=$(grep "$@") || _ssel_rc=$?
     [ -z "$_ssel_out" ] || printf '%s\n' "$_ssel_out"
@@ -119,6 +133,38 @@ _secret_scan_sel() {
     fi
     unset _ssel_rc _ssel_out
     return 0
+}
+
+secret_scan_drop_placeholders() {
+    # Hit lines on stdin → the same lines, minus those whose only credential
+    # shape is a connection string with a placeholder password.
+    #
+    # The placeholder URIs are blanked out of a COPY of the lines, and a line
+    # stays a hit only when its copy still matches: a real password elsewhere on
+    # the line, or any other shape, keeps it. A fixed number of processes however
+    # many hits there are; nothing is spawned for a clean scan.
+    #
+    # A `scan-error:` line from an earlier stage always stays, and a grep that
+    # failed here keeps EVERY line: dropping is the one thing this filter does,
+    # and it must not drop on a verdict it never got.
+    _ssdp_in=$(cat)
+    if [ -z "$_ssdp_in" ]; then
+        unset _ssdp_in
+        return 0
+    fi
+    _ssdp_rc=0
+    _ssdp_keep=$(printf '%s\n' "$_ssdp_in" \
+        | sed -E "s#$SECRET_SCAN_URI_PLACEHOLDER# #g" \
+        | grep -naE -e "$SECRET_SCAN_PATTERN") || _ssdp_rc=$?
+    if [ "$_ssdp_rc" -gt 1 ]; then
+        printf '%s\n' "$_ssdp_in"
+        unset _ssdp_in _ssdp_keep _ssdp_rc
+        return 0
+    fi
+    _ssdp_keep=$(printf '%s\n' "$_ssdp_keep" | cut -d: -f1 | tr '\n' ' ')
+    printf '%s\n' "$_ssdp_in" \
+        | awk -v keep=" $_ssdp_keep" 'index(keep, " " NR " ") || /^scan-error: /'
+    unset _ssdp_in _ssdp_keep _ssdp_rc
 }
 
 secret_scan_diff() {
@@ -151,7 +197,8 @@ secret_scan_diff() {
         /^\+\+\+ /  { path = substr($0, 5); sub(/^b\//, "", path); next }
         /^\+/       { print path ": " $0 }' \
         | _secret_scan_sel -aE -e "$SECRET_SCAN_PATTERN" \
-        | _secret_scan_sel -avF -e "$SECRET_SCAN_ALLOW" || true)   # rc-ok: the verdict is the output; grep failures arrive as scan-error lines
+        | _secret_scan_sel -avF -e "$SECRET_SCAN_ALLOW" \
+        | secret_scan_drop_placeholders || true)   # rc-ok: the verdict is the output; grep failures arrive as scan-error lines
     if [ -n "$_ssd_hits" ]; then
         printf '%s\n' "$_ssd_hits"
         return 1
@@ -258,7 +305,8 @@ _secret_scan_grep() {
         # rc-ok below and in the text branch: _secret_scan_sel turns a failed
         # grep into a scan-error line, and any line here is a hit.
         if [ "$1" = token ]; then
-            _ssg_hits=$(_secret_scan_sel -aoE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp.nonul" || true)   # rc-ok: see above
+            _ssg_hits=$(_secret_scan_sel -aoE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp.nonul" \
+                | secret_scan_drop_placeholders || true)   # rc-ok: see above
         else
             _ssg_hits=$(_secret_scan_sel -aoiE -e "$_ssg_ere" "$_ssg_tmp.nonul" || true)   # rc-ok: see above
         fi
@@ -268,7 +316,7 @@ _secret_scan_grep() {
         fi
     elif [ "$1" = token ]; then
         _ssg_hits=$(_secret_scan_sel -naE -e "$SECRET_SCAN_PATTERN" "$_ssg_tmp.nonul" \
-            | _secret_scan_sel -avF -e "$SECRET_SCAN_ALLOW" || true)   # rc-ok: see above
+            | _secret_scan_sel -avF -e "$SECRET_SCAN_ALLOW" | secret_scan_drop_placeholders || true)   # rc-ok: see above
     else
         _ssg_hits=$(_secret_scan_sel -naiE -e "$_ssg_ere" "$_ssg_tmp.nonul" || true)   # rc-ok: see above
     fi
@@ -512,7 +560,7 @@ secret_scan_messages() {
     fi
     if [ -n "$_ssm_msgs" ]; then
         _ssm_hits=$(printf '%s\n' "$_ssm_msgs" | _secret_scan_sel -naE -e "$SECRET_SCAN_PATTERN" \
-            | _secret_scan_sel -avF -e "$SECRET_SCAN_ALLOW" || true)   # rc-ok: grep failures arrive as scan-error lines
+            | _secret_scan_sel -avF -e "$SECRET_SCAN_ALLOW" | secret_scan_drop_placeholders || true)   # rc-ok: grep failures arrive as scan-error lines
         if [ -n "$_ssm_hits" ]; then
             printf '%s\n' "$_ssm_hits" | sed 's/^/commit message: /'
             _ssm_fail=1
@@ -544,7 +592,8 @@ secret_scan_suspects() {
     #
     # Why nothing the precise pass would flag can be missing:
     #   * the stream grep sees each blob as its NUL-stripped bytes, line for line
-    #     — exactly what _secret_scan_grep greps — and honours no allow marker;
+    #     — exactly what _secret_scan_grep greps — and honours neither the allow
+    #     marker nor the placeholder filter;
     #   * a blob that opens with a UTF-16 BOM is ALWAYS a suspect. The precise
     #     pass transcodes it and no raw stream can stand in for that: a
     #     non-ASCII denylist entry takes two bytes per character there and never

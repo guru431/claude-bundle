@@ -58,4 +58,11 @@ git add --all
 guard_protected_deletions "testrepo2"
 git diff --cached --name-only | grep -q '^a\.txt$' || fail "a.txt unexpectedly unstaged"
 
+# --- Case: without the scan library the guard fails closed instead of letting
+# the deletion through (no secret_scan_git_paths → an empty deletion list) ---
+echo x > FINDINGS.md; git add -A; git commit -qm findings
+rm FINDINGS.md; git add --all
+( unset -f secret_scan_git_paths; guard_protected_deletions "testrepo2" ) \
+    && fail "guard passed without the secret-scan lib (must fail closed)"
+
 echo "PASS: guard_protected_deletions"

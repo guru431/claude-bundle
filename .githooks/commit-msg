@@ -28,14 +28,24 @@ fi
 
 fail=0
 
-# Comment lines are stripped by git before the message is stored, so a token in
-# one is never published — and the commit template itself carries example text.
+# Which lines git keeps depends on the cleanup mode, and the hook is not told it.
+# `#` lines are stripped only when the message is edited in the editor
+# (cleanup=strip). With `git commit -F` or `-m` — the usual way a script or an
+# agent writes a multi-line message — cleanup=whitespace applies and a `#` line
+# is stored as written; the old blanket `grep -v '^#'` never read it. The editor
+# mode is recognised by the hint git itself puts into the template:
+#   "with '#' will be ignored" — the `#` lines (status, Author:, the hint) are
+#     dropped, so they are not scanned: the template would match every time;
+#   "... will be kept" / "will be ignored" — everything under the scissors line
+#     (`commit -v`, --cleanup=scissors) is dropped by git as well.
+# No hint (-F, -m, a localised git) — everything is scanned: a false alarm here
+# is cheaper than a token in the history.
 #
-# Decode BEFORE stripping comments: an editor configured for UTF-16 (the default
-# of `>` and `Out-File` in Windows PowerShell 5.1) writes a message whose BOM and
-# NUL-interleaved bytes make every grep below see either binary or nothing.
-# -a: GNU grep drops a line it cannot decode, and a message line carrying a
-# CP1251 word and a token would have vanished before the scan.
+# Decode BEFORE looking for the hint: an editor configured for UTF-16 (the
+# default of `>` and `Out-File` in Windows PowerShell 5.1) writes a message whose
+# BOM and NUL-interleaved bytes make every grep below see either binary or
+# nothing. -a: GNU grep drops a line it cannot decode, and a message line
+# carrying a CP1251 word and a token would have vanished before the scan.
 #
 # rc 1 from grep — every line was a comment, the body is empty; rc 2 — grep did
 # not run, and an empty body would then be scanned as "clean". The decode is
@@ -44,11 +54,17 @@ if ! decoded=$(secret_scan_decode < "$msg_file"); then
   echo "BLOCKED: the commit message could not be read — it was NOT scanned."
   exit 1
 fi
-cm_rc=0
-body=$(printf '%s\n' "$decoded" | grep -av '^#') || cm_rc=$?
-if [ "$cm_rc" -gt 1 ]; then
-  echo "BLOCKED: grep failed (rc $cm_rc) — the commit message was NOT scanned."
-  exit 1
+body=$decoded
+if printf '%s\n' "$decoded" | grep -qE "^# (Lines starting )?with '#' will be (ignored|kept)"; then
+  body=$(printf '%s\n' "$decoded" | sed '/^# -* >8 -*$/,$d')
+fi
+if printf '%s\n' "$decoded" | grep -qE "^# (Lines starting )?with '#' will be ignored"; then
+  cm_rc=0
+  body=$(printf '%s\n' "$body" | grep -av '^#') || cm_rc=$?
+  if [ "$cm_rc" -gt 1 ]; then
+    echo "BLOCKED: grep failed (rc $cm_rc) — the commit message was NOT scanned."
+    exit 1
+  fi
 fi
 
 if ! hits=$(printf '%s\n' "$body" | secret_scan_text); then

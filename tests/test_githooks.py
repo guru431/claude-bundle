@@ -248,6 +248,41 @@ def test_commit_msg_refuses_to_run_with_an_invalid_denylist(guarded: Repo, tmp_p
     assert cp.returncode != 0, f"commit-msg passed with a broken denylist:\n{_out(cp)}"
 
 
+@integration
+def test_commit_msg_scans_hash_lines_of_a_message_given_with_F(guarded: Repo, tmp_path: Path):
+    """With `-F` or `-m` git keeps `#` lines (cleanup=whitespace), and the hook
+    stripped every one of them before the scan."""
+    guarded.write("a.txt", "a\n")
+    assert guarded.git("add", "-A").returncode == 0
+    msg = tmp_path / "msg.txt"
+    msg.write_bytes(f"subject\n\n# {TOKEN}\n".encode())
+    cp = guarded.git("commit", "-q", "-F", str(msg))
+    assert cp.returncode != 0, f"a token on a kept `#` line was committed:\n{_out(cp)}"
+
+
+@integration
+def test_commit_msg_ignores_hash_lines_the_editor_template_drops(guarded: Repo, tmp_path: Path):
+    """The other side: in the editor git drops `#` lines, so there is nothing to block."""
+    msg = tmp_path / "msg.txt"
+    msg.write_bytes(("subject\n\n# Please enter the commit message for your changes. Lines starting\n"
+                     "# with '#' will be ignored, and an empty message aborts the commit.\n"
+                     f"# {TOKEN}\n").encode())
+    cp = guarded.git("hook", "run", "commit-msg", "--", str(msg))
+    assert cp.returncode == 0, f"a `#` line git strips blocked the commit:\n{_out(cp)}"
+
+
+@integration
+def test_personal_denylist_reads_the_hooks_directory_too(guarded: Repo):
+    """Excluding `.githooks/` "because it documents token formats" switched the
+    personal denylist off for the hooks as well — and they are published."""
+    guarded.write(".sanitize-patterns", HOST + "\n")
+    guarded.write(".githooks/NOTES", f"deploy to {HOST}\n")
+    assert guarded.git("add", "-f", ".githooks/NOTES").returncode == 0
+    cp = guarded.git("commit", "-q", "-m", "notes")
+    assert cp.returncode != 0, f"a denylisted name in .githooks/ was committed:\n{_out(cp)}"
+    assert "sanitize-patterns" in _out(cp)
+
+
 # ── pre-push ────────────────────────────────────────────────────────────────
 
 @integration
@@ -502,6 +537,17 @@ def test_github_push_path_denylist_cannot_be_switched_off_by_accident(published:
 
 
 @integration
+def test_github_push_masks_a_token_in_the_remote_url(published: Repo):
+    """A remote set up as https://user:<PAT>@… printed the token into the console."""
+    secret = "Tk9" * 10
+    assert published.git("remote", "set-url", "github",
+                         f"https://u:{secret}@127.0.0.1:9/x.git").returncode == 0
+    cp = _check_only(published)
+    out = _out(cp)
+    assert "***@127.0.0.1" in out and secret not in out, out
+
+
+@integration
 def test_github_push_lets_the_commit_that_scrubs_a_name_through(published: Repo):
     published.write("docs/deploy.md", f"ssh {HOST}\n")
     published.plant()
@@ -643,6 +689,37 @@ def test_a_line_that_is_not_valid_utf8_is_still_scanned(tmp_path: Path):
                         'secret_scan_diff < cp1251.diff; echo "diff rc=$?"', env=env)
     out = _out(cp)
     assert "text rc=1" in out and "diff rc=1" in out, out
+
+
+# Assembled from pieces, like every fixture here: the literal would be caught by
+# the very guards this file tests.
+@integration   # a full text scan per case, 1-2 s on Windows
+@pytest.mark.parametrize("line", [
+    "DATABASE_URL=postgres://user:" + "password@localhost:5432/db",
+    "x `postgresql://user:" + "pass@host/db` y",
+    "redis://default:" + "***@cache:6379",
+    "postgresql://user:" + "<password>@host/db",
+    "mysql://app:" + "${DB_PASSWORD}@db/app",
+])
+def test_placeholder_password_in_a_connection_string_passes(tmp_path: Path, line: str):
+    """The textbook `user:password@` from a README stopped the nightly push."""
+    (tmp_path / "text").write_text(line + "\n", encoding="utf-8")
+    cp = _lib(tmp_path, 'secret_scan_text < text; echo "rc=$?"')
+    assert "rc=0" in _out(cp), _out(cp)
+
+
+@integration   # a full text scan per case, 1-2 s on Windows
+@pytest.mark.parametrize("line", [
+    "postgresql://user:" + "Xk9mQ2pL@host/db",
+    "postgres://u:" + "pass@a and postgresql://admin:" + "Real9Pw@db",
+    "postgres://user:" + "PASSWORD@host",
+    "postgres://user:" + "password@h " + TOKEN,
+])
+def test_real_password_in_a_connection_string_still_blocks(tmp_path: Path, line: str):
+    """The filter drops ONLY the placeholder: anything else on the line stays a hit."""
+    (tmp_path / "text").write_text(line + "\n", encoding="utf-8")
+    cp = _lib(tmp_path, 'secret_scan_text < text; echo "rc=$?"')
+    assert "rc=1" in _out(cp), _out(cp)
 
 
 # ── fail-closed: a grep or git that fails is not a clean scan ───────────────

@@ -83,6 +83,40 @@ The short list; UPGRADING.md has the steps.
 - **Both task monitors report changes that have not reached their remote for
   48 hours** — only while `ClaudeGitPushAll` is enabled.
 
+### Findings: 20 resolved, 15 declined
+
+The weekly code review filed 34 findings, and one about slow tests was open;
+each was checked against the code. Resolved, most with a regression test:
+
+- **`wiki-build-index.py`** replaces only the rows of the Stats table in
+  `wiki/index.md` — a note kept under it was deleted every night — and walks the
+  vault for backlinks once per run instead of twice.
+- **`append_fragment`** (compile-kb, compile-sessions): a retried article no
+  longer appends a page it created to itself under `## Update (…)`.
+- **`github-push.sh`** masks a token embedded in the `github` remote URL before
+  printing it.
+- **`git-push-all.sh`**: of two sweeps that find the same stale lock, the one
+  that loses the `mkdir` exits instead of running on unlocked.
+- **`check-io-matrix.py`** reads every place a `writes=` field names, not just
+  its first word; **`check-registry.py`** reports an empty or non-mapping
+  registry instead of a traceback.
+- **`log-retention.py`**: a bad retention window now reaches the run ledger
+  (exit 2 recorded) — it was read at import, before the record was opened.
+- **Seen-state files** of the Windows task monitor and `runs.py stale --seen`
+  are written through a temp file, as the POSIX monitor's already were.
+- **`claude-switch.ps1`**: a host value with two colons that is not an IPv6
+  address (`127.0.0.1:3456:1`) is refused as malformed.
+- **`config_report()`** tells a value from `.env` from one in the process
+  environment (`.env` / `env`, was `env/.env` for both).
+- Smaller: the file lock's wait uses the monotonic clock; `wiki-flush` survives
+  an unwritable log; `--demo` reports a phase timeout; test-sweep gives
+  discovered suites the same private pytest temp root as contract suites;
+  `get-key.ps1` exits 3 (not 1) when its `.env` parser is missing;
+  `save-cred.ps1` exits 1 when an overwrite is declined; `enable-guard.ps1` says
+  pushes are guarded too.
+- **Tests:** seven bash probes of `secret-scan.sh` that take 1–2.5 s on Windows
+  moved to `integration` (CI runs it on both platforms).
+
 ### CI: a slow call has to be slow twice
 
 On CI (`CI=1`) `tests/conftest.py` fails a fast-suite test whose call takes over

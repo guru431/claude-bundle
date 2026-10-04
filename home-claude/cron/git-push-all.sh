@@ -663,7 +663,14 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
         echo "=== git-push-all: another sweep is running (pid $(cat "$LOCK_DIR/pid")) — exiting ===" >> "$LOG_FILE"
         exit 0
     fi
-    rm -rf "$LOCK_DIR" && mkdir "$LOCK_DIR" 2>/dev/null || true
+    # A stale lock — its sweep died without the trap. Taken over strictly: of two
+    # sweeps that both found it stale, the one whose mkdir loses exits. With
+    # `|| true` here the loser carried on unlocked, beside the winner.
+    rm -rf "$LOCK_DIR"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo "=== git-push-all: lost the race for a stale lock to another sweep — exiting ===" >> "$LOG_FILE"
+        exit 0
+    fi
 fi
 echo "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
 trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM

@@ -87,9 +87,13 @@ def _load_dotenv() -> None:
             # either kind, mismatched ones included: `""x""` became x, `"x'` x.
             v = value.strip()
             os.environ[key] = v[1:-1] if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'" else v
+            _DOTENV_LOADED[key] = os.environ[key]
 
 
 _DOTENV_DUPLICATES: list[str] = []
+# What THIS file put into os.environ — what config_report() calls ".env", as
+# opposed to a value the caller's environment already had (or set later).
+_DOTENV_LOADED: dict[str, str] = {}
 _load_dotenv()
 
 
@@ -117,7 +121,11 @@ _FALSE_WORDS = {"0", "false", "no", "off", "disabled", "disable"}
 
 
 def _env_source(name: str) -> str:
-    return "env/.env" if os.environ.get(name) is not None else "default"
+    """Where a SET variable came from: `.env`, or the process environment (a CI
+    job, a wrapper's export, the scheduler). Both used to read "env/.env", so the
+    report pointed at the file for a value the file did not even hold."""
+    loaded = _DOTENV_LOADED.get(name)
+    return ".env" if loaded is not None and loaded == os.environ.get(name) else "env"
 
 
 def _env_bool(name: str, default: bool, *, on_invalid: bool | None = None) -> bool:
@@ -132,10 +140,10 @@ def _env_bool(name: str, default: bool, *, on_invalid: bool | None = None) -> bo
         return default
     word = raw.strip().lower()
     if word in _TRUE_WORDS:
-        _CONFIG_NOTES.append((name, "True", "env/.env"))
+        _CONFIG_NOTES.append((name, "True", _env_source(name)))
         return True
     if word in _FALSE_WORDS:
-        _CONFIG_NOTES.append((name, "False", "env/.env"))
+        _CONFIG_NOTES.append((name, "False", _env_source(name)))
         return False
     chosen = default if on_invalid is None else on_invalid
     msg = (f"{name}={raw!r} is not a boolean "
@@ -143,7 +151,7 @@ def _env_bool(name: str, default: bool, *, on_invalid: bool | None = None) -> bo
            f"— treating it as {chosen}")
     print(f"ERROR: {msg}", file=sys.stderr)
     _CONFIG_ERRORS.append(msg)
-    _CONFIG_NOTES.append((name, f"{chosen} (INVALID {raw!r})", "env/.env"))
+    _CONFIG_NOTES.append((name, f"{chosen} (INVALID {raw!r})", _env_source(name)))
     return chosen
 
 
@@ -170,9 +178,9 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
         msg = f"{name}={raw!r} {problem} — using the default {default}"
         print(f"ERROR: {msg}", file=sys.stderr)
         _CONFIG_ERRORS.append(msg)
-        _CONFIG_NOTES.append((name, f"{default} (INVALID {raw!r})", "env/.env"))
+        _CONFIG_NOTES.append((name, f"{default} (INVALID {raw!r})", _env_source(name)))
         return default
-    _CONFIG_NOTES.append((name, str(value), "env/.env"))
+    _CONFIG_NOTES.append((name, str(value), _env_source(name)))
     return value
 
 # The OTHER root. BUNDLE_ROOT is where the pipeline's own files live and moves
@@ -1109,7 +1117,10 @@ def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
 
     acquired = False
     token = b""
-    deadline = time.time() + wait
+    # Monotonic, as in _os_lock_acquire: an NTP step on the wall clock stretched
+    # or cut the wait by its size. time.time() stays for the lock file's AGE —
+    # an mtime is wall-clock by nature.
+    deadline = time.monotonic() + wait
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         while True:
@@ -1146,7 +1157,7 @@ def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
                         # ever, ignoring the wait the caller asked for and the
                         # fail-open this function promises. The nightly task
                         # then hung until the scheduler killed it.
-                        if time.time() >= deadline:
+                        if time.monotonic() >= deadline:
                             _lock_timeout_notice(label, wait, fail_open)
                             break
                         time.sleep(0.5)
@@ -1173,7 +1184,7 @@ def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
                           file=sys.stderr)
                     steal.unlink(missing_ok=True)
                     continue
-                if time.time() >= deadline:
+                if time.monotonic() >= deadline:
                     _lock_timeout_notice(label, wait, fail_open)
                     break
                 time.sleep(1.0)
@@ -2478,7 +2489,7 @@ else:
     print(f"ERROR: {_msg}", file=sys.stderr)
     _CONFIG_ERRORS.append(_msg)
 _CONFIG_NOTES.append(("WIKI_LLM_PROVIDER", LLM_PROVIDER,
-                      "env/.env" if _raw_provider else "default"))
+                      _env_source("WIKI_LLM_PROVIDER") if _raw_provider else "default"))
 
 # Derived constants (names kept for the _llm_* callers below).
 DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL = _provider_cfg("deepseek")
@@ -2884,9 +2895,9 @@ def config_report() -> list[str]:
         raw = (os.environ.get(name) or "").strip()
         resolved = resolver() or ""
         if raw and not os.path.isfile(raw):
-            source = f"env/.env — BUT {raw!r} IS NOT A FILE, fell back"
+            source = f"{_env_source(name)} — BUT {raw!r} IS NOT A FILE, fell back"
         elif raw:
-            source = "env/.env"
+            source = _env_source(name)
         else:
             source = "resolved from PATH"
         lines.append(f"{name:<17} = {resolved or 'NOT FOUND'}  ({source})")
@@ -3459,6 +3470,12 @@ def append_fragment(existing_body: str, fragment: str, date_str: str) -> str:
     Returns the existing body unchanged when the fragment is already present, so
     a replayed daily is idempotent.
     """
+    # Present as it was written, too: a page CREATED from this very fragment holds
+    # it untransformed — its own H1, its headings at their own level — so the
+    # transformed copy below never matched it, and a retried article (a sibling
+    # change rejected, the article not finalized) appended the page to itself.
+    if normalize_body(fragment).strip() in normalize_body(existing_body):
+        return existing_body
     fragment = _date_current_headings(_demote_headings(_strip_leading_h1(fragment.strip())),
                                       date_str)
     # Normalized on BOTH sides — the page holds the transformed text.

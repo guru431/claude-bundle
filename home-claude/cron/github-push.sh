@@ -59,7 +59,9 @@ BRANCH="${BRANCH_ARG:-$(git rev-parse --abbrev-ref HEAD)}"
 if ! git remote get-url github >/dev/null 2>&1; then
   echo "ERROR: $(basename "$REPO") has no remote 'github' — github-secondary scheme not configured"; exit 2
 fi
-GH_URL="$(git remote get-url github)"
+# A remote set up with a token in it (https://user:<PAT>@github.com/...) printed
+# that token into the console and the log. Only the userinfo is masked.
+GH_URL="$(git remote get-url github | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@]*@#\1***@#')"
 
 echo "=== github-push: $(basename "$REPO") [$BRANCH] → $GH_URL ==="
 

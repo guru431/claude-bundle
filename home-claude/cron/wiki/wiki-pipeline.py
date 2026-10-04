@@ -208,9 +208,13 @@ def demo(argv: list[str]) -> int:
               f"deleted at the end; nothing under {BUNDLE_ROOT} is written")
         env = _demo_env(sandbox, answer)
         for name, script in DEMO_PHASES:
-            r = subprocess.run([sys.executable, str(sandbox / "cron" / "wiki" / script.name)],
-                               cwd=sandbox, env=env, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=300)
+            try:
+                r = subprocess.run([sys.executable, str(sandbox / "cron" / "wiki" / script.name)],
+                                   cwd=sandbox, env=env, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=300)
+            except subprocess.TimeoutExpired:
+                print(f"[{name}] {script.name} -> TIMEOUT after 300s")
+                return 1
             print(f"[{name}] {script.name} -> exit {r.returncode}")
             if r.returncode != 0:
                 print((r.stdout + r.stderr).strip()[-3000:])

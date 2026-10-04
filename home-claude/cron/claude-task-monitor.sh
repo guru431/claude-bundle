@@ -232,8 +232,13 @@ if chain:
     NOTES.insert(0, chain)
 
 try:
+    # Temp + replace (as claude-task-monitor.py's save_seen): a write cut short
+    # left a truncated JSON, read back as {}, and every standing failure was
+    # alerted again as new.
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(seen, indent=1), encoding='utf-8')
+    tmp = STATE.with_name(STATE.name + '.tmp')
+    tmp.write_text(json.dumps(seen, indent=1), encoding='utf-8')
+    tmp.replace(STATE)
 except OSError:
     pass
 
@@ -528,7 +533,9 @@ if log_line:
     print(log_line, file=sys.stderr)
 try:
     state.parent.mkdir(parents=True, exist_ok=True)
-    state.write_text(json.dumps(seen, indent=1), encoding='utf-8')
+    tmp = state.with_name(state.name + '.tmp')      # temp + replace, as above
+    tmp.write_text(json.dumps(seen, indent=1), encoding='utf-8')
+    tmp.replace(state)
 except OSError:
     pass
 print(alert)

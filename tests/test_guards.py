@@ -11,6 +11,7 @@ Run: pytest tests/ -q
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import re
 import subprocess
@@ -66,11 +67,17 @@ def test_log_retention_refuses_bad_window(tmp_path: Path, value: str):
     env = os.environ.copy()
     env["WIKI_LOG_RETENTION_DAYS"] = value
     env["CLAUDE_HOME"] = str(tmp_path / "fake-claude-home")
+    env["CLAUDE_BUNDLE_RUNS_DIR"] = str(tmp_path / "runs")
     r = subprocess.run([sys.executable, str(tmp_path / "cron" / "log-retention.py")],
                        capture_output=True, text=True, env=env, timeout=60,
                        encoding="utf-8", errors="replace")
     assert r.returncode == 2, r.stdout + r.stderr
     assert victim.exists(), "the sweep deleted a log despite refusing to run"
+    # The refusal reaches the run ledger: the window was read at import time,
+    # before terminal_record opened, and the exit left no record at all.
+    rows = [json.loads(line) for p in (tmp_path / "runs").glob("runs-*.jsonl")
+            for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [(row["task"], row["process_rc"]) for row in rows] == [("ClaudeLogRetention", 2)]
 
 
 # ── flush: a negative backlog cap must not select the whole archive ──────────
@@ -403,6 +410,7 @@ def _utf16_blob(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.mark.integration   # 1.1-1.6 s measured on Windows: spawns of secret-scan.sh
 def test_secret_scan_reads_utf16(tmp_path: Path, bash: str):
     """secret_scan_text transcodes before grepping; the raw bytes match nothing."""
     blob = _utf16_blob(tmp_path)
@@ -657,6 +665,20 @@ def test_a_negative_integer_flag_keeps_its_default_and_says_so(bundle_tree: Path
     errors = " ".join(utils.config_errors())
     assert "WIKI_RETRY_LIMIT" in errors and "WIKI_LLM_LOCK_WAIT" in errors
     assert "INVALID '-1'" in " ".join(utils.config_report())
+
+
+def test_config_notes_tell_the_env_file_from_the_process_environment(bundle_tree: Path,
+                                                                    monkeypatch):
+    """Every set value was reported as "env/.env", so a value exported by a CI
+    job or a wrapper pointed at a .env that did not even hold the key."""
+    (bundle_tree / ".env").write_text("WIKI_RETRY_LIMIT=5\n", encoding="utf-8")
+    monkeypatch.delenv("WIKI_RETRY_LIMIT", raising=False)
+    monkeypatch.setenv("WIKI_LLM_PACE_SECONDS", "2")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    notes = {name: source for name, _value, source in utils._CONFIG_NOTES}
+    assert notes["WIKI_RETRY_LIMIT"] == ".env"
+    assert notes["WIKI_LLM_PACE_SECONDS"] == "env"
+    assert notes["WIKI_PROJECT_LOG_MAX_LINES"] == "default"
 
 
 def test_zero_is_still_a_valid_retry_limit(bundle_tree: Path, monkeypatch):

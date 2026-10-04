@@ -268,6 +268,7 @@ def _stubs(tmp_path: Path, *names: str, exit_code: int = 0) -> tuple[Path, Path]
 needs_bash = pytest.mark.usefixtures("bash")
 
 
+@pytest.mark.integration   # 1.1-1.6 s measured on Windows: a bash start per case
 @needs_bash
 def test_help_and_argument_errors():
     """The smoke test the test policy asks of every entry point."""

@@ -514,6 +514,10 @@ def test_github_push_lets_the_commit_that_scrubs_a_name_through(published: Repo)
 
 
 # ── library probes (one shell each) ─────────────────────────────────────────
+# A probe that runs the denylist loader or a full text scan is 1-2 s on Windows
+# by `--durations` (each grep/sed/iconv of secret-scan.sh is a process spawn in
+# Git Bash, ~70 ms apiece): those are `integration`, which CI runs on both
+# platforms. The pre-commit hook still exercises the same library on every commit.
 
 def _lib(tmp_path: Path, body: str, env: dict | None = None) -> subprocess.CompletedProcess:
     script = tmp_path / "probe.sh"
@@ -530,6 +534,7 @@ def test_denylist_loader_refuses_a_pattern_grep_cannot_compile(tmp_path: Path):
     assert "build-box-(7" in out, "the message does not name the broken line"
 
 
+@integration   # 2.1 s per case measured on Windows
 @pytest.mark.parametrize("raw", [
     b"\xef\xbb\xbf" + f"{HOST}\r\n\r\n  \r\nother\r\n".encode(),   # UTF-8 BOM, CRLF, blanks
     b"\xff\xfe" + f"{HOST}\r\n".encode("utf-16-le"),               # PowerShell 5.1 `>`
@@ -555,6 +560,7 @@ def _blob_id(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\x00" % len(data) + data).hexdigest()
 
 
+@integration   # 2.1-2.5 s measured on Windows
 def test_the_fast_path_names_every_blob_the_precise_scan_would_flag(tmp_path: Path):
     """secret_scan_suspects decides which blobs get the precise scan at all, so
     what it leaves out is published unread. It must name every blob with a hit —
@@ -616,6 +622,7 @@ echo "reads=$(wc -l < ../blob-reads | tr -d ' ')"
     assert "reads=1" in out, f"the precise pass read more than the one suspect blob:\n{out}"
 
 
+@integration   # 1.0-1.1 s measured on Windows
 def test_binary_content_is_scanned_not_skipped(tmp_path: Path):
     (tmp_path / "blob").write_bytes(b"\x00\x01head\x00" + f"k={TOKEN}".encode() + b"\x00\n")
     cp = _lib(tmp_path, 'secret_scan_text < blob; echo "rc=$?"')
@@ -623,6 +630,7 @@ def test_binary_content_is_scanned_not_skipped(tmp_path: Path):
     assert "rc=1" in out and "binary" in out, out
 
 
+@integration   # 1.6-1.8 s measured on Windows
 def test_a_line_that_is_not_valid_utf8_is_still_scanned(tmp_path: Path):
     """GNU grep in a UTF-8 locale suppresses a matching line that carries an
     encoding error — a CP1251 comment next to a key was reported clean. (Git
@@ -639,6 +647,7 @@ def test_a_line_that_is_not_valid_utf8_is_still_scanned(tmp_path: Path):
 
 # ── fail-closed: a grep or git that fails is not a clean scan ───────────────
 
+@integration   # 1.6-1.9 s measured on Windows
 def test_grep_that_fails_is_a_scan_error_not_a_clean_scan(tmp_path: Path):
     """grep answers 2 for "could not run", and `|| true` read it as 1, "no match".
 

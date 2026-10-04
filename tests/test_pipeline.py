@@ -294,6 +294,25 @@ def test_compile_kb_stops_resending_an_article_with_a_rejected_path(bundle: Path
     assert "Nothing to process" in r.stdout, f"the article was sent again:\n{r.stdout}"
 
 
+def test_compile_kb_retry_does_not_append_a_created_page_to_itself(bundle: Path):
+    """A rejected sibling keeps the article for a retry, and the retry re-applies
+    the change that CREATED a page. append_fragment demoted the fragment's
+    headings before asking "already on the page?", so a page with sections never
+    matched itself and got its own body again under `## Update (…)`."""
+    _kb_article(bundle, "widgets.md", b"Widgets are small parts.\n")
+    resp = bundle / "kb_retry.json"
+    resp.write_text(json.dumps([
+        {"path": "kb/concepts/Widget.md", "action": "create",
+         "content": "# Widget\n\nA small part.\n\n## Usage\n\nBolt it on. See [[index]].\n"},
+        {"path": "projects/elsewhere/leak.md", "action": "create",
+         "content": "# Leak\n\nNot the curator's namespace.\n"}]), encoding="utf-8")
+    script = bundle / "cron" / "wiki" / "wiki-compile-kb.py"
+    for _ in range(2):
+        _run(script, {"WIKI_LLM_MOCK_RESPONSE": str(resp)}, cwd=bundle)
+    page = (bundle / "wiki" / "kb" / "concepts" / "Widget.md").read_text(encoding="utf-8")
+    assert "## Update" not in page and page.count("Bolt it on.") == 1, page
+
+
 def test_compile_kb_keeps_a_refused_change_readable(bundle: Path):
     """The quarantined copy of a change aimed outside kb/ is for a person to read.
     json.dumps escaped every non-Latin letter, so a Cyrillic article's payload
@@ -1563,6 +1582,23 @@ def test_a_link_to_a_same_named_page_of_another_project_is_a_backlink(bundle: Pa
         (projects / name / "setup.md").write_text(f"# Setup\n\n{body}\n", encoding="utf-8")
 
     assert index.collect_backlinks().get("setup") == ["projects/a/setup"]
+
+
+def test_the_stats_table_is_replaced_without_the_note_under_it(bundle: Path, monkeypatch):
+    """The replace ran from the table header to the next `##`, so a note kept
+    under the Stats table was deleted by every nightly rebuild."""
+    index = _load_wiki_script(bundle, monkeypatch, "index_stats", "wiki-build-index.py")
+    main = bundle / "wiki" / "index.md"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text("# Wiki\n\n## Stats\n\n| Section | Pages | Updated |\n|---|---|---|\n"
+                    "| projects/ | 1 | 2020-01-01 |\n\nCounted nightly — keep this note.\n\n"
+                    "## How to use\n", encoding="utf-8")
+
+    index.update_main_index(2, 7, {"tools": 3})
+
+    text = main.read_text(encoding="utf-8")
+    assert "| projects/ | 7 (in 2 projects) |" in text and "2020-01-01" not in text
+    assert "\nCounted nightly — keep this note.\n\n## How to use\n" in text
 
 
 def test_lint_walkers_skip_the_same_folders(bundle: Path, monkeypatch):

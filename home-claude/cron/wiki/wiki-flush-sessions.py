@@ -837,11 +837,16 @@ def _flush(rec: dict) -> int:
     log_file = CRON_LOG_DIR / f"wiki-flush-sessions_{DATE}.log"
 
     def log(msg):
+        # Best effort, like test-sweep's log(): a locked or unwritable log file
+        # must not take the flush down in the middle of the night.
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
         print(line)
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError as exc:
+            print(f"  (log not written: {exc})", file=sys.stderr)
 
     log(f"=== Wiki Flush Sessions {DATE} ===")
     # Show the effective privacy policy up front (also visible in --dry-run) so

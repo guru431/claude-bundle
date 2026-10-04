@@ -18,7 +18,9 @@
 # output ever. Diagnostics go to stderr, because anything on stdout would be
 # read as part of the key.
 #
-# Exit codes: 0 = value printed, 1 = not set anywhere, 2 = bad variable name.
+# Exit codes: 0 = value printed, 1 = not set anywhere, 2 = bad variable name,
+# 3 = the .env parser (lib\dotenv.ps1) is missing - a broken install, not a
+# missing key.
 
 param([Parameter(Position = 0, Mandatory = $true)][string]$Name)
 
@@ -38,7 +40,7 @@ $lib = @((Join-Path $PSScriptRoot 'lib\dotenv.ps1'), (Join-Path $PSScriptRoot 'c
     Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $lib) {
     [Console]::Error.WriteLine("get-key.ps1: lib\dotenv.ps1 or cron\lib\dotenv.ps1 not found next to $PSScriptRoot - this script needs the bundle's .env parser")
-    exit 1
+    exit 3
 }
 . $lib
 

@@ -41,6 +41,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "Done. Commits to this repo now run the secret-guard." -ForegroundColor Cyan
+    Write-Host "Done. Commits and pushes to this repo now run the secret-guards." -ForegroundColor Cyan
     Write-Host "Bypass a confirmed false positive with:  git commit --no-verify" -ForegroundColor DarkGray
+    Write-Host "                                    or:  git push   --no-verify" -ForegroundColor DarkGray
 } finally { Pop-Location }

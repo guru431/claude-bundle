@@ -407,6 +407,13 @@ def check(registry: Path = REGISTRY, ps_parsed: Path | None = None) -> int:
 
     text = registry.read_text(encoding="utf-8")
     data = yaml.safe_load(text)
+    # An empty file loads as None and a list as a list: neither has .get(), and
+    # the guard died with a traceback instead of saying what is wrong.
+    if not isinstance(data, dict):
+        print(f"REGISTRY SCHEMA ERRORS — fix {registry}:")
+        print(f"  the file is not a YAML mapping with a `tasks:` list "
+              f"(got {type(data).__name__})")
+        return 1
     tasks = data.get("tasks") or []
 
     problems: list[str] = check_subset(text)

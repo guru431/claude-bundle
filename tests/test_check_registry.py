@@ -211,3 +211,15 @@ def test_check_reports_a_block_scalar_in_a_registry_file(tmp_path: Path, capsys)
                           "    description: >-\n      folded\n", encoding="utf-8")
     assert check_registry.check(reg) == 1
     assert "block scalar" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("body", ["", "# nothing yet\n", "- name: One\n"])
+def test_a_registry_that_is_not_a_mapping_is_a_problem_not_a_traceback(tmp_path: Path, capsys,
+                                                                       body: str):
+    """safe_load gives None for an empty file and a list for a bare list; both
+    died on `.get` with an AttributeError instead of exit 1 and a reason."""
+    pytest.importorskip("yaml")
+    reg = tmp_path / "registry.yaml"
+    reg.write_text(body, encoding="utf-8")
+    assert check_registry.check(reg) == 1
+    assert "not a YAML mapping" in capsys.readouterr().out

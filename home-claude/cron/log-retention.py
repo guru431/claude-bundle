@@ -40,7 +40,7 @@ Schedule: weekly (see cron/registry.yaml).
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=nothing money=no writes=DELETES old cron/logs/*.log, cron/logs/*.jsonl, cron/logs/*.diff, cron/logs/rejected/*.txt and projects/*/memory/handoff-*.md
+# bundle-io: offbox=nothing money=no writes=DELETES old cron/logs/*.log, cron/logs/*.jsonl, cron/logs/*.diff, cron/logs/rejected/*.txt and ~/.claude/projects/*/memory/handoff-*.md
 import os
 import re
 import sys
@@ -120,9 +120,6 @@ def _window(var: str, default: int) -> int:
     return days
 
 
-RETENTION_DAYS = _window("WIKI_LOG_RETENTION_DAYS", 30)
-REJECTED_RETENTION_DAYS = _window("WIKI_REJECTED_RETENTION_DAYS", 7)
-HANDOFF_RETENTION_DAYS = _window("WIKI_HANDOFF_RETENTION_DAYS", 7)
 # Cumulative append-only journals. They sit in logs/ next to the per-day files and
 # match the *.jsonl glob, but their mtime is the time of the LAST write, not the age
 # of the contents. runs-<year>.jsonl (and the pre-rotation runs.jsonl) is the
@@ -202,6 +199,12 @@ def _prune_all(rec: dict) -> int:
     verb = "would free" if DRY_RUN else "freed"
     log(f"=== log retention {date.today().isoformat()}"
         f"{' (DRY RUN)' if DRY_RUN else ''} ===")
+    # Read here, inside main()'s terminal_record: a bad window exits 2, and read
+    # at import time that exit came before the record was opened — a broken .env
+    # line the run ledger never saw.
+    retention_days = _window("WIKI_LOG_RETENTION_DAYS", 30)
+    rejected_days = _window("WIKI_REJECTED_RETENTION_DAYS", 7)
+    handoff_days = _window("WIKI_HANDOFF_RETENTION_DAYS", 7)
     swept = 0
 
     if LOG_DIR.exists():
@@ -211,17 +214,17 @@ def _prune_all(rec: dict) -> int:
         # nothing ever rotated.
         deleted, kept, freed = prune(
             (*LOG_DIR.glob("*.log"), *LOG_DIR.glob("*.jsonl"), *LOG_DIR.glob("*.diff")),
-            RETENTION_DAYS, "cron/logs",
+            retention_days, "cron/logs",
         )
-        log(f"Retention {RETENTION_DAYS}d: {deleted} removed, {kept} kept, {verb} {freed} bytes.")
+        log(f"Retention {retention_days}d: {deleted} removed, {kept} kept, {verb} {freed} bytes.")
         swept += deleted + kept
 
         if REJECTED_DIR.exists():
             r_deleted, r_kept, r_freed = prune(
                 REJECTED_DIR.glob("*.txt"),
-                REJECTED_RETENTION_DAYS, "cron/logs/rejected",
+                rejected_days, "cron/logs/rejected",
             )
-            log(f"Quarantine retention {REJECTED_RETENTION_DAYS}d (logs/rejected): "
+            log(f"Quarantine retention {rejected_days}d (logs/rejected): "
                 f"{r_deleted} removed, {r_kept} kept, {verb} {r_freed} bytes.")
             swept += r_deleted + r_kept
     else:
@@ -232,9 +235,9 @@ def _prune_all(rec: dict) -> int:
     if PROJECTS_DIR.is_dir():
         h_deleted, h_kept, h_freed = prune(
             PROJECTS_DIR.glob("*/memory/handoff-*.md"),
-            HANDOFF_RETENTION_DAYS, "projects/*/memory",
+            handoff_days, "projects/*/memory",
         )
-        log(f"Handoff retention {HANDOFF_RETENTION_DAYS}d (projects/*/memory): "
+        log(f"Handoff retention {handoff_days}d (projects/*/memory): "
             f"{h_deleted} removed, {h_kept} kept, {verb} {h_freed} bytes.")
         swept += h_deleted + h_kept
 
@@ -242,8 +245,8 @@ def _prune_all(rec: dict) -> int:
     # and the run ledger: zero means it found nothing at all to rotate, which
     # for a task pointed at the wrong tree looks identical to a healthy run.
     rec.update(useful_items=swept,
-               note=f"windows {RETENTION_DAYS}/{REJECTED_RETENTION_DAYS}/"
-                    f"{HANDOFF_RETENTION_DAYS}d")
+               note=f"windows {retention_days}/{rejected_days}/"
+                    f"{handoff_days}d")
     return 0
 
 

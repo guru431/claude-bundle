@@ -127,6 +127,23 @@ def _is_nothing(value: str) -> bool:
     return not re.search(r"(?:->|→|telegram|http|api|provider|by default|unless|with )", low)
 
 
+def _writes_outward(value: str) -> bool:
+    """True unless every place a `writes=` field names is inside the bundle.
+
+    Writes inside the bundle's own tree (wiki/, logs/) are not a publishing
+    claim: the matrix column is about what leaves or is modified OUTSIDE it. But
+    EVERY item must be inside — the check used to read only the start of the
+    value, so `wiki pages and your ~/projects` or `DELETES old cron/logs/… and
+    ~/projects/…` counted as local-only after their first words. A `DELETES`
+    prefix is the verb, not a place.
+    """
+    if _is_nothing(value):
+        return False
+    places = re.sub(r"(?i)^\s*deletes\s+", "", value)
+    return not all(re.match(r"(?i)\s*(old\s+)?(wiki|cron|logs|~/\.claude)", item)
+                   for item in re.split(r",|\band\b", places) if item.strip())
+
+
 # Network / spend / destructive primitives, and the field each one obliges. This
 # is the cross-check the guard was missing: the `bundle-io` header was pure
 # self-declaration, so a script could import `requests`, POST to an API and
@@ -268,18 +285,7 @@ def check() -> int:
             wrong = state_problem(name, rows[name], task.get("enabled") is not False)
             if wrong:
                 problems.append(wrong)
-        # "writes" inside the bundle's own tree (wiki/, logs/) is not a
-        # publishing claim: the matrix column is about what leaves or is
-        # modified OUTSIDE it.
-        writes_outward = not _is_nothing(io["writes"]) and not re.match(
-            r"(?i)\s*(wiki|cron|logs|~/\.claude)", io["writes"])
-        # A `writes=DELETES …` field used to be read as local-only merely because
-        # it STARTED with the word "deletes" — so the one task that removes files
-        # could describe anything it liked after that word and still count as
-        # having no outward effect.
-        if re.match(r"(?i)\s*deletes", io["writes"]):
-            writes_outward = not re.match(
-                r"(?i)\s*deletes\s+(old\s+)?(wiki|cron|logs|~/\.claude)", io["writes"])
+        writes_outward = _writes_outward(io["writes"])
         for contradiction in code_contradicts(path, io):
             problems.append(f"{name}: {contradiction}")
         # The row is what people read. A header that names Telegram while the

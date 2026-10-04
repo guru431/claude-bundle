@@ -156,6 +156,13 @@ function Split-HostPort([string]$value, [string]$varName, [int]$defaultPort) {
     }
     elseif (($value.ToCharArray() | Where-Object { $_ -eq ':' } | Measure-Object).Count -ge 2) {
         # Two or more colons and no brackets => bare IPv6 literal, no port given.
+        # Only if it parses as one: a typo like 127.0.0.1:3456:1 has two colons
+        # too, and was taken as a host, giving the URL [127.0.0.1:3456:1]:3456.
+        $ip = $null
+        if (-not [System.Net.IPAddress]::TryParse($value, [ref]$ip) -or
+            $ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+            throw "$varName malformed - two or more ':' but not an IPv6 address; bracket an IPv6 host with a port as [addr]:port (got '$value')."
+        }
         $h = $value
     }
     else {

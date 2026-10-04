@@ -507,8 +507,13 @@ def _cli_stale_seen(state: Path, now: datetime | None = None,
     if standing:
         print(f"already reported, still stale: {', '.join(standing)}", file=sys.stderr)
     try:
+        # Temp + replace, as claude-task-monitor.py's save_seen: a write cut short
+        # left a truncated JSON, the next run read it as {}, and every silence
+        # already reported was sent again as new.
         state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text(json.dumps(seen, indent=1), encoding="utf-8")
+        tmp = state.with_name(state.name + ".tmp")
+        tmp.write_text(json.dumps(seen, indent=1), encoding="utf-8")
+        tmp.replace(state)
     except OSError as exc:
         print(f"seen-state not written ({exc}) — the next run may repeat this",
               file=sys.stderr)

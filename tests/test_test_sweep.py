@@ -310,6 +310,8 @@ def test_basetemp_passed_to_pytest(tmp_path, monkeypatch):
     assert "--basetemp" in seen["cmd"]
     given = Path(seen["cmd"][seen["cmd"].index("--basetemp") + 1])
     assert given.name == "proj-sub" and given.parent == sweep.RUN_ROOT
+    # Nested pytest runs too: only contract suites had their temproot moved.
+    assert Path(seen["kwargs"]["env"]["PYTEST_DEBUG_TEMPROOT"]).parent == sweep.RUN_ROOT
 
 
 def test_cleanup_removes_run_dirs_and_keeps_the_named_one(tmp_path, monkeypatch):

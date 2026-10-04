@@ -149,6 +149,20 @@ def test_io_matrix_wants_telegram_named_in_the_header(repo: Path):
     assert "ClaudeHealthcheck" in r.stdout and "Telegram" in r.stdout
 
 
+def test_io_matrix_reads_every_place_a_writes_field_names(repo: Path):
+    """Only the start of `writes=` was read: after `DELETES old cron/logs/…` the
+    value could name any outside path and the task still counted as local-only."""
+    target = repo / "home-claude" / "cron" / "log-retention.py"
+    text = target.read_text(encoding="utf-8")
+    line = next(l for l in text.splitlines() if l.startswith("# bundle-io:"))
+    target.write_text(text.replace(line, "# bundle-io: offbox=nothing money=no "
+                                         "writes=DELETES old cron/logs/*.log and ~/projects/*"),
+                      encoding="utf-8")
+    r = _run_guard("check-io-matrix.py", repo)
+    assert r.returncode == 1, f"a write outside the bundle went unnoticed:\n{r.stdout}"
+    assert "ClaudeLogRetention" in r.stdout
+
+
 def _edit_matrix_row(repo: Path, task: str, edit) -> None:
     """Apply `edit(line) -> str` to the privacy-matrix row whose Task column names `task`."""
     arch = repo / "docs" / "cron-architecture.md"

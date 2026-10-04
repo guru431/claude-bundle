@@ -554,6 +554,14 @@ def child_env() -> dict:
     for name in list(env):
         if name in TEMPLATE_NAMES or secretish.search(name):
             env.pop(name, None)
+    # A test that starts pytest in a subprocess without --basetemp writes into
+    # the shared `pytest-of-<user>`, and a `pytest-current` left there under a
+    # token the user cannot clean up breaks every later pytest of the account.
+    # Nested runs go into this run's tree instead, which the sweep deletes — for
+    # a discovered suite as much as for a contract one.
+    nested = RUN_ROOT / "nested"
+    nested.mkdir(parents=True, exist_ok=True)
+    env["PYTEST_DEBUG_TEMPROOT"] = str(nested)
     return env
 
 
@@ -825,13 +833,6 @@ def contract_env() -> dict:
     py_dir = Path(sys.executable).parent
     dirs = [str(py_dir)] + ([str(py_dir / "Scripts")] if os.name == "nt" else [])
     env["PATH"] = os.pathsep.join(dirs + [env.get("PATH", "")])
-    # A test that starts pytest in a subprocess without --basetemp writes into
-    # the shared `pytest-of-<user>`, and a `pytest-current` left there under a
-    # token the user cannot clean up breaks every later pytest of the account.
-    # Nested runs go into this run's tree instead, which the sweep deletes.
-    nested = RUN_ROOT / "nested"
-    nested.mkdir(parents=True, exist_ok=True)
-    env["PYTEST_DEBUG_TEMPROOT"] = str(nested)
     return env
 
 

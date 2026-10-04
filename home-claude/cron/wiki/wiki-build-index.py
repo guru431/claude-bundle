@@ -152,7 +152,7 @@ def ensure_project_log(project_dir: Path) -> None:
     atomic_write_text(log_path, content)
 
 
-def build_projects_index() -> tuple[int, int]:
+def build_projects_index(backlinks: dict[str, list[str]]) -> tuple[int, int]:
     """Generate projects/index.md with categorization."""
     lines = [
         "# Projects (projects/)",
@@ -211,7 +211,7 @@ def build_projects_index() -> tuple[int, int]:
                 lines.append(f"- [[projects/{project}/{stem}|{stem}]] · {upd}")
             lines.append("")
 
-    lines.extend(render_backlinks(collect_backlinks(), all_stems))
+    lines.extend(render_backlinks(backlinks, all_stems))
 
     lines.append("---")
     lines.append("Back: [[index|Main index]]")
@@ -222,7 +222,7 @@ def build_projects_index() -> tuple[int, int]:
     return projects_count, pages_count
 
 
-def build_kb_index() -> dict[str, int]:
+def build_kb_index(backlinks: dict[str, list[str]]) -> dict[str, int]:
     """Generate kb/index.md with sub-sections, counters and the full listing."""
     sections = ["concepts", "tools", "people"]
     counts: dict[str, int] = {}
@@ -277,7 +277,7 @@ def build_kb_index() -> dict[str, int]:
                 lines.append(f"- [[kb/{sec}/{stem}|{stem}]]")
         lines.append("")
 
-    lines.extend(render_backlinks(collect_backlinks(),
+    lines.extend(render_backlinks(backlinks,
                                   [stem for sec in sections
                                    for stem, _ in all_items[sec]]))
 
@@ -311,7 +311,9 @@ def update_main_index(projects_count: int, pages_count: int, kb_counts: dict[str
         f"| projects/ | {pages_count} (in {projects_count} projects) | {today} |\n"
     )
 
-    pattern = re.compile(r"\|\s*Section\s*\|\s*Pages\s*\|\s*Updated\s*\|[\s\S]*?(?=\n##|\Z)", re.MULTILINE)
+    # The table's own rows and nothing past them. The pattern ran on to the next
+    # `##`, so a note a person kept under the table was deleted every night.
+    pattern = re.compile(r"\|\s*Section\s*\|\s*Pages\s*\|\s*Updated\s*\|.*(?:\n\|.*)*\n?")
     if pattern.search(text):
         text = pattern.sub(new_table, text)
     else:
@@ -325,8 +327,11 @@ def main():
     if is_dry_run():
         print("DRY RUN — indexes would be rebuilt, no writes.")
         return
-    projects_count, pages_count = build_projects_index()
-    kb_counts = build_kb_index()
+    # One walk of the whole vault for both indexes — it reads every page, and
+    # index.md files (the only thing the two builds write) are not pages to it.
+    backlinks = collect_backlinks()
+    projects_count, pages_count = build_projects_index(backlinks)
+    kb_counts = build_kb_index(backlinks)
     update_main_index(projects_count, pages_count, kb_counts)
     print(f"projects/: {pages_count} pages in {projects_count} projects")
     print(f"kb/concepts/: {kb_counts.get('concepts', 0)}")

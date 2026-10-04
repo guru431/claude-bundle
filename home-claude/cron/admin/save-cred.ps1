@@ -43,7 +43,9 @@ Write-Host ""
 if (Test-Path $target) {
     Write-Host "File already exists. Overwrite? (type 'yes' to confirm)" -ForegroundColor Yellow
     $confirm = Read-Host "Confirm"
-    if ($confirm -ne 'yes') { Write-Host "Cancelled." -ForegroundColor DarkGray; return }
+    # exit 1, like the empty-password path below: nothing was saved by this run,
+    # and a bare `return` ended the script with 0, the code of a successful save.
+    if ($confirm -ne 'yes') { Write-Host "Cancelled." -ForegroundColor DarkGray; exit 1 }
 }
 
 $securePwd = Read-Host -Prompt "Password for $env:USERDOMAIN\$User" -AsSecureString

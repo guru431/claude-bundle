@@ -151,7 +151,7 @@ touches your real `~/.claude/`.
 | Fast suite (60 s budget; on Windows only with `-n auto`) | `python -m pytest -q -n auto` |
 | All five CI guards | `python scripts/check-registry.py && python scripts/check-doc-counts.py && python scripts/check-env-ref.py && python scripts/check-io-matrix.py && python scripts/check-agents-sync.py` |
 | Shell lint (CI parity — gates on warnings) | `{ git ls-files '*.sh'; git ls-files '.githooks/*'; } \| xargs shellcheck --severity=warning -e SC1091 -f gcc` |
-| Secret-format scan (same lib as pre-commit) | `. home-claude/cron/lib/secret-scan.sh && git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/'` |
+| Secret-format scan (same lib as pre-commit, the CI step) | `. home-claude/cron/lib/secret-scan.sh && git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/' \| grep -vF -e "$SECRET_SCAN_ALLOW" \| secret_scan_drop_placeholders` |
 | Denylist grep (mandatory before every commit) | `git diff --cached \| grep -iEf .sanitize-patterns` |
 | Python compiles | `python -m compileall -q home-claude/cron home-claude/hooks home-claude/bin` |
 | Windows offline check | `powershell -File scripts/self-test.ps1` |

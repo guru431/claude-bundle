@@ -165,8 +165,11 @@ jobs:
           # Without it this step contradicted the escape hatch the library
           # documents for exactly this case — a detector's own test fixtures,
           # which must look like the thing they detect.
+          # And drop placeholder passwords like the hooks do: without
+          # secret_scan_drop_placeholders this step failed on the README-style
+          # `postgres://user:password@localhost` the library documents itself.
           hits=$(git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/' \
-                 | grep -vF -e "$SECRET_SCAN_ALLOW" || true)
+                 | grep -vF -e "$SECRET_SCAN_ALLOW" | secret_scan_drop_placeholders || true)
           if [ -n "$hits" ]; then
             echo "$hits"
             echo "::error::Possible secret/token format found in tracked files"

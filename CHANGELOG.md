@@ -152,7 +152,8 @@ Each fix comes with a test that fails on the code it replaces.
   from a README, `<password>`, `***`, `$VAR` / `${VAR}`: a short, exact list
   (`URI_PLACEHOLDER_PASSWORDS`, generated into `SECRET_SCAN_URI_PLACEHOLDER`) is
   dropped after grep by `secret_scan_drop_placeholders`; anything else on the
-  line keeps it a hit.
+  line keeps it a hit. The CI secret guard applies the filter too: without it,
+  the step went red on the library's own example of a placeholder.
 - **commit-msg scans `#` lines when git keeps them.** With `-F` or `-m` git
   stores a `#` line as written; only the editor template (recognised by git's
   own hint) and everything under the scissors line are skipped now.

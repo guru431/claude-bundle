@@ -68,6 +68,31 @@ def test_matches_on_the_path_tail_too(sync):
     assert dropped
 
 
+def test_a_bare_basename_does_not_vouch_for_a_path(sync):
+    """The tail used to be the basename alone, and `README.md` or `.mcp.json`
+    is in almost any AGENTS.md — a real missing item was dropped on it."""
+    report = ("### CRITICAL_MISSING_IN_AGENTS\n"
+              "- No mention of `tools/network/.mcp.json`\n")
+    cleaned, dropped = sync.verify_report(report, "MCP servers live in `.mcp.json`\n")
+
+    assert "tools/network/.mcp.json" in cleaned
+    assert dropped == []
+
+
+def test_every_path_of_a_command_is_checked_on_its_own(sync):
+    """A multi-word fragment is a command: the tail of its last word being in the
+    file passed the whole item off as false."""
+    report = ("### CRITICAL_MISSING_IN_AGENTS\n"
+              "- run `python scripts/mcp-probe.py network/.mcp.json` after edits\n")
+    cleaned, dropped = sync.verify_report(report, "edit `network/.mcp.json` by hand\n")
+
+    assert "mcp-probe.py" in cleaned
+    assert dropped == []
+    cleaned, dropped = sync.verify_report(
+        report, "`scripts/mcp-probe.py` checks `network/.mcp.json`\n")
+    assert dropped, "both paths are there — the claim is false"
+
+
 def test_keeps_a_claim_that_is_actually_true(sync):
     report = ("### CRITICAL_MISSING_IN_AGENTS\n"
               "- `scripts/gen-scheduler.py` is not listed\n")

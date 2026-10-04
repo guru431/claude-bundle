@@ -16,7 +16,12 @@ import re
 # as a boundary to the model. Both passes are deliberately narrow — unlike
 # stripping `<<<`/`>>>` wholesale they leave real transcript content (git
 # conflict markers, heredocs, shell redirects) intact.
-_FENCE_LIKE_RE = re.compile(r"(?i)<{2,}\s*/?\s*(?:end[_\s-]*)?untrusted[_\s-]*data[^>\n]*>{2,}")
+# The closing `…>>` is optional: `<<<END_UNTRUSTED_DATA` with no `>>>` (or a
+# single `>`) reads as the end of the block to a model as well as the exact
+# marker does. When the line does carry `>>`, everything up to it goes too (the
+# label of a forged fence).
+_FENCE_LIKE_RE = re.compile(
+    r"(?i)<{2,}\s*/?\s*(?:end[_\s-]*)?untrusted[_\s-]*data(?:[^>\n]*>{2,})?")
 # Leftover bare mentions of the marker word, so the exact token never survives.
 _MARKER_WORD_RE = re.compile(r"(?i)untrusted_data")
 

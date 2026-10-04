@@ -621,11 +621,17 @@ def baseline_regressions(counts: dict[str, int], baseline: dict[str, int]) -> li
     return lines
 
 
-def send_telegram_alert(message: str):
-    """Send an alert to Telegram on errors."""
+def send_telegram_alert(message: str) -> bool:
+    """Send an alert to Telegram. False only for an alert that was due and did
+    not arrive — with alerts switched off (WIKI_LINT_TELEGRAM) nothing is lost.
+
+    main needs the answer: an undelivered regression alert must not move the
+    baseline, or the next run compares against the new numbers and nobody ever
+    hears of the jump.
+    """
     if not ENABLE_TELEGRAM_ALERTS:
-        return
-    notify.send(message)
+        return True
+    return notify.send(message)
 
 
 def fix_mechanical(pages: dict[str, list[Path]]) -> list[str]:
@@ -732,12 +738,17 @@ def main():
     # against the previous run. This is what catches a regression buried in a
     # standing pile of WARNs, which the absolute count never will.
     baseline = load_baseline()
+    alert_lost = False
     if baseline:
         regressions = baseline_regressions(class_counts, baseline)
         if regressions:
             body = "\n".join(regressions)
             log(f"Regressions past baseline:\n{body}")
-            send_telegram_alert(f"wiki-lint {DATE}: findings grew past baseline\n{body}")
+            alert_lost = not send_telegram_alert(
+                f"wiki-lint {DATE}: findings grew past baseline\n{body}")
+            if alert_lost:
+                log("ERROR: the regression alert was not delivered — the baseline is "
+                    "left as it was, so the next run compares and alerts again")
         else:
             log("No regressions past baseline")
     else:
@@ -745,7 +756,7 @@ def main():
     # Only the scheduled run moves the baseline — the registry passes the flag.
     # Every run used to overwrite it, so a manual check between two scheduled
     # ones silently swallowed whatever had grown since the last of them.
-    if "--save-baseline" in sys.argv:
+    if "--save-baseline" in sys.argv and not alert_lost:
         save_baseline(class_counts)
         log("Baseline saved")
 
@@ -754,14 +765,17 @@ def main():
     # Terminal ledger record (cron/runs.py). useful_items = pages inspected —
     # a lint that walked an EMPTY vault reports zero rather than passing for a
     # clean bill of health, which is what "0 errors over 0 pages" reads as.
-    record_run(task="ClaudeWikiLint", process_rc=1 if stats["errors"] else 0,
-               useful_items=stats["pages"], delivery="n/a",
+    failed = stats["errors"] > 0 or alert_lost
+    record_run(task="ClaudeWikiLint", process_rc=1 if failed else 0,
+               useful_items=stats["pages"], delivery="failed" if alert_lost else "n/a",
                note=f"{stats['errors']} error(s), {stats['warnings']} warning(s)")
 
     # Lint errors (index desync) are a hard failure: skip the heartbeat and exit
     # non-zero so the cron monitor sees it. Link resolution and colliding page
     # names are only ever WARNs — see check_broken_links / check_ambiguous_names.
-    if stats["errors"] > 0:
+    # An undelivered regression alert fails the run too: otherwise nobody would
+    # hear of the jump at all.
+    if failed:
         sys.exit(1)
     mark_phase_success("lint")
 

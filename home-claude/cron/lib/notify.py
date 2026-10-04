@@ -19,7 +19,8 @@ What send() guarantees:
 - the text goes in on stdin (from a file), never argv — argv is visible in
   the process list; the output goes to a temp file, not a pipe, so the
   timeout is exact;
-- the timeout covers the sender's attempt for every part of the message;
+- the timeout covers the sender's whole retry schedule (TELEGRAM_RETRY_GAPS)
+  for every part of the message;
 - on timeout the whole process tree is stopped: `Git\\bin\\bash.exe` is only a
   launcher, and killing it alone left the real bash and curl running;
 - True only on a confirmed delivery (exit 0). A timeout, an OSError or a
@@ -49,7 +50,8 @@ CURL_ATTEMPT_SEC = 40
 PART_CHARS = 4000
 #: Headroom for bash start-up, the Python splitter and reading `.env`.
 SLACK_SEC = 60
-
+#: telegram-send.sh's gaps between attempts when TELEGRAM_RETRY_GAPS is unset.
+DEFAULT_GAPS = "30,90"
 
 
 def _stderr(msg: str) -> None:
@@ -68,10 +70,24 @@ def find_bash() -> str | None:
     return resolve()
 
 
+def _gaps() -> list[int]:
+    """The sender's retry schedule — TELEGRAM_RETRY_GAPS, read the way the shell
+    reads it (unset = the default, empty = a single attempt)."""
+    raw = os.environ.get("TELEGRAM_RETRY_GAPS", DEFAULT_GAPS)
+    try:
+        return [int(g) for g in raw.replace(",", " ").split()]
+    except ValueError:
+        return [int(g) for g in DEFAULT_GAPS.split(",")]
+
+
 def timeout_for(text: str) -> int:
-    """How long to wait for telegram-send.sh: one attempt per part, plus headroom."""
+    """How long to wait for telegram-send.sh: every attempt and every gap of its
+    retry schedule, for each part of the message, plus headroom. A wait sized
+    for one attempt killed the sender before its first retry."""
+    gaps = _gaps()
+    per_part = (len(gaps) + 1) * CURL_ATTEMPT_SEC + sum(gaps)
     parts = max(1, math.ceil(len(text.strip()) / PART_CHARS))
-    return parts * CURL_ATTEMPT_SEC + SLACK_SEC
+    return parts * per_part + SLACK_SEC
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -99,7 +115,8 @@ def send(text: str, log: Callable[[str], None] | None = None,
     Success is not logged: that is the caller's call.
 
     `timeout` is for a caller with an outside time budget only (a Claude Code
-    hook, which is itself killed on timeout). Night tasks leave it unset.
+    hook, which is itself killed on timeout). Shorter than timeout_for() means
+    some of the sender's retries never happen; night tasks leave it unset.
     """
     log = log or _stderr
     if not (text or "").strip():

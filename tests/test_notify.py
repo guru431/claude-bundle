@@ -86,6 +86,21 @@ def test_the_timeout_grows_with_the_parts_of_a_long_message():
     assert notify.timeout_for("x" * (notify.PART_CHARS * 2 + 1)) > one
 
 
+def test_the_timeout_covers_the_senders_whole_retry_schedule(monkeypatch):
+    """telegram-send.sh waits TELEGRAM_RETRY_GAPS between attempts; a wait sized
+    for one attempt killed it before the first retry."""
+    monkeypatch.setenv("TELEGRAM_RETRY_GAPS", "30 90")
+    full = notify.timeout_for("x")
+    assert full >= 3 * 30 + 30 + 90
+    monkeypatch.setenv("TELEGRAM_RETRY_GAPS", "30,90")   # the template's spelling
+    assert notify.timeout_for("x") == full
+    monkeypatch.setenv("TELEGRAM_RETRY_GAPS", "")
+    single = notify.timeout_for("x")
+    assert single < 30 + 90
+    monkeypatch.delenv("TELEGRAM_RETRY_GAPS")
+    assert notify.timeout_for("x") > single   # unset = the default "30 90"
+
+
 # ── the guard: no *.py calls telegram-send.sh around notify.py ───────────────
 
 _SKIP_DIRS = {"node_modules", "venv", "__pycache__", "tests", "worktrees", "logs", "state"}

@@ -78,6 +78,7 @@ installer generates the first from the second.
 | `SYNC_CHECK_PRIVATE_HOSTS` | optional (commented) | `home-claude/cron/agents-md-sync-check.py` |
 | `TELEGRAM_BOT_TOKEN` | declared | `home-claude/cron/bundle-status.py`, `home-claude/cron/telegram-send.sh` |
 | `TELEGRAM_CHAT_ID` | declared | `home-claude/cron/bundle-status.py`, `home-claude/cron/telegram-send.sh` |
+| `TELEGRAM_RETRY_GAPS` | optional (commented) | `home-claude/cron/lib/notify.py`, `home-claude/cron/telegram-send.sh` |
 | `TEST_SWEEP_RUN_BUDGET` | optional (commented) | `home-claude/cron/test-sweep.py` |
 | `TEST_SWEEP_SKIP` | optional (commented) | `home-claude/cron/test-sweep.py` |
 | `TEST_SWEEP_TELEGRAM` | optional (commented) | `home-claude/cron/test-sweep.py` |
@@ -102,7 +103,7 @@ installer generates the first from the second.
 | `WIKI_RETRY_LIMIT` | optional (commented) | `home-claude/cron/hooks/utils.py` |
 | `WIN_REMOTE_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 
-_80 variables._
+_81 variables._
 
 ## `bundle.local.yaml` keys
 

@@ -1027,6 +1027,29 @@ def test_flush_merges_colliding_slugs(bundle: Path, tmp_path: Path):
     assert any("second.jsonl" in k for k in processed), f"second dir's session lost: {processed}"
 
 
+def test_a_blind_append_retried_the_next_night_adds_no_copy(bundle: Path, monkeypatch):
+    """The appended fragment was dated by the RUN: a pair retried the next night
+    came back as "State as of <tomorrow>", the presence check did not recognize
+    what was already on the page, and the page got the section twice."""
+    wcs = _load_wiki_script(bundle, monkeypatch, "wcs_retry_date", "wiki-compile-sessions.py")
+    monkeypatch.setattr(wcs, "append_per_project_log", lambda *_a, **_k: None)
+    page = bundle / "wiki" / "projects" / "demo" / "gateway.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("---\nupdated: 2020-05-04\n---\n# Gateway\n\nthe original body\n",
+                    encoding="utf-8")
+    change = {"path": "projects/demo/gateway.md",
+              "content": "## Current state\n\nthe gateway is back up"}
+
+    for night in ("2020-05-05", "2020-05-06"):
+        monkeypatch.setattr(wcs, "DATE", night)
+        wcs.apply_changes([dict(change)], source_daily="2020-05-04.md",
+                          project="demo", blind_update=True)
+
+    text = page.read_text(encoding="utf-8")
+    assert text.count("the gateway is back up") == 1, "the retry appended a copy"
+    assert "State as of 2020-05-04 (snapshot)" in text
+
+
 def test_compile_coalesces_same_path_changes(bundle: Path):
     """Two changes targeting ONE page must merge, not overwrite.
 
@@ -1649,6 +1672,26 @@ def test_only_the_scheduled_lint_moves_the_baseline(bundle: Path, monkeypatch):
         except SystemExit:
             pass                        # an index desync in the sandbox vault is not the point
         assert lint.BASELINE_FILE.exists() == ("--save-baseline" in argv), argv
+
+
+def test_an_undelivered_regression_alert_does_not_move_the_baseline(bundle: Path,
+                                                                    monkeypatch):
+    """The baseline moved whether the alert about the jump arrived or not, so a
+    lost alert meant the next run compared against the new numbers in silence."""
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_alert_lost", "wiki-lint.py")
+    lint.BASELINE_FILE.write_text('{"date": "2020-01-01", "counts": {"x": 0}}',
+                                  encoding="utf-8")
+    before = lint.BASELINE_FILE.read_text(encoding="utf-8")
+    monkeypatch.setattr(lint, "ENABLE_TELEGRAM_ALERTS", True)
+    monkeypatch.setattr(lint, "baseline_regressions", lambda *_a: ["x: 0 → 99 (+99)"])
+    monkeypatch.setattr(lint.notify, "send", lambda *_a, **_k: False)
+    monkeypatch.setattr(sys, "argv", ["wiki-lint.py", "--save-baseline"])
+
+    with pytest.raises(SystemExit) as exc:
+        lint.main()
+
+    assert exc.value.code == 1
+    assert lint.BASELINE_FILE.read_text(encoding="utf-8") == before
 
 
 def test_a_second_section_of_a_compiled_project_is_sent_alone(bundle: Path):

@@ -206,44 +206,58 @@ def main() -> int:
 
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     ok = failed = 0
-    for f in pages[:args.limit]:
-        rel = f.relative_to(WIKI_ROOT).as_posix()
-        fm, body = read_page(f)
-        # FENCED, like every other prompt in the bundle. This was the one place
-        # a whole page — attacker-influenced text, since a page is compiled out
-        # of session transcripts — was interpolated into an instruction with no
-        # boundary at all.
-        prompt = (prompt_tpl.replace("{PAGE_NAME}", f.name)
-                  .replace("{PAGE_BODY}", fence(f"kind=wiki-page file={f.name}", body)))
+    try:
+        for f in pages[:args.limit]:
+            rel = f.relative_to(WIKI_ROOT).as_posix()
+            fm, body = read_page(f)
+            # FENCED, like every other prompt in the bundle. This was the one place
+            # a whole page — attacker-influenced text, since a page is compiled out
+            # of session transcripts — was interpolated into an instruction with no
+            # boundary at all.
+            prompt = (prompt_tpl.replace("{PAGE_NAME}", f.name)
+                      .replace("{PAGE_BODY}", fence(f"kind=wiki-page file={f.name}", body)))
 
-        merged = llm_call(prompt, timeout=300)
-        if not merged:
-            log(f"  FAIL {rel}: no LLM response")
-            failed += 1
-            continue
-        merged = re.sub(r"^\s*```(?:markdown)?\s*", "", merged)
-        merged = re.sub(r"\s*```\s*$", "", merged).strip() + "\n"
+            merged = llm_call(prompt, timeout=300)
+            if not merged:
+                log(f"  FAIL {rel}: no LLM response")
+                failed += 1
+                continue
+            merged = re.sub(r"^\s*```(?:markdown)?\s*", "", merged)
+            merged = re.sub(r"\s*```\s*$", "", merged).strip() + "\n"
 
-        sane, why = merged_is_sane(body, merged)
-        if not sane:
-            log(f"  FAIL {rel}: {why}")
-            failed += 1
-            continue
+            sane, why = merged_is_sane(body, merged)
+            if not sane:
+                log(f"  FAIL {rel}: {why}")
+                failed += 1
+                continue
 
-        (PREVIEW_DIR / f"{f.stem}.merged.md").write_text(merged, encoding="utf-8")
-        if args.apply:
-            write_page(f, fm, merged)
-            log(f"  MERGED {rel}: {len(body)} → {len(merged)} chars")
-        else:
-            log(f"  PREVIEW {rel}: {len(body)} → {len(merged)} chars "
-                f"→ {(PREVIEW_DIR / (f.stem + '.merged.md')).name}")
-        ok += 1
+            # Named after the page's PATH, not its stem: the same stem in two
+            # projects is normal (setup, overview), and the second preview
+            # overwrote the first.
+            preview = PREVIEW_DIR / (rel.removesuffix(".md").replace("/", "__") + ".merged.md")
+            preview.write_text(merged, encoding="utf-8")
+            if args.apply:
+                try:
+                    write_page(f, fm, merged)
+                except OSError as e:
+                    # A full disk, permissions, a file locked by an editor: one
+                    # page must not stop the rest of the batch.
+                    log(f"  FAIL {rel}: could not write: {e}")
+                    failed += 1
+                    continue
+                log(f"  MERGED {rel}: {len(body)} → {len(merged)} chars")
+            else:
+                log(f"  PREVIEW {rel}: {len(body)} → {len(merged)} chars → {preview.name}")
+            ok += 1
 
-    log(f"done: ok={ok} failed={failed} "
-        f"({'WRITTEN' if args.apply else 'preview only, write with --apply'})")
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(LOG_DIR / f"wiki-conflict-resolve_{DATE}.log",
-                      "\n".join(log_lines) + "\n")
+        log(f"done: ok={ok} failed={failed} "
+            f"({'WRITTEN' if args.apply else 'preview only, write with --apply'})")
+    finally:
+        # The log is the only list of the pages an --apply run has already
+        # rewritten, so it is written even when the loop dies half-way.
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(LOG_DIR / f"wiki-conflict-resolve_{DATE}.log",
+                          "\n".join(log_lines) + "\n")
     return 0
 
 

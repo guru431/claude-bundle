@@ -82,6 +82,41 @@ The short list; UPGRADING.md has the steps.
   and `sync.cmd` reports them `updated` once.
 - **Both task monitors report changes that have not reached their remote for
   48 hours** — only while `ClaudeGitPushAll` is enabled.
+- **`telegram-send.sh` retries** an alert that certainly did not arrive, after
+  30 and 90 s by default (`TELEGRAM_RETRY_GAPS`; empty = one attempt), so a
+  failed send now takes up to ~4 minutes before it reports; `notify.send` waits
+  for the whole schedule.
+
+### Ported from the meta-repo: alert retries, the fence, wiki and memory fixes
+
+The second half of the comparison of the files the bundle shares with the
+meta-repo: fixes made there since the last comparison. Each comes with a test
+that fails on the code it replaces.
+
+- **`telegram-send.sh`** retries spread out in time, and only what certainly
+  did not arrive: a 5xx, or no answer while the body never left (connect
+  failure, `size_upload` 0). No answer after the body went out, and refusals on
+  the merits (400/403/429), are not retried — a retry could post twice. curl's
+  stderr goes to its own file: folded into stdout, the Windows CRT put
+  `curl: (28) …` where the HTTP code belongs. `TELEGRAM_RETRY_GAPS` is in the
+  `.env` template; `notify.timeout_for` covers the schedule.
+- **`untrusted.fence`** removes a forged marker without its closing `>>>` too
+  (`<<<END_UNTRUSTED_DATA` alone used to survive whole).
+- **`wiki-compile-sessions.py`** dates an appended fragment by the daily, not by
+  the run: a pair retried the next night came back as another day's snapshot and
+  was appended twice. The page-body cap is `MAX_CONTENT_CHARS` (it always
+  counted characters).
+- **`wiki-conflict-resolve.py`** names a preview after the page's path (two
+  projects' `setup.md` overwrote each other's), fails one page on a write
+  error instead of the whole run, and writes its log even when the loop dies.
+- **`wiki-lint.py`** keeps the baseline and exits 1 when the regression alert
+  was not delivered — the next run compared against the new numbers in silence.
+- **`memory-update.py`** subtracts the exact `### <name>` headers from the
+  prompt cap before sharing it out; the flat 12 characters per project fitted a
+  six-letter name only, and longer names pushed the summary over the cap.
+- **`agents-md-sync-check.py`**: a path is matched on its last two segments, not
+  its basename (`.mcp.json` vouched for any path ending in it), and each path of
+  a backticked command is checked on its own.
 
 ### Findings: 20 resolved, 15 declined
 

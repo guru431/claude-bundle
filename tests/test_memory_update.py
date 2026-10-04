@@ -225,6 +225,18 @@ def test_a_project_left_out_of_a_full_prompt_is_read_until_a_night_serves_it(
     assert mod.owed_projects() == {}, "a served project must stop being read back"
 
 
+def test_long_project_names_do_not_push_the_summary_over_its_cap(memory):
+    """Each share used to be cap/n minus a flat 12 characters for `### <name>`
+    and the blank line — enough for a six-letter name. Longer names took the
+    difference out of the cap the summary exists to enforce."""
+    cap = 20_000
+    msgs = {f"a-rather-long-project-name-{n:02d}": memory.MSG_SEP.join(["m"] * 2000)
+            for n in range(20)}
+    summary = memory.build_summary(msgs, cap=cap)
+    assert len(summary) <= cap, f"{len(summary)} chars against a {cap} cap"
+    assert all(f"### {name}\n" in summary for name in msgs)
+
+
 def _sent_book(bundle: Path) -> dict:
     """memory.sent_hashes from the copy's state file."""
     state = json.loads((bundle / "wiki" / ".processed.json").read_text(encoding="utf-8"))

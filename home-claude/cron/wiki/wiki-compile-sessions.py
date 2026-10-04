@@ -327,7 +327,7 @@ def compile_project_data(project: str, data: str,
     deterministic bail) was retried nightly, forever.
 
     Each change carries `_bodies_withheld`: True when the LLM saw only page
-    NAMES while producing it (page-count or byte cap), so apply_changes must
+    NAMES while producing it (page-count or size cap), so apply_changes must
     append rather than overwrite. It is PER CHANGE, not per project, because
     visibility is recomputed for every part: existing_pages grows as parts feed
     their own output back into it, so part 3 can cross MAX_PAGES_WITH_CONTENT
@@ -340,7 +340,9 @@ def compile_project_data(project: str, data: str,
 
     # Guard against context overflow (e.g. 128K-token providers): if there
     # are many pages, send only the names (see MAX_PAGES_WITH_CONTENT above).
-    MAX_CONTENT_BYTES = 40000
+    # Counted in CHARACTERS (len(str)), not bytes: a model's limit is in tokens,
+    # and those track characters more closely than the UTF-8 bytes of non-Latin text.
+    MAX_CONTENT_CHARS = 40000
 
     def render_existing(part: str) -> tuple[str, str, bool]:
         """Render the page-name list and bodies for a prompt from current state.
@@ -350,7 +352,7 @@ def compile_project_data(project: str, data: str,
         or it would rewrite the page from the pre-run body and erase those facts.
 
         Pages the part LINKS to go first, then the rest freshest-first: when the
-        byte cap cuts the list, it now cuts pages the new data does not mention,
+        size cap cuts the list, it now cuts pages the new data does not mention,
         rather than an older page it is explicitly about.
         """
         names = "\n".join(f"- {name}" for name in sorted(existing_pages.keys()))
@@ -362,7 +364,7 @@ def compile_project_data(project: str, data: str,
             # sorted() is stable: within each group the mtime order is kept.
             for name in sorted(existing_pages, key=lambda n: n not in linked):
                 bodies += f"\n### {name}\n{existing_pages[name]}\n"
-                if len(bodies) > MAX_CONTENT_BYTES:
+                if len(bodies) > MAX_CONTENT_CHARS:
                     bodies += "\n(remaining pages omitted due to size)\n"
                     withheld = True
                     break
@@ -662,7 +664,10 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
             # normalized to nest under `## Update (…)`. append_fragment (utils)
             # is the shared implementation — compile-kb used to append raw text
             # and produced the "two versions of one page" this prevents.
-            merged = append_fragment(existing_body, content, DATE)
+            # Dated by the daily, not by the run: a pair retried the next night
+            # otherwise came back with another date, the presence check did not
+            # recognize it, and the page got the section twice.
+            merged = append_fragment(existing_body, content, source_date)
             if merged == existing_body:
                 continue  # nothing new — keeps a retried daily idempotent
             content = merged
@@ -677,7 +682,7 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
             if not sane:
                 print(f"  WARN compile {project}: {rel_path} — {why}; appending "
                       f"instead of replacing", file=sys.stderr)
-                merged = append_fragment(existing_body, content, DATE)
+                merged = append_fragment(existing_body, content, source_date)
                 if merged == existing_body:
                     continue
                 content = merged

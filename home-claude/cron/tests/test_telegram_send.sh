@@ -91,4 +91,41 @@ for rc in 1 0; do
     [ "$parts" -eq 0 ] || fail "curl was called although the splitter produced nothing"
 done
 
+# --- Case 4: retries — only what certainly did not arrive, spread out in time ---
+# A stub that answers from a script of responses, one per call (`-w` prints
+# `<code> <size_upload>` on the last line). TELEGRAM_RETRY_GAPS=0 keeps it fast.
+mkdir -p "$TMP/rbin"
+cat > "$TMP/rbin/curl" <<'STUB'
+#!/bin/bash
+cat > /dev/null
+n=$(($(cat "$CALLS" 2>/dev/null || echo 0) + 1))
+echo "$n" > "$CALLS"
+line=$(sed -n "${n}p" "$ANSWERS")
+[ -n "$line" ] || line="200 10"
+case "$line" in
+    "200 "*) printf '{"ok":true}\n%s' "$line" ;;
+    *) echo "curl: (28) stub failure" >&2; printf '\n%s' "$line" ;;
+esac
+STUB
+chmod +x "$TMP/rbin/curl"
+export CALLS="$TMP/calls"
+export ANSWERS="$TMP/answers"
+
+retry_case() {   # retry_case <answers, one per line> <want calls> <want rc> <label>
+    printf '%s\n' "$1" > "$ANSWERS"
+    rm -f "$CALLS"
+    PATH="$TMP/rbin:$PATH" TELEGRAM_RETRY_GAPS="0 0" bash "$SCRIPT" "retry probe" \
+        > /dev/null 2> "$TMP/stderr"
+    rc=$?
+    calls=$(cat "$CALLS")
+    [ "$calls" -eq "$2" ] || fail "$4: expected $2 call(s), got $calls"
+    [ "$rc" -eq "$3" ] || fail "$4: expected exit $3, got $rc"
+}
+retry_case "000 0" 2 0 "nothing left the machine (connect failed) — retried"
+retry_case "503 120" 2 0 "a 5xx — retried"
+retry_case "000 120" 1 1 "the body went out, no answer — NOT retried (would post twice)"
+retry_case "400 120" 1 1 "a refusal on the merits — not retried"
+retry_case "$(printf '000 0\n000 0\n000 0')" 3 1 "the schedule ends — exit 1"
+grep -qF 'curl: (28)' "$TMP/stderr" || fail "curl's own error is not in the report"
+
 echo "PASS: test_telegram_send.sh"

@@ -224,20 +224,42 @@ def detect_newline(path: Path) -> str:
     return "\r\n" if crlf > raw.count(b"\n") - crlf else "\n"
 
 
-def _ident_variants(token: str) -> list[str]:
-    """Forms an identifier may have been written in inside AGENTS.md.
+_PATH_SEP = re.compile(r"[/\\]")
+_TAIL2 = re.compile(r"[^/\\]+[/\\][^/\\]+$")
+
+
+def _path_forms(word: str) -> list[str]:
+    """Forms a path may have been written in inside AGENTS.md.
 
     The model quotes a path as `~/.config/thing.md` while the file spells it
     absolutely; comparing whole strings would miss that, so the tail counts too.
+    The tail is the last TWO segments, not the bare basename: `README.md` or
+    `.mcp.json` is in almost any AGENTS.md and used to vouch for a real item.
     """
-    token = token.strip().rstrip("/\\")
+    word = word.rstrip("/\\")
+    forms = [word]
+    m = _TAIL2.search(word)
+    if m and m.group(0) != word:
+        forms.append(m.group(0))
+    return forms
+
+
+def _identifiers(token: str) -> list[list[str]]:
+    """The identifiers of a backticked fragment, each with its accepted forms.
+
+    A multi-word fragment holding paths (`python scripts/probe.py net/.mcp.json`)
+    is a command: every path-like word is checked on its own. Otherwise the tail
+    of its last word, found in the file, passed the whole item off as false. A
+    fragment with no path (`Sat 07:00`) is compared whole, as before.
+    """
+    token = token.strip()
     if not token:
         return []
-    variants = [token]
-    tail = re.split(r"[/\\]", token)[-1]
-    if tail and tail != token:
-        variants.append(tail)
-    return variants
+    words = token.split()
+    paths = [w for w in words if _PATH_SEP.search(w.rstrip("/\\"))]
+    if len(words) > 1 and paths:
+        return [_path_forms(p) for p in paths]
+    return [_path_forms(token)]
 
 
 def _is_vacuous(tokens: list[str]) -> bool:
@@ -275,9 +297,10 @@ def verify_report(report: str, agents_md: str) -> tuple[str, list[str]]:
                 dropped.append(item.lstrip("-* ").strip())
                 continue
             if in_missing:
-                variants = [_ident_variants(t) for t in tokens]
-                if variants and all(
-                    any(v in agents_md for v in vs) for vs in variants if vs
+                idents = [i for t in tokens for i in _identifiers(t)]
+                # False only when EVERY identifier it names is there.
+                if idents and all(
+                    any(v in agents_md for v in forms) for forms in idents
                 ):
                     dropped.append(item.lstrip("-* ").strip())
                     continue

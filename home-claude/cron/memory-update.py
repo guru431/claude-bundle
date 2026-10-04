@@ -450,7 +450,11 @@ def build_summary(proj_messages: dict[str, str], cap: int = PROMPT_TOTAL_CAP) ->
     deferred = deferred_projects(proj_messages, cap)
     projects = [p for p in sorted(proj_messages) if p not in deferred]
     n = len(projects)
-    share = max(SUMMARY_MIN_SHARE, cap // n - SUMMARY_SECTION_OVERHEAD)
+    # The share comes out of what is left after the EXACT headers and separators.
+    # A flat SUMMARY_SECTION_OVERHEAD per project covered a six-letter name; a
+    # longer one took the difference out of the cap this function enforces.
+    overhead = sum(len(f"### {proj}\n") for proj in projects) + 2 * (n - 1)
+    share = max(SUMMARY_MIN_SHARE, (cap - overhead) // n)
     out = []
     for proj in projects:
         body = proj_messages[proj]

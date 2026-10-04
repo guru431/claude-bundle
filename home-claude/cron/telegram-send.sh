@@ -122,25 +122,64 @@ for part in "$PARTS_DIR"/part*.json; do
     # Telegram but whose reply missed --max-time 30 was posted a second time —
     # the message went out twice. --retry-connrefused is gone with it: it is a
     # modifier of --retry and does nothing on its own.
-    RESPONSE=$(curl -sS --connect-timeout 10 --max-time 30 -X POST \
-      -H "Content-Type: application/json; charset=utf-8" \
-      --data-binary "@$part" \
-      -w '\n%{http_code}' \
-      -K - <<CURL_CFG 2>&1
+    #
+    # The retries this script does make are SPREAD OUT IN TIME, and only for a
+    # message that certainly did not arrive. A machine's outbound link that
+    # blinks for a minute or two failed every attempt curl could fit into half a
+    # minute, and the alert — often the only report of a failed night — was
+    # lost while the channel itself was fine. The gaps between attempts are
+    # TELEGRAM_RETRY_GAPS (seconds, comma- or space-separated; default 30,90;
+    # empty = one attempt). cron/lib/notify.py sizes its wait from the same
+    # variable.
+    #
+    # curl's stderr goes to its own file, not `2>&1`: the Windows CRT flushes it
+    # AFTER stdout, so `curl: (28) …` landed on the last line where the HTTP code
+    # belongs, and the retry never recognized the very failure it is for.
+    GAPS="${TELEGRAM_RETRY_GAPS-30,90}"
+    ATTEMPT=0
+    for gap in ${GAPS//,/ } ""; do
+        ATTEMPT=$((ATTEMPT + 1))
+        RESPONSE=$(curl -sS --connect-timeout 10 --max-time 30 -X POST \
+          -H "Content-Type: application/json; charset=utf-8" \
+          --data-binary "@$part" \
+          -w '\n%{http_code} %{size_upload}' \
+          -K - <<CURL_CFG 2>"$PARTS_DIR/curl.err"
 url = "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
 CURL_CFG
 )
-    HTTP_CODE=$(printf '%s' "$RESPONSE" | tail -n1)
+        # The -w line: `<http code> <bytes of the body sent>`.
+        LAST=$(printf '%s' "$RESPONSE" | tail -n1)
+        CODE_NOW=${LAST%% *}
+        SENT_NOW=${LAST##* }
+        # Retry ONLY what certainly was not delivered: a 5xx, or no answer while
+        # the request body never left (DNS, connection refused, connect timeout —
+        # size_upload=0). No answer after the body went out (an operation timeout,
+        # a reset while reading) is not retried: Telegram may have taken it, and a
+        # retry would post it twice. A refusal on the merits — 400 "chat not
+        # found", 403 "bot was blocked", 429 — is not cured by repeating it.
+        case "$CODE_NOW" in
+            200) break ;;
+            5??) : ;;
+            000|"") [ "${SENT_NOW:-0}" = "0" ] || break ;;
+            *) break ;;
+        esac
+        [ -n "$gap" ] || break
+        echo "telegram-send: attempt $ATTEMPT failed (HTTP ${CODE_NOW:-no answer}), retrying in ${gap}s" >&2
+        sleep "$gap"
+    done
+    HTTP_CODE="$CODE_NOW"
     BODY=$(printf '%s' "$RESPONSE" | sed '$d')
+    CURL_ERR=$(cat "$PARTS_DIR/curl.err" 2>/dev/null)
     # Mask the bot token before anything is printed. Keeping it out of argv is only
-    # half the job: 2>&1 above folds curl's own diagnostics into $RESPONSE, and those
-    # quote the URL — token included — straight into a cron log that is not treated
-    # as a secret store. Bash substitution, not sed: the token is substituted as a
-    # literal, whereas sed would treat / & \ inside it as syntax and leave it intact.
+    # half the job: curl's own diagnostics quote the URL — token included — and
+    # they go straight into a cron log that is not treated as a secret store. Bash
+    # substitution, not sed: the token is substituted as a literal, whereas sed
+    # would treat / & \ inside it as syntax and leave it intact.
     BODY="${BODY//"$TELEGRAM_BOT_TOKEN"/***TOKEN***}"
+    CURL_ERR="${CURL_ERR//"$TELEGRAM_BOT_TOKEN"/***TOKEN***}"
 
     if [ "$HTTP_CODE" != "200" ] || printf '%s' "$BODY" | grep -q '"ok":false'; then
-        echo "telegram-send: Bot API error (HTTP ${HTTP_CODE:-?}): $BODY" >&2
+        echo "telegram-send: Bot API error (HTTP ${HTTP_CODE:-?}): $BODY${CURL_ERR:+ [$CURL_ERR]}" >&2
         status=1
         continue
     fi

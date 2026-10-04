@@ -20,7 +20,7 @@ Schedule: daily at 02:00.
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=your user messages of allowed projects + a slice of ~/.claude/memory -> LLM provider (a SECOND call with MEMORY_CROSS_NOTES=1); on a night with no extraction, one line saying why -> Telegram Bot API money=tokens writes=~/.claude/memory/*.md
+# bundle-io: offbox=your user messages of allowed projects + a slice of ~/.claude/memory -> LLM provider (a SECOND call with MEMORY_CROSS_NOTES=1); on a night a call gets no usable answer, one line saying why -> Telegram Bot API money=tokens writes=~/.claude/memory/*.md
 import hashlib
 import json
 import os
@@ -738,25 +738,32 @@ def _update(rec: dict) -> int:
         return 0
 
     appended, user_kind, carried = update_user_md(msgs)
-    if appended is not None:
-        # Recorded only now that the provider has answered usably, and only for
+    cross_kind = update_cross_notes(msgs)
+    if appended is not None and cross_kind == "ok":
+        # Recorded only now that BOTH calls have answered usably, and only for
         # the messages the prompt carried in full. A message cut mid-text by a
         # cap is not recorded and may be offered again: a repeated tail is the
         # cheap side of that trade, a message that never went out is not.
+        # Both, because a recorded message is never collected again: when
+        # cross-notes failed after USER.md answered, its links for the night
+        # were lost for good. Repeating the USER.md call is safe — its prompt
+        # carries the tail of USER.md, where tonight's facts were just appended.
         carried_set = carried_messages(carried)
         remember_sent([d for d, text in fresh.items() if text in carried_set], seen)
         # And the projects that prompt had no room for stay readable until a
         # later night serves them — a failed night records nothing, and the
         # widened catch-up window covers everything anyway.
         remember_deferred(deferred_projects(msgs), since)
-    cross_kind = update_cross_notes(msgs)
     log("=== End Memory Update ===")
     run_incident_extract()
 
-    # If there were messages to process but the LLM was never reached
-    # (all providers depleted/failed), the night is silently empty — make
-    # it visible to the exit-code-based monitor instead of returning 0.
-    failed = bool(msgs) and appended is None
+    # If there were messages to process but a call got no usable answer (all
+    # providers depleted/failed, or an unparseable reply), the night is
+    # silently incomplete — make it visible to the exit-code-based monitor
+    # instead of returning 0. A red night also widens the next catch-up window.
+    failed_calls = [call for call, ok in (("USER.md", appended is not None),
+                                          ("cross-notes", cross_kind == "ok")) if not ok]
+    failed = bool(msgs) and bool(failed_calls)
     # WHY it failed, in the LLMResult taxonomy. All four causes used to print
     # the same "llm_call returned empty" and raise the same alert, so "the
     # gateway is down tonight" and "your key is wrong and every night from now
@@ -778,8 +785,9 @@ def _update(rec: dict) -> int:
              + (f"; {kind}" if failed else ""),
     )
     if failed:
-        log(f"ERROR: no memory extraction this run — {reason}.")
-        send_telegram(f"memory-update: no extraction tonight — {reason}.")
+        calls = " and ".join(failed_calls)
+        log(f"ERROR: no usable answer for {calls} this run — {reason}.")
+        send_telegram(f"memory-update: no usable answer for {calls} tonight — {reason}.")
         return 1
     return 0
 

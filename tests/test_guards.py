@@ -1121,6 +1121,26 @@ def test_a_project_label_is_stripped_but_a_name_starting_with_project_is_kept(
     assert utils.normalize_project_name(raw) == expected
 
 
+def test_a_known_project_with_capitals_matches_and_keeps_its_bucket(
+        bundle_tree: Path, monkeypatch):
+    """The heading was lowercased, the `known_projects` entry was not, so `MyApp`
+    never matched anything and every heading took the slug path instead.
+
+    The entry is lowercased where it is read: the bucket stays `myapp` — the
+    name the slug path gave all along — so a fix that returned `MyApp` would
+    have shifted every flush and compile marker recorded under `myapp`.
+    """
+    pytest.importorskip("yaml")
+    (bundle_tree / "bundle.local.yaml").write_text(
+        "known_projects:\n  - MyApp\n", encoding="utf-8")
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.normalize_project_name("MyApp") == "myapp"
+    assert utils.normalize_project_name("MYAPP (session 1)") == "myapp"
+    assert utils.normalize_project_name("myapp-notes") == "myapp"
+    assert utils.normalize_wiki_path("projects/myapp-deploy.md") == "projects/myapp/deploy.md"
+    assert utils.normalize_wiki_path("projects/MyApp-deploy.md") == "projects/myapp/deploy.md"
+
+
 def test_projects_named_project_something_are_separate_and_can_be_allowed(
         bundle_tree: Path, monkeypatch):
     """With F2 an `allow_projects: [project-alpha]` entry was reported unusable

@@ -98,6 +98,33 @@ The short list; UPGRADING.md has the steps.
   holds it.
 - **The hooks scan `.githooks/` too**, so the personal denylist now reads the
   hooks a repository publishes; github-push.sh no longer skips them either.
+- **With `MEMORY_CROSS_NOTES=1`, a night whose cross-notes call fails is red**
+  and alerts, and its messages go out again the next night — both calls. It
+  used to exit 0 and lose that night's links.
+
+### The three findings the meta-repo comparison left open
+
+Each fix comes with a test that fails on the code it replaces.
+
+- **`memory-update.py` records a night only when both calls answered.** The
+  sent journal was written as soon as USER.md answered; a recorded message is
+  never collected again, so when the cross-notes call failed afterwards, its
+  links for that night were lost — with exit 0 and no alert. Now `sent_hashes`
+  and `deferred` wait for both, the night is red, and the alert names the call
+  that failed. Repeating the USER.md call is safe: its prompt carries the tail
+  of USER.md, where that night's facts were appended.
+- **`known_projects` entries with capitals match.** Headings were lowercased,
+  entries were not, so `MyApp` never matched and `MyApp-notes` became a bucket
+  of its own. Entries are lowercased where the manifest is read — for the
+  section normalizer, the LLM path normalizer and flush alike, and the path
+  normalizer lowercases the file name it compares them with — and the bucket
+  stays `myapp`, the name the slug path already gave: no flush or compile
+  marker moves.
+- **`registry-parse.ps1` no longer cuts a quoted list item at `#`.** Only a
+  value that started with a quote was protected, so `script_args: [a, "b #c"]`
+  reached Task Scheduler as `[a, "b`, and only `check-registry --ps-parsed`
+  noticed. Comments are now stripped by a scan that knows where a quoted scalar
+  starts — the value or a list item.
 
 ### Ported from the meta-repo: the secret gates
 

@@ -67,8 +67,9 @@ def differences(dump: Path, text: str) -> list[str]:
 
 # Every construct registry-parse.ps1 claims to read, each written the way a
 # person editing the file might: quoting both ways, a `''` escape, '#' inside a
-# quoted value and after an unquoted one, inline lists with a quoted comma and a
-# single element, every YAML boolean spelling, a top-level key after `tasks:`.
+# quoted value and after an unquoted one, inline lists with a quoted comma, a
+# quoted '#' and a single element, every YAML boolean spelling, a top-level key
+# after `tasks:`.
 SUBSET_FIXTURE = """\
 # header comment
 version: 1
@@ -94,7 +95,7 @@ tasks:
   - name: 'Quoted'
     description: 'see #42 - it''s quoted'
     script: 'C:\\bundle\\cron\\quoted.sh'
-    script_args: ["--full", 'a,b,c', plain]
+    script_args: ["--full", 'a,b,c', plain, "b #c", 'it''s #d']   # trailing comment
     kind: bash
     trigger: "Weekly Sun 03:00"
     enabled: no

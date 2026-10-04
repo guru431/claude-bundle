@@ -264,6 +264,34 @@ def test_a_failed_night_s_messages_are_offered_again(bundle, tmp_path):
     assert "releases are cut on Thursdays" in user_md.read_text(encoding="utf-8")
 
 
+def test_a_night_whose_cross_notes_call_failed_is_offered_again(bundle, tmp_path,
+                                                               monkeypatch):
+    """USER.md answered, the cross-notes call did not — the night is not done.
+
+    The sent journal was written as soon as USER.md answered, so the next night
+    found every message "already sent", and the cross-notes call never saw this
+    night's messages again. The run exited 0 and alerted nobody.
+    """
+    monkeypatch.setenv("MEMORY_CROSS_NOTES", "1")
+    home = tmp_path / "home_cross"
+    _seed(home, "C--work-alpha", ["Alpha now publishes its schema to the shared registry."])
+    _seed(home, "C--work-beta", ["Beta reads its schema from the shared registry."])
+
+    # One canned answer serves both calls: USER.md takes `add`, cross-notes
+    # rejects a `links` that is not a list.
+    first = _run(bundle, home, json.dumps({"add": "- alpha publishes its schema",
+                                           "links": "not a list"}))
+    assert first.returncode == 1, first.stdout
+    assert "cross-notes" in first.stdout.split("ERROR:", 1)[-1], first.stdout
+
+    second = _run(bundle, home, json.dumps({"add": "",
+                                            "links": ["alpha → beta: one schema registry"]}))
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "Collected user messages from 2 projects" in second.stdout, second.stdout
+    notes = home / ".claude" / "memory" / "cross-project-notes.md"
+    assert "one schema registry" in notes.read_text(encoding="utf-8")
+
+
 def test_a_message_the_cap_kept_out_of_the_prompt_is_offered_again(bundle, tmp_path):
     """Only what the prompt carried counts as sent.
 

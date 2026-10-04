@@ -329,8 +329,13 @@ elif not all(isinstance(k, str) and isinstance(v, str)
 PROJECT_MAP: dict[str, str] = dict(_project_map_raw)
 
 # Wiki project slugs the path/section normalizer recognizes (bundle.local.yaml
-# `known_projects:`).
-KNOWN_PROJECTS: list[str] = _manifest_str_list("known_projects")
+# `known_projects:`). Lowercased here, once: every reader compares them with a
+# lowercased heading, so an entry written `MyApp` never matched anything. And
+# lowercased rather than kept as written: unmatched, `MyApp` already got the
+# bucket `myapp` from the slug path, and the flush and compile markers are
+# recorded under that name. (The meta-repo returns the entry as written; its
+# fallback is a fixed bucket, not a slug, so no marker moved there.)
+KNOWN_PROJECTS: list[str] = [p.lower() for p in _manifest_str_list("known_projects")]
 
 # ── Unified per-project privacy policy (honored by EVERY pipeline source) ────
 # One declarative policy, applied identically by every collector (JSONL, memory
@@ -3908,8 +3913,9 @@ def normalize_wiki_path(path: str) -> str:
     if len(parts) == 2 and parts[0] == "projects":
         # projects/some-name.md → try to split filename into project + topic.
         name = parts[1].replace(".md", "")
+        low = name.lower()      # KNOWN_PROJECTS is lowercased where it is read
         for proj in sorted(KNOWN_PROJECTS, key=len, reverse=True):
-            if name.startswith(proj + "-") or name.startswith(proj + "_"):
+            if low.startswith(proj + "-") or low.startswith(proj + "_"):
                 remainder = name[len(proj) + 1:]
                 path = f"projects/{proj}/{remainder}.md"
                 parts = path.split("/")

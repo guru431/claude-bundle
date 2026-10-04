@@ -74,20 +74,43 @@ function Parse-InlineArray([string]$body) {
     return $items | ForEach-Object { Unwrap-Value $_.Trim() }
 }
 
+# The line without its comment: from a '#' that opens the line or follows
+# whitespace, outside quotes. A quote opens only where a scalar starts — the
+# value after `key:` or an item of a `[...]` list — so the apostrophe of a plain
+# `don't` hides nothing. The test this replaced looked only at whether the VALUE
+# started with a quote, and left a quoted list item unprotected:
+# `[a, "b #c"]` was cut at the '#'.
+function Remove-Comment([string]$line) {
+    $q = ''; $flow = 0; $prev = ''
+    for ($i = 0; $i -lt $line.Length; $i++) {
+        $c = [string]$line[$i]
+        if ($q) {
+            if ($q -eq '"' -and $c -eq '\') { $i++ }
+            elseif ($c -eq $q) { $q = '' }
+            continue
+        }
+        if ($c -match '\s') { continue }
+        if ($c -eq '#' -and ($i -eq 0 -or $line[$i - 1] -match '\s')) {
+            return $line.Substring(0, $i).TrimEnd()
+        }
+        # $prev stays put across a quoted scalar, so the second quote of a
+        # `''` escape reopens it.
+        $start = $prev -eq ':' -or ($flow -gt 0 -and ($prev -eq '[' -or $prev -eq ','))
+        if ($start -and ($c -eq "'" -or $c -eq '"')) { $q = $c; continue }
+        if ($start -and $c -eq '[') { $flow++ }
+        elseif ($flow -gt 0 -and $c -eq ']') { $flow-- }
+        $prev = $c
+    }
+    return $line
+}
+
 function Parse-RegistryYaml([string]$path) {
     $lines = Get-Content $path -Encoding UTF8
     $result = @{ launcher = $null; managed_marker = 'managed-by-registry'; tasks = @() }
     $currentTask = $null
     $inTasks = $false
     foreach ($raw in $lines) {
-        $line = $raw -replace '^\s*#.*$', ''
-        # Strip trailing inline comments, but NOT when the value is quoted
-        # (a quoted value may legitimately contain '#', e.g. `desc: 'see #42'`).
-        # We only look at the part after the first ':' to decide.
-        $valPart = if ($line -match '^\s*[^:]+:\s*(.*)$') { $Matches[1].TrimStart() } else { '' }
-        if (-not ($valPart.StartsWith("'") -or $valPart.StartsWith('"'))) {
-            $line = $line -replace '\s+#[^\n]*$', ''
-        }
+        $line = Remove-Comment $raw
         if ($line.Trim() -eq '') { continue }
 
         # Top-level key (column 0). `tasks:` opens the list; any OTHER top-level

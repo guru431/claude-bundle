@@ -141,6 +141,8 @@ def test_tasks_without_a_declared_port_are_not_probed():
         {"name": "Stringly", "health_port": "8765"},
         {"name": "OutOfRange", "health_port": 70000},
         {"name": "Zero", "health_port": 0},
+        # YAML `health_port: yes` — bool is an int, and True would probe port 1.
+        {"name": "Boolean", "health_port": True},
     ]) == []
 
 

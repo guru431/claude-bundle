@@ -194,8 +194,8 @@ def check_health_ports(tasks: list[dict]) -> list[tuple[str, str]]:
     """
     problems: list[tuple[str, str]] = []
     for task in tasks:
-        port = task.get("health_port")
-        if not isinstance(port, int) or not 1 <= port <= 65535:
+        port = health_port(task)
+        if port is None:
             continue
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=PROBE_TIMEOUT_S):

@@ -4,7 +4,9 @@
 # Project scheme: origin=primary (default push, including the nightly
 # git-push-all sweep), github=secondary (pushed ONLY by hand via this script).
 # Before pushing to the public github remote we run a 4-stage privacy gate over
-# the whole range of commits that would leave for github (github/<branch>..<branch>).
+# the whole range of commits that would leave for github (github/<branch>..<branch>),
+# then a local CI gate (ci-precheck.py), and after the push we wait for the
+# GitHub Actions run of the published commit (ci-watch.py).
 #
 # Usage:
 #   github-push.sh [project|path] [branch]
@@ -13,6 +15,7 @@
 #   github-push.sh --check-only [project] [branch]   # checks only, no push
 #
 # Bypass a confirmed false-positive: GITHUB_PUSH_FORCE=1 github-push.sh ...
+# Skip the CI gate and the wait for CI:  GITHUB_PUSH_NO_CI=1 github-push.sh ...
 set -eu
 
 # Bundle layout: home-claude/cron/github-push.sh → BUNDLE_ROOT = .../home-claude/
@@ -225,5 +228,62 @@ fi
 echo "Privacy checks passed."
 if [ "$CHECK_ONLY" = "1" ]; then echo "(--check-only: push skipped)"; exit 0; fi
 
+# --- the CI gate: what GitHub Actions will check, before the push -------------
+# A red run used to arrive by e-mail a day later, although nearly all of it is
+# visible here in seconds (ci-precheck.py says what). Not a copy of CI — the
+# portable subset; ci-watch.py catches the rest after the push. rc 2 means "an
+# autofix was applied": the fix sits in the working tree and a push sends
+# commits, so the publication stops until it is committed.
+# Invocation-time switches: GITHUB_PUSH_NO_CI=1 skips both halves,
+# GITHUB_PUSH_CI_FIX=0 reports without fixing.
+if [ -z "${PYTHON_BIN:-}" ] && [ -f "$SCRIPT_DIR/lib/runtime.sh" ]; then
+  PYTHON=""
+  set +e
+  # shellcheck source=lib/runtime.sh
+  . "$SCRIPT_DIR/lib/runtime.sh"
+  set -e
+  PYTHON_BIN="$PYTHON"
+fi
+if [ "${GITHUB_PUSH_NO_CI:-0}" = "1" ]; then
+  echo "GITHUB_PUSH_NO_CI=1 — CI gate skipped."
+elif [ -z "${PYTHON_BIN:-}" ]; then
+  echo "WARN: no python found — CI gate skipped."
+else
+  echo "=== CI gate (local) ==="
+  # `|| gate_rc=$?`, not `; gate_rc=$?`: under `set -e` a non-zero gate would
+  # end the script before the assignment, and the triage below would never run.
+  gate_rc=0
+  if [ "${GITHUB_PUSH_CI_FIX:-1}" = "1" ]; then
+    "$PYTHON_BIN" "$SCRIPT_DIR/ci-precheck.py" "$REPO" --fix || gate_rc=$?
+  else
+    "$PYTHON_BIN" "$SCRIPT_DIR/ci-precheck.py" "$REPO" || gate_rc=$?
+  fi
+  case "$gate_rc" in
+    0) : ;;
+    2) echo ""
+       echo "PUBLICATION STOPPED: the autofix changed the working tree."
+       echo "Review the diff, commit it, and publish again."
+       exit 1 ;;
+    *) echo ""
+       echo "PUBLICATION CANCELLED — CI would be red on these commits."
+       echo "Bypass (a known failure that is not yours to fix now): GITHUB_PUSH_NO_CI=1 $0 ..."
+       exit 1 ;;
+  esac
+fi
+
 git push github "$BRANCH"
 echo "OK: $(basename "$REPO") [$BRANCH] published to github."
+
+# --- and make sure CI is actually green ---------------------------------------
+# The local gate is not CI: a test that depends on the machine passes here and
+# fails on a fresh runner. Only the real run says.
+if [ "${GITHUB_PUSH_NO_CI:-0}" = "1" ]; then
+  echo "GITHUB_PUSH_NO_CI=1 — the CI result is not checked."
+elif [ -n "${PYTHON_BIN:-}" ]; then
+  echo "=== CI result ==="
+  "$PYTHON_BIN" "$SCRIPT_DIR/ci-watch.py" "$REPO" || {
+    echo ""
+    echo "The commits are published, but CI is red — see above."
+    exit 1
+  }
+fi

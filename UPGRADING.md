@@ -89,9 +89,29 @@ branch already holds does not block git-push-all again. The masker strikes the
 same values out of logs, FINDINGS and LLM payloads. Nothing to do unless your
 keys live in another file: then set `SECRET_VAULT_FILE` to it.
 
+### Remotes anyone can read are no longer pushed
+
+`git-push-all.sh` now asks each remote, anonymously, whether it can be read
+without logging in, and does not push to one that can. If you publish some
+repositories on purpose, name them in `.env` before the next night —
+`GIT_PUSH_PUBLIC_REPOS=my-tool, my-site` (directory names; `*` turns the check
+off) — or each gets one Telegram line and stays unpushed. A remote you did not
+mean to be public: make it private on its host; the next night pushes it again.
+
+### github-push.sh runs a CI gate
+
+A publication now runs the local checks of `cron/ci-precheck.py` first and
+waits for the GitHub Actions run afterwards. Nothing to set up; for a private
+repository put a `GITHUB_TOKEN` in `.env` so the run can be read, and use
+`GITHUB_PUSH_NO_CI=1 github-push.sh …` for a one-off publication without it.
+
 ### Windows task registry
 
 Then run `sync.cmd` once (step 4 above).
+
+- **New task `ClaudeDaemonWatch`** (`enabled: false`). Carry it into an edited
+  registry if you run a service with `health_port` and want it restarted within
+  minutes; enable it there and run `sync.cmd`.
 
 - **A re-install now replaces a registry nobody edited**, as `install.sh` does:
   the manifest records the registry the installer bootstrapped, and a file that

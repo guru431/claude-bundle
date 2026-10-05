@@ -25,10 +25,12 @@ installer generates the first from the second.
 | `ANTHROPIC_API_KEY` | declared | — |
 | `API_TIMEOUT_MS` | optional (commented) | `scripts/claude-switch.ps1` |
 | `BASH_BIN` | not in .env (internal) | `home-claude/cron/claude-healthcheck.sh`, `home-claude/cron/claude-task-monitor.sh`, `home-claude/cron/git-push-all.sh` |
-| `BASH_EXE` | declared | `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh` |
+| `BASH_EXE` | declared | `home-claude/cron/ci-precheck.py`, `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh` |
 | `BUNDLE_ROOT` | not in .env (internal) | `home-claude/cron/github-push.sh` |
 | `CCR_API_KEY` | declared | `scripts/claude-switch.ps1` |
 | `CCR_HOST` | declared | `scripts/claude-switch.ps1` |
+| `CI_PRECHECK_TEST_TIMEOUT` | optional (commented) | `home-claude/cron/ci-precheck.py` |
+| `CI_WATCH_TIMEOUT` | optional (commented) | `home-claude/cron/ci-watch.py` |
 | `CLAUDE_BASH_DENY` | not in .env (internal) | `home-claude/hooks/bash-guard.py` |
 | `CLAUDE_BIN` | declared | `home-claude/cron/claude-warm-window.sh`, `home-claude/cron/hooks/utils.py` |
 | `CLAUDE_BUNDLE_RUNS_DIR` | not in .env (internal) | `home-claude/cron/runs.py` |
@@ -44,10 +46,14 @@ installer generates the first from the second.
 | `DEEPSEEK_BASE_URL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `DEEPSEEK_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)`, `scripts/claude-switch.ps1` |
 | `DEEPSEEK_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
+| `GITHUB_PUSH_CI_FIX` | not in .env (internal) | `home-claude/cron/github-push.sh` |
 | `GITHUB_PUSH_FORCE` | not in .env (internal) | `home-claude/cron/github-push.sh` |
+| `GITHUB_PUSH_NO_CI` | not in .env (internal) | `home-claude/cron/github-push.sh` |
+| `GITHUB_TOKEN` | optional (commented) | `home-claude/cron/ci-watch.py` |
 | `GIT_NET_TIMEOUT` | optional (commented) | `home-claude/cron/git-push-all.sh` |
 | `GIT_PUSH_ALL_DRY_RUN` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
 | `GIT_PUSH_ALL_LIB` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
+| `GIT_PUSH_PUBLIC_REPOS` | optional (commented) | `home-claude/cron/git-push-all.sh` |
 | `GIT_SSH_COMMAND` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
 | `HANDOFF_WAIT_SECONDS` | optional (commented) | `home-claude/cron/hooks/session-start.py` |
 | `HEALTHCHECK_DISK_EXCLUDE` | optional (commented) | `home-claude/cron/claude-healthcheck.sh` |
@@ -65,6 +71,7 @@ installer generates the first from the second.
 | `MEMORY_CROSS_NOTES` | optional (commented) | `home-claude/cron/memory-update.py` |
 | `MINIMAX_API_KEY` | declared | `scripts/claude-switch.ps1` |
 | `MONITOR_EXCLUDE_TASKS` | optional (commented) | `home-claude/cron/claude-task-monitor.sh` |
+| `MONITOR_PULSE_URL` | optional (commented) | `home-claude/cron/claude-task-monitor.py`, `home-claude/cron/claude-task-monitor.sh`, `home-claude/cron/monitor_checks.py` |
 | `OLLAMA_HOST` | declared | `scripts/claude-switch.ps1` |
 | `OPENCODE_GO_API_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)`, `scripts/claude-switch.ps1` |
 | `OPENCODE_GO_KEY` | — | `home-claude/cron/hooks/utils.py (PROVIDERS)`, `scripts/claude-switch.ps1` |
@@ -105,7 +112,7 @@ installer generates the first from the second.
 | `WIKI_RETRY_LIMIT` | optional (commented) | `home-claude/cron/hooks/utils.py` |
 | `WIN_REMOTE_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 
-_83 variables._
+_90 variables._
 
 ## `bundle.local.yaml` keys
 

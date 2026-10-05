@@ -11,7 +11,7 @@
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=your commits -> your git remotes; the names of the repos it failed or held back, with the paths that held them back (a sensitive file name, a protected file's deletion) -> Telegram Bot API money=no writes=auto-commits and PUSHES every repo under projects_root
+# bundle-io: offbox=your commits -> your git remotes; an anonymous request for each remote's ref list -> that remote's host; the names of the repos it failed or held back, with the paths that held them back (a sensitive file name, a protected file's deletion) and the address of a remote anyone can read -> Telegram Bot API money=no writes=auto-commits and PUSHES every repo under projects_root
 
 # --- Helpers (defined before the main body so the file can be sourced in tests
 #     via GIT_PUSH_ALL_LIB=1 without running a push sweep) ---
@@ -521,6 +521,109 @@ restore_index() {
     fi
 }
 
+# --- A remote anyone can read is a publication, not a backup ---
+# The sweep commits whatever sits in a working tree and pushes it, unattended;
+# its gates look for secrets, not for privacy, so they hold only while the
+# remote is private. Self-hosted Gitea and Forgejo create repositories public
+# unless told otherwise, so does a project in a public GitLab group, and a
+# repository once made public by hand stays that way — after which every night
+# publishes the notes, logs and drafts its owner never meant to share.
+#
+# So each remote is asked what a stranger would ask: the smart-HTTP ref
+# advertisement (`<repo>/info/refs?service=git-upload-pack`) that every git
+# host serves. A 200 with git's own content type means anyone can clone it; a
+# login page (200, text/html) or a 401/403/404 means they cannot. curl -q — no
+# ~/.curlrc — and no netrc, credential helper or token: the question is exactly
+# what an anonymous client sees. An ssh:// or scp-style remote is probed at the
+# https address of the same host and path; a host that serves no https there
+# gives no answer, and the repo is pushed as before.
+#
+# A readable remote of a repo not named in GIT_PUSH_PUBLIC_REPOS is NOT pushed:
+# counted skipped, not failed, with one Telegram line per remote until a probe
+# finds it closed (cron/state/git-push-all-public-remotes.txt). The local
+# auto-commit still happens — it exposes nothing.
+
+# The anonymous https address of a remote URL, credentials stripped. Non-zero
+# for a URL with no network host: a local path, file://, a drive letter.
+# Args: <url>
+remote_https_url() {
+    local url="$1" scheme host port path
+    local re_url='^([A-Za-z][A-Za-z0-9+.-]*)://([^@/]*@)?([^/:@]+)(:[0-9]+)?/(.+)$'
+    local re_scp='^([^@/:]+@)?([^/:@]+):(.+)$'
+    if [[ $url =~ $re_url ]]; then
+        scheme=${BASH_REMATCH[1]} host=${BASH_REMATCH[3]} port=${BASH_REMATCH[4]} path=${BASH_REMATCH[5]}
+        case "$scheme" in
+            https|http) ;;
+            ssh|git|git+ssh|ssh+git) scheme=https port="" ;;   # the ssh port is not the web one
+            *) return 1 ;;
+        esac
+    elif [[ $url != *://* && $url =~ $re_scp ]]; then   # file:///x is no host "file"
+        host=${BASH_REMATCH[2]} path=${BASH_REMATCH[3]} scheme=https port=""
+        [ "${#host}" -gt 1 ] || return 1    # C:/repos/x is a Windows path, not host C
+    else
+        return 1
+    fi
+    path=${path#/}; path=${path%/}
+    [ -n "$path" ] || return 1
+    printf '%s://%s%s/%s\n' "$scheme" "$host" "$port" "$path"
+}
+
+# 0 — anyone can clone it; 1 — they cannot; 2 — no curl to ask with; 3 — the
+# host gave no answer (offline, no https on that host).
+# Args: <https-url>
+remote_is_public() {
+    command -v curl >/dev/null 2>&1 || return 2
+    local out
+    out=$(curl -q -s -L --max-redirs 3 --max-time 15 -o /dev/null \
+        -w '%{http_code} %{content_type}' \
+        "$1/info/refs?service=git-upload-pack" 2>/dev/null)
+    case "$out" in
+        "200 application/x-git-upload-pack-advertisement"*) return 0 ;;
+        ""|000*) return 3 ;;
+    esac
+    return 1
+}
+
+# 0 — push; 1 — anyone can read the remote and the repo is not named in
+# GIT_PUSH_PUBLIC_REPOS (directory names, comma- or space-separated; `*` names
+# them all and turns the probe off): do not push.
+# Args: <label> <remote>
+guard_remote_visibility() {
+    local label="$1" remote="$2" allow url https rc
+    local state="$BUNDLE_ROOT/cron/state/git-push-all-public-remotes.txt"
+    allow=" ${GIT_PUSH_PUBLIC_REPOS:-} "; allow=${allow//,/ }
+    case "$allow" in
+        *" * "*|*" $label "*) return 0 ;;
+    esac
+    # The URL as configured, not `git remote get-url`: that one applies
+    # insteadOf, and the address to report is the one the owner wrote.
+    url=$(git config --get "remote.$remote.pushurl" 2>/dev/null) \
+        || url=$(git config --get "remote.$remote.url" 2>/dev/null) || return 0
+    https=$(remote_https_url "$url") || return 0
+    remote_is_public "$https"; rc=$?
+    case $rc in
+        1)
+            # Closed: forget the alert, so opening it again alerts again.
+            if [ "$DRY_RUN" != "1" ] && grep -qxF "$https" "$state" 2>/dev/null; then
+                { grep -vxF "$https" "$state" || true; } > "$state.tmp" && mv -f "$state.tmp" "$state"   # rc-ok: alert dedup file, not a scan; rc 1 = the list became empty
+            fi
+            return 0 ;;
+        2)
+            echo "[$label] curl not found — whether $remote is public was not checked" >> "$LOG_FILE"
+            return 0 ;;
+        3)
+            echo "[$label] visibility probe of $https got no answer — pushed as before" >> "$LOG_FILE"
+            return 0 ;;
+    esac
+    echo "[$label] $https IS READABLE WITHOUT LOGIN and $label is not in GIT_PUSH_PUBLIC_REPOS — NOT pushed" >> "$LOG_FILE"
+    if [ "$DRY_RUN" != "1" ] && ! grep -qxF "$https" "$state" 2>/dev/null \
+        && [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ] \
+        && "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: $https can be read without logging in — [$label] was not pushed. Make it private, or add $label to GIT_PUSH_PUBLIC_REPOS in .env." >> "$LOG_FILE" 2>&1; then
+        mkdir -p "$(dirname "$state")" && printf '%s\n' "$https" >> "$state"
+    fi
+    return 1
+}
+
 # Unified per-repo run: auto-commit (with the .env exclusion + the protected-
 # deletion guard) + push origin <branch>. Replaces the copy-pasted blocks
 # (main loop / wiki), which had already drifted apart. Updates the global
@@ -584,6 +687,11 @@ push_repo() {
         echo "[$label] no git remote configured — nothing to push" >> "$LOG_FILE"
         skipped=$((skipped + 1)); return
     fi
+    # Asked before the commit and whether or not anything is to be pushed: a
+    # readable remote has to be noticed on a night it is up to date too. It
+    # holds back only the push below; the local auto-commit exposes nothing.
+    local exposed=0
+    guard_remote_visibility "$label" "$remote" || exposed=1
     # A failed status (`Out of diskspace` refreshing the index) printed nothing —
     # that is, "clean tree", "up to date" and a lost nightly commit, unlogged.
     local status
@@ -705,6 +813,12 @@ push_repo() {
     remote_hash=$(git rev-parse "$remote/$branch" 2>/dev/null)
     if [ "$local_hash" = "$remote_hash" ]; then
         echo "[$label] up to date" >> "$LOG_FILE"
+        skipped=$((skipped + 1)); return
+    fi
+    # Skipped, not failed: the alert went once, deduplicated; failed would
+    # repeat the summary alert every night while the owner decides.
+    if [ "$exposed" = 1 ]; then
+        echo "[$label] push held back: the remote is readable without login (see above)" >> "$LOG_FILE"
         skipped=$((skipped + 1)); return
     fi
     # Something WILL be published — scan it. Covers commits that predate this

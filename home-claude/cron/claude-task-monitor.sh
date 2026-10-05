@@ -14,7 +14,7 @@
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the TITLES of stale findings from every allowed project, the last stderr lines of a failed bash/python task, and the names of allowed repos whose changes have not reached their remote for 48h (only with ClaudeGitPushAll on) -> Telegram Bot API money=no writes=$HOME/task-monitor-fatal.log OUTSIDE the bundle (a start-up failure, or the full text of an alert it could not deliver: task names, Password/S4U task command lines), and cron/state/task-monitor-seen.json
+# bundle-io: offbox=a failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the TITLES of stale findings from every allowed project, the last stderr lines of a failed bash/python task, and the names of allowed repos whose changes have not reached their remote for 48h (only with ClaudeGitPushAll on) -> Telegram Bot API; an empty GET after a clean run -> the watcher at MONITOR_PULSE_URL (only when set) money=no writes=$HOME/task-monitor-fatal.log OUTSIDE the bundle (a start-up failure, or the full text of an alert it could not deliver: task names, Password/S4U task command lines), and cron/state/task-monitor-seen.json
 
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -z "$BUNDLE_ROOT" ] || [ ! -d "$BUNDLE_ROOT/cron" ]; then
@@ -684,6 +684,16 @@ else
     echo "All tasks OK, no alert needed" >> "$LOG_FILE"
 fi
 rm -f "$SEEN_BACKUP"
+
+# Pulse to a watcher outside this machine (MONITOR_PULSE_URL, opt-in) — only
+# after a run that measured and delivered, so any other outcome, and a machine
+# that never got this far, reach it as silence (monitor_checks.send_pulse). The
+# URL goes through the environment, not argv.
+if [ "$MONITOR_RC" -eq 0 ] && [ -n "${MONITOR_PULSE_URL:-}" ]; then
+    echo "TRACE: stage=pulse $(date '+%H:%M:%S')" >> "$LOG_FILE"
+    MONITOR_PULSE_URL="$MONITOR_PULSE_URL" "$PYTHON" -X utf8 "$CRON_DIR/monitor_checks.py" pulse \
+        >> "$LOG_FILE" 2>&1 || true   # the ping never decides the run
+fi
 
 echo "=== End Task Monitor $(date '+%H:%M:%S') ===" >> "$LOG_FILE"
 

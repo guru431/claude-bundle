@@ -14,14 +14,16 @@ for (AtStartup/AtLogOn tasks) — neither parsed the field nor probed anything,
 while the registry told the user "the task monitors read it". Two copies of one
 check drift; one copy cannot.
 
-A plain module, not a script: the Windows monitor's heredoc imports it with
-cron/ on sys.path, exactly as it imports schtasks_status, and the tests import
-it with neither scheduler present. See tests/test_task_monitor_win.py and
-tests/test_task_monitor_posix.py.
+A plain module: the Windows monitor's heredoc imports it with cron/ on
+sys.path, exactly as it imports schtasks_status, and the tests import it with
+neither scheduler present. See tests/test_task_monitor_win.py and
+tests/test_task_monitor_posix.py. Its one command line, `monitor_checks.py
+pulse`, is how the shell monitor sends its pulse (send_pulse).
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import subprocess
@@ -115,6 +117,9 @@ def read_registry(registry: Path) -> list[dict]:
             cur["platform"] = value(stripped)
         elif stripped.startswith("trigger:"):
             cur["trigger"] = value(stripped)
+        elif stripped.startswith(("logon_type:", "user:")):
+            # daemon-watch leaves an interactive task alone until its user logs on.
+            cur[stripped.split(":", 1)[0]] = value(stripped)
         elif stripped.startswith(("kind:", "script:")):
             # The Windows monitor finds a failed task's stderr by its script.
             cur[stripped.split(":", 1)[0]] = value(stripped)
@@ -201,6 +206,114 @@ def check_health_ports(tasks: list[dict]) -> list[tuple[str, str]]:
                              f"({type(exc).__name__}) — the {task.get('trigger', '?')} "
                              f"service is down, whatever its exit status says"))
     return problems
+
+
+# ── Bringing a dead service back (cron/daemon-watch.py) ──────────────────────
+
+# A second look before a restart: one refused connect can be a socket that
+# blinked or a full backlog, and the price of a wrong verdict is restarting a
+# working service. Then the time a restarted service gets to open its port.
+RECHECK_DELAY_S = 5.0
+REVIVE_SETTLE_S = 20.0
+
+
+def health_port(task: dict) -> int | None:
+    """The port an ENABLED task declares as `health_port`, else None."""
+    port = task.get("health_port")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        return None
+    return None if task.get("enabled") is False else port
+
+
+def port_alive(port: int) -> bool:
+    """Whether something accepts a connection on loopback `port`."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=PROBE_TIMEOUT_S):
+            return True
+    except OSError:
+        return False
+
+
+def restart_task(name: str) -> str:
+    """End a Windows task and run it again: '' on success, else what failed.
+
+    `/end` first. A service can hang as a LIVE process with a dead socket — an
+    asyncio accept loop that stopped re-arming after one failed accept does
+    exactly that — and Task Scheduler counts it as Running, so `restart_count`
+    never fires and `/run` on its own is refused.
+    """
+    for verb in ("/end", "/run"):
+        try:
+            r = subprocess.run(["schtasks", verb, "/tn", name],
+                               capture_output=True, timeout=60, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            # One hung schtasks must not cost the check of the other services.
+            return f"schtasks {verb} did not answer: {type(exc).__name__}: {exc}"[:200]
+        if verb == "/run" and r.returncode != 0:
+            return ("schtasks /run failed: " + (r.stdout + r.stderr).decode(
+                "oem" if os.name == "nt" else "utf-8", errors="replace").strip())[:200]
+        time.sleep(2)
+    return ""
+
+
+def revive_if_dead(task: dict, restart=restart_task) -> tuple[bool, str] | None:
+    """None while the service listens (or declares no port); otherwise
+    (whether it came back, a line for the log and the alert).
+
+    The verdict is the port's, not schtasks': `/run` can be refused on a timing
+    and the service come up anyway. Its complaint goes along as detail.
+    """
+    port = health_port(task)
+    if port is None or port_alive(port):
+        return None
+    time.sleep(RECHECK_DELAY_S)
+    if port_alive(port):
+        return None
+    name = str(task.get("name", "?"))
+    err = restart(name)
+    time.sleep(REVIVE_SETTLE_S)
+    if port_alive(port):
+        return True, (f"{name}: port {port} was not listening — RESTARTED, the port "
+                      f"is up again{f' ({err})' if err else ''}")
+    return False, (f"{name}: port {port} is not listening{f' — {err}' if err else ''}; "
+                   f"the {task.get('trigger', '?')} service did not come back. By hand: "
+                   f"schtasks /end /tn \"{name}\" && schtasks /run /tn \"{name}\"")
+
+
+# How long the pulse may take. A monitor must not hang on a watcher that does
+# not answer, and the ping is a single small GET.
+PULSE_TIMEOUT_S = 10.0
+
+
+def send_pulse(url: str | None, timeout: float = PULSE_TIMEOUT_S) -> str | None:
+    """Tell a watcher OUTSIDE this machine that the monitor ran and did its job.
+
+    The monitor is the last line of defence, and it cannot report its own
+    absence: with the machine off, the scheduler stopped or the monitor itself
+    broken, Telegram stays quiet — and quiet reads as "all well". A dead-man's
+    switch elsewhere (healthchecks.io, an Uptime Kuma push monitor, a webhook of
+    your own that expects a call every day) turns that silence into an alert.
+    Both monitors call this only after a run that measured and delivered (exit
+    0); a run that failed sends nothing, so it reaches the watcher as silence
+    too.
+
+    A plain GET, the request every such service accepts. The URL is never
+    logged: for most of them it IS the credential. None when no URL is set;
+    otherwise a line for the log. A failed ping never changes the exit code.
+    """
+    if not url:
+        return None
+    if not url.lower().startswith(("https://", "http://")):
+        # urllib's own complaint quotes the URL back.
+        return "pulse NOT sent — MONITOR_PULSE_URL is not an http(s) URL"
+    from urllib.request import Request, urlopen
+    try:
+        with urlopen(Request(url, headers={"User-Agent": "claude-bundle-monitor"}),
+                     timeout=timeout) as resp:
+            return f"pulse sent (HTTP {resp.status})"
+    except Exception as exc:  # the reason only: an HTTPError's str carries no URL
+        return (f"pulse NOT sent ({type(exc).__name__}: {exc}) — the outside "
+                f"watcher will read this run as silence")
 
 
 def chain_dead(path: Path = CHAIN_DEAD_PATH,
@@ -404,3 +517,14 @@ def unpushed_report(seen: dict, registry: Path, projects_root: Path | None,
         return f"{line} (already reported)", ""
     seen[UNPUSHED_SEEN_KEY] = labels
     return line, line
+
+
+if __name__ == "__main__":
+    # `monitor_checks.py pulse` — the shell monitor's way to send_pulse(), with
+    # the URL taken from the environment so it never appears in a command line.
+    import sys
+    if sys.argv[1:] != ["pulse"]:
+        print("usage: monitor_checks.py pulse   (reads MONITOR_PULSE_URL)", file=sys.stderr)
+        sys.exit(2)
+    result = send_pulse(os.environ.get("MONITOR_PULSE_URL", "").strip())
+    print(result or "pulse: MONITOR_PULSE_URL is not set")

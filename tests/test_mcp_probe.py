@@ -220,6 +220,27 @@ def test_default_configs_include_each_projects_mcp_json(tmp_path, monkeypatch, c
     assert mod.check_wrappers(configs) == 1
 
 
+def test_the_config_root_follows_claude_config_dir(tmp_path, monkeypatch):
+    """Under CLAUDE_CONFIG_DIR Claude Code keeps `.claude.json`, the plugin cache
+    and (by the installers' default) bundle.local.yaml inside that directory; the
+    audit read them from home only and missed the main declarations."""
+    pytest.importorskip("yaml")
+    home_json = Path.home() / ".claude.json"                 # the conftest sandbox
+    home_json.write_text("{}", encoding="utf-8")
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    assert _load().DEFAULT_CONFIG == home_json               # nothing inside yet: home
+    (cfg / ".claude.json").write_text("{}", encoding="utf-8")
+    work, config = _project_with_wrapper(tmp_path)
+    (cfg / "bundle.local.yaml").write_text(f"projects_root: '{work.as_posix()}'\n",
+                                           encoding="utf-8")
+    mod = _load()
+    assert mod.DEFAULT_CONFIG == cfg / ".claude.json"
+    assert mod.PLUGIN_CACHE == cfg / "plugins" / "cache"
+    assert config in mod.default_configs()
+
+
 def test_projects_root_env_is_the_fallback(tmp_path, monkeypatch):
     work, config = _project_with_wrapper(tmp_path)
     monkeypatch.setenv("PROJECTS_ROOT", str(work))

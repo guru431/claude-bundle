@@ -2,6 +2,7 @@
 """Check MCP server declarations — by handshake, not by "the process started".
 
     python scripts/mcp-probe.py                     # probe servers in ~/.claude.json
+                                                    # (in $CLAUDE_CONFIG_DIR when set)
     python scripts/mcp-probe.py path/to/.mcp.json   # probe a specific config
     python scripts/mcp-probe.py CONFIG server-name  # probe one server
     python scripts/mcp-probe.py --check-wrappers    # audit declarations, launch nothing
@@ -35,8 +36,31 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 HOME = Path.home()
-DEFAULT_CONFIG = HOME / ".claude.json"
-PLUGIN_CACHE = HOME / ".claude" / "plugins" / "cache"
+
+
+def claude_config_dir() -> Path:
+    """Claude Code's config root: CLAUDE_CONFIG_DIR when set, else ~/.claude."""
+    value = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    return Path(value).expanduser() if value else HOME / ".claude"
+
+
+def claude_json_path() -> Path:
+    """Where Claude Code keeps `.claude.json`.
+
+    Under CLAUDE_CONFIG_DIR it lives INSIDE that directory, not in home (Claude
+    Code resolves CLAUDE_CONFIG_DIR -> HOME). Read from home only, the audit
+    skipped the main declarations of anyone who moved the config root — which
+    both installers support. No file there: home, as without the variable.
+    """
+    if os.environ.get("CLAUDE_CONFIG_DIR", "").strip():
+        inside = claude_config_dir() / ".claude.json"
+        if inside.is_file():
+            return inside
+    return HOME / ".claude.json"
+
+
+DEFAULT_CONFIG = claude_json_path()
+PLUGIN_CACHE = claude_config_dir() / "plugins" / "cache"
 
 # A server is "wrapped" when the command resolves the package instead of running it.
 WRAPPERS = ("npx", "npm", "pnpm", "yarn", "bunx", "uv", "uvx", "pipx")
@@ -376,7 +400,7 @@ def projects_root() -> Path | None:
     environment and prints manifest diagnostics as a side effect of import. A
     manifest that cannot be read costs the project scan, never the audit.
     """
-    manifest = HOME / ".claude" / "bundle.local.yaml"
+    manifest = claude_config_dir() / "bundle.local.yaml"
     value = None
     if manifest.is_file():
         try:

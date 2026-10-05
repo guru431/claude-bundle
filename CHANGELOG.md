@@ -101,6 +101,61 @@ The short list; UPGRADING.md has the steps.
 - **With `MEMORY_CROSS_NOTES=1`, a night whose cross-notes call fails is red**
   and alerts, and its messages go out again the next night — both calls. It
   used to exit 0 and lose that night's links.
+- **`git-push-all.sh` no longer pushes to a remote anyone can read.** Each
+  remote is asked anonymously for its ref list; a public one is skipped with one
+  Telegram line, unless its repo is named in `GIT_PUSH_PUBLIC_REPOS` (`*` = all).
+  List the repositories you publish on purpose before the next night.
+- **`github-push.sh` runs a CI gate**: local checks before the push, and a wait
+  for the GitHub Actions run after it. A gate failure cancels the publication;
+  `GITHUB_PUSH_NO_CI=1` skips both halves for one run.
+- **New task `ClaudeDaemonWatch`** (off, Windows only) restarts a registry
+  service whose `health_port` stopped listening; `MONITOR_PULSE_URL` (optional)
+  gives both task monitors a dead-man's switch outside the machine.
+
+### Ported from the meta-repo: what had no twin here
+
+The comparison of shared files only ever looked at files both repositories
+have, so fixes travelled and whole features did not. These four lived in the
+meta-repo alone; each comes with tests that fail without it.
+
+- **The nightly push asks whether a remote is public before pushing to it.**
+  The sweep's gates look for secrets, not for privacy: they hold while a remote
+  is private, and self-hosted Gitea and Forgejo create repositories public by
+  default. `git-push-all.sh` now requests `info/refs?service=git-upload-pack`
+  from each remote the way a stranger would (curl -q, no netrc, no credential
+  helper; an ssh or scp-style remote at the https address of the same host and
+  path). A 200 with git's own content type holds the push back — skipped, not
+  failed, one alert per remote until a probe finds it closed. A login page, a
+  401/403/404 or no answer pushes as before; `GIT_PUSH_PUBLIC_REPOS` names the
+  repositories that are public on purpose. Scenarios:
+  `cron/tests/test_push_visibility.sh`.
+- **A dead service comes back within minutes.** `restart_count` covers a
+  failed start only; a service that started and died, or hangs alive with a
+  dead socket, was noticed by the monitor once a day. `cron/daemon-watch.py`
+  (`ClaudeDaemonWatch`, every 10 minutes, off by default) probes each enabled
+  task's `health_port` twice, restarts a closed one with `schtasks /end` +
+  `/run`, judges by the port again, and pages at most every 6 hours per
+  service. It leaves a machine alone for 10 minutes after boot, and an
+  interactive task alone while its user has no session. The probe and the
+  restart live in `monitor_checks` (`revive_if_dead`), whose line parser now
+  reads `logon_type` and `user` too.
+- **The monitors can be watched from outside.** With `MONITOR_PULSE_URL` set,
+  both task monitors send an empty GET after every run that measured and
+  delivered; a watcher such as healthchecks.io or an Uptime Kuma push monitor
+  turns the silence of a dead machine, a stopped scheduler or a broken monitor
+  into an alert. The URL is never logged (`monitor_checks.send_pulse`).
+- **`github-push.sh` checks what CI will check before publishing.**
+  `cron/ci-precheck.py` runs shellcheck, compileall, the project's fast suite
+  (under its `.venv` when it has one) and its `cron/tests/*.sh`, and checks
+  encodings and line endings; `--fix` repairs SC1125 directives, a BOM or CRLF
+  in `.sh` and then stops the publication, since the fix is not committed yet.
+  After the push, `cron/ci-watch.py` waits for the Actions run of the published
+  commit and prints the tail of each failed job; a repository whose Actions
+  never ran is not waited for. `GITHUB_TOKEN` (environment, or that one key of
+  `.env`) lets it watch a private repository.
+- **`mcp-probe.py` follows `CLAUDE_CONFIG_DIR`**: `.claude.json`, the plugin
+  cache and `bundle.local.yaml` are read inside it when it is set — both
+  installers support that root, and the audit read only the home directory.
 
 ### The three findings the meta-repo comparison left open
 

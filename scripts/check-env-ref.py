@@ -89,6 +89,8 @@ CODE_ONLY = {
     # (`GITHUB_PUSH_FORCE=1 github-push.sh ...`). Putting them in .env would
     # make a one-off override permanent — the opposite of the intent.
     "GITHUB_PUSH_FORCE",
+    "GITHUB_PUSH_NO_CI",
+    "GITHUB_PUSH_CI_FIX",
     "GIT_PUSH_ALL_DRY_RUN",
     "GIT_PUSH_ALL_LIB",
     # Test seam: lets cron/tests/ override the secret-scan pattern. The shipped

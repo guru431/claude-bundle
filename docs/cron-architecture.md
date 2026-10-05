@@ -1,6 +1,6 @@
 # Cron architecture (Windows Task Scheduler)
 
-The bundle ships 17 scheduled tasks (eleven disabled by default) managed
+The bundle ships 18 scheduled tasks (twelve disabled by default) managed
 declaratively through one YAML file. This document explains the moving parts.
 
 ## The big picture
@@ -188,7 +188,10 @@ result stays 0 or "still running" for as long as the process exists, so a
 service that started and then crashed reads as healthy until the next reboot.
 With the field set, `ClaudeTaskMonitor` (and `ClaudeTaskMonitorPosix`) connect to
 `127.0.0.1:<port>` and report a closed port as a failure whatever the exit
-status says — once, and again only if the service came back in between. Leave
+status says — once, and again only if the service came back in between. On
+Windows, `ClaudeDaemonWatch` (off by default) goes one step further: every 10
+minutes it probes the same ports and restarts a task whose port stays closed —
+`restart_count` cannot, since it covers a failed start only. Leave
 it out on ordinary scheduled tasks: they have a real exit status, and a probe
 would only invent failures.
 
@@ -255,8 +258,8 @@ changes the second time.
 
 ## What ships in the bundle
 
-17 tasks, eleven of them shipping `enabled: false`: `ClaudeWikiCompileKB`,
-`ClaudeMd2PdfSync`, `ClaudeWarmWindow`, `ClaudeGitPushAll`,
+18 tasks, twelve of them shipping `enabled: false`: `ClaudeWikiCompileKB`,
+`ClaudeMd2PdfSync`, `ClaudeWarmWindow`, `ClaudeGitPushAll`, `ClaudeDaemonWatch`,
 `ClaudeAgentsMdSyncCheck`, `ClaudeTestSweep`, `ClaudeTestSweepFull`,
 `ClaudeTaskMonitorPosix` — and the three wiki PHASE tasks, which
 `ClaudeWikiPipeline` now runs in order instead.
@@ -281,6 +284,7 @@ Edit `registry.yaml` to disable any others you don't want before running
 | `ClaudeTaskMonitorPosix` | Daily 09:30 | the same alert on Linux/macOS, from failed `systemd --user` units / launchd agents and tasks gone silent in the run ledger (off by default — enable it on a POSIX box) |
 | `ClaudeTestSweep` | Daily 05:15 | run every project's fast test level — its [test contract](#the-test-sweep-and-the-test-contract), or a discovered pytest suite; file a finding when one turns red (off by default; needs `projects_root`) |
 | `ClaudeTestSweepFull` | Weekly Sat 07:00 | the same sweep at the full level — `integration` tests included (off by default; needs `projects_root`) |
+| `ClaudeDaemonWatch` | Daily 00:00 /10min | restart a service whose `health_port` stopped listening, minutes after it died instead of at the next monitor run (off by default — Windows only; enable it once a task declares `health_port`) |
 | `ClaudeWarmWindow` | Daily 01:00 /4h | ping the Claude 5h window (off by default — read the billing note in the script; set `CLAUDE_BIN` in `.env` if the `claude` CLI isn't on PATH in session 0) |
 
 Alerts go to Telegram when something is wrong, not as a success report — with
@@ -317,9 +321,10 @@ this table reflects it.
 | `ClaudeWikiCompileKB` | the text of your KB sources (`kb_sources/`, or `KB_SOURCE_DIR`) → your LLM provider. They belong to no project, so the project policy does not apply to them | yes (PAYG tokens) | no | off (opt-in) |
 | `ClaudeMemoryUpdate` | your user messages (up to ~40 KB/night) + a slice of `~/.claude/memory/` → your LLM provider. With `MEMORY_CROSS_NOTES=1`, a **second** call on top of that, carrying messages from two or more projects at once. On a night a call gets no usable answer, one line saying why → Telegram Bot API | yes (PAYG tokens) | no | on (cross-notes off) |
 | `ClaudeHealthcheck` | host metrics → your LLM provider (see below); when a check fires, the alert with the model's analysis of those metrics → Telegram Bot API, and a line when the analysis itself failed | yes (PAYG tokens) | no | on |
-| `ClaudeGitPushAll` | your commits → your git remotes, and Telegram alerts naming the repos that failed or were held back, with the paths that held them back — a sensitive file name, or a protected file such as `FINDINGS.md` whose deletion was not committed; never a secret's value. Before a push, what the remote does not have yet is scanned: a token-shaped secret, or a sensitive file name (`.env`, private keys, credential files — the table the git hooks use), holds that repo back, and it fails every night until the file is out of its history or pushed once by hand. A blob over 1 MiB is noted in the log, not scanned | no | yes — auto-commits and `git push`es every repo under `projects_root` (the vault too, when `wiki/` has a `.git` of its own) | off (opt-in) |
-| `ClaudeTaskMonitor` / alerts | failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the titles of stale findings from every allowed project, the last stderr lines of a failed bash/python task, and the names of allowed repos whose changes have not reached their remote for 48h (only with `ClaudeGitPushAll` on) → Telegram Bot API | no | no | on |
-| `ClaudeTaskMonitorPosix` | failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers, plus the names of allowed repos whose changes have not reached their remote for 48h (only with `ClaudeGitPushAll` on) → Telegram Bot API | no | no | off (POSIX only) |
+| `ClaudeGitPushAll` | your commits → your git remotes, and Telegram alerts naming the repos that failed or were held back, with the paths that held them back — a sensitive file name, or a protected file such as `FINDINGS.md` whose deletion was not committed; never a secret's value. Before a push, what the remote does not have yet is scanned: a token-shaped secret, or a sensitive file name (`.env`, private keys, credential files — the table the git hooks use), holds that repo back, and it fails every night until the file is out of its history or pushed once by hand. A blob over 1 MiB is noted in the log, not scanned. Each remote is also asked, anonymously, for its ref list (`info/refs`, as any visitor could): a remote anyone can read is not pushed unless its repo is named in `GIT_PUSH_PUBLIC_REPOS`, and one alert names its address | no | yes — auto-commits and `git push`es every repo under `projects_root` (the vault too, when `wiki/` has a `.git` of its own) | off (opt-in) |
+| `ClaudeTaskMonitor` / alerts | failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the titles of stale findings from every allowed project, the last stderr lines of a failed bash/python task, and the names of allowed repos whose changes have not reached their remote for 48h (only with `ClaudeGitPushAll` on) → Telegram Bot API. With `MONITOR_PULSE_URL` set, an empty GET after each clean run → that outside watcher | no | no | on |
+| `ClaudeTaskMonitorPosix` | failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers, plus the names of allowed repos whose changes have not reached their remote for 48h (only with `ClaudeGitPushAll` on) → Telegram Bot API. With `MONITOR_PULSE_URL` set, an empty GET after each clean run → that outside watcher | no | no | off (POSIX only) |
+| `ClaudeDaemonWatch` | the name and port of a service it restarted, or could not bring back → Telegram Bot API, at most every 6 h per service | no | no — but it **restarts** (`schtasks /end` + `/run`) your registry services whose `health_port` stops listening | off (Windows only) |
 | `ClaudeWarmWindow` | ping → Anthropic | Claude subscription/billing | no | off |
 | `ClaudeMd2PdfSync` | on a failure, the paths of the documents that did not convert (relative to `projects_root`) → Telegram Bot API; the reasons stay in the local log. Projects the privacy policy denies are not walked. The render is local, except that the browser fetches any remote image a document links | no | rewrites the paired `*.pdf` in your working copies — which `ClaudeGitPushAll` commits when that task is on | off |
 | `ClaudeWikiLint` | a lint summary → Telegram Bot API, only with `WIKI_LINT_TELEGRAM=1` | no | rewrites vault pages, only with `--fix` | on (alerts off) |

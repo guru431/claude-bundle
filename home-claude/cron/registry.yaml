@@ -31,7 +31,8 @@
 #   on it.
 #
 # ── health_port: for services, not for scheduled jobs ──────────────────────
-#   No scheduler acts on this field — the task monitors read it. For a task
+#   No scheduler acts on this field — the task monitors read it, and
+#   ClaudeDaemonWatch restarts a task whose port stays closed. For a task
 #   triggered AtStartup or AtLogOn the scheduler's own answer carries no
 #   information: LastRun is the moment the machine booted, and the result stays
 #   0 for as long as the task counts as "running". A service that started and
@@ -95,7 +96,8 @@
 #   — a boot task that raced the network, say. A process that started and then
 #   exited non-zero is not a failure to it: the task is recorded as completed and
 #   is NOT restarted. A service that must come back after it exits needs a loop
-#   in its own action, or a watcher that probes its `health_port`.
+#   in its own action, or a watcher that probes its `health_port` — on Windows,
+#   ClaudeDaemonWatch below (off by default).
 #
 # ── kind: exec through cmd /c — quote every `set` ──────────────────────────
 #   `cmd /c set VAR= && next` does not clear VAR: the value is everything up to
@@ -397,6 +399,23 @@ tasks:
     runlevel: limited
     hidden: true
     timeout_hours: 1
+
+  - name: ClaudeDaemonWatch
+    project: main
+    description: Every 10 minutes, restart a registry service whose health_port stopped listening (after two probes; not in the first 10 minutes after boot); Telegram at most every 6h per service. Disabled by default — enable it once a task declares health_port.
+    script: <bundle-install-path>\cron\daemon-watch.py
+    kind: python
+    platform: windows
+    trigger: Daily 00:00
+    repeat_every: PT10M
+    repeat_for: P1D
+    user: <user>
+    logon_type: password
+    runlevel: limited
+    hidden: true
+    # A probe, a restart, a settle of 20 s per dead service — minutes at worst.
+    timeout_hours: 1
+    enabled: false
 
   - name: ClaudeWarmWindow
     project: main

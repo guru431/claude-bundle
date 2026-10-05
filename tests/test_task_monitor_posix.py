@@ -282,3 +282,73 @@ def test_the_posix_monitor_reports_a_silent_task_once_and_again_on_monday(tmp_pa
     assert len(sent) == 2, sent
     assert "1 task(s) still silent since an earlier alert: ClaudeDaily" in sent[1], sent[1]
     assert "last verdict" not in sent[1], "the digest repeated the full line"
+
+
+# ── The pulse to a watcher outside the machine ───────────────────────────────
+
+@pytest.fixture
+def watcher():
+    """A local HTTP server in place of healthchecks.io: records each GET's path
+    and answers with `watcher.status`."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            server.hits.append(self.path)
+            self.send_response(server.status)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    server.status, server.hits = 200, []
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05},
+                              daemon=True)
+    thread.start()
+    yield server
+    server.shutdown()
+    server.server_close()
+
+
+def test_the_pulse_is_a_get_and_never_logs_its_url(watcher):
+    """For most watchers the URL IS the credential, so no line may carry it."""
+    url = f"http://127.0.0.1:{watcher.server_port}/ping/secret-uuid"
+    assert monitor_checks.send_pulse("") is None
+    assert monitor_checks.send_pulse(url) == "pulse sent (HTTP 200)"
+    assert watcher.hits == ["/ping/secret-uuid"]
+    watcher.status = 500
+    for bad in (url, "127.0.0.1/ping/secret-uuid"):
+        line = monitor_checks.send_pulse(bad)
+        assert line.startswith("pulse NOT sent") and "secret-uuid" not in line, line
+
+
+def test_the_shell_monitors_pulse_command_reads_the_url_from_the_environment(watcher):
+    """claude-task-monitor.sh sends its pulse as `monitor_checks.py pulse`."""
+    import os
+    import subprocess
+    env = dict(os.environ,
+               MONITOR_PULSE_URL=f"http://127.0.0.1:{watcher.server_port}/ping/abc")
+    out = subprocess.run([sys.executable, "-X", "utf8", str(CRON / "monitor_checks.py"),
+                          "pulse"], env=env, capture_output=True, text=True, timeout=20)
+    assert out.returncode == 0 and out.stdout.strip() == "pulse sent (HTTP 200)", out
+    assert watcher.hits == ["/ping/abc"]
+    assert "monitor_checks.py\" pulse" in (CRON / "claude-task-monitor.sh").read_text(
+        encoding="utf-8"), "the shell monitor no longer calls the tested entry point"
+
+
+def test_the_posix_monitor_pulses_only_after_a_clean_run(monkeypatch):
+    """Exit 1 is the monitor's own failure (it could not measure or deliver); the
+    watcher has to read that run as silence."""
+    import types
+    pulses: list[str] = []
+    monkeypatch.setattr(monitor, "os", types.SimpleNamespace(
+        name="posix", environ={"MONITOR_PULSE_URL": "https://watcher.invalid/x"}))
+    monkeypatch.setattr(monitor, "send_pulse",
+                        lambda url: pulses.append(url) or "pulse sent (HTTP 200)")
+    monkeypatch.setattr(monitor, "log", lambda line: None)
+    monkeypatch.setattr(monitor, "main", lambda: 1)
+    assert monitor.run() == 1 and pulses == []
+    monkeypatch.setattr(monitor, "main", lambda: 0)
+    assert monitor.run() == 0 and pulses == ["https://watcher.invalid/x"]

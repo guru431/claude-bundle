@@ -41,7 +41,7 @@ box once the units are installed.
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers, plus the names of allowed repos whose changes have not reached their remote for 48h (only with ClaudeGitPushAll on) -> Telegram Bot API money=no writes=cron/state/task-monitor-posix-seen.json
+# bundle-io: offbox=a failure summary naming the bundle's own units (failed ones, and tasks gone silent in the run ledger) and a down LLM chain's providers, plus the names of allowed repos whose changes have not reached their remote for 48h (only with ClaudeGitPushAll on) -> Telegram Bot API; an empty GET after a clean run -> the watcher at MONITOR_PULSE_URL (only when set) money=no writes=cron/state/task-monitor-posix-seen.json
 from __future__ import annotations
 
 import json
@@ -70,7 +70,7 @@ from runs import STALE_SEEN_KEY, stale_alert, terminal_record  # noqa: E402
 # had already drifted — see monitor_checks' header.
 from monitor_checks import (  # noqa: E402
     CHAIN_SEEN_KEY, UNPUSHED_SEEN_KEY, chain_dead_report, check_health_ports,
-    read_registry, unpushed_report)
+    read_registry, send_pulse, unpushed_report)
 
 DATE = datetime.now().strftime("%Y-%m-%d")
 LAUNCHD_PREFIX = "com.claude-bundle."
@@ -373,5 +373,17 @@ def main() -> int:
         return 0
 
 
+def run() -> int:
+    """main(), then the pulse to an outside watcher (MONITOR_PULSE_URL, opt-in)
+    — only after a run that measured and delivered; any other outcome reaches the
+    watcher as silence (monitor_checks.send_pulse)."""
+    rc = main()
+    if rc == 0 and os.name != "nt":
+        line = send_pulse(os.environ.get("MONITOR_PULSE_URL", "").strip())
+        if line:
+            log(line)
+    return rc
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())

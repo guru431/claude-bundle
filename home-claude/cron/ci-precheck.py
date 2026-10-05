@@ -232,6 +232,10 @@ def find_bash() -> str | None:
     /mingw64/bin:/usr/bin at the FRONT of PATH and shadows the stubs the tests
     put there, so the scenarios would quietly reach the real curl or git. Never
     System32's bash.exe — that is the WSL launcher.
+
+    Not utils.find_bash(): it prefers `Git\\bin`, and importing utils loads the
+    bundle's .env into this process — the gate would then run a project's tests
+    with every key of that file in their environment.
     """
     explicit = os.environ.get("BASH_EXE")
     if explicit and os.path.isfile(explicit):

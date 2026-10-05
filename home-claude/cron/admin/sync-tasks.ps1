@@ -498,9 +498,13 @@ function Get-CurrentSummary([string]$name) {
     $t = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     if (-not $t) { return $null }
     # One more Export-ScheduledTask only for the faceless trigger, not per task.
+    # Exported by name and path: `-InputObject $t` fails on these tasks with "The
+    # parameter is incorrect", and under a silent catch the day was never read
+    # at all. A failure is now printed instead of swallowed.
     $monthDays = ''
     if ("$(($t.Triggers | Select-Object -First 1).CimClass.CimClassName)" -eq 'MSFT_TaskTrigger') {
-        try { $monthDays = Get-XmlMonthDays (Export-ScheduledTask -InputObject $t -ErrorAction Stop) } catch {}
+        try { $monthDays = Get-XmlMonthDays (Export-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction Stop) }
+        catch { Write-Host ("   WARN: {0}: day of month not read ({1}) - a day change will go unnoticed" -f $name, $_.Exception.Message) -ForegroundColor Yellow }
     }
     return @{
         monthDays = $monthDays

@@ -167,6 +167,31 @@ foreach ($spec in @('Monthly day=2 03:00', 'Daily 03:00')) {
     assert rows == [["Monthly day=2 03:00", "2"], ["Daily 03:00", ""]], r.stdout
 
 
+@windows_only
+@pytest.mark.integration   # reads the live Task Scheduler
+def test_the_day_of_a_monthly_trigger_is_read_from_a_live_task(tmp_path: Path):
+    """The test above parses the XML; this one checks how the syncer fetches it.
+    `Export-ScheduledTask -InputObject` failed on live Monthly tasks ("The
+    parameter is incorrect"), a silent catch left the day empty, and a changed
+    day printed `[unchanged]`. The day is read independently over COM here."""
+    code = define_functions(SYNC, ["Get-XmlMonthDays", "Get-CurrentSummary"]) + r"""
+$svc = New-Object -ComObject Schedule.Service
+$svc.Connect()
+foreach ($t in Get-ScheduledTask) {
+    if ("$(($t.Triggers | Select-Object -First 1).CimClass.CimClassName)" -ne 'MSFT_TaskTrigger') { continue }
+    $want = Get-XmlMonthDays $svc.GetFolder($t.TaskPath.TrimEnd('\')).GetTask($t.TaskName).Xml
+    if (-not $want) { continue }
+    Write-Output ("{0}|{1}|{2}" -f $t.TaskName, $want, (Get-CurrentSummary $t.TaskName).monthDays)
+}
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    rows = [line.split("|") for line in r.stdout.splitlines() if line.count("|") == 2]
+    if not rows:
+        pytest.skip("no Monthly task is registered on this machine")
+    assert all(want == got for _, want, got in rows), r.stdout + r.stderr
+
+
 def test_a_task_is_ours_only_when_the_marker_leads_its_description(tmp_path: Path):
     """One predicate for -Unregister and the foreign-task guard. Matched anywhere,
     a task that merely mentioned the marker was ours to delete."""

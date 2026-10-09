@@ -78,6 +78,20 @@ form.
   through PowerShell, which rejects the example's quoted form. Write each entry
   in exec form: `"command": "<python-exe>", "args": ["<claude-home>/hooks/bash-guard.py"]`.
 
+### Context7: a declared server instead of the plugin
+
+The `context7` plugin's endpoint now answers 401 until you authenticate in
+`/mcp`, so the bundle no longer enables it. The installer adds only the
+`settings.json` keys you lack and leaves your `enabledPlugins` as it is:
+
+1. Set `"context7@claude-plugins-official"` in `enabledPlugins` to `false`.
+2. `claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp`
+3. Rename allow-list entries `mcp__plugin_context7_context7__*` to
+   `mcp__context7__*`. `claude-switch.ps1 -SeedPermissions` writes the new
+   names; a `settings.local.json` it seeded earlier still has the old ones.
+
+Keeping the plugin instead works too, once you authenticate it in `/mcp`.
+
 ### Key values in `.env` are now guarded
 
 `git-push-all.sh` and `github-push.sh` compare every outgoing commit with the

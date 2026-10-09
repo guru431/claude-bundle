@@ -573,7 +573,8 @@ if [ "$profile" = lite ]; then
 Lite install done. In a Claude Code chat, run:
   /plugin marketplace add anthropics/claude-plugins-official
   /plugin install superpowers
-  /plugin install context7
+and in a terminal, the library-docs server:
+  claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp
 
 Then reload the window.
 EOF

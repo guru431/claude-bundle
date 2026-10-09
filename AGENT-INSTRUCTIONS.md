@@ -91,10 +91,16 @@ User runs in the chat:
 ```
 /plugin marketplace add anthropics/claude-plugins-official
 /plugin install superpowers
-/plugin install context7
 ```
 
 You can't invoke `/plugin` yourself — it's an interactive shell command.
+
+The library-docs server you add yourself, as a user-scope HTTP server — not the
+`context7` plugin, whose endpoint answers 401 until the user authenticates in
+`/mcp`:
+```bash
+claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp
+```
 
 ### 4. Verify
 

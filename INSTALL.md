@@ -113,7 +113,15 @@ In a Claude chat:
 ```
 /plugin marketplace add anthropics/claude-plugins-official
 /plugin install superpowers
-/plugin install context7
+```
+
+Then, in a terminal, the library-docs server. Declare it yourself rather than
+through the `context7` plugin: the plugin's endpoint answers 401 until you
+authenticate in `/mcp`, while this one works anonymously (for a higher rate limit
+add `--header "CONTEXT7_API_KEY: <key>"`):
+
+```bash
+claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp
 ```
 
 Then check that no local MCP process was started for a server that has a hosted

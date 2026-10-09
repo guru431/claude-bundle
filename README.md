@@ -5,7 +5,8 @@ and **full**. Pick one, or start lite and grow into full.
 
 **Lite** (~5 minutes, *no extra software*): drop a sanitized `CLAUDE.md`
 and `settings.json` into `~/.claude/`, add the skill templates and the
-slash command, install the `superpowers` and `context7` plugins. Needs
+slash command, install the `superpowers` plugin and the hosted Context7
+docs server. Needs
 nothing beyond VS Code + the Claude Code extension — get a consistent
 coding discipline across machines. (This is Tier 1 below, minus the
 optional Python hooks.)
@@ -168,13 +169,13 @@ claude-bundle/
 | File | What it gives |
 |---|---|
 | `CLAUDE.md` | The rules every session needs, nothing longer: Findings pattern, when to continue vs. stop and ask, tool-selection rules (Glob/Grep/Read/Edit over Bash), MCP declaration, Windows file-encoding rules (BOM for `.ps1`, no BOM for `.sh`, CRLF for `.cmd`), Karpathy coding discipline (Think/Simplicity/Surgical/Goal-driven), test policy, subagents/verification/tests cadence, Superpowers workflow, Codex coexistence note |
-| `settings.json` | Permissions allow-list, `enabledPlugins` for `superpowers` and `context7`, `language: ru` (change to your preference) |
+| `settings.json` | Permissions allow-list, `enabledPlugins` for `superpowers`, `language: ru` (change to your preference) |
 | `hooks/*.py` | Optional: a deny/ask rule table for Bash commands, `.ps1`/`.sh` encoding fixes, regenerate `.pdf` when the paired `.md` is edited; with the full tier also an ask before a credential file is read or written, a warning on a pasted credential, and a Telegram line when a long task finishes |
 | `skills/rules-reference/` | The long references behind `CLAUDE.md` — test policy, Windows shells and encodings, MCP servers, Task Scheduler — read on demand instead of loaded into every session |
 | `skills/*/SKILL.md` | Optional: `code-review-external` template (second-opinion review), `code-selfcheck` template (check your diff against your own anti-pattern catalog), `personal-voice` template (write text in your voice by register) |
 | `commands/code-review-ext.md` | Optional: `/code-review-ext` slash wrapper |
 
-After install: `/plugin install superpowers context7` gives you a large
+After install: `/plugin install superpowers` gives you a large
 set of skills and slash commands like `/brainstorm`, `/writing-plans`,
 `/systematic-debugging`, `/subagent-driven-development`,
 `/verification-before-completion`. Run `/skills` after installing to see
@@ -281,17 +282,21 @@ Then in a Claude Code chat:
 ```
 /plugin marketplace add anthropics/claude-plugins-official
 /plugin install superpowers
-/plugin install context7
+```
+
+And in a terminal, the library-docs server — hosted, no local process, no login:
+```
+claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp
 ```
 
 Reload the window. Done.
 
-> **Worth checking once.** Current `context7` ships an HTTP config and needs no local
-> Node process. But a plugin update can leave `installPath` pinned to an older
-> npx-based copy, and nothing tells you — you just pay a local server per session
-> (on Windows up to six processes, plus a few seconds of registry round-trip while a
-> new window opens). Run `python scripts/mcp-probe.py --check-wrappers` after installing;
-> if it flags anything, see [`docs/mcp-servers.md`](docs/mcp-servers.md).
+> **Not the `context7` plugin.** Its config points at an endpoint that answers 401
+> until you authenticate through `/mcp`, and it sends no headers, so an API key cannot
+> reach it. The plain endpoint above works anonymously; for a higher rate limit add
+> `--header "CONTEXT7_API_KEY: <key>"`. A plugin that brings its own MCP server can
+> also drift after an update — run `python scripts/mcp-probe.py --check-wrappers`
+> after installing one; if it flags anything, see [`docs/mcp-servers.md`](docs/mcp-servers.md).
 
 ### If you want the full tier too
 

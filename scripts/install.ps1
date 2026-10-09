@@ -893,7 +893,8 @@ if ($Profile -eq 'lite') {
     Info "Lite install done. In a Claude Code chat, run:"
     Info "  /plugin marketplace add anthropics/claude-plugins-official"
     Info "  /plugin install superpowers"
-    Info "  /plugin install context7"
+    Info "and in a terminal, the library-docs server:"
+    Info "  claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp"
     Info ""
     if ($DryRun) { Info "[dry-run] lite plan complete — no files changed."; exit 0 }
     foreach ($n in (Get-UpgradeNotes $script:previousManifest 'lite')) { Warn $n }

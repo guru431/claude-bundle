@@ -111,6 +111,23 @@ The short list; UPGRADING.md has the steps.
 - **New task `ClaudeDaemonWatch`** (off, Windows only) restarts a registry
   service whose `health_port` stopped listening; `MONITOR_PULSE_URL` (optional)
   gives both task monitors a dead-man's switch outside the machine.
+- **Context7 is a declared server, not a plugin.** `settings.json` no longer
+  enables `context7@claude-plugins-official`; an existing `settings.json` keeps
+  its `enabledPlugins` — disable the plugin and add the server by hand.
+
+### Context7: the plugin needs a login, the server does not
+
+The `context7` plugin's `.mcp.json` now points at
+`https://mcp.context7.com/mcp?client=claude-code-plugin`, which answers 401
+without a token, so a fresh install showed the server in `/mcp` as needing
+authentication; the plugin sends no headers, so an API key could not reach it.
+The plain `https://mcp.context7.com/mcp` still answers anonymously. README,
+INSTALL.md, AGENT-INSTRUCTIONS.md and both installers now recommend
+`claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp`
+instead of `/plugin install context7`; both shipped settings files drop the
+plugin from `enabledPlugins`, `claude-switch.ps1 -SeedPermissions` allows the
+tools under their declared-server names (`mcp__context7__*`), and
+`docs/mcp-servers.md` covers this case next to the stale-`installPath` one.
 
 ### Ported from the meta-repo: what had no twin here
 

@@ -113,12 +113,23 @@ copy in the plugin cache. Result — a local server per session, six processes, 
 registry round-trip on every window open, and no indication anything was wrong.
 
 Editing `installed_plugins.json` did not stick: the value was rewritten when a session
-ended. If you hit this, stop relying on the plugin for that server and declare it
-yourself:
+ended.
+
+The same plugin later changed its endpoint to `https://mcp.context7.com/mcp?client=claude-code-plugin`,
+which answers 401 without a token, so after an install `/mcp` lists the server as
+needing authentication. The plugin's config sends no headers, so an API key has no way
+to reach it; the plain `https://mcp.context7.com/mcp` still answers anonymously.
+
+In either case, stop relying on the plugin for that server and declare it yourself:
 
 1. **Disable the plugin** — set `enabledPlugins["<plugin>@<marketplace>"]` to `false` in
    `~/.claude/settings.json`. Skipping this declares the server twice.
-2. **Declare the server** in `mcpServers` in `~/.claude.json`:
+2. **Declare the server** at user scope:
+   ```bash
+   claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp
+   # optional, for a higher rate limit: --header "CONTEXT7_API_KEY: <key>"
+   ```
+   which writes this into `mcpServers` in `~/.claude.json`:
    ```json
    "context7": { "type": "http", "url": "https://mcp.context7.com/mcp" }
    ```

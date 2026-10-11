@@ -118,6 +118,36 @@ The short list; UPGRADING.md has the steps.
   syncer registered such a task Disabled, the POSIX generator enabled it.
   **`uninstall.sh`** exits 1 for a bad argument (was 2).
 
+### From a second-model review of the files just ported
+
+The files the port below touched were read once more by an outside model. It
+filed six findings; each was checked against the code. Fixed, each with a test
+that fails on the code it replaces:
+
+- **`sync-tasks.ps1` refuses a trigger time or day out of range.** `Daily 25:00`
+  passed the regex and the start boundary was built with `AddHours(25)`: the
+  task was registered, silently, for another day; `Monthly day=32` reached Task
+  Scheduler as written. Only `check-registry.py` read the ranges, and the syncer
+  is what applies a registry — checked or not.
+- **The Windows task monitor says when it could not read the registry.** Without
+  it the hung-task check, the service port probe and the stderr tail do not run,
+  and the monitor went on in silence. The reason is now a line in the alert.
+- **The dry-run preview of `git-push-all.sh` reports a failed listing of
+  untracked files** instead of calling files it never read "clean" — the same
+  rule the preview already had for a failed `git diff`.
+- **`mcp-probe.py`**: a plain probe reads the servers the audit reads, the local
+  scope (`projects.<dir>.mcpServers`, where `claude mcp add` puts a server by
+  default) included; a `.claude.json` that holds nothing but `projects` is no
+  longer taken for a server named "projects"; and the cache of a plugin that
+  `settings.json` switches off is not a declaration — it stays on disk and is
+  not loaded.
+
+Declined, with the reason in the local findings archive: the in-repository
+fallback of the denylist temp file in `github-push.sh` (reached only on a system
+with no `mktemp`), `GIT_PUSH_PUBLIC_REPOS` and a directory name with a space
+(it matches), and CRLF in `get_recent_pages_preview` (declined before:
+`read_text` already normalizes line endings).
+
 ### Ported from the meta-repo: five fixes since the last comparison
 
 The shared files were compared again, commit by commit. Five fixes made in the

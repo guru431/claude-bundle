@@ -151,8 +151,13 @@ try:
     REGISTRY = {t['name']: t for t in
                 monitor_checks.read_registry(Path(sys.argv[1]) / 'registry.yaml')
                 if t.get('name')}
-except OSError:
+except OSError as exc:
     REGISTRY = {}
+    # Said in the alert, not only decided here: without the registry the hung
+    # check, the port probe and the stderr tail below do not run, and a monitor
+    # that goes on in silence is the green line over real failures again.
+    NOTES.append(f'registry.yaml could not be read ({type(exc).__name__}) — the hung-task '
+                 f'check, the service port probe and the stderr tail did NOT run')
 TIMEOUTS = {name: t.get('timeout_hours') for name, t in REGISTRY.items()}
 # The launcher keeps a bash/python task's stderr; a FAIL line carries its tail.
 STDERR_DIR = monitor_checks.stderr_dir(Path(sys.argv[1]) / 'registry.yaml')

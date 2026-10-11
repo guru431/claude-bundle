@@ -134,6 +134,26 @@ foreach ($c in @(@('AtStartup', ''), @('AtLogOn', ''), @('AtStartup', 'PT8H'),
     ], r.stdout
 
 
+def test_a_time_of_day_out_of_range_is_refused_not_rolled_over(tmp_path: Path):
+    """`Daily 25:00` passed the trigger regex, and the start boundary was built
+    with AddHours(25): the task was registered, silently, for one o'clock the
+    next night. Only check-registry.py read the range — and the syncer is what
+    applies a registry, checked or not."""
+    code = define_functions(SYNC, ["Build-XmlTrigger", "Get-RepeatDuration",
+                                   "Get-CalendarStart"]) + r"""
+foreach ($spec in @('Daily 24:00', 'Daily 07:60', 'Weekly Mon 99:00', 'Monthly day=1 25:61',
+                   'Monthly day=0 01:00', 'Monthly day=32 01:00', 'Daily 23:59')) {
+    try { Build-XmlTrigger $spec '' '' '' | Out-Null; Write-Output "$spec|accepted" }
+    catch { Write-Output ("$spec|" + $_.Exception.Message) }
+}
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    got = dict(line.split("|", 1) for line in r.stdout.splitlines() if "|" in line)
+    assert got.pop("Daily 23:59") == "accepted", got
+    assert len(got) == 6 and all("out of range" in why for why in got.values()), got
+
+
 def test_a_repeating_calendar_trigger_is_not_rolled_to_tomorrow(tmp_path: Path):
     """A slot already passed today rolls to tomorrow — except for a trigger with
     repeat_every: its <Repetition> ticks only from StartBoundary on, so rolling

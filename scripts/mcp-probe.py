@@ -94,23 +94,23 @@ def _servers_in(data) -> dict:
     if isinstance(data, dict) and "mcpServers" in data:
         return data["mcpServers"] or {}
     # Some plugin configs omit the wrapper key and map names to specs directly.
-    if isinstance(data, dict) and all(isinstance(v, dict) for v in data.values()):
+    # What makes a value a server is its `command` or `url`: "every value is a
+    # mapping" also fits a .claude.json that holds nothing but `projects`, and
+    # the probe then tried to start a server named "projects".
+    if isinstance(data, dict) and data and all(
+            isinstance(v, dict) and ("command" in v or "url" in v) for v in data.values()):
         return data
     return {}
 
 
-def load_servers(path: Path) -> dict:
-    """Read a config in either shape: {"mcpServers": {...}} or a bare mapping."""
-    return _servers_in(_read_config(path))
-
-
 def declared_servers(path: Path) -> list[tuple[str, dict, str]]:
-    """(name, spec, where) for every server a config declares — for the audit.
+    """(name, spec, where) for every server a config declares — in either shape,
+    {"mcpServers": {...}} or a bare mapping. The audit and the probe both read it.
 
     Includes the "local" scope: `claude mcp add` stores a server in
     ~/.claude.json under projects.<dir>.mcpServers by default, not in the
-    top-level mcpServers that load_servers() reads. The audit only read the
-    latter, so the most common way to add a server was the one it never saw.
+    top-level mcpServers. Read without it, the most common way to add a server
+    was the one never seen.
     """
     data = _read_config(path)
     found = [(name, spec, str(path)) for name, spec in _servers_in(data).items()
@@ -429,10 +429,29 @@ def projects_root() -> Path | None:
     return Path(value).expanduser() if value else None
 
 
+def disabled_plugins() -> set[str]:
+    """The plugins settings.json switches off, as `plugin@marketplace`."""
+    settings = claude_config_dir() / "settings.json"
+    if not settings.is_file():
+        return set()
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return set()                      # unreadable: the audit stays complete
+    plugins = data.get("enabledPlugins") if isinstance(data, dict) else None
+    return {name for name, on in (plugins.items() if isinstance(plugins, dict) else ())
+            if on is False}
+
+
 def default_configs() -> list[Path]:
     configs = [DEFAULT_CONFIG]
     if PLUGIN_CACHE.is_dir():
-        configs += sorted(PLUGIN_CACHE.glob("*/*/*/.mcp.json"))
+        # A disabled plugin's cache stays on disk and is not loaded: what it
+        # declares is not a declaration. The cache path is
+        # <marketplace>/<plugin>/<version>.
+        off = disabled_plugins()
+        configs += [p for p in sorted(PLUGIN_CACHE.glob("*/*/*/.mcp.json"))
+                    if f"{p.parents[1].name}@{p.parents[2].name}" not in off]
     # A repository's own .mcp.json: project-scoped servers Claude Code loads for
     # anyone who opens that project. Only read here, never launched (probing a
     # server would execute whatever a cloned repository declares). The privacy
@@ -463,17 +482,18 @@ def main() -> int:
         print(f"config not found: {path}")
         return 1
 
-    servers = load_servers(path)
+    # declared_servers, as the audit: the local scope included. A plain probe
+    # read the top-level mcpServers only and found nothing on a machine whose
+    # servers were all added with `claude mcp add`.
+    servers = declared_servers(path)
     if not servers:
         print(f"no MCP servers declared in {path}")
         return 0
 
     print(f"Probing {len(servers)} server(s) from {path}\n")
     failures = 0
-    for name, spec in servers.items():
+    for name, spec, _where in servers:
         if args.servers and name not in args.servers:
-            continue
-        if not isinstance(spec, dict):
             continue
         if not probe(name, spec):
             failures += 1

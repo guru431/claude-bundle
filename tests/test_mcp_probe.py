@@ -238,6 +238,26 @@ def test_default_configs_include_each_projects_mcp_json(tmp_path, monkeypatch, c
     assert mod.check_wrappers(configs) == 1
 
 
+def test_a_disabled_plugins_cache_is_not_a_declaration(tmp_path, monkeypatch):
+    """A disabled plugin's cache stays on disk, and Claude Code does not load it.
+    The audit read every cached .mcp.json, so a wrapper in a plugin switched off
+    in settings.json kept failing the check for a server that never starts."""
+    cfg = tmp_path / "cfg"
+    cache = cfg / "plugins" / "cache" / "official"
+    for plugin in ("on", "off", "unlisted"):
+        (cache / plugin / "v1").mkdir(parents=True)
+        (cache / plugin / "v1" / ".mcp.json").write_text('{"mcpServers": {}}', encoding="utf-8")
+    (cfg / "settings.json").write_text(
+        '{"enabledPlugins": {"on@official": true, "off@official": false}}', encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    monkeypatch.delenv("PROJECTS_ROOT", raising=False)
+
+    cached = [p for p in _load().default_configs() if cache in p.parents]
+
+    # One that enabledPlugins does not name stays in the audit: silence is worse.
+    assert cached == [cache / "on" / "v1" / ".mcp.json", cache / "unlisted" / "v1" / ".mcp.json"]
+
+
 def test_the_config_root_follows_claude_config_dir(tmp_path, monkeypatch):
     """Under CLAUDE_CONFIG_DIR Claude Code keeps `.claude.json`, the plugin cache
     and (by the installers' default) bundle.local.yaml inside that directory; the
@@ -289,3 +309,20 @@ def test_local_scope_servers_in_claude_json_are_audited(tmp_path, monkeypatch, c
     }), encoding="utf-8")
     assert mod.check_wrappers([config]) == 1
     assert "/home/someone/app" in capsys.readouterr().out
+
+
+def test_the_probe_reads_the_servers_the_audit_reads(tmp_path, monkeypatch, capsys):
+    """`claude mcp add` puts a server under projects.<dir>.mcpServers by default.
+    The audit read those; a plain probe read the top-level mcpServers only and
+    said "no MCP servers declared" on a machine whose servers were all added
+    that way."""
+    config = tmp_path / ".claude.json"
+    config.write_text(json.dumps({"projects": {"/work/app": {"mcpServers": {
+        "local-one": {"command": sys.executable, "args": ["-c", "pass"]}}}}}), encoding="utf-8")
+    mod = _load()
+    probed = []
+    monkeypatch.setattr(mod, "probe", lambda name, spec, *a, **k: probed.append(name) or True)
+    monkeypatch.setattr(sys, "argv", ["mcp-probe.py", str(config)])
+
+    assert mod.main() == 0
+    assert probed == ["local-one"], capsys.readouterr().out

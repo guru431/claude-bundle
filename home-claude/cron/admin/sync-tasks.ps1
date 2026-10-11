@@ -301,6 +301,10 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
     if ($rep) { $rep += "`n      " }
     if ($spec -match '^Daily\s+(\d{1,2}):(\d{2})$') {
         $h = [int]$Matches[1]; $m = [int]$Matches[2]
+        # A time outside 00:00-23:59 passed the regex, and Get-StartBoundary did
+        # AddHours(25): the task was registered, silently, for another day. Only
+        # check-registry.py read the range, and this script is what applies it.
+        if ($h -gt 23 -or $m -gt 59) { throw "Time out of range in trigger '$spec' (expected 00:00-23:59)" }
         $start = Get-CalendarStart $h $m ([bool]$repeatEvery)
         return @"
 <CalendarTrigger>
@@ -312,6 +316,7 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
     }
     if ($spec -match '^Weekly\s+(\w+)\s+(\d{1,2}):(\d{2})$') {
         $dowRaw = $Matches[1]; $h = [int]$Matches[2]; $m = [int]$Matches[3]
+        if ($h -gt 23 -or $m -gt 59) { throw "Time out of range in trigger '$spec' (expected 00:00-23:59)" }
         # Normalize day-of-week: accept full names ('Monday') and 3-letter
         # short forms ('Mon'), case-insensitive. Anything else is a typo —
         # fail loud here, not with a cryptic Register-ScheduledTask error.
@@ -342,6 +347,8 @@ function Build-XmlTrigger([string]$spec, [string]$delay, [string]$repeatEvery, [
     }
     if ($spec -match '^Monthly\s+day=(\d{1,2})\s+(\d{1,2}):(\d{2})$') {
         $d = [int]$Matches[1]; $h = [int]$Matches[2]; $m = [int]$Matches[3]
+        if ($h -gt 23 -or $m -gt 59) { throw "Time out of range in trigger '$spec' (expected 00:00-23:59)" }
+        if ($d -lt 1 -or $d -gt 31) { throw "Day out of range in trigger '$spec' (expected 1-31)" }
         $start = Get-CalendarStart $h $m ([bool]$repeatEvery)
         return @"
 <CalendarTrigger>

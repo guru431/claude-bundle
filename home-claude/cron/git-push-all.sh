@@ -312,7 +312,12 @@ guard_secrets_preview() {
     bin_hits=$(secret_scan_changed_binaries worktree "" "${SWEEP_EXCLUDES[@]}")
     hits="${hits:+$hits${bin_hits:+
 }}$bin_hits"
-    untracked=$(secret_scan_git_paths ls-files --others --exclude-standard -- "${SWEEP_EXCLUDES[@]}" 2>/dev/null)
+    # The exit code again: a listing that failed is not "no untracked files".
+    if ! untracked=$(secret_scan_git_paths ls-files --others --exclude-standard -- "${SWEEP_EXCLUDES[@]}" 2>/dev/null); then
+        hits="${hits:+$hits
+}scan-error: git ls-files failed, so the untracked files were NOT scanned"
+        untracked=""
+    fi
     # New paths only, as in staged_sensitive_paths: an edit of a tracked `*.key`
     # is not a sensitive name entering the repository.
     bad=$( { secret_scan_git_paths diff HEAD --name-only --diff-filter=AR -- "${SWEEP_EXCLUDES[@]}"

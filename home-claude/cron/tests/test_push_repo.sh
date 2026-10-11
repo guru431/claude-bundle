@@ -479,4 +479,20 @@ grep -q "scan-error: git diff HEAD failed" "$LOG_FILE" || fail "T29: the preview
 grep -q "staged secret-scan: clean" "$LOG_FILE" && fail "T29: the preview called an unscanned tree clean"
 cd "$TMP" || exit 1
 
-echo "PASS: push_repo (32 scenarios)"
+# === Test 30: a failed listing of untracked files is not a clean preview either ===
+# The list of untracked files was taken with no look at git's exit code: a git
+# that failed gave an empty list, and the dry run said "clean" about files it
+# had never read.
+R30="$TMP/r30"; mkrepo "$R30"; echo new > "$R30/new.py"
+mkdir -p "$TMP/stubs-git-ls"
+printf '#!/bin/bash\ncase "$*" in *"ls-files -z --others"*) exit 128 ;; esac\nexec %q "$@"\n' \
+    "$(command -v git)" > "$TMP/stubs-git-ls/git"
+chmod +x "$TMP/stubs-git-ls/git"
+: > "$LOG_FILE"
+( export PATH="$TMP/stubs-git-ls:$PATH"; DRY_RUN=1
+  reset_counters; push_repo "$R30" "r30" "Auto-commit: test" )
+grep -q "scan-error: git ls-files failed" "$LOG_FILE" || fail "T30: the preview did not report the failed listing"
+grep -q "staged secret-scan: clean" "$LOG_FILE" && fail "T30: the preview called unread files clean"
+cd "$TMP" || exit 1
+
+echo "PASS: push_repo (33 scenarios)"

@@ -94,6 +94,18 @@ def test_a_service_with_a_closed_port_fails_whatever_task_scheduler_says(run_tas
     assert re.search(pattern, line), f"TASK_FAIL_COUNT does not count: {line}"
 
 
+def test_an_unreadable_registry_is_said_in_the_alert(run_task_status, tmp_path):
+    """Without the registry three checks do not run — a task hung past its
+    timeout, a service's port, a failed task's stderr — and the monitor carried
+    on in silence: the green line over real failures it exists to prevent."""
+    (tmp_path / "registry.yaml").unlink()
+
+    out = run_task_status([_task("ClaudeDaemon", result=267009)])
+
+    assert "registry.yaml could not be read" in out, out
+    assert "nothing listening on port" not in out      # the probe did not run, and that is said
+
+
 def test_without_pyyaml_the_port_is_still_probed(run_task_status, monkeypatch):
     """The no-PyYAML fallback parser is where a field goes silently missing."""
     monkeypatch.setitem(sys.modules, "yaml", None)      # `import yaml` now fails

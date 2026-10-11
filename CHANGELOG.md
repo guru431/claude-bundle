@@ -115,6 +115,19 @@ The short list; UPGRADING.md has the steps.
   enables `context7@claude-plugins-official`; an existing `settings.json` keeps
   its `enabledPlugins` — disable the plugin and add the server by hand.
 
+### Findings: "leave only the header" is a goal, not a ban on recording
+
+Asked to resolve everything in FINDINGS.md and IDEAS.md and leave only the
+header, the agent kept running into two rules at once: a side problem is not
+solved inline, and now the file may not take a new entry either. It settled for
+neither — new problems found on the way were mentioned in the final message,
+unfixed and unrecorded, often in later turns of the same session. `home-claude/CLAUDE.md`
+§ Findings and its `codex/AGENTS.md` mirror gain a **Clearing to the header**
+paragraph: everything found until the session ends is part of the task and fixed
+right away, the user's decisions are collected into one question at the end,
+only what waits on an external event is recorded, and a finding mentioned only in
+the chat is named as the failure it is.
+
 ### Context7: the plugin needs a login, the server does not
 
 The `context7` plugin's `.mcp.json` now points at

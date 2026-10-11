@@ -49,6 +49,19 @@ so a crash leaves a duplicate, not a loss. Nothing is deleted from the archive: 
 stops automated review filing the same rejected thing again. Root-caused
 incidents are not findings — they go to the incident log.
 
+**Clearing to the header.** "Resolve everything in FINDINGS.md and IDEAS.md, leave
+only the header" sets a goal — nothing left unresolved — and does not forbid
+writing to those files. Everything that turns up during that work and until the
+session ends (related drift: docs, addresses, configs on hosts, slow tests) is part
+of the task: "do NOT solve it inline" does not apply, fix it right away. Verify a
+doubtful observation first (measure again, `--durations`). Collect the user's
+decisions into one question at the end, finish the rest before asking, then act
+on the answers. What cannot be fixed in this session (it waits on an external
+event or on someone else) is recorded, and the final report says why the file is
+not just the header; a refusal or deferral by the user goes to the archive under
+**Closing**. Never mention a finding only in the final message, neither fixed nor
+recorded — that is exactly losing it in the chat.
+
 ## When to continue vs. stop and ask
 
 - **Continue without asking** when the task is unambiguous and the step is

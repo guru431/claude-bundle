@@ -251,10 +251,21 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
             try:
                 message = json.loads(line)
             except json.JSONDecodeError:
+                message = None
+            # `42` or `"ready"` parses as JSON and is no more a JSON-RPC message
+            # than a banner is — and `.get` on it ended the whole run with a
+            # traceback, the servers after this one unprobed.
+            if not isinstance(message, dict):
                 junk.append(line)          # stray stdout — this is what breaks MCP
                 continue
             if message.get("id") == want_id:
                 return message
+
+    def stray(junk: list[str]) -> bool:
+        if junk:
+            print(f"{name:<14} FAIL — {len(junk)} non-JSON line(s) on stdout, "
+                  f"this breaks JSON-RPC: {junk[0][:60]!r}")
+        return bool(junk)
 
     def stderr_text() -> str:
         # Read only after shutdown(): the child writes through a handle that
@@ -289,9 +300,7 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
         if send(INITIALIZE):
             reply = read_reply(1, time.monotonic() + timeout, junk)
 
-        if junk:
-            print(f"{name:<14} FAIL — {len(junk)} non-JSON line(s) on stdout, "
-                  f"this breaks JSON-RPC: {junk[0][:60]!r}")
+        if stray(junk):
             return False
         if reply is None:
             shutdown()
@@ -304,6 +313,11 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
         tools_reply = None
         if send({"jsonrpc": "2.0", "method": "notifications/initialized"}, TOOLS_LIST):
             tools_reply = read_reply(2, time.monotonic() + timeout, junk)
+        # Again: a banner printed only once the session is up — between the two
+        # replies — was read into `junk` and never looked at, and the server
+        # passed as OK.
+        if stray(junk):
+            return False
         count = len((tools_reply.get("result") or {}).get("tools") or []) if tools_reply else None
 
         if count is None:

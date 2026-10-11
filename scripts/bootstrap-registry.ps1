@@ -167,7 +167,10 @@ if ($replaced -eq 0) {
 # by hand — and filling in one left half the jobs working with no diagnostic
 # anywhere, while utils.py called the .env name DEPRECATED and the docs called
 # it REQUIRED. Only ever fills an EMPTY line; a value the user set stays.
-$deployRoot = Split-Path -Parent (Split-Path -Parent $RegistryPath)
+# Under $InstallPath — the root the tasks run from and read .env in. It used to
+# be derived from $RegistryPath, so a registry kept anywhere else pointed this
+# block at a folder with no .env, and it filled nothing without a word.
+$deployRoot = $InstallPath
 $envFile = Join-Path $deployRoot '.env'
 $manifest = Join-Path $deployRoot 'bundle.local.yaml'
 if ((Test-Path $envFile) -and (Test-Path $manifest)) {

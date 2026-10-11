@@ -368,6 +368,25 @@ def test_verify_leaves_no_transcript_behind(tmp_path: Path):
 
 @windows_only
 @pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
+def test_verify_reads_enabled_the_way_the_sync_registers_it(tmp_path: Path):
+    """`enabled:` with no value: the sync registers the task Disabled (an empty
+    string is falsy), -Verify read it as enabled, and every check after such a
+    sync came back exit 4 over a state the syncer itself had produced."""
+    name = f"ClaudeBundleTest-{uuid.uuid4().hex[:12]}"
+    reg = _deployment(tmp_path, (
+        f"  - name: {name}\n"
+        f"    script: {tmp_path / 'job.sh'}\n"
+        "    trigger: Daily 02:00\n"
+        "    timeout_hours: 1\n"
+        "    enabled:\n"))
+    env = dict(os.environ, TEMP=str(tmp_path), TMP=str(tmp_path))
+    r = run_ps_file(SYNC, "-Verify", "-RegistryPath", reg, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "disabled in registry.yaml" in r.stdout, r.stdout
+
+
+@windows_only
+@pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
 def test_an_only_name_the_registry_lacks_is_refused(tmp_path: Path):
     """A typo'd -Only name was skipped in silence and the sync exited 0 without
     touching what it was called for. `A,B` on a direct -File call is split."""

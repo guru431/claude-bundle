@@ -327,6 +327,38 @@ grep -q "^python .*runs\.py record" "$TMP/stubs.log" \
 [ "$(git -C "$P/app" rev-parse HEAD)" = "$(git -C "$P/app" rev-parse "origin/$(br "$P/app")")" ] \
     || fail "T20: the change was not pushed"
 
+# === Test 20b: a dry run of the whole sweep alerts nobody ===
+# The guard for a hand-staged .env runs ahead of the dry-run branch and sent its
+# Telegram line from a preview; so did the closing "N failed repos".
+printf '#!/bin/bash\necho "$1" >> "%s"\n' "$TMP/tg.log" > "$B/cron/telegram-send.sh"
+printf 'DB_PASSWORD=hunter2\n' > "$P/app/.env"; git -C "$P/app" add .env
+: > "$TMP/tg.log"
+( unset GIT_NET_TIMEOUT PYTHON_EXE
+  export STUB_LOG="$TMP/stubs.log" PATH="$S:$PATH" GIT_PUSH_ALL_DRY_RUN=1
+  bash "$B/cron/git-push-all.sh" ) && fail "T20b: a dry run over a staged .env exited 0"
+grep -q "SENSITIVE path already staged" "$B"/cron/logs/git-push-all_*.log \
+    || fail "T20b: the preview did not report the staged .env"
+[ -s "$TMP/tg.log" ] && fail "T20b: a dry run sent a Telegram alert ($(cat "$TMP/tg.log"))"
+git -C "$P/app" reset -q -- .env; rm -f "$P/app/.env"
+
+# === Test 20c: a lock that has no pid yet is not a stale lock ===
+# The owner writes its pid in the statement after its mkdir. A second sweep that
+# looked in between found no pid file, called the lock stale and removed it —
+# two sweeps at once. It waits for the pid now; the `sleep` stub stands for the
+# owner writing it meanwhile.
+L="$B/cron/logs/.git-push-all.lock"
+mkdir -p "$L" "$TMP/stubs-lock"
+printf '#!/bin/bash\necho %s > "%s"\n' "$$" "$L/pid" > "$TMP/stubs-lock/sleep"
+chmod +x "$TMP/stubs-lock/sleep"
+echo again >> "$P/app/app.py"
+( unset GIT_NET_TIMEOUT PYTHON_EXE
+  export STUB_LOG="$TMP/stubs.log" PATH="$TMP/stubs-lock:$S:$PATH"
+  bash "$B/cron/git-push-all.sh" ) || fail "T20c: the second sweep did not exit cleanly"
+grep -q "another sweep is running (pid $$)" "$B"/cron/logs/git-push-all_*.log \
+    || fail "T20c: the lock of a sweep that was still starting was taken over"
+[ -n "$(git -C "$P/app" status --porcelain)" ] || fail "T20c: the second sweep committed beside the first"
+rm -rf "$L"
+
 # === Test 21: an unfinished merge fails the repo; nothing is committed ===
 # `git add --all` marks conflicted files resolved, so the auto-commit used to
 # publish the conflict markers; an unfinished rebase detaches HEAD and slid into
@@ -429,4 +461,19 @@ reset_counters; push_repo "$R28" "r28" "Auto-commit: test"
 [ "$failed" = "1" ] || fail "T28: a new token was pushed (pushed=$pushed)"
 cd "$TMP" || exit 1
 
-echo "PASS: push_repo (29 scenarios)"
+# === Test 29: a git that fails is not a clean preview ===
+# The preview read `git diff` through a pipe: a git that failed handed the
+# scanner nothing, and the dry run said "clean" for a tree nobody had scanned —
+# the failure guard_secrets closes for the real run.
+R29="$TMP/r29"; mkrepo "$R29"; echo change >> "$R29/app.py"
+git() { case "$*" in *"diff HEAD --unified=0"*) return 128 ;; esac; command git "$@"; }
+: > "$LOG_FILE"
+DRY_RUN=1
+reset_counters; push_repo "$R29" "r29" "Auto-commit: test"
+DRY_RUN=0
+unset -f git
+grep -q "scan-error: git diff HEAD failed" "$LOG_FILE" || fail "T29: the preview did not report the failed diff"
+grep -q "staged secret-scan: clean" "$LOG_FILE" && fail "T29: the preview called an unscanned tree clean"
+cd "$TMP" || exit 1
+
+echo "PASS: push_repo (32 scenarios)"

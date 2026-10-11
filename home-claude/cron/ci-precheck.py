@@ -332,7 +332,8 @@ def check_python_matrix(repo: Path) -> Result:
     # The version the tests ran under — for a project with a .venv, not the gate's.
     local = subprocess.run([project_python(repo), "-c",
                             "import sys; print('%d.%d' % sys.version_info[:2])"],
-                           capture_output=True, text=True, timeout=60).stdout.strip()
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=60).stdout.strip()
     missing = sorted(v for v in versions if v != local)
     if not missing:
         return Result("python matrix", "ok", f"the local {local} covers the matrix")
@@ -346,7 +347,23 @@ CHECKS = (check_shellcheck, check_compileall, check_fast_tests, check_shell_test
 
 
 def run_checks(repo: Path) -> list[Result]:
-    return [c(repo) for c in CHECKS]
+    """Every check; one that could not RUN is a skip, as the header promises.
+
+    A tool that hangs past its timeout or a `.venv` interpreter that will not
+    start raised out of the gate instead, and github-push.sh read the
+    traceback's rc 1 as "CI would be red on these commits".
+    """
+    results = []
+    for check in CHECKS:
+        try:
+            results.append(check(repo))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            why = (f"did not finish in {exc.timeout:g}s"
+                   if isinstance(exc, subprocess.TimeoutExpired)
+                   else f"could not run ({type(exc).__name__}: {exc})")
+            results.append(Result(check.__name__[len("check_"):].replace("_", " "),
+                                  "skip", why))
+    return results
 
 
 def main() -> int:

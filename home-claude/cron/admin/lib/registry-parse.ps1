@@ -44,7 +44,15 @@ function Unwrap-Value([string]$v) {
     # truthy, and registered the task enabled.
     if (@('true', 'yes', 'on') -contains $v)  { return $true }
     if (@('false', 'no', 'off') -contains $v) { return $false }
-    if ($v -match '^-?\d+$') { return [int]$v }
+    if ($v -match '^-?\d+$') {
+        # Int32 where it fits, Int64 past that. The bare [int] cast THREW on a
+        # larger number — a chat id or a millisecond timestamp in script_args —
+        # and took the whole sync down with it, while YAML read a plain integer.
+        $n = [long]0
+        if (-not [long]::TryParse($v, [ref]$n)) { return $v }
+        if ($n -ge [int]::MinValue -and $n -le [int]::MaxValue) { return [int]$n }
+        return $n
+    }
     return $v
 }
 

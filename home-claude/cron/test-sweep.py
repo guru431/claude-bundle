@@ -1063,6 +1063,14 @@ def update_contract_finding(errors: list[str], state: dict) -> None:
     target = bundle_utils.BUNDLE_ROOT / "FINDINGS.md"
     drop_finding(target, CONTRACT_FINDING)
     if not sig:
+        # Forgotten only once the entry is gone. A FINDINGS.md that could not be
+        # rewritten that night (held by an editor or a scanner) kept the finding
+        # open for good: with the errors dropped from the state, no later run
+        # had a reason to come back to it.
+        if finding_is_open(target, CONTRACT_FINDING):
+            log(f"test contract errors fixed, but the finding in {target} could not "
+                "be closed — the next run tries again")
+            return
         log("test contract errors fixed — the finding in the bundle's FINDINGS.md is closed")
         state.pop(CONTRACT_STATE_KEY, None)
         return

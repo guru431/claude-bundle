@@ -57,6 +57,13 @@ FLOODS_STDERR = "import sys\nsys.stderr.write('x' * 1_000_000)\nsys.stderr.flush
 
 CRASHES = "import sys\nsys.stderr.write('boom: missing API key\\n')\nsys.exit(3)\n"
 
+# Valid JSON on stdout that is not a JSON-RPC message, ahead of the handshake.
+SCALAR_FIRST = "print(42, flush=True)\n" + ANSWERS
+
+# A clean initialize, then a banner before the tools/list reply.
+LATE_BANNER = ANSWERS.replace('result = {"tools": [{"name": "t"}]}',
+                              'print("server ready", flush=True); result = {"tools": []}')
+
 
 def _server(tmp_path: Path, name: str, body: str) -> dict:
     script = tmp_path / f"{name}.py"
@@ -132,6 +139,17 @@ def test_a_server_that_dies_at_startup_reports_its_stderr(tmp_path, spawned, cap
     assert _probe_with_watchdog(mod, "crash", _server(tmp_path, "crash", CRASHES), 10.0) is False
     out = capsys.readouterr().out
     assert "FAIL" in out and "boom: missing API key" in out
+
+
+@pytest.mark.parametrize("body", [SCALAR_FIRST, LATE_BANNER], ids=["json-scalar", "late-banner"])
+def test_stray_stdout_fails_the_server_whenever_it_comes(tmp_path, spawned, capsys, body):
+    """Two lines the probe let through. `42` is valid JSON, so it passed the
+    non-JSON check and reached `message.get`: AttributeError, and the run ended
+    there. A banner printed after initialize was collected and never checked —
+    the server came out OK."""
+    mod = _load()
+    assert _probe_with_watchdog(mod, "noisy", _server(tmp_path, "noisy", body), 10.0) is False
+    assert "this breaks JSON-RPC" in capsys.readouterr().out
 
 
 def test_a_non_string_argument_does_not_end_the_whole_run(tmp_path, spawned, capsys):

@@ -16,9 +16,9 @@
 #   bash scripts/uninstall.sh --claude-home DIR   # default: $CLAUDE_CONFIG_DIR, else ~/.claude
 #
 # Needs Python 3.9+ (the manifest is JSON).
-# Exit: 0 removed or dry run; 1 no / unreadable manifest, or no Python;
-#       2 finished, but changed files were kept; 3 a timer could not be
-#       disabled — nothing was removed.
+# Exit: 0 removed or dry run; 1 nothing was attempted — bad arguments, no /
+#       unreadable manifest, or no Python; 2 finished, but changed files were
+#       kept; 3 a timer could not be disabled — nothing was removed.
 set -eu
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,13 +32,15 @@ dry_run=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --claude-home)
-            [ $# -ge 2 ] || { echo "ERROR: --claude-home needs a directory" >&2; exit 2; }
+            # 1, not 2: 2 is "finished, but changed files were kept", and a
+            # caller could not tell that from a call that never started.
+            [ $# -ge 2 ] || { echo "ERROR: --claude-home needs a directory" >&2; exit 1; }
             claude_home="$2"; shift 2 ;;
         --confirm) confirm=1; shift ;;
         --force) force=1; shift ;;
         --dry-run) dry_run=1; shift ;;
         -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
-        *) echo "ERROR: unknown option: $1 (see --help)" >&2; exit 2 ;;
+        *) echo "ERROR: unknown option: $1 (see --help)" >&2; exit 1 ;;
     esac
 done
 

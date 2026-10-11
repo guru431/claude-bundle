@@ -1694,6 +1694,56 @@ def test_an_undelivered_regression_alert_does_not_move_the_baseline(bundle: Path
     assert lint.BASELINE_FILE.read_text(encoding="utf-8") == before
 
 
+def test_a_failed_baseline_write_leaves_the_old_baseline(bundle: Path, monkeypatch):
+    """The baseline was written in place, so a run killed mid-write left a
+    truncated file — no baseline at all to the next run, which then reported
+    every class of 20 findings or more as new."""
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_baseline_atomic", "wiki-lint.py")
+    lint.BASELINE_FILE.write_text('{"date": "2020-01-01", "counts": {"x": 7}}',
+                                  encoding="utf-8")
+
+    def killed(self, target):
+        raise OSError("killed before the new file took the old one's place")
+
+    monkeypatch.setattr(Path, "replace", killed)
+    lint.save_baseline({"x": 99})
+
+    assert lint.load_baseline() == {"x": 7}
+
+
+def test_a_page_that_ends_at_its_frontmatter_keeps_one_block(bundle: Path, monkeypatch):
+    """The closing `---` had to be followed by a newline. A page saved without
+    one read as having no frontmatter, and the next write put a second block on
+    top of the first — what read_page already prevents for a BOM."""
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_fm_eof", "wiki-lint.py")
+    page = bundle / "wiki" / "kb" / "tools" / "stub.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_bytes(b"---\ntitle: Stub\n---")
+
+    fm, body = lint.read_page(page)
+    assert fm == {"title": "Stub"} and body == ""
+    lint.write_page(page, fm, body + "# Stub\n")
+
+    assert page.read_text(encoding="utf-8").splitlines().count("---") == 2
+    # The same block at the top of an LLM answer is dropped whole, too.
+    assert sys.modules["utils"].strip_leading_frontmatter("---\ntitle: Stub\n---") == ""
+
+
+def test_lint_asks_the_page_reader_whether_a_page_has_frontmatter(bundle: Path, monkeypatch):
+    """The lint had a test of its own, "starts with ---": a page that opens with
+    a horizontal rule passed as having frontmatter, while read_page — and every
+    compiler with it — finds none in it."""
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_fm_reader", "wiki-lint.py")
+    tools = bundle / "wiki" / "kb" / "tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    (tools / "ruled.md").write_text("---\n\n# Ruled\n\nOpens with a rule.\n", encoding="utf-8")
+    (tools / "sourced.md").write_text("---\ntitle: Sourced\n---\n# Sourced\n", encoding="utf-8")
+
+    warned = "\n".join(lint.check_missing_frontmatter(lint.find_all_pages()))
+
+    assert "ruled.md" in warned and "sourced.md" not in warned
+
+
 def test_a_second_section_of_a_compiled_project_is_sent_alone(bundle: Path):
     """The next night's append must not re-send the section already compiled.
 

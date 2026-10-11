@@ -278,6 +278,8 @@ def test_help_and_argument_errors():
     assert _run("install-lite.sh", "--profile", "full").returncode == 2, \
         "install-lite.sh must not turn into a full install"
     assert _run("uninstall.sh", "--help").returncode == 0
+    # Not 2: for the uninstaller that is "finished, but changed files were kept".
+    assert _run("uninstall.sh", "--no-such-option").returncode == 1
 
 
 @pytest.mark.integration

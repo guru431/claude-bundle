@@ -306,7 +306,9 @@ same way they were created — through the deployment's registry
 elevation, so **run the uninstaller from an elevated PowerShell**. Without
 elevation it refuses (exit 3) while any task named in that registry is still
 registered, and deletes nothing: the files it would remove include the tool
-that unregisters the tasks. To take the task step on its own:
+that unregisters the tasks. It refuses the same way when that tool is already
+gone from the deployment while a task is not, and prints the command that
+unregisters them with the checkout's copy. To take the task step on its own:
 
 ```powershell
 # elevated

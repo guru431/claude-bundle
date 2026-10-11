@@ -179,6 +179,18 @@ def test_s4u_is_a_logon_type():
     assert [p for p in check_registry.check_task(task) if "logon_type" in p]
 
 
+@pytest.mark.parametrize("key", ["enabled", "hidden"])
+def test_a_boolean_with_no_value_is_rejected(key: str):
+    """`enabled:` and nothing after it. YAML reads a null — the POSIX generator
+    takes the task for enabled — and sync-tasks.ps1 an empty string, which
+    registers it Disabled; the guard let it through as "not set"."""
+    task = {"name": "T", "script": "C:\\b\\x.py", "trigger": "Daily 01:00",
+            "timeout_hours": 1, "platform": "windows", key: None}
+    assert [p for p in check_registry.check_task(task) if p.startswith(f"{key}:")]
+    del task[key]
+    assert check_registry.check_task(task) == []
+
+
 def test_a_parser_dump_that_disagrees_with_yaml_fails_the_check(tmp_path: Path, capsys):
     """`--ps-parsed`, without PowerShell: the dump the parser used to produce
     for `enabled: no` — the truthy string, where YAML reads a boolean."""
@@ -223,3 +235,13 @@ def test_a_registry_that_is_not_a_mapping_is_a_problem_not_a_traceback(tmp_path:
     reg.write_text(body, encoding="utf-8")
     assert check_registry.check(reg) == 1
     assert "not a YAML mapping" in capsys.readouterr().out
+
+
+def test_a_registry_that_is_not_yaml_is_a_problem_not_a_traceback(tmp_path: Path, capsys):
+    """A tab or a stray bracket — the commonest way a hand-edited registry
+    breaks — raised YAMLError out of the guard."""
+    pytest.importorskip("yaml")
+    reg = tmp_path / "registry.yaml"
+    reg.write_text(HEAD + "    script_args: [unclosed\n", encoding="utf-8")
+    assert check_registry.check(reg) == 1
+    assert "not valid YAML" in capsys.readouterr().out

@@ -248,6 +248,11 @@ if [ "${GITHUB_PUSH_NO_CI:-0}" = "1" ]; then
   echo "GITHUB_PUSH_NO_CI=1 — CI gate skipped."
 elif [ -z "${PYTHON_BIN:-}" ]; then
   echo "WARN: no python found — CI gate skipped."
+elif [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != "$BRANCH" ]; then
+  # The gate reads the working tree. With another branch checked out it would
+  # test files this publication does not carry, and cancel it — or pass it — on
+  # their account.
+  echo "CI gate skipped: the working tree is not on '$BRANCH', so the local checks would read other files."
 else
   echo "=== CI gate (local) ==="
   # `|| gate_rc=$?`, not `; gate_rc=$?`: under `set -e` a non-zero gate would
@@ -281,7 +286,10 @@ if [ "${GITHUB_PUSH_NO_CI:-0}" = "1" ]; then
   echo "GITHUB_PUSH_NO_CI=1 — the CI result is not checked."
 elif [ -n "${PYTHON_BIN:-}" ]; then
   echo "=== CI result ==="
-  "$PYTHON_BIN" "$SCRIPT_DIR/ci-watch.py" "$REPO" || {
+  # The published commit by name: ci-watch defaults to HEAD, and for a branch
+  # that is not checked out it waited for a run of another commit, then called
+  # a good publication red.
+  "$PYTHON_BIN" "$SCRIPT_DIR/ci-watch.py" "$REPO" --sha "$(git rev-parse "$BRANCH")" || {
     echo ""
     echo "The commits are published, but CI is red — see above."
     exit 1

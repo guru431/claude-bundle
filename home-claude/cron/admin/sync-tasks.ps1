@@ -751,7 +751,11 @@ if ($Verify) {
     foreach ($task in $reg.tasks) {
         if ($Only -and ($Only -notcontains $task.name)) { continue }
         if ("$($task.platform)".ToLower() -eq 'posix') { continue }
-        $enabledInRegistry = -not ($task.enabled -eq $false)
+        # The reading Build-TaskXml registers by. `-not (… -eq $false)` took an
+        # `enabled:` with no value for enabled, while the sync had registered
+        # that task Disabled — and every -Verify then warned about a state the
+        # syncer itself had produced. (A missing key is $true: the parser's default.)
+        $enabledInRegistry = [bool]$task.enabled
         $cur = Get-ScheduledTask -TaskName $task.name -ErrorAction SilentlyContinue
         if (-not $cur) {
             if ($enabledInRegistry) {

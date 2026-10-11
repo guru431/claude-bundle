@@ -114,6 +114,51 @@ The short list; UPGRADING.md has the steps.
 - **Context7 is a declared server, not a plugin.** `settings.json` no longer
   enables `context7@claude-plugins-official`; an existing `settings.json` keeps
   its `enabledPlugins` — disable the plugin and add the server by hand.
+- **Registry: `enabled:` or `hidden:` with no value is a schema error** — the
+  syncer registered such a task Disabled, the POSIX generator enabled it.
+  **`uninstall.sh`** exits 1 for a bad argument (was 2).
+
+### Findings: 16 resolved, 19 declined
+
+The weekly code review of 2026-10-10 filed 35 findings; each was checked against
+the code. Resolved, each with a test that fails on the code it replaces:
+
+- **`mcp-probe.py`**: stdout that is valid JSON and still no JSON-RPC message
+  (`42`, `"ready"`) fails that server instead of ending the whole run with a
+  traceback, and a banner printed between the two replies of the handshake is a
+  FAIL — it was collected and never looked at.
+- **`github-push.sh <project> <branch>`** with another branch checked out:
+  `ci-watch.py` is given the published commit (`--sha`) instead of waiting for
+  a run of HEAD that never comes, and the local CI gate is skipped with a line
+  saying why — it reads the working tree, not the branch.
+- **`ci-precheck.py`**: a check that cannot run (a tool past its timeout, an
+  interpreter that will not start) is a skip, as its header promises, not a
+  traceback that `github-push.sh` reads as a red CI.
+- **`uninstall.ps1`**: with the deployment's `sync-tasks.ps1` gone it still
+  looks for the tasks its registry names and refuses (exit 3) while one is
+  registered — that step used to be skipped whole, and the files went while the
+  tasks stayed. A registry the parser cannot read no longer ends the script
+  with a raw error.
+- **`bootstrap-registry.ps1`** fills `PROJECTS_ROOT` in the `.env` under
+  `-InstallPath`, not two levels above `-RegistryPath`.
+- **`git-push-all.sh`**: a lock with no pid file yet gets two seconds before it
+  is called stale — a second sweep could remove the lock of one that was just
+  starting; the dry-run preview reports a failed `git diff` instead of "clean";
+  and a dry run sends no Telegram alerts (the staged-`.env` guard and the
+  closing "N failed repos" did).
+- **Registry**: a boolean with no value is rejected (above), `sync-tasks.ps1
+  -Verify` reads `enabled` the way the sync registers it, and
+  `check-registry.py` names a file that is not YAML instead of a traceback.
+  `registry-parse.ps1` reads an integer past Int32 — a chat id in `script_args`
+  — as YAML does; its cast threw, and the whole sync with it.
+- **Wiki**: a page whose closing `---` is the last thing in the file keeps one
+  frontmatter block — the next write used to stack a second on top;
+  `wiki-lint.py` asks `read_page` whether a page has frontmatter instead of
+  testing for a leading `---`, and writes its baseline through a temp file.
+- **`test-sweep.py`** keeps the contract errors in its state until their finding
+  is really closed: with `FINDINGS.md` unwritable on the night they were fixed,
+  it stayed open for good.
+- **`uninstall.sh`**: 2 means only "changed files were kept".
 
 ### Findings: "leave only the header" is a goal, not a ban on recording
 

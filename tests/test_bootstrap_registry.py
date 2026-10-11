@@ -48,6 +48,24 @@ def test_a_rerun_still_generates_projects_root(tmp_path: Path):
     assert "PROJECTS_ROOT=D:\\work\\projects" in (root / ".env").read_text(encoding="utf-8")
 
 
+def test_projects_root_is_generated_in_the_deployment_not_beside_the_registry(tmp_path: Path):
+    """.env was looked for two levels above -RegistryPath. With the registry kept
+    outside the deployment that is a folder with no .env, so PROJECTS_ROOT stayed
+    empty in the one the tasks read — and nothing said so."""
+    root = _deployment(tmp_path)
+    (root / ".env").write_text("PROJECTS_ROOT=\n", encoding="utf-8")
+    (root / "bundle.local.yaml").write_text("projects_root: D:\\work\\projects\n",
+                                            encoding="utf-8")
+    elsewhere = tmp_path / "config" / "cron" / "registry.yaml"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text(REGISTRY, encoding="utf-8")
+
+    r = run_ps_file(SCRIPT, "-InstallPath", root, "-RegistryPath", elsewhere)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PROJECTS_ROOT=D:\\work\\projects" in (root / ".env").read_text(encoding="utf-8")
+
+
 def test_a_drive_root_is_recognised_as_a_drive(tmp_path: Path):
     """TrimEnd turned `C:\\` into `C:`, which the `^X:\\` pattern no longer matched:
     a valid local path was called "neither UNC nor an absolute drive path"."""

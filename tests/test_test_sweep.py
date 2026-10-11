@@ -1022,6 +1022,29 @@ def test_contract_error_files_one_bundle_finding_and_falls_back(sweep_env, monke
     assert "__contract__" not in json.loads(sweep.STATE_PATH.read_text(encoding="utf-8"))
 
 
+def test_a_contract_finding_that_could_not_be_closed_is_retried(sweep_env, monkeypatch, tmp_path):
+    """The state forgot the errors whether or not the entry was deleted. With
+    FINDINGS.md unwritable on the night the contract was fixed, the finding
+    stayed open for good: nothing was left to bring a later run back to it."""
+    project, sent = sweep_env
+    plan = {"demo": [_suite(runner="nose")]}
+    monkeypatch.setattr(sweep, "tests_contract", lambda: (dict(plan), []))
+    monkeypatch.setattr(sweep, "run_suite",
+                        lambda suite, key, full: {"status": "ok", "seconds": 1.0, "tail": ""})
+    monkeypatch.setattr(sweep, "run_contract", lambda suite, level: _contract_res("ok"))
+    bundle_findings = tmp_path / "bundle" / "FINDINGS.md"
+    sweep.main([])
+
+    plan["demo"] = [_suite()]                        # fixed
+    with monkeypatch.context() as locked:
+        locked.setattr(sweep, "drop_finding", lambda path, title: False)
+        sweep.main([])
+    assert sweep.CONTRACT_FINDING in bundle_findings.read_text(encoding="utf-8")
+
+    sweep.main([])
+    assert sweep.CONTRACT_FINDING not in bundle_findings.read_text(encoding="utf-8")
+
+
 def test_a_contract_for_a_missing_project_is_an_error(sweep_env, monkeypatch, tmp_path):
     project, sent = sweep_env
     monkeypatch.setattr(sweep, "tests_contract", lambda: ({"ghost": [_suite()]}, []))

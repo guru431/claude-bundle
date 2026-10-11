@@ -290,8 +290,10 @@ def check_missing_frontmatter(pages: dict[str, list[Path]]) -> list[str]:
     warnings = []
     for name, paths in pages.items():
         for path in paths:
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if not text.lstrip().startswith("---"):
+            # read_page, the reader every compiler uses. "Starts with ---" was a
+            # second definition: a page that opens with a horizontal rule passed
+            # it while carrying no frontmatter anything can read.
+            if not read_page(path)[0]:
                 warnings.append(
                     f"WARN: no YAML frontmatter (no `sources:` provenance): "
                     f"{path.relative_to(WIKI_ROOT)}")
@@ -595,10 +597,12 @@ def load_baseline() -> dict[str, int]:
 def save_baseline(counts: dict[str, int]):
     """Overwrite the baseline with this run's counts."""
     try:
-        BASELINE_FILE.write_text(
-            json.dumps({"date": DATE, "counts": counts}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        # Through a temp file: a run killed mid-write left a truncated baseline,
+        # which reads as none at all — and the next run reported every class of
+        # 20 findings or more as new.
+        atomic_write_text(
+            BASELINE_FILE,
+            json.dumps({"date": DATE, "counts": counts}, ensure_ascii=False, indent=2))
     except OSError:
         pass
 

@@ -118,6 +118,8 @@ A publication now runs the local checks of `cron/ci-precheck.py` first and
 waits for the GitHub Actions run afterwards. Nothing to set up; for a private
 repository put a `GITHUB_TOKEN` in `.env` so the run can be read, and use
 `GITHUB_PUSH_NO_CI=1 github-push.sh …` for a one-off publication without it.
+The local checks read the working tree, so they are skipped when the branch
+being published is not the one checked out; the wait for its run is not.
 
 ### Windows task registry
 
@@ -145,6 +147,10 @@ Then run `sync.cmd` once (step 4 above).
 - **`enabled: no` / `off` / `"false"` in a task of your own** used to register
   the task ENABLED: the syncer read those words as non-empty strings. They now
   disable it, as YAML says. Check that is what you meant.
+- **`enabled:` or `hidden:` with nothing after the colon** is now a schema
+  error in `check-registry.py` (and `self-test.ps1 -InstallPath`). The syncer
+  reads the empty value as false and registers the task Disabled; the POSIX
+  generator reads it as enabled. Write `true` or `false`, or drop the line.
 - **`timeout_hours` on every task**, `0` for no limit. `check-registry.py`
   requires it: without it the syncer registers 72 hours and a systemd unit gets
   no limit at all — one line, two behaviours.
@@ -326,6 +332,8 @@ Then run `sync.cmd` once (step 4 above).
   file** (`credentials.json`, `.pgpass`, `.git-credentials`, …) that
   `.gitignore` does not cover: it used to commit and push it. Gitignore such
   files; `GIT_PUSH_ALL_DRY_RUN=1` previews which repositories would fail.
+- **`uninstall.sh` exits 1 for a bad argument** (was 2). 2 keeps its one
+  meaning there: finished, but changed files were kept.
 
 ### The bundle's own clone (maintainers)
 

@@ -177,7 +177,9 @@ guard_staged_sensitive() {
         echo "[$label] SENSITIVE path already staged — repo skipped, nothing committed:" >> "$LOG_FILE"
     fi
     echo "$staged" | sed 's/^/    /' >> "$LOG_FILE"
-    if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+    # Not from a dry run: this guard runs ahead of the dry-run branch, and a
+    # preview that found a hand-staged .env sent a real alert about it.
+    if [ "$DRY_RUN" != "1" ] && [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
         "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: sensitive path in [$label] — repo skipped (not committed, not pushed):
 $staged
 (gitignore it, or unstage it by hand if you staged it)" >> "$LOG_FILE" 2>&1
@@ -297,8 +299,15 @@ guard_secrets_preview() {
         echo "[$label] [DRY] secret-scan lib unavailable — the real run WOULD SKIP this repo (fail closed)" >> "$LOG_FILE"
         return 0
     fi
-    local hits untracked f fhits bad bin_hits
-    hits=$(git -c core.quotePath=false diff HEAD --unified=0 -- "${SWEEP_EXCLUDES[@]}" 2>/dev/null | secret_scan_diff)
+    local hits untracked f fhits bad bin_hits diff
+    # Its own command with its code read, as in guard_secrets: in a pipe a git
+    # that failed handed the scanner nothing, and the preview said "clean" for a
+    # repository the real run fails.
+    if ! diff=$(git -c core.quotePath=false diff HEAD --unified=0 -- "${SWEEP_EXCLUDES[@]}" 2>/dev/null); then
+        hits="scan-error: git diff HEAD failed, so the working tree was NOT scanned"
+    else
+        hits=$(printf '%s\n' "$diff" | secret_scan_diff)
+    fi
     # Tracked binary files, as guard_secrets reads them from the index.
     bin_hits=$(secret_scan_changed_binaries worktree "" "${SWEEP_EXCLUDES[@]}")
     hits="${hits:+$hits${bin_hits:+
@@ -888,6 +897,10 @@ have_bash || exit 1
 # every filesystem this touches, unlike a test-then-create on a lock file.
 LOCK_DIR="$LOG_DIR/.git-push-all.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    # The owner writes its pid in the statement after its mkdir, so a lock found
+    # in between has no pid file yet. That used to read as a stale lock, which
+    # was removed from under a sweep that was just starting: give the pid a moment.
+    [ -f "$LOCK_DIR/pid" ] || sleep 2
     if [ -f "$LOCK_DIR/pid" ] && kill -0 "$(cat "$LOCK_DIR/pid" 2>/dev/null)" 2>/dev/null; then
         echo "=== git-push-all: another sweep is running (pid $(cat "$LOCK_DIR/pid")) — exiting ===" >> "$LOG_FILE"
         exit 0
@@ -980,9 +993,10 @@ if [ "$DRY_RUN" != "1" ]; then
 fi
 
 # Failed pushes must be visible: Telegram alert + exit 1 (so the task-monitor
-# catches a non-zero exit instead of every night reporting success).
+# catches a non-zero exit instead of every night reporting success). A dry run
+# keeps the exit code and sends nothing: its reader is at the log.
 if [ "$failed" -gt 0 ]; then
-    if [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
+    if [ "$DRY_RUN" != "1" ] && [ -f "$BUNDLE_ROOT/cron/telegram-send.sh" ]; then
         "$BASH_BIN" "$BUNDLE_ROOT/cron/telegram-send.sh" "git-push-all: $failed failed repos: $failed_repos" >> "$LOG_FILE" 2>&1
     fi
     exit 1

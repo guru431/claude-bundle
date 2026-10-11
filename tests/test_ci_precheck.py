@@ -182,6 +182,19 @@ def test_a_clean_repo_exits_0(repo: Path, monkeypatch, no_shellcheck):
     assert gate.main() == 0
 
 
+def test_a_check_that_cannot_run_is_a_skip_not_a_traceback(repo: Path, monkeypatch,
+                                                           no_shellcheck, capsys):
+    """The header's contract. An interpreter that will not start raised out of
+    the gate, and github-push.sh read the traceback's rc 1 as a red CI."""
+    wf = repo / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "ci.yml").write_text('        python-version: ["3.10"]\n', encoding="utf-8")
+    monkeypatch.setattr(gate, "project_python", lambda _repo: str(repo / "no-such-python"))
+    monkeypatch.setattr(sys, "argv", ["ci-precheck.py", str(repo)])
+    assert gate.main() == 0
+    assert "[skip] python matrix — could not run" in capsys.readouterr().out
+
+
 def test_an_autofix_stops_the_publication_with_rc_2(repo: Path, monkeypatch, no_shellcheck, capsys):
     """The fix sits in the working tree and a push sends commits: going on would
     publish without it."""

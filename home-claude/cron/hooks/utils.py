@@ -3036,7 +3036,10 @@ def dry_run_last_night(today: date | None = None) -> bool:
     return (DRY_RUN_UNTIL - (today or date.today())).days == 1
 
 
-FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+# The closing `---` may be the last thing in the file. With a newline required
+# after it, a page saved without one read as having no frontmatter, and the next
+# write_page stacked a second block on top of the first.
+FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---(?:\n|\Z)", re.DOTALL)
 
 # YAML's actual rule for "this line is a key": an identifier, a colon, and then
 # either whitespace or end of line. A bare `":" in line` test read the list item
@@ -3204,7 +3207,7 @@ def strip_leading_frontmatter(content: str) -> str:
     # to the NEXT `---` anywhere in the document — which for a page that opens
     # with a thematic break and later has another one meant the whole
     # introduction was silently eaten as if it were YAML.
-    m = re.match(r"^\s*---\r?\n((?:[^\n]*\r?\n)*?)---\r?\n", content, re.DOTALL)
+    m = re.match(r"^\s*---\r?\n((?:[^\n]*\r?\n)*?)---(?:\r?\n|\Z)", content, re.DOTALL)
     if not m:
         return content
     block = m.group(1)

@@ -31,7 +31,8 @@
 # Exit codes: 0 = ok (or dry run), 1 = missing / unreadable manifest,
 #             2 = finished, but some files were skipped,
 #             3 = this deployment's scheduled tasks are still registered (not
-#                 elevated, or -Unregister failed) — nothing was deleted.
+#                 elevated, -Unregister failed, or the deployment's syncer is
+#                 gone) — nothing was deleted.
 
 param(
     # Defaults to CLAUDE_CONFIG_DIR when set — the root install.ps1 wrote the
@@ -171,10 +172,8 @@ $syncTasks = Join-Path $mfPipelineRoot 'cron\admin\sync-tasks.ps1'
 # "unregistered in step 1b" on every full-tier run — on a dry run, and when
 # there was nothing to unregister or no syncer to do it with.
 $taskStep = $null
-if ($mf.tier -eq 'full' -and -not (Test-Path $syncTasks)) {
-    $taskStep = "not checked — $syncTasks is not in the deployment, so nothing here can unregister its tasks"
-}
-if ($mf.tier -eq 'full' -and (Test-Path $syncTasks)) {
+if ($mf.tier -eq 'full') {
+    $haveSyncer = Test-Path $syncTasks
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $isAdmin = ([System.Security.Principal.WindowsPrincipal]$me).IsInRole(
         [System.Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -186,23 +185,52 @@ if ($mf.tier -eq 'full' -and (Test-Path $syncTasks)) {
     $regFile = Join-Path $mfPipelineRoot 'cron\registry.yaml'
     $regParser = Join-Path (Split-Path -Parent $PSScriptRoot) 'home-claude\cron\admin\lib\registry-parse.ps1'
     if ((Test-Path $regFile) -and (Test-Path $regParser)) {
-        . $regParser
-        $regData = Parse-RegistryYaml $regFile
-        $taskNames = @($regData.tasks | ForEach-Object { "$($_.name)" })
-        if ($regData.managed_marker) { $taskMarker = "$($regData.managed_marker)" }
+        # A registry the parser cannot read is "no readable registry" too: it
+        # used to end the uninstaller here with a raw PowerShell error.
+        try {
+            . $regParser
+            $regData = Parse-RegistryYaml $regFile
+            $taskNames = @($regData.tasks | ForEach-Object { "$($_.name)" })
+            if ($regData.managed_marker) { $taskMarker = "$($regData.managed_marker)" }
+        } catch {
+            $taskNames = $null
+            Warn "cron\registry.yaml could not be read ($($_.Exception.Message)) — every task carrying the marker counts as this deployment's"
+        }
     }
     $managed = @()
     $listError = $null
-    try {
-        $managed = @(Select-DeploymentTasks @(Get-ScheduledTask -ErrorAction SilentlyContinue) $taskNames $taskMarker)
-    } catch { $managed = @(); $listError = $_.Exception.Message }
-    if ($null -ne $listError) {
-        $taskStep = "could not be listed ($listError) — none were unregistered"
-    } elseif ($managed.Count -eq 0) {
-        $taskStep = "none of this deployment's tasks are registered — nothing to unregister"
+    # Without the syncer the tasks are still looked for: this step used to be
+    # skipped whole, and the files went while the tasks named in the registry
+    # stayed registered. Only with no readable registry either is there nothing
+    # to tell this deployment's tasks from another install's.
+    if (-not $haveSyncer -and $null -eq $taskNames) {
+        $taskStep = "not checked — the deployment has neither $syncTasks nor a readable registry.yaml, so its tasks cannot be told from another install's"
+    } else {
+        try {
+            $managed = @(Select-DeploymentTasks @(Get-ScheduledTask -ErrorAction SilentlyContinue) $taskNames $taskMarker)
+        } catch { $managed = @(); $listError = $_.Exception.Message }
+        if ($null -ne $listError) {
+            $taskStep = "could not be listed ($listError) — none were unregistered"
+        } elseif ($managed.Count -eq 0) {
+            $taskStep = "none of this deployment's tasks are registered — nothing to unregister"
+        }
     }
     if ($managed.Count -gt 0) {
-        if (-not $apply) {
+        if (-not $haveSyncer) {
+            if (-not $apply) {
+                Info "[dry-run] $($managed.Count) task(s) of this deployment are still registered and nothing in it can unregister them — a real run stops here (exit 3)"
+                $taskStep = "$($managed.Count) still registered, and $syncTasks is not in the deployment — a real run refuses (exit 3)"
+            } else {
+                $checkoutSync = Join-Path (Split-Path -Parent $PSScriptRoot) 'home-claude\cron\admin\sync-tasks.ps1'
+                Write-Host "ERROR: $($managed.Count) scheduled task(s) of this deployment are still registered" -ForegroundColor Red
+                Write-Host "       ($(@($managed | ForEach-Object { $_.TaskName }) -join ', ')), and the deployment no longer has" -ForegroundColor Red
+                Write-Host "       $syncTasks to unregister them." -ForegroundColor Red
+                Write-Host "       Unregister them with this checkout's copy, ELEVATED, then run this again:" -ForegroundColor Red
+                Write-Host "         powershell -File `"$checkoutSync`" -Unregister -RegistryPath `"$regFile`"" -ForegroundColor Red
+                Write-Host "       Nothing has been removed." -ForegroundColor Red
+                exit 3
+            }
+        } elseif (-not $apply) {
             Info "[dry-run] would unregister $($managed.Count) registry-managed task(s) first"
             $taskStep = "$($managed.Count) would be unregistered first (registry-driven, never schtasks /delete)"
         } elseif ($isAdmin) {

@@ -69,7 +69,7 @@ def differences(dump: Path, text: str) -> list[str]:
 # person editing the file might: quoting both ways, a `''` escape, '#' inside a
 # quoted value and after an unquoted one, inline lists with a quoted comma, a
 # quoted '#' and a single element, every YAML boolean spelling, a top-level key
-# after `tasks:`.
+# after `tasks:`, and a number too large for Int32 (the parser's cast threw on it).
 SUBSET_FIXTURE = """\
 # header comment
 version: 1
@@ -123,6 +123,13 @@ tasks:
     script_args: ["--only"]
     enabled: True
     hidden: FALSE
+
+  - name: BigNumber
+    script: C:\\bundle\\cron\\notify.py
+    kind: python
+    trigger: Daily 01:30
+    timeout_hours: 1
+    script_args: [--chat, -1001234567890, 1717171717171]
 
 extra_top_level: after-the-list
 """

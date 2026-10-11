@@ -515,6 +515,32 @@ def test_github_push_blocks_dotenv_in_a_non_ascii_directory(published: Repo):
 
 
 @integration
+def test_github_push_checks_ci_for_the_branch_it_published(published: Repo, tmp_path: Path):
+    """`github-push.sh project side` from a tree on main. ci-watch defaulted to
+    HEAD and waited for a run of main's commit that never came — a red result
+    after a good push — and the local gate tested main's files for side."""
+    assert published.git("checkout", "-q", "-b", "side").returncode == 0
+    published.write("side.txt", "side\n")
+    published.plant("side")
+    side = published.head()
+    assert published.git("checkout", "-q", "main").returncode == 0
+    calls = tmp_path / "python-calls.log"
+    stub = tmp_path / "python-stub"
+    stub.write_text(f'#!/bin/sh\n[ "$1" = "-c" ] && exit 0\necho "$*" >> "{calls.as_posix()}"\n',
+                    encoding="utf-8", newline="\n")
+    stub.chmod(0o755)
+    env = {**published.env, "PYTHON_EXE": stub.as_posix(),
+           "SECRET_VAULT_FILE": str(tmp_path / "no-vault.env")}
+    cp = subprocess.run([BASH, GITHUB_PUSH.as_posix(), published.path.as_posix(), "side"],
+                        env=env, capture_output=True, timeout=600)
+    out = _out(cp)
+    assert cp.returncode == 0, out
+    logged = calls.read_text(encoding="utf-8")
+    assert f"--sha {side}" in logged, logged
+    assert "ci-precheck.py" not in logged and "CI gate skipped" in out, out
+
+
+@integration
 def test_github_push_refuses_an_invalid_denylist(published: Repo):
     published.write(".sanitize-patterns", f"{HOST}\nbuild-box-(7\n")
     published.write("docs/deploy.md", f"ssh {HOST}\n")

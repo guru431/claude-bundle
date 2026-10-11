@@ -159,10 +159,14 @@ def check_task(task: dict) -> list[str]:
         if err:
             problems.append(err)
     for key in BOOLS:
-        val = task.get(key)
-        if val is not None and not isinstance(val, bool):
-            problems.append(f"{key}: must be true/false, got {type(val).__name__} "
-                            f"({val!r}) — a quoted 'false' registers as enabled")
+        # `in`, not .get(): a key with nothing after it is a null to YAML — the
+        # POSIX generator takes `enabled:` for enabled — and an empty string to
+        # sync-tasks.ps1, which registers the task Disabled.
+        if key in task and not isinstance(task[key], bool):
+            val = task[key]
+            problems.append(f"{key}: must be true/false, got {type(val).__name__} ({val!r}) — "
+                            + ("the two parsers read an empty value differently" if val is None
+                               else "a quoted 'false' registers as enabled"))
     for key in INTS:
         val = task.get(key)
         if val is None:
@@ -406,7 +410,14 @@ def check(registry: Path = REGISTRY, ps_parsed: Path | None = None) -> int:
         return 2
 
     text = registry.read_text(encoding="utf-8")
-    data = yaml.safe_load(text)
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        # The commonest way for a hand-edited registry to be broken, and the one
+        # that ended in a traceback.
+        print(f"REGISTRY SCHEMA ERRORS — fix {registry}:")
+        print(f"  the file is not valid YAML: {' '.join(str(exc).split())}")
+        return 1
     # An empty file loads as None and a list as a list: neither has .get(), and
     # the guard died with a traceback instead of saying what is wrong.
     if not isinstance(data, dict):

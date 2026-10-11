@@ -52,20 +52,23 @@ def test_a_merged_settings_json_survives_an_old_manifest_and_force(tmp_path: Pat
     assert results == {"merged": True, "template": False}
 
 
-@pytest.mark.integration   # three full-tier dry runs, ~1.5 s (ScheduledTasks module load)
+@pytest.mark.integration   # six full-tier runs, ~2.5 s (ScheduledTasks module load)
 def test_the_summary_says_what_happened_to_the_scheduled_tasks(tmp_path: Path):
     """The summary said "unregistered in step 1b" on every full-tier run — on a
     dry run, with nothing registered, and with no syncer to unregister with.
-    Dry runs only. The "would unregister" case shadows Get-ScheduledTask with a
-    function for the called script, so no real task is needed or touched."""
-    def deployment(name: str, with_syncer: bool) -> Path:
+    Dry runs, and one -Confirm that must refuse before it deletes anything (the
+    manifest lists no file either). The "registered" cases shadow
+    Get-ScheduledTask with a function for the called script, so no real task is
+    needed or touched."""
+    def deployment(name: str, with_syncer: bool, task: str | None = None) -> Path:
         home = tmp_path / name
         (home / "cron" / "admin").mkdir(parents=True)
         if with_syncer:
             (home / "cron" / "admin" / "sync-tasks.ps1").write_text("# never run by a dry run\n", encoding="utf-8")
         (home / "cron" / "registry.yaml").write_text(
             "version: 1\nlauncher: C:\\b\\bin\\_run-hidden.vbs\ntasks:\n"
-            f"  - name: ClaudeBundleTest-{name}\n    script: C:\\b\\cron\\t.py\n", encoding="utf-8")
+            f"  - name: {task or 'ClaudeBundleTest-' + name}\n    script: C:\\b\\cron\\t.py\n",
+            encoding="utf-8")
         (home / ".bundle-manifest.json").write_text(json.dumps({
             "bundle_version": "0.0.0", "installed_at": "2026-01-01T00:00:00Z", "tier": "full",
             "claude_home": str(home), "pipeline_root": str(home), "written": [],
@@ -75,6 +78,13 @@ def test_the_summary_says_what_happened_to_the_scheduled_tasks(tmp_path: Path):
     none_home = deployment("none", True)
     nosync_home = deployment("nosync", False)
     shadow_home = deployment("shadow", True)
+    # Its syncer is gone, its task is not.
+    orphaned_home = deployment("orphaned", False, task="ClaudeBundleTest-shadow")
+    # A registry the syncer's parser cannot read. A directory in its place fails
+    # Get-Content the way a file another process holds locked does.
+    unreadable_home = deployment("unreadable", True)
+    (unreadable_home / "cron" / "registry.yaml").unlink()
+    (unreadable_home / "cron" / "registry.yaml").mkdir()
     out = tmp_path / "summaries.txt"
     code = f"""
 $ErrorActionPreference = 'Stop'
@@ -94,17 +104,33 @@ function Get-ScheduledTask {{
     [pscustomobject]@{{ TaskName = 'ClaudeBundleTest-shadow'; Description = 'managed-by-registry | test' }}
 }}
 $lines += 'shadow=' + (Summary {ps_quote(shadow_home)})
+$lines += 'orphaned=' + (Summary {ps_quote(orphaned_home)})
+$lines += 'unreadable=' + (Summary {ps_quote(unreadable_home)})
+& {ps_quote(UNINSTALL)} -ClaudeHome {ps_quote(orphaned_home)} -Confirm *>&1 | Out-Null
+$lines += 'orphaned-confirm=' + $LASTEXITCODE
 [System.IO.File]::WriteAllLines({ps_quote(out)}, $lines, [System.Text.Encoding]::Unicode)
 """
     r = run_ps(code, tmp_path, cwd=tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     got = dict(line.split("=", 1) for line in out.read_text(encoding="utf-16").splitlines())
-    assert got["none"] == ("scheduled tasks: none of this deployment's tasks are registered "
-                           "\u2014 nothing to unregister"), got
-    assert got["nosync"].startswith("scheduled tasks: not checked \u2014 "), got
-    assert got["shadow"] == ("[dry-run] would unregister 1 registry-managed task(s) first || "
-                             "scheduled tasks: 1 would be unregistered first (registry-driven, "
-                             "never schtasks /delete)"), got
+    nothing = ("scheduled tasks: none of this deployment's tasks are registered "
+               "\u2014 nothing to unregister")
+    assert got["none"] == nothing, got
+    # No syncer is no reason not to look: the registry still names the tasks.
+    assert got["nosync"] == nothing, got
+    would = ("[dry-run] would unregister 1 registry-managed task(s) first || "
+             "scheduled tasks: 1 would be unregistered first (registry-driven, "
+             "never schtasks /delete)")
+    assert got["shadow"] == would, got
+    # The header's promise \u2014 exit 3 while a task named in the registry is still
+    # registered \u2014 was not kept without the syncer: the step was skipped whole,
+    # and the files went while the tasks stayed.
+    assert "1 still registered" in got["orphaned"] and "exit 3" in got["orphaned"], got
+    assert got["orphaned-confirm"] == "3", got
+    assert (orphaned_home / ".bundle-manifest.json").exists(), "a refused run deleted something"
+    # An unreadable registry used to end the script with a raw error. It names
+    # nothing, so every task carrying the marker counts.
+    assert got["unreadable"] == would, got
     assert "unregistered in step 1b" not in " ".join(got.values())
 
 

@@ -466,12 +466,15 @@ cd "$TMP" || exit 1
 # scanner nothing, and the dry run said "clean" for a tree nobody had scanned —
 # the failure guard_secrets closes for the real run.
 R29="$TMP/r29"; mkrepo "$R29"; echo change >> "$R29/app.py"
-git() { case "$*" in *"diff HEAD --unified=0"*) return 128 ;; esac; command git "$@"; }
+# A PATH stub, not a git() function: the CI shellcheck flags every git call above
+# a function defined this far down (SC2218); the subshell scopes the stub.
+mkdir -p "$TMP/stubs-git"
+printf '#!/bin/bash\ncase "$*" in *"diff HEAD --unified=0"*) exit 128 ;; esac\nexec %q "$@"\n' \
+    "$(command -v git)" > "$TMP/stubs-git/git"
+chmod +x "$TMP/stubs-git/git"
 : > "$LOG_FILE"
-DRY_RUN=1
-reset_counters; push_repo "$R29" "r29" "Auto-commit: test"
-DRY_RUN=0
-unset -f git
+( export PATH="$TMP/stubs-git:$PATH"; DRY_RUN=1
+  reset_counters; push_repo "$R29" "r29" "Auto-commit: test" )
 grep -q "scan-error: git diff HEAD failed" "$LOG_FILE" || fail "T29: the preview did not report the failed diff"
 grep -q "staged secret-scan: clean" "$LOG_FILE" && fail "T29: the preview called an unscanned tree clean"
 cd "$TMP" || exit 1

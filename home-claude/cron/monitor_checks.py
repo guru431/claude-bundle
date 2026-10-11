@@ -97,6 +97,12 @@ def read_registry(registry: Path) -> list[dict]:
         admin/lib/registry-parse.ps1: a quoted value keeps its `#`.
         """
         val = line.split(":", 1)[1].strip()
+        # A quoted value ends at its closing quote, and only there may a comment
+        # follow. Taken whole, `'windows'  # this box` kept the comment and both
+        # quotes, and the quoted spelling stopped matching again.
+        quoted = re.match(r"""(['"])(.*?)\1\s*(?:#.*)?$""", val)
+        if quoted:
+            return quoted.group(2)
         if not val.startswith(("'", '"')):
             val = re.sub(r"\s+#.*$", "", val)
         return unwrap(val)

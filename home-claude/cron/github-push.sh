@@ -4,7 +4,7 @@
 # Project scheme: origin=primary (default push, including the nightly
 # git-push-all sweep), github=secondary (pushed ONLY by hand via this script).
 # Before pushing to the public github remote we run a 4-stage privacy gate over
-# the whole range of commits that would leave for github (github/<branch>..<branch>),
+# the whole range of commits that would leave for github (<branch> minus what github has),
 # then a local CI gate (ci-precheck.py), and after the push we wait for the
 # GitHub Actions run of the published commit (ci-watch.py).
 #
@@ -68,17 +68,28 @@ GH_URL="$(git remote get-url github | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/
 
 echo "=== github-push: $(basename "$REPO") [$BRANCH] → $GH_URL ==="
 
-# --- what would leave: range github/<branch>..<branch> ---
-git fetch github "$BRANCH" --quiet 2>/dev/null || true   # rc-ok: a stale or missing github/<branch> only widens the range scanned below
-if git rev-parse "github/$BRANCH" >/dev/null 2>&1; then
-  RANGE="github/$BRANCH..$BRANCH"
-  N=$(git rev-list --count "$RANGE")
+# --- what would leave: the branch minus EVERYTHING github already has ---
+# Not just the namesake github/<branch>: a branch github had not seen yet was
+# scanned from its first commit, and one cut from published history stopped on
+# files that had been on github's main for years. The pre-push hook counts a
+# publication the same way (`--not --remotes=<target>`). `--prune`: a stale ref
+# to a branch deleted over there would pass its commits off as published. When
+# github cannot be asked the range only gets wider — the whole history.
+RANGE=""
+if git fetch github --prune --quiet 2>/dev/null \
+   && [ -n "$(git for-each-ref --count=1 --format='%(refname)' refs/remotes/github)" ]; then
+  RANGE="$BRANCH --not --remotes=github"
+  # RANGE is a rev list and must word-split.
+  # shellcheck disable=SC2086
+  N=$(git rev-list --count $RANGE)
 else
-  RANGE=""   # first push — check the whole tree
-  N="(new repo — whole tree)"
+  N="(new repo — whole tree)"   # first push — the whole reachable history is published
 fi
 echo "New commits to publish: $N"
-if [ -n "$RANGE" ] && [ "$N" = "0" ]; then
+# No new commits on a branch github does not have is a branch being created on
+# published history: nothing to check, and it still has to be pushed.
+if [ -n "$RANGE" ] && [ "$N" = "0" ] \
+   && git rev-parse --verify --quiet "refs/remotes/github/$BRANCH" >/dev/null; then
   echo "Nothing to publish — github is already up to date."; exit 0
 fi
 

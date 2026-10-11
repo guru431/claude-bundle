@@ -487,7 +487,7 @@ def test_the_claude_cli_is_resolved_through_pathext(cron_copy: Path, monkeypatch
         argvs.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout="answer\n", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(u, "_run_tree", fake_run)
     assert u._llm_claude("hi") == "answer"
     assert argvs[0][0] == shim
 
@@ -557,7 +557,7 @@ def test_the_claude_cli_gets_no_tools_no_mcp_and_no_project_dir(cron_copy: Path,
         seen["listing"] = sorted(os.listdir(kw["cwd"])) if kw.get("cwd") else None
         return subprocess.CompletedProcess(argv, 0, stdout="answer\n", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(u, "_run_tree", fake_run)
     assert u._llm_claude("hi") == "answer"
 
     argv = seen["argv"]
@@ -566,3 +566,22 @@ def test_the_claude_cli_gets_no_tools_no_mcp_and_no_project_dir(cron_copy: Path,
     assert "--no-session-persistence" in argv
     assert seen["cwd"] and seen["listing"] == [], "the CLI ran in a directory with files"
     assert not Path(seen["cwd"]).exists(), "the sandbox directory was left behind"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "nt", reason="the cmd.exe -> CLI tree of an npm shim is Windows")
+def test_a_timeout_ends_a_claude_cli_started_through_a_shim(cron_copy: Path, monkeypatch):
+    """An npm install puts `claude.cmd` on PATH: cmd.exe is the child and the CLI
+    its grandchild. On a timeout subprocess.run killed cmd.exe alone, then read
+    the pipes to the end with no timeout — and the CLI still held them. The call
+    came back when the CLI finished by itself, however long that took."""
+    hang = cron_copy / "claude_hang.py"
+    hang.write_text("import sys, time\nsys.stdin.read()\ntime.sleep(12)\n", encoding="utf-8")
+    shim = cron_copy / "claude.cmd"
+    shim.write_text(f'@"{sys.executable}" "{hang}" %*\r\n', encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_BIN", str(shim))
+    u = _load_utils(cron_copy, "utils_claude_timeout")
+
+    started = time.monotonic()
+    assert u._llm_claude("hi", timeout=1) is None
+    assert time.monotonic() - started < 8, "the timeout waited for the CLI to finish by itself"

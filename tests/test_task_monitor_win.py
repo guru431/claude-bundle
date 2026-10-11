@@ -122,6 +122,23 @@ def test_without_pyyaml_an_inline_comment_is_not_part_of_the_value(tmp_path, mon
         "health_port": 1, "platform": "all#1"}]
 
 
+def test_without_pyyaml_a_comment_after_a_quoted_value_is_dropped(tmp_path, monkeypatch):
+    """`platform: 'windows'  # this box only`. A value that opened with a quote
+    was returned whole — the comment and both quotes with it — so the quoted
+    spelling stopped matching the moment someone annotated the line. The value
+    ends at its closing quote; a `#` inside the quotes stays."""
+    monkeypatch.setitem(sys.modules, "yaml", None)
+    registry = tmp_path / "registry.yaml"
+    registry.write_text("tasks:\n"
+                        "  - name: ClaudeDaemon\n"
+                        "    platform: 'windows'   # this box only\n"
+                        '    script: "C:/a #1/run.sh"  # a hash inside the quotes\n',
+                        encoding="utf-8")
+
+    assert monitor_checks.read_registry(registry) == [{
+        "name": "ClaudeDaemon", "platform": "windows", "script": "C:/a #1/run.sh"}]
+
+
 def test_a_task_without_a_declared_port_is_left_to_its_exit_code(run_task_status):
     """An ordinary scheduled task has a real exit status; a probe would invent failures."""
     out = run_task_status([_task("ClaudeNightly", result=0, state="Ready")])
@@ -255,6 +272,42 @@ def test_the_windows_monitor_puts_a_down_chain_on_top_of_its_alert(run_task_stat
     assert "LLM chain is DOWN (" not in run_task_status(failed), "reported twice"
 
 
+# ── the seen-state snapshot ──────────────────────────────────────────────────
+
+def _seen_state_block() -> str:
+    """The shell lines that snapshot the seen-state when a run starts."""
+    text = SCRIPT.read_text(encoding="utf-8")
+    m = re.search(r'^SEEN_STATE=.*?^\[ -f "\$SEEN_STATE" \] && cp "\$SEEN_STATE" "\$SEEN_BACKUP"\n',
+                  text, re.M | re.S)
+    assert m, f"no seen-state snapshot block in {SCRIPT.name}"
+    return m.group(0)
+
+
+def test_a_snapshot_left_by_a_killed_run_is_put_back(tmp_path: Path, bash: str):
+    """A run killed between marking its failures "reported" and delivering the
+    alert leaves its snapshot behind — the end of a normal run removes it. The
+    next run deleted that snapshot and went on from the state the dead run had
+    written: its failures were on record as reported and had gone nowhere."""
+    state = tmp_path / "state"
+    state.mkdir()
+    seen = state / "task-monitor-seen.json"
+    snapshot = state / "task-monitor-seen.json.prealert"
+    seen.write_text('{"Old": "1", "MarkedButNeverSent": "2"}', encoding="utf-8")
+    snapshot.write_text('{"Old": "1"}', encoding="utf-8")
+    log = tmp_path / "monitor.log"
+    block = tmp_path / "seen-block.sh"
+    block.write_text(f'CRON_DIR="{tmp_path.as_posix()}"\nLOG_FILE="{log.as_posix()}"\n'
+                     + _seen_state_block(), encoding="utf-8", newline="\n")
+
+    cp = subprocess.run([bash, block.as_posix()], capture_output=True, text=True, timeout=60)
+
+    assert cp.returncode == 0, cp.stderr
+    assert seen.read_text(encoding="utf-8") == '{"Old": "1"}'
+    # ...and this run starts with a snapshot of its own.
+    assert snapshot.read_text(encoding="utf-8") == '{"Old": "1"}'
+    assert "seen-state" in log.read_text(encoding="utf-8")
+
+
 # ── the session-0 path policy (Password and S4U tasks) ───────────────────────
 
 LAUNCHER_ARGS = '//B //nologo "C:\\bundle\\bin\\_run-hidden.vbs" bash '
@@ -302,10 +355,16 @@ def test_s4u_tasks_are_held_to_the_session_0_path_policy(monkeypatch, capsys):
         _policy_task("S4ULocal", "S4U", LAUNCHER_ARGS + '"D:\\bundle\\cron\\e.sh"'),
         # `\\?\` is the local device namespace, not a share.
         _policy_task("S4UDevicePath", "S4U", LAUNCHER_ARGS + '"\\\\?\\C:\\bundle\\cron\\f.sh"'),
+        # Forward slashes name the same paths, and a registry written by hand
+        # in Git Bash carries them.
+        _policy_task("S4UShareFwd", "S4U", LAUNCHER_ARGS + '"//host/share/cron/g.sh"'),
+        _policy_task("PasswordMappedFwd", "Password", LAUNCHER_ARGS + '"Z:/bundle/cron/h.sh"'),
     ]}, monkeypatch, capsys)
 
-    assert _flagged(out, "with a mapped-drive path") == ["PasswordMapped", "S4UMapped"], out
-    assert _flagged(out, "S4U task with a UNC path") == ["S4UShare", "S4UShareExe"], out
+    assert _flagged(out, "with a mapped-drive path") == [
+        "PasswordMapped", "PasswordMappedFwd", "S4UMapped"], out
+    assert _flagged(out, "S4U task with a UNC path") == [
+        "S4UShare", "S4UShareExe", "S4UShareFwd"], out
 
 
 @pytest.mark.parametrize("reply", [

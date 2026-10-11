@@ -459,10 +459,19 @@ def published(tmp_path: Path) -> Repo:
     return repo
 
 
-def _check_only(repo: Repo) -> subprocess.CompletedProcess:
+def _check_only(repo: Repo, branch: str = "main") -> subprocess.CompletedProcess:
     return subprocess.run([BASH, GITHUB_PUSH.as_posix(), "--check-only",
-                           repo.path.as_posix(), "main"],
+                           repo.path.as_posix(), branch],
                           env=repo.env, capture_output=True, timeout=600)
+
+
+def _publish_dotenv(repo: Repo) -> None:
+    """A `.env` that is already on github's main — published before this gate
+    existed, or with it forced. What a later branch must not be blamed for."""
+    repo.write(".env", "PASSWORD=hunter2\n")
+    repo.plant("an old .env")
+    cp = repo.git("push", "-q", "github", "main")
+    assert cp.returncode == 0, _out(cp)
 
 
 @integration
@@ -538,6 +547,67 @@ def test_github_push_checks_ci_for_the_branch_it_published(published: Repo, tmp_
     logged = calls.read_text(encoding="utf-8")
     assert f"--sha {side}" in logged, logged
     assert "ci-precheck.py" not in logged and "CI gate skipped" in out, out
+
+
+@integration
+def test_github_push_does_not_rescan_what_github_already_has(published: Repo):
+    """A branch github has not seen yet was scanned from its first commit: the
+    range was `github/<branch>..<branch>`, and with no `github/<branch>` that is
+    the whole history. A pull-request branch cut from published history stopped
+    on files that had been on github's main for years. What leaves is the branch
+    minus everything github has — the way the pre-push hook counts it."""
+    _publish_dotenv(published)
+    assert published.git("checkout", "-q", "-b", "fix/x").returncode == 0
+    published.write("fix.txt", "fix\n")
+    published.plant("fix")
+    cp = _check_only(published, "fix/x")
+    out = _out(cp)
+    assert cp.returncode == 0, out
+    assert "New commits to publish: 1" in out, out
+
+
+@integration
+def test_github_push_still_scans_what_a_new_branch_adds(published: Repo):
+    """The narrower range must not let through what the branch itself brings."""
+    assert published.git("checkout", "-q", "-b", "fix/y").returncode == 0
+    published.write(".env", "PASSWORD=hunter2\n")
+    published.plant("a .env of its own")
+    cp = _check_only(published, "fix/y")
+    out = _out(cp)
+    assert cp.returncode != 0, out
+    assert ".env" in out, out
+
+
+@integration
+def test_github_push_creates_a_branch_that_adds_no_commits(published: Repo):
+    """No new commits on a branch github does not have is not "nothing to
+    publish": the branch itself still has to be created there."""
+    assert published.git("checkout", "-q", "-b", "same").returncode == 0
+    cp = subprocess.run([BASH, GITHUB_PUSH.as_posix(), published.path.as_posix(), "same"],
+                        env={**published.env, "GITHUB_PUSH_NO_CI": "1"},
+                        capture_output=True, timeout=600)
+    out = _out(cp)
+    assert cp.returncode == 0, out
+    assert "Nothing to publish" not in out, out
+    heads = published.git("ls-remote", "--heads", "github").stdout.decode()
+    assert "refs/heads/same" in heads, heads
+
+
+@integration
+def test_github_push_scans_the_whole_history_for_an_empty_github(published: Repo,
+                                                                 tmp_path: Path):
+    """A first push publishes the whole history, so the whole history is read."""
+    _publish_dotenv(published)
+    empty = tmp_path / "empty.git"
+    cp = subprocess.run([GIT, "init", "-q", "--bare", str(empty)], env=published.env,
+                        capture_output=True, timeout=120)
+    assert cp.returncode == 0, _out(cp)
+    assert published.git("remote", "set-url", "github", str(empty)).returncode == 0
+    assert published.git("update-ref", "-d", "refs/remotes/github/main").returncode == 0
+    cp = _check_only(published)
+    out = _out(cp)
+    assert cp.returncode != 0, out
+    assert ".env" in out, out
 
 
 @integration

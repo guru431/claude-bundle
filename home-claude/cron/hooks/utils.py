@@ -4681,6 +4681,37 @@ def _llm_mock(prompt: str, timeout: int = 600) -> str | None:
     return "[]"
 
 
+def _run_tree(argv: list[str], *, input: str, env: dict, cwd: str,
+              timeout: float) -> subprocess.CompletedProcess:
+    """subprocess.run with a timeout that holds for a command behind a shim.
+
+    An npm install puts `claude.cmd` on PATH: cmd.exe is the child and the real
+    CLI its grandchild. On a timeout subprocess.run kills the child alone and
+    then, on Windows, reads the pipes to the end with no timeout — pipes the
+    grandchild still holds. The call returned when the CLI finished by itself,
+    however long that took. Here the whole tree is stopped first — by the same
+    helper that stops an alert sender (cron/lib/notify.py) — and the last read
+    is bounded too.
+    """
+    from notify import _kill_tree
+
+    # A session of its own on POSIX: _kill_tree signals the process group.
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=env, cwd=cwd, text=True,
+                            encoding="utf-8", errors="replace",
+                            start_new_session=(os.name != "nt"))
+    try:
+        out, err = proc.communicate(input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def _llm_claude(prompt: str, timeout: int = 600) -> str | None:
     """Claude CLI fallback (claude -p --model sonnet).
 
@@ -4722,16 +4753,12 @@ def _llm_claude(prompt: str, timeout: int = 600) -> str | None:
     try:
         with tempfile.TemporaryDirectory(prefix="bundle-claude-",
                                          ignore_cleanup_errors=True) as sandbox:
-            result = subprocess.run(
+            result = _run_tree(
                 [claude_bin, "-p", "--model", "sonnet", "--output-format", "text",
                  "--tools", "", "--strict-mcp-config", "--no-session-persistence", "-"],
                 input=prompt,
-                capture_output=True,
-                text=True,
                 env=env,
                 timeout=timeout,
-                encoding="utf-8",
-                errors="replace",
                 cwd=sandbox,
             )
         if result.returncode == 0 and result.stdout.strip():

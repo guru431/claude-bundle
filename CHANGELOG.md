@@ -118,6 +118,42 @@ The short list; UPGRADING.md has the steps.
   syncer registered such a task Disabled, the POSIX generator enabled it.
   **`uninstall.sh`** exits 1 for a bad argument (was 2).
 
+### Ported from the meta-repo: five fixes since the last comparison
+
+The shared files were compared again, commit by commit. Five fixes made in the
+meta-repo since the last port apply here; each comes with a test that fails on
+the code it replaces.
+
+- **`github-push.sh` checks a new branch for what it adds, not for its whole
+  history.** The range was `github/<branch>..<branch>`, and a branch github had
+  not seen yet has no `github/<branch>`: everything reachable was scanned, so a
+  pull-request branch cut from published history stopped on files that had been
+  on github's main for years. The range is now the branch minus everything
+  github has (`<branch> --not --remotes=github`, after `git fetch github
+  --prune`) — the way the pre-push hook counts a publication. A branch that
+  adds no commits is still created on github; an empty or unreachable github is
+  scanned in full, as before.
+- **A task-monitor run that was cut short no longer buries its failures.** The
+  monitor marks failures as reported before the alert leaves, and keeps a
+  snapshot to put back if the delivery fails. A run killed in between left the
+  snapshot behind, and the next run deleted it and went on from the state the
+  dead run had written. A snapshot found at the start of a run is restored
+  first.
+- **The session-0 path policy reads forward slashes.** `Z:/…` and
+  `//host/share/…` are the same paths to Windows as their backslash spellings,
+  and a Password or S4U task registered with them passed the monitor's backstop.
+- **Without PyYAML, a comment after a quoted value is dropped.**
+  `platform: 'windows'  # this box only` came back whole — the comment and both
+  quotes — so `monitor_checks.read_registry`'s line parser stopped matching a
+  quoted spelling the moment someone annotated the line. A `#` inside the quotes
+  stays.
+- **The Claude CLI timeout holds for an npm install.** `claude.cmd` makes
+  cmd.exe the child and the CLI its grandchild; on a timeout `subprocess.run`
+  killed cmd.exe alone and then read the pipes to the end — pipes the CLI still
+  held — so a call with a 1-second timeout came back when the CLI was done.
+  `_llm_claude` now stops the whole tree, with the helper `notify.send` already
+  used.
+
 ### Findings: 16 resolved, 19 declined
 
 The weekly code review of 2026-10-10 filed 35 findings; each was checked against

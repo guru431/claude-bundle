@@ -58,6 +58,14 @@ echo "TRACE: BUNDLE_ROOT=$BUNDLE_ROOT" >> "$LOG_FILE"
 # prevent. The file as it stands right now is put back if delivery fails.
 SEEN_STATE="$CRON_DIR/state/task-monitor-seen.json"
 SEEN_BACKUP="$SEEN_STATE.prealert"
+# A snapshot that outlived its run means the run was cut short between writing
+# the seen-state and delivering the alert (a finished run removes it below). Its
+# failures are on record as reported and went nowhere: start from the state
+# before that run.
+if [ -f "$SEEN_BACKUP" ]; then
+    cp "$SEEN_BACKUP" "$SEEN_STATE" \
+        && echo "seen-state restored from the snapshot of a run that did not finish" >> "$LOG_FILE"
+fi
 rm -f "$SEEN_BACKUP"
 [ -f "$SEEN_STATE" ] && cp "$SEEN_STATE" "$SEEN_BACKUP"
 
@@ -375,8 +383,9 @@ ConvertTo-Json -InputObject ([PSCustomObject]@{ Mapped = $mapped; Tasks = $tasks
 
 # A drive-letter path, or a UNC path, at the start of the command line or after
 # a space or a quote. `\\?\` and `\\.\` are the local device namespace, not shares.
-DRIVE_RE = re.compile(r'(?:^|[\s"])([A-Za-z]):\\')
-UNC_RE = re.compile(r'(?:^|[\s"])\\\\(?![?.]\\)[^\\\s"]+\\[^\\\s"]')
+# Either slash: `Z:/…` and `//host/share/…` are the same paths to Windows.
+DRIVE_RE = re.compile(r'(?:^|[\s"])([A-Za-z]):[\\/]')
+UNC_RE = re.compile(r'(?:^|[\s"])(?:\\\\|//)(?![?.][\\/])[^\\/\s"]+[\\/][^\\/\s"]')
 
 # A collection that fails must SAY so. An uncaught timeout or a malformed JSON
 # reply ended this program with a traceback in the log and nothing on stdout —

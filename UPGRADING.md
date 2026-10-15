@@ -92,6 +92,18 @@ The `context7` plugin's endpoint now answers 401 until you authenticate in
 
 Keeping the plugin instead works too, once you authenticate it in `/mcp`.
 
+### Subagents: the implementer agent and the limits
+
+`CLAUDE.md` sends code edits by a subagent to an `implementer` agent, which the
+bundle now ships as `agents/implementer.md`; the installer copies `agents/` like
+`skills/` (an edited copy is backed up first). `settings.json` gains
+`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=4`, `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1`
+and `BASH_MAX_OUTPUT_LENGTH=15000` under `env`. The merge now adds the `env`
+variables you lack as well as the top-level keys — the template shipped
+`"env": {}`, so a merge of top-level keys alone never delivered them. A variable
+you set keeps your value; to run without a limit, set it to a value of your own
+rather than deleting it, or the next re-install adds it back.
+
 ### Key values in `.env` are now guarded
 
 `git-push-all.sh` and `github-push.sh` compare every outgoing commit with the

@@ -38,10 +38,10 @@ agent instructions.
 
 | Path | What's copied | Prerequisites | Verification run |
 |---|---|---|---|
-| Lite — automated (`install.ps1 -Profile lite`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/` without the full-tier `wiki.md`, `.bundle-version` stamp (no `.env`) | Windows PowerShell, VS Code + Claude Code ext | built-in check: the copied files exist and `settings.json` parses (the full `self-test.ps1` is for the full tier — it checks Python, YAML, hooks and the registry, none of which a lite install has) |
-| Lite — manual (Copy-Item snippet) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/` without `wiki.md` | Windows PowerShell | manual: `/help`, `/skills` in chat |
+| Lite — automated (`install.ps1 -Profile lite`) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/` without the full-tier `wiki.md`, `agents/`, `.bundle-version` stamp (no `.env`) | Windows PowerShell, VS Code + Claude Code ext | built-in check: the copied files exist and `settings.json` parses (the full `self-test.ps1` is for the full tier — it checks Python, YAML, hooks and the registry, none of which a lite install has) |
+| Lite — manual (Copy-Item snippet) | `CLAUDE.md`, `settings.json`, `skills/`, `commands/` without `wiki.md`, `agents/` | Windows PowerShell | manual: `/help`, `/skills` in chat |
 | Full — automated (`install.ps1 -Profile full`) | Lite set + `hooks/`, `wiki/`, `bin/`, `cron/` + `.env` from template + registry bootstrap (optional `save-cred`/`sync`) | Python 3.10+, Git for Windows, an LLM backend | runs `self-test.ps1` automatically |
-| POSIX — lite (`bash scripts/install.sh`) | `CLAUDE.md`, `settings.json` (merged), `skills/`, `commands/` without the full-tier `wiki.md`, `.bundle-version` stamp, `.bundle-manifest.json` | bash; a Python 3.9+ for the merge and the manifest | built-in check: the files exist and `settings.json` parses |
+| POSIX — lite (`bash scripts/install.sh`) | `CLAUDE.md`, `settings.json` (merged), `skills/`, `commands/` without the full-tier `wiki.md`, `agents/`, `.bundle-version` stamp, `.bundle-manifest.json` | bash; a Python 3.9+ for the merge and the manifest | built-in check: the files exist and `settings.json` parses |
 | POSIX — full (`bash scripts/install.sh --profile full`) | Lite set + `hooks/`, `wiki/`, `bin/`, `cron/` + `.env` + `bundle.local.yaml`; systemd/launchd units with `--install-units` | Python 3.10+ with requests + PyYAML, bash, systemd or launchd, an LLM backend | built-in: the deployed registry passes `check-registry.py` and `cron/` compiles; `gen-scheduler.py --check` for the units |
 
 - Choose **Lite** if you just want consistent rules, permissions, and
@@ -103,6 +103,7 @@ Copy-Item "$src\settings.json" $dst -Force
 # Optional sub-folders
 Copy-Item -Recurse "$src\hooks"    $dst -Force
 Copy-Item -Recurse "$src\skills"   $dst -Force
+Copy-Item -Recurse "$src\agents"   $dst -Force   # the implementer subagent CLAUDE.md delegates to
 New-Item -ItemType Directory -Force -Path "$dst\commands" | Out-Null
 Copy-Item "$src\commands\code-review-ext.md" "$dst\commands" -Force   # /wiki comes in step 8
 ```
@@ -260,7 +261,7 @@ That is why the installer takes **two** roots, not one:
 ```
 
 - **`-ClaudeHome`** (default `~/.claude`) — `CLAUDE.md`, `settings.json`,
-  `skills/`, `commands/`, `hooks/`. Claude Code honors `CLAUDE_CONFIG_DIR`
+  `skills/`, `commands/`, `agents/`, `hooks/`. Claude Code honors `CLAUDE_CONFIG_DIR`
   for its config root, but only when that variable is exported in the
   environment of the CLI/IDE that reads it — pointing the installer
   somewhere else without exporting it to the client is a sandbox install,
@@ -803,9 +804,10 @@ bash scripts/uninstall.sh                       # a dry run; --confirm deletes
 `bash scripts/install-lite.sh` still works — it is `install.sh --profile lite`.
 Call the scripts through `bash`: a fresh clone does not mark them executable.
 
-- **Lite** copies `CLAUDE.md`, `skills/` and `commands/` into the config root,
-  **merges** `settings.json` (your keys win, missing template keys are added,
-  the previous file stays as `settings.json.bak-<stamp>`), backs up anything
+- **Lite** copies `CLAUDE.md`, `skills/`, `commands/` and `agents/` into the
+  config root, **merges** `settings.json` (your keys win, missing template keys
+  and `env` variables are added, the previous file stays as
+  `settings.json.bak-<stamp>`), backs up anything
   else it replaces into `.bundle-backup-<stamp>/` and stamps `.bundle-version`.
   `commands/wiki.md` is left out: `/wiki` searches the vault only the full tier
   builds. The merge and the manifest need a Python 3.9+. Without one the

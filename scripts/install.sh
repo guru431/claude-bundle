@@ -17,7 +17,7 @@
 # Options:
 #   --profile lite|full   lite (default) needs only bash. full needs Python 3.10+
 #                         with requests and PyYAML (pip install -r requirements.txt).
-#   --claude-home DIR     CLAUDE.md, settings.json, skills/, commands/, hooks/
+#   --claude-home DIR     CLAUDE.md, settings.json, skills/, commands/, agents/, hooks/
 #                         (default: $CLAUDE_CONFIG_DIR, else ~/.claude)
 #   --pipeline-root DIR   full: cron/, wiki/, bin/, .env, bundle.local.yaml
 #                         (default: the same directory as --claude-home)
@@ -175,6 +175,7 @@ printf 'claude_home\tCLAUDE.md\thome-claude/CLAUDE.md\n' >> "$plan"
 printf 'claude_home\tsettings.json\thome-claude/settings.json\n' >> "$plan"
 plan_tree claude_home skills
 plan_tree claude_home commands
+plan_tree claude_home agents
 if [ "$profile" = full ]; then
     plan_tree claude_home hooks        # Claude Code lifecycle hooks: read from the config root
     plan_tree pipeline_root wiki
@@ -195,7 +196,7 @@ fi
 say ""
 say "=== claude-bundle installer ==="
 say "Profile:      $profile"
-say "ClaudeHome:   $claude_home    (CLAUDE.md, settings.json, skills/, commands/)"
+say "ClaudeHome:   $claude_home    (CLAUDE.md, settings.json, skills/, commands/, agents/)"
 if [ "$profile" = full ]; then
     say "PipelineRoot: $pipeline_root    (cron/, wiki/, bin/, .env)"
 fi
@@ -337,7 +338,7 @@ while IFS="$TAB" read -r root rel from; do
     cp "$from" "$dst"
     printf '%s\t%s\n' "$root" "$rel" >> "$written"
 done < "$plan"
-ok "copied CLAUDE.md, settings.json, skills/, commands/ -> $claude_home"
+ok "copied CLAUDE.md, settings.json, skills/, commands/, agents/ -> $claude_home"
 if [ "$profile" = lite ] && [ -f "$src/commands/wiki.md" ]; then
     say "[skip] commands/wiki.md - full tier only (it searches the vault the pipeline builds)"
 fi

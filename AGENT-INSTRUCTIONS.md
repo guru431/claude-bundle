@@ -71,6 +71,8 @@ cp "$SRC/settings.json" "$DST/settings.json"
 # Only /code-review-ext: /wiki searches the vault the full tier builds (step 5).
 cp -r "$SRC/skills"   "$DST/" 2>/dev/null
 mkdir -p "$DST/commands" && cp "$SRC/commands/code-review-ext.md" "$DST/commands/"
+# The implementer subagent CLAUDE.md sends code edits to:
+cp -r "$SRC/agents"   "$DST/"
 # Full only — hooks are Python scripts; they need a real Python on PATH:
 cp -r "$SRC/hooks"    "$DST/" 2>/dev/null
 ```
@@ -78,7 +80,8 @@ cp -r "$SRC/hooks"    "$DST/" 2>/dev/null
 Don't Edit/Write `~/.claude/*` directly via your tools — use `cp`.
 If the user explicitly asks to "merge, not replace": read existing
 `settings.json`, union `permissions.allow` and `enabledPlugins`,
-preserve their `hooks` and `env`, write back.
+preserve their `hooks`, add the template's `env` variables they lack
+(theirs win), write back.
 
 ### 2. Ask the user to reload Claude Code
 
@@ -339,7 +342,8 @@ For per-project AGENTS.md, ask the user which projects they want.
 ```
 Profile: <lite | full>
 Lite:   deployed CLAUDE.md, settings.json, skills (templates — paths
-        still need filling), commands (/code-review-ext; /wiki on full).
+        still need filling), commands (/code-review-ext; /wiki on full),
+        agents (implementer).
         Hooks: <skipped / X-of-Y enabled>.
 Full:   deployed wiki/ skeleton, cron/ pipeline. Registered N/18 tasks
         with Task Scheduler. LLM provider: <provider>. Telegram alerts:

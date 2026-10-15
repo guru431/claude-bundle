@@ -26,7 +26,7 @@
 #
 # Two roots, because they are two different things:
 #   -ClaudeHome   (default ~/.claude) — CLAUDE.md, settings.json, skills/,
-#                 commands/, hooks/. Claude Code does honor CLAUDE_CONFIG_DIR
+#                 commands/, agents/, hooks/. Claude Code does honor CLAUDE_CONFIG_DIR
 #                 for its config root, but only when that variable is exported
 #                 in the environment of the CLI/IDE itself; session history and
 #                 memory follow the same root. Pointing this elsewhere WITHOUT
@@ -325,6 +325,18 @@ function Merge-SettingsJson {
             $added += $prop.Name
         }
     }
+    # `env` one level down as well. The template shipped `"env": {}` for long
+    # enough that every install has the key, so variables added to it later (the
+    # subagent limits) never reached one. Yours still win, per variable.
+    $objType = [System.Management.Automation.PSCustomObject]
+    if (($tpl.env -is $objType) -and ($user.env -is $objType)) {
+        foreach ($prop in $tpl.env.PSObject.Properties) {
+            if (-not $user.env.PSObject.Properties[$prop.Name]) {
+                $user.env | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value
+                $added += "env.$($prop.Name)"
+            }
+        }
+    }
     $json = $user | ConvertTo-Json -Depth 20
     # WITHOUT a BOM: Claude Code reads settings.json as UTF-8, and PS 5.1's
     # Out-File / Set-Content default would put one there.
@@ -500,7 +512,7 @@ function Get-PlannedFiles {
         $s = Join-Path $srcHome $f
         if (Test-Path $s) { $plan.Add(@{ root = 'claude_home'; path = $f; src = $s }) }
     }
-    foreach ($d in @('skills', 'commands')) {
+    foreach ($d in @('skills', 'commands', 'agents')) {
         Add-PlannedTree $plan (Join-Path $srcHome $d) $d 'claude_home'
     }
     if ($Profile -eq 'full') {
@@ -568,7 +580,7 @@ function Invoke-BundleDiff {
     foreach ($k in $counts.Keys) { Info ("  {0,-20} {1}" -f $k, $counts[$k]) }
     Info ""
     Info "Caveats, so the list is not read as a plain overwrite plan:"
-    Info "  settings.json is MERGED (your keys win; only missing template keys are added)."
+    Info "  settings.json is MERGED (your keys win; only missing template keys and env variables are added)."
     Info "  A cron/registry.yaml edited since it was bootstrapped, and a wiki/index.md changed since the last install, are preserved, not replaced."
     Info "  Anything 'modified' is backed up to .bundle-backup-<stamp>\ by a real install."
     Info "Nothing was written. Drop -Diff to install."
@@ -687,7 +699,7 @@ $script:registryKept = $false
 Info ""
 Info "=== claude-bundle installer ==="
 Info "Profile:      $Profile"
-Info "ClaudeHome:   $ClaudeHome    (CLAUDE.md, settings.json, skills/, commands/)"
+Info "ClaudeHome:   $ClaudeHome    (CLAUDE.md, settings.json, skills/, commands/, agents/)"
 if ($Profile -eq 'full') {
     Info "PipelineRoot: $PipelineRoot    (cron/, wiki/, bin/, .env)"
 }
@@ -773,7 +785,7 @@ if ($rootsSplit) {
 
 # ── 1. Copy config (ClaudeHome — the only place Claude Code reads it) ────────
 if ($DryRun) {
-    Info "[dry-run] would copy CLAUDE.md, settings.json, skills/, commands/ -> $ClaudeHome"
+    Info "[dry-run] would copy CLAUDE.md, settings.json, skills/, commands/, agents/ -> $ClaudeHome"
 } else {
     Copy-Item (Join-Path $srcHome 'CLAUDE.md') $ClaudeHome -Force
     Add-Written (Join-Path $srcHome 'CLAUDE.md') (Join-Path $ClaudeHome 'CLAUDE.md') 'claude_home'
@@ -792,7 +804,7 @@ if ($DryRun) {
     # nothing had changed it since. Only a file this run created is ours.
     if ($settingsExisted) { $script:preserved.Add('settings.json') }
     else { Add-Written (Join-Path $srcHome 'settings.json') $settingsDst 'claude_home' }
-    foreach ($d in @('skills', 'commands')) {
+    foreach ($d in @('skills', 'commands', 'agents')) {
         $s = Join-Path $srcHome $d
         if (Test-Path $s) {
             Backup-Overwrites $s (Join-Path $ClaudeHome $d) $d
@@ -800,7 +812,7 @@ if ($DryRun) {
             Add-Written $s (Join-Path $ClaudeHome $d) 'claude_home'
         }
     }
-    Good "copied CLAUDE.md, settings.json, skills/, commands/ -> $ClaudeHome"
+    Good "copied CLAUDE.md, settings.json, skills/, commands/, agents/ -> $ClaudeHome"
 }
 
 if ($Profile -eq 'full') {

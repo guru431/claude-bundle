@@ -172,9 +172,12 @@ the reference implementation.
 - **Delegate only large, independent work that can run in parallel** — an audit,
   a migration, research across many files. Not what a few tool calls do, and
   never "check my own work" by a subagent.
-- **Code edits by a subagent go to an implementer agent**: one task = one group of
-  related fixes in one module or file; a round of fixes is a new agent with a
-  hand-off note, not a continuation of the old one.
+- **Code edits by a subagent go to the `implementer` agent**
+  (`~/.claude/agents/implementer.md`): one task = one group of related fixes in
+  one module or file; a round of fixes is a new agent with a hand-off note, not a
+  continuation of the old one. `settings.json` caps subagents at 4 at a time and
+  one level deep (`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`,
+  `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`).
 - **One review per batch of changes**, not per task; what it newly finds goes to
   `FINDINGS.md` for later, not into the current cycle.
 - **Tests along the way** — targeted ones for the touched module; the fast suite

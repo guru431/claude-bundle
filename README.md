@@ -43,7 +43,7 @@ claude-bundle/
 │
 ├── home-claude/                       ← copied into ~/.claude/
 │   ├── CLAUDE.md                       the rules every session needs
-│   ├── settings.json                   permissions + plugins + language
+│   ├── settings.json                   permissions + plugins + language + subagent limits
 │   ├── settings.example-with-hooks.json reference wiring for every shipped hook
 │   ├── hooks/                          user-level hooks (all opt-in)
 │   │   ├── bash-guard.py + bash-deny.yaml  declarative deny/ask rule table
@@ -63,6 +63,8 @@ claude-bundle/
 │   ├── commands/                       user-level slash commands
 │   │   ├── code-review-ext.md
 │   │   └── wiki.md                     /wiki <words> — search the vault, no LLM (full tier)
+│   ├── agents/                         user-level subagents
+│   │   └── implementer.md              the code-edit subagent CLAUDE.md delegates to
 │   ├── wiki/                           empty Karpathy-style vault skeleton
 │   │   ├── index.md
 │   │   ├── projects/<your-slugs>/      atomic pages (incident/solution/...)

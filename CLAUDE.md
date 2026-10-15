@@ -42,6 +42,7 @@ Windows username — all stripped. Every addition keeps it that way; see
 │   ├── skills/               4 skills: 3 templates + rules-reference (the long
 │   │                         references home-claude/CLAUDE.md points to)
 │   ├── commands/             2 slash commands (/wiki is full tier)
+│   ├── agents/               implementer.md — the code-edit subagent
 │   ├── wiki/                 empty Karpathy vault skeleton
 │   ├── bin/                  _run-hidden.vbs (Task Scheduler launcher), md2pdf.py
 │   └── cron/                 tier-2 pipeline

@@ -144,6 +144,21 @@ def test_settings_merge_adds_only_missing_keys(bi, tmp_path):
     assert user.read_text(encoding="utf-8") == "{broken"
 
 
+def test_a_reinstall_brings_the_shipped_env_variables(bi, tmp_path, capsys):
+    """The template shipped `"env": {}`, so every earlier install has the key,
+    and a merge of top-level keys alone never delivered the subagent limits
+    added to it later. A variable you set keeps your value."""
+    user = tmp_path / "settings.json"
+    user.write_text(json.dumps({"env": {"BASH_MAX_OUTPUT_LENGTH": "30000"}}), encoding="utf-8")
+    template = ROOT / "home-claude" / "settings.json"
+    assert bi.main(["merge-settings", str(template), str(user), str(tmp_path / "bak")]) == 0
+    env = json.loads(user.read_text(encoding="utf-8"))["env"]
+    assert env["BASH_MAX_OUTPUT_LENGTH"] == "30000"
+    assert env["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] == "4"
+    assert env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] == "1"
+    assert "env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS" in capsys.readouterr().out
+
+
 def test_a_pinned_env_value_is_never_overwritten(bi, tmp_path):
     env = tmp_path / ".env"
     env.write_bytes(b"# keys\r\nPYTHON_EXE=\r\nexport BASH_EXE=/opt/bash\r\n")
@@ -295,7 +310,10 @@ def test_lite_merges_settings_leaves_out_wiki_and_uninstalls_cleanly(tmp_path):
     settings = json.loads((home / "settings.json").read_text(encoding="utf-8"))
     assert settings["hooks"] == {"Stop": []} and settings["language"] == "ru"
     assert "permissions" in settings, "the template keys were not merged in"
+    assert settings["env"]["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] == "1"
     assert (home / "commands" / "code-review-ext.md").is_file()
+    # home-claude/CLAUDE.md sends code edits by a subagent to this agent.
+    assert (home / "agents" / "implementer.md").is_file()
     # CLAUDE.md points at these references, so lite must ship them too.
     assert (home / "skills" / "rules-reference" / "test-policy.md").is_file()
     assert not (home / "commands" / "wiki.md").exists(), "/wiki needs cron/, which lite has none of"

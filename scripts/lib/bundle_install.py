@@ -27,9 +27,10 @@ POSIX the registry keeps its placeholders and sits in `written` with its own
 hash. Hashes are upper-case hex, as Get-FileHash writes them.
 
 Subcommands (paths absolute):
-  merge-settings SRC DST BACKUP  add the template keys DST lacks (yours win);
-                                 back DST up to BACKUP first. Prints the added
-                                 keys. Exit 3: DST is not a JSON object, untouched.
+  merge-settings SRC DST BACKUP  add the template keys DST lacks, and the `env`
+                                 variables it lacks (yours win); back DST up to
+                                 BACKUP first. Prints the added keys. Exit 3:
+                                 DST is not a JSON object, untouched.
   was-ours CLAUDE_HOME BASE ROOT REL
                                  exit 0 when the previous install (the manifest
                                  in CLAUDE_HOME) wrote ROOT/REL, found at
@@ -185,13 +186,21 @@ def merge_settings(src: str, dst: str, backup: str) -> int:
     except (OSError, ValueError) as exc:
         print(f"{dst} could not be parsed ({exc})")
         return 3
-    added = [key for key in template if key not in user]
-    if added:
+    added = {key: template[key] for key in template if key not in user}
+    # `env` one level down as well. The template shipped `"env": {}` for long
+    # enough that every install has the key, so variables added to it later
+    # (the subagent limits) never reached one. Yours still win, per variable.
+    tpl_env, user_env = template.get("env"), user.get("env")
+    env_added = ({k: v for k, v in tpl_env.items() if k not in user_env}
+                 if isinstance(tpl_env, dict) and isinstance(user_env, dict) else {})
+    if added or env_added:
         shutil.copy2(dst, backup)
-        user.update({key: template[key] for key in added})
+        user.update(added)
+        if env_added:
+            user_env.update(env_added)
         # No BOM: Claude Code reads settings.json as plain UTF-8.
         write_text(dst, json.dumps(user, indent=2, ensure_ascii=False) + "\n")
-    print(", ".join(added))
+    print(", ".join([*added, *(f"env.{k}" for k in env_added)]))
     return 0
 
 
@@ -442,7 +451,7 @@ def diff(args) -> int:
     for status, count in counts.items():
         print(f"  {status:<20} {count}")
     print("\nCaveats, so the list is not read as a plain overwrite plan:")
-    print("  settings.json is MERGED (your keys win; only missing template keys are added).")
+    print("  settings.json is MERGED (your keys win; only missing template keys and env variables are added).")
     print("  An edited cron/registry.yaml or wiki/index.md is preserved, not replaced.")
     print("  Anything 'modified' is backed up to .bundle-backup-<stamp>/ by a real install.")
     print("Nothing was written. Drop --diff to install.")

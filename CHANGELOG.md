@@ -117,6 +117,29 @@ The short list; UPGRADING.md has the steps.
 - **Registry: `enabled:` or `hidden:` with no value is a schema error** — the
   syncer registered such a task Disabled, the POSIX generator enabled it.
   **`uninstall.sh`** exits 1 for a bad argument (was 2).
+- **`agents/implementer.md` ships, and `settings.json` limits subagents** (4 at
+  a time, one level deep, Bash output capped at 15000 characters). The merge
+  now adds missing `env` variables too — yours win.
+
+### The subagent setup CLAUDE.md assumed
+
+`CLAUDE.md` sends code edits by a subagent to an implementer agent, and the
+bundle shipped neither that agent nor the limits the rule was written with. A
+machine installed from the bundle ran without them: in ten days a quarter of
+its subagents grew past 400k tokens of context, against a handful on a machine
+that had them. Now:
+
+- **`home-claude/agents/implementer.md`** — the agent the rule names: one bounded
+  task, no subagents of its own, targeted tests while working and the fast suite
+  once before the commit, a hand-off when the turns run out (`maxTurns: 150`).
+  Both installers copy `agents/` into the config root, on every profile.
+- **`settings.json` → `env`**: `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=4`,
+  `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1`, `BASH_MAX_OUTPUT_LENGTH=15000`.
+- **The `settings.json` merge goes one level into `env`.** The template had
+  shipped `"env": {}`, so every install already carried the key, and a merge of
+  top-level keys alone would never have delivered the limits to one. A variable
+  you set keeps your value. Tested on both installers against the shipped
+  template.
 
 ### From a second-model review of the files just ported
 

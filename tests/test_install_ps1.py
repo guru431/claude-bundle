@@ -103,7 +103,8 @@ def test_a_lite_install_keeps_the_users_settings_and_leaves_out_wiki(tmp_path: P
     claude_home = home / ".claude"
     claude_home.mkdir()
     settings = claude_home / "settings.json"
-    settings.write_text('{"myOwnKey": "mine"}', encoding="utf-8")
+    settings.write_text('{"myOwnKey": "mine", "env": {"BASH_MAX_OUTPUT_LENGTH": "30000"}}',
+                        encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
     env.update(USERPROFILE=str(home), HOME=str(home))
     r = run_ps_file(ROOT / "scripts" / "install.ps1", "-Profile", "lite", "-NonInteractive", "-Force",
@@ -125,6 +126,13 @@ def test_a_lite_install_keeps_the_users_settings_and_leaves_out_wiki(tmp_path: P
     # X2: the user's own settings.json was merged, so it is theirs.
     assert "settings.json" in mf["preserved"]
     assert "settings.json" not in written
+    # The template shipped `"env": {}`, so every earlier install has the key:
+    # the subagent limits arrive only if `env` is merged one level down.
+    merged_env = json.loads(settings.read_text(encoding="utf-8-sig"))["env"]
+    assert merged_env["BASH_MAX_OUTPUT_LENGTH"] == "30000"
+    assert merged_env["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] == "4"
+    # home-claude/CLAUDE.md sends code edits by a subagent to this agent.
+    assert "agents/implementer.md" in written
 
     r = run_ps_file(ROOT / "scripts" / "uninstall.ps1", "-ClaudeHome", claude_home,
                     "-Confirm", "-Force", env=env, cwd=tmp_path)

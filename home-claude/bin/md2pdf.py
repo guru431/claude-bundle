@@ -471,6 +471,16 @@ def _print_once(browser: str, url: str, target: Path, timeout: float,
         url,
     ]
     name = Path(browser).name
+    # Edge relaunches itself, and the first process exits 0 before anything is
+    # printed. md2pdf then removed the profile under the relaunched process,
+    # which started without the seeded Local State and paid the blank-password
+    # check (a failed logon per print) — and Chrome was tried on top, since
+    # nothing had been printed yet. With this flag Edge prints in the process
+    # md2pdf waits for (measured, Edge on Windows: the PDF and Local State are
+    # written by the time it exits).
+    exe = re.split(r"[\\/]", browser)[-1].casefold()
+    if exe in ("msedge.exe", "msedge") or exe.startswith("microsoft-edge"):
+        cmd.insert(1, "--edge-skip-compat-layer-relaunch")
     try:
         # A timeout is this browser's failure, not the run's: the next one gets
         # what is left. Killing the browser also ends its children (measured with

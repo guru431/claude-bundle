@@ -147,9 +147,14 @@ The short list; UPGRADING.md has the steps.
   starting. The answer — Local State's `password_manager` section, nothing else
   from it — is now cached per user (`%LOCALAPPDATA%\md2pdf\`, elsewhere
   `$XDG_CACHE_HOME/md2pdf/` or `~/.cache/md2pdf/`) and seeded into each new
-  profile: the first print still pays the check, later ones do not. Edge still
-  costs one per print while it relaunches itself: the relaunched process
-  starts after md2pdf has already removed the profile.
+  profile: the first print still pays the check, later ones do not.
+- **Edge prints in one process and no longer falls through to Chrome.** Edge
+  relaunched itself, and its first process exited 0 before anything was
+  printed: md2pdf took that for a failed print and tried Chrome as well, and
+  removed the profile under the relaunched Edge, which then started without the
+  cached answer — a failed logon per print, and an `md2pdf-profile-*` directory
+  it recreated in the temp dir. Edge is now started with
+  `--edge-skip-compat-layer-relaunch` and exits only once the PDF is written.
 
 ### The subagent setup CLAUDE.md assumed
 

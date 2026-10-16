@@ -739,3 +739,25 @@ def test_an_unwritable_cache_does_not_break_printing(md2pdf, paths, monkeypatch)
     md2pdf.html_to_pdf(html, pdf)
 
     assert pdf.read_bytes() == NEW_PDF
+
+
+@pytest.mark.parametrize("browser, relaunch_flag", [
+    (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", True),
+    ("/usr/bin/msedge", True),
+    ("/usr/bin/microsoft-edge-stable", True),
+    (r"C:\Program Files\Google\Chrome\Application\chrome.exe", False),
+    ("/usr/bin/chromium", False),
+])
+def test_edge_is_told_not_to_relaunch_itself(md2pdf, paths, monkeypatch, browser, relaunch_flag):
+    """Edge relaunches itself and its first process exits 0 before anything is
+    printed; md2pdf then removed the profile under the relaunched one, which
+    started without the seeded Local State and paid the blank-password check
+    (one failed logon per print) — and Chrome was tried on top of it."""
+    html, pdf = paths
+    fake = FakeBrowser(writes=NEW_PDF)
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: [browser])
+    monkeypatch.setattr(md2pdf.subprocess, "run", fake)
+
+    md2pdf.html_to_pdf(html, pdf)
+
+    assert ("--edge-skip-compat-layer-relaunch" in fake.calls[0]) is relaunch_flag

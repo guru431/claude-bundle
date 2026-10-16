@@ -138,6 +138,18 @@ The short list; UPGRADING.md has the steps.
   `http://strategy.md/`. A bare name in one of those three zones is now taken
   for a file; a bare domain in any other zone (`booking.com`) stays a link.
   `linkify-it-py` joins `requirements-dev.txt`, so CI runs the check.
+- **A print no longer counts towards the Windows account lockout.** Chrome and
+  Edge, started with a profile that has not yet recorded whether the Windows
+  password is blank, find out by logging on with an empty password — a failed
+  logon (Security 4625) per browser start, and md2pdf starts each browser with
+  a fresh profile. A few prints in a row (`--pair` over several files) reached
+  the lockout threshold, and scheduled tasks with a stored password stopped
+  starting. The answer — Local State's `password_manager` section, nothing else
+  from it — is now cached per user (`%LOCALAPPDATA%\md2pdf\`, elsewhere
+  `$XDG_CACHE_HOME/md2pdf/` or `~/.cache/md2pdf/`) and seeded into each new
+  profile: the first print still pays the check, later ones do not. Edge still
+  costs one per print while it relaunches itself: the relaunched process
+  starts after md2pdf has already removed the profile.
 
 ### The subagent setup CLAUDE.md assumed
 

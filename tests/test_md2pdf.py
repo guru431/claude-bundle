@@ -14,6 +14,7 @@ would otherwise launch Edge.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -39,6 +40,9 @@ def md2pdf(tmp_path_factory, monkeypatch):
     # test's own, never the machine's.
     systemp = str(tmp_path_factory.mktemp("systemp"))
     monkeypatch.setattr(module.tempfile, "gettempdir", lambda: systemp)
+    # Likewise the cached password-manager state: never the user's real one.
+    cache = tmp_path_factory.mktemp("usercache") / "md2pdf" / "password-state.json"
+    monkeypatch.setattr(module, "PASSWORD_STATE_CACHE", cache, raising=False)
     yield module
     sys.modules.pop(spec.name, None)
 
@@ -648,3 +652,90 @@ def test_temp_dirs_of_a_killed_run_are_swept_and_live_ones_kept(md2pdf, paths, m
     assert not any(d.exists() for d in killed), "a killed run's leftovers survived"
     assert all(d.is_dir() for d in running), "a live run's directory was swept"
     assert unrelated.is_dir()
+
+
+# --- the cached blank-password check ------------------------------------------
+# Chromium starting with a profile whose Local State lacks
+# password_manager.os_password_last_changed checks whether the Windows password
+# is blank by trying to log on with an empty one: one failed logon (Security
+# 4625) per browser start. md2pdf starts every browser with a fresh profile, so
+# each print counted towards the account lockout threshold. The answer is
+# cached outside the profiles and seeded into each new one — and nothing else
+# from Local State is ever carried over (it holds the profile's os_crypt key).
+
+PASSWORD_STATE = {"os_password_blank": False,
+                  "os_password_last_changed": "13400000000000000"}
+
+
+class LocalStateBrowser(FakeBrowser):
+    """Prints, and like Chromium leaves a Local State in its profile on exit."""
+
+    def __init__(self, **kwargs):
+        super().__init__(writes=NEW_PDF, **kwargs)
+        self.seen_at_launch: list[object] = []
+
+    def __call__(self, cmd, **kwargs):
+        profile = Path(next(a.split("=", 1)[1] for a in cmd
+                            if a.startswith("--user-data-dir=")))
+        state = profile / "Local State"
+        self.seen_at_launch.append(
+            json.loads(state.read_text(encoding="utf-8")) if state.is_file() else None)
+        state.write_text(json.dumps({
+            "os_crypt": {"encrypted_key": "fake-profile-key"},
+            "password_manager": dict(PASSWORD_STATE),
+            "browser": {"last_known_version": "157.0.0.0"},
+        }), encoding="utf-8")
+        return super().__call__(cmd, **kwargs)
+
+
+def test_the_blank_password_check_is_cached_and_seeded(md2pdf, paths, monkeypatch):
+    html, pdf = paths
+    browser = LocalStateBrowser()
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: ["/fake/chrome"])
+    monkeypatch.setattr(md2pdf.subprocess, "run", browser)
+
+    md2pdf.html_to_pdf(html, pdf)
+
+    cache = md2pdf.PASSWORD_STATE_CACHE
+    assert json.loads(cache.read_text(encoding="utf-8")) == {
+        "password_manager": PASSWORD_STATE}, "the cache must hold password_manager only"
+    assert browser.seen_at_launch == [None]
+
+    md2pdf.html_to_pdf(html, pdf)
+
+    assert browser.seen_at_launch[1] == {"password_manager": PASSWORD_STATE}, \
+        "the second profile was not seeded before the browser started"
+    assert pdf.read_bytes() == NEW_PDF
+
+
+@pytest.mark.parametrize("content", [
+    b"{not json", b"[]", b'{"password_manager": "x"}',
+    b'{"password_manager": {"os_password_blank": "no"}}', b"\xff\xfe\x00"])
+def test_a_corrupt_cache_does_not_break_printing(md2pdf, paths, monkeypatch, content):
+    html, pdf = paths
+    cache = md2pdf.PASSWORD_STATE_CACHE
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_bytes(content)
+    browser = LocalStateBrowser()
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: ["/fake/chrome"])
+    monkeypatch.setattr(md2pdf.subprocess, "run", browser)
+
+    md2pdf.html_to_pdf(html, pdf)
+
+    assert pdf.read_bytes() == NEW_PDF
+    assert browser.seen_at_launch == [None], "a corrupt cache was seeded"
+    assert json.loads(cache.read_text(encoding="utf-8")) == {
+        "password_manager": PASSWORD_STATE}, "the corrupt cache was not replaced"
+
+
+def test_an_unwritable_cache_does_not_break_printing(md2pdf, paths, monkeypatch):
+    html, pdf = paths
+    blocker = md2pdf.PASSWORD_STATE_CACHE.parent
+    blocker.parent.mkdir(parents=True, exist_ok=True)
+    blocker.write_bytes(b"a file where the cache directory should be")
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: ["/fake/chrome"])
+    monkeypatch.setattr(md2pdf.subprocess, "run", LocalStateBrowser())
+
+    md2pdf.html_to_pdf(html, pdf)
+
+    assert pdf.read_bytes() == NEW_PDF

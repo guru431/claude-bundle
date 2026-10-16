@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import os
 import re
 import secrets
@@ -318,6 +319,74 @@ def sweep_stale_temp(target_dir: Path, budget: int) -> None:
                 continue
 
 
+# Chromium (Chrome and Edge alike) starting with a profile whose Local State
+# lacks password_manager.os_password_last_changed checks whether the Windows
+# password is blank by logging on with an empty one. Every such start is a
+# failed logon (Security 4625) — and every print starts a browser with a fresh
+# profile, so a handful of prints in a row tripped the account lockout
+# threshold, after which every scheduled task with a stored password failed to
+# start. The browser keeps the answer in Local State: a profile seeded with it
+# skips the check (measured: second start with the same profile, no 4625).
+#
+# So the answer is cached here and seeded into each new profile. ONLY the
+# password_manager section, never the rest of Local State: that holds the
+# profile's os_crypt key, which must not outlive the profile.
+#
+# Per user and local: the answer is about this account's password (another
+# account on the machine must not inherit it), and it must survive the sweep of
+# the temp profile dirs. Not next to this script, which may be a checkout shared
+# by several accounts.
+def _password_state_cache_path() -> Path:
+    base = (os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CACHE_HOME")
+            or str(Path.home() / ".cache"))
+    return Path(base) / "md2pdf" / "password-state.json"
+
+
+PASSWORD_STATE_CACHE = _password_state_cache_path()
+
+
+def _password_state(data: object) -> dict | None:
+    """`{"password_manager": {...}}` with just the two known keys, or None."""
+    pm = data.get("password_manager") if isinstance(data, dict) else None
+    if not isinstance(pm, dict):
+        return None
+    blank = pm.get("os_password_blank")
+    changed = pm.get("os_password_last_changed")
+    if not isinstance(blank, bool) or not isinstance(changed, str) or not changed.isdigit():
+        return None
+    return {"password_manager": {"os_password_blank": blank,
+                                 "os_password_last_changed": changed}}
+
+
+def seed_password_state(profile_dir: str) -> None:
+    """Give a fresh profile the cached answer. Never fails the print."""
+    try:
+        state = _password_state(json.loads(PASSWORD_STATE_CACHE.read_text(encoding="utf-8")))
+        if state:
+            (Path(profile_dir) / "Local State").write_text(json.dumps(state), encoding="utf-8")
+    except Exception:  # noqa: BLE001 — a missing or broken cache only costs the check
+        pass
+
+
+def harvest_password_state(profile_dir: str) -> None:
+    """Cache the answer the browser left in its profile. Never fails the print."""
+    try:
+        local_state = Path(profile_dir) / "Local State"
+        state = _password_state(json.loads(local_state.read_text(encoding="utf-8")))
+        if state is None:
+            return
+        cache = PASSWORD_STATE_CACHE
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_name(f"{cache.name}.{secrets.token_hex(6)}.tmp")
+        try:
+            tmp.write_text(json.dumps(state), encoding="utf-8")
+            os.replace(tmp, cache)  # atomic: a concurrent run never reads half a file
+        finally:
+            tmp.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 — the next run simply checks again
+        pass
+
+
 # Where a Chromium print keeps the page title: the Info dictionary the trailer
 # names, as a literal string or — for anything non-ASCII — UTF-16BE hex.
 _PDF_INFO_REF = re.compile(rb"/Info\s+(\d+)\s+(\d+)\s+R")
@@ -387,6 +456,7 @@ def _print_once(browser: str, url: str, target: Path, timeout: float,
     # is not visible — that is how a trip itinerary turned into a PDF reading
     # "ERR_FILE_NOT_FOUND". With it there is nothing to attach to.
     profile_dir = tempfile.mkdtemp(prefix=PROFILE_DIR_PREFIX)
+    seed_password_state(profile_dir)
     cmd = [
         browser,
         "--headless",
@@ -410,6 +480,7 @@ def _print_once(browser: str, url: str, target: Path, timeout: float,
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"{name}: no result within {timeout:.0f}s") from None
     finally:
+        harvest_password_state(profile_dir)
         shutil.rmtree(profile_dir, ignore_errors=True)
     stderr = result.stderr.decode(errors="replace")[:500]
     if result.returncode != 0:

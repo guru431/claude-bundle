@@ -161,6 +161,21 @@ _FILE_HREF_RE = re.compile(r"""\s+href\s*=\s*(?:"\s*file:[^"]*"|'\s*file:[^']*'|
                            re.I)
 
 
+# Country zones that are also extensions of the files a Markdown document
+# names. linkify links a bare host name, so "strategy.md" in plain text printed
+# as a link to http://strategy.md/ (Moldova). A bare domain in any other zone —
+# booking.com, klerk.ru — stays a link.
+FILE_ZONES = {"md", "py", "sh"}
+
+
+def _is_file_name(match) -> bool:
+    """A linkify match without a scheme whose zone is a file extension."""
+    if match.schema:
+        return False
+    host = re.split(r"[/:?#]", match.raw, maxsplit=1)[0]
+    return host.rsplit(".", 1)[-1].lower() in FILE_ZONES
+
+
 def md_to_html(md_path: Path) -> str:
     import re
 
@@ -181,14 +196,9 @@ def md_to_html(md_path: Path) -> str:
             import linkify_it  # noqa: F401,WPS433
             md.options["linkify"] = True
             md.enable("linkify")
-            # linkify-it also links a bare host name, and `.md`, `.py`, `.sh`
-            # are country domains: "strategy.md" in plain text printed as a
-            # link to http://strategy.md/. Keep what GFM autolinks — a scheme,
-            # `www.`, an e-mail address.
             fuzzy = md.linkify.match
             md.linkify.match = lambda text: [
-                m for m in fuzzy(text) or []
-                if m.schema or m.raw.lower().startswith("www.")]
+                m for m in fuzzy(text) or [] if not _is_file_name(m)]
         except ImportError:
             pass
         body = md.render(src)

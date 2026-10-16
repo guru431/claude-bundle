@@ -135,9 +135,9 @@ The short list; UPGRADING.md has the steps.
 - **A bare file name is no longer a link.** With `linkify-it-py` installed,
   linkify also linked bare host names, and `.md`, `.py`, `.sh` are country
   domains: "strategy.md" in plain text printed as a link to
-  `http://strategy.md/`. What GFM autolinks stays a link — a scheme, `www.`, an
-  e-mail address. `linkify-it-py` joins `requirements-dev.txt`, so CI runs the
-  check.
+  `http://strategy.md/`. A bare name in one of those three zones is now taken
+  for a file; a bare domain in any other zone (`booking.com`) stays a link.
+  `linkify-it-py` joins `requirements-dev.txt`, so CI runs the check.
 
 ### The subagent setup CLAUDE.md assumed
 

@@ -428,18 +428,19 @@ def test_no_link_target_in_the_pdf_is_a_local_file(md2pdf, tmp_path, monkeypatch
 def test_a_bare_file_name_is_not_a_link(md2pdf, tmp_path):
     # linkify-it also links a bare host name, and `.md`, `.py`, `.sh` are
     # country domains: "strategy.md" in plain text printed as a link to
-    # http://strategy.md/ (2026-10-16). Kept: what GFM autolinks — a scheme,
-    # `www.`, an e-mail address.
+    # http://strategy.md/ (2026-10-16). A bare domain in another zone is meant
+    # as one and stays a link.
     pytest.importorskip("linkify_it")
     md = tmp_path / "doc.md"
-    md.write_text("See strategy.md, setup.py and README.md.\n\n"
-                  "Still links: https://example.com/a, www.example.org and me@example.com.\n",
-                  encoding="utf-8")
+    md.write_text("See strategy.md, setup.py, install.sh and README.md#usage.\n\n"
+                  "Still links: https://example.com/a, www.example.org, booking.com and "
+                  "me@example.com.\n", encoding="utf-8")
 
     body = md2pdf.md_to_html(md).partition("<body>")[2]
 
     assert re.findall(r'href="([^"]*)"', body) == [
-        "https://example.com/a", "http://www.example.org", "mailto:me@example.com"]
+        "https://example.com/a", "http://www.example.org", "http://booking.com",
+        "mailto:me@example.com"]
 
 
 def test_images_still_resolve_to_the_file_the_print_needs(md2pdf, tmp_path):

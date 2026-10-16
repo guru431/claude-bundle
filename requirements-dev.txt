@@ -27,6 +27,11 @@ PyYAML
 # developer machine. It used to require a system install nobody had, so the
 # lint gate was CI-only and every shell finding was discovered after the push.
 shellcheck-py>=0.9
+# linkify-it-py — optional at runtime (md2pdf links plain-text URLs only when it
+# is installed), but `tests/test_md2pdf.py::test_a_bare_file_name_is_not_a_link`
+# needs it to check that "strategy.md" in plain text does not become a link to
+# http://strategy.md/. Asked for via `importorskip`, so it is listed here.
+linkify-it-py
 # psutil — `tests/test_test_sweep.py::test_timeout_kills_grandchildren` checks that
 # a suite timeout reaps the whole process TREE, not just the direct child: the
 # regression it guards left pytest's grandchildren alive holding the project's

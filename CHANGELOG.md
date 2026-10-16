@@ -120,6 +120,24 @@ The short list; UPGRADING.md has the steps.
 - **`agents/implementer.md` ships, and `settings.json` limits subagents** (4 at
   a time, one level deep, Bash output capped at 15000 characters). The merge
   now adds missing `env` variables too — yours win.
+- **md2pdf on Windows:** a PDF printed under Python 3.13+ keeps an owner-only
+  ACL until it is reset (`icacls … /reset`); new prints take the folder's.
+
+### md2pdf: the folder's permissions, and no link to `strategy.md`
+
+- **A printed PDF takes the permissions of its folder.** The print goes into a
+  temp directory next to the target, and from Python 3.13 `tempfile.mkdtemp`
+  gives that directory an owner-only ACL on Windows; `os.replace` carried the
+  PDF out with it. A PDF one account printed, another could not read or rebuild
+  — `md2pdf-on-edit` failed there with `PermissionError`. The directory is now a
+  plain `mkdir`, which inherits. PDFs printed before keep the closed ACL:
+  UPGRADING.md has the reset.
+- **A bare file name is no longer a link.** With `linkify-it-py` installed,
+  linkify also linked bare host names, and `.md`, `.py`, `.sh` are country
+  domains: "strategy.md" in plain text printed as a link to
+  `http://strategy.md/`. What GFM autolinks stays a link — a scheme, `www.`, an
+  e-mail address. `linkify-it-py` joins `requirements-dev.txt`, so CI runs the
+  check.
 
 ### The subagent setup CLAUDE.md assumed
 

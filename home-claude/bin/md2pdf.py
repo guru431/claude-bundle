@@ -37,6 +37,7 @@ import argparse
 import html
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -180,6 +181,14 @@ def md_to_html(md_path: Path) -> str:
             import linkify_it  # noqa: F401,WPS433
             md.options["linkify"] = True
             md.enable("linkify")
+            # linkify-it also links a bare host name, and `.md`, `.py`, `.sh`
+            # are country domains: "strategy.md" in plain text printed as a
+            # link to http://strategy.md/. Keep what GFM autolinks — a scheme,
+            # `www.`, an e-mail address.
+            fuzzy = md.linkify.match
+            md.linkify.match = lambda text: [
+                m for m in fuzzy(text) or []
+                if m.schema or m.raw.lower().startswith("www.")]
         except ImportError:
             pass
         body = md.render(src)
@@ -439,7 +448,12 @@ def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
     # file name, so there is nothing to compare against.
     title = comparable_title(html_title(html_path))
     sweep_stale_temp(pdf_path.parent, budget)
-    tmp_dir = Path(tempfile.mkdtemp(dir=pdf_path.parent, prefix=TEMP_DIR_PREFIX))
+    # Not tempfile.mkdtemp: from Python 3.13 it gives the directory an
+    # owner-only ACL on Windows, and os.replace carried the PDF out with that
+    # ACL instead of the folder's — a PDF one account printed, another could
+    # not rebuild. A plain mkdir inherits the folder's permissions.
+    tmp_dir = pdf_path.parent / f"{TEMP_DIR_PREFIX}{secrets.token_hex(6)}"
+    tmp_dir.mkdir()
     tmp = tmp_dir / "out.pdf"
     failures: list[str] = []
     try:

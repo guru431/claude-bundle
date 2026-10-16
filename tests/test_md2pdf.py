@@ -216,6 +216,38 @@ def test_browser_candidates_honours_the_override(md2pdf, monkeypatch):
     assert md2pdf.browser_candidates() == ["/opt/my-browser"]
 
 
+# subprocess.run as it was before any test replaced it with a fake browser.
+_REAL_RUN = subprocess.run
+
+
+def _acl(path: Path) -> list[str]:
+    """The entries `icacls` lists for a file, without the path it pads them to."""
+    out = _REAL_RUN(["icacls", str(path)], capture_output=True, text=True,
+                    encoding="oem", check=True).stdout
+    return sorted(line.replace(str(path), "").strip() for line in out.splitlines() if line.strip())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
+def test_the_printed_pdf_takes_the_permissions_of_its_folder(md2pdf, paths, monkeypatch):
+    # From Python 3.13 mkdtemp gives its directory an owner-only ACL, and
+    # os.replace carried the PDF out of it with that ACL instead of the folder's:
+    # a PDF printed by one Windows account could not be rebuilt by another
+    # (2026-10-16, PermissionError in md2pdf-on-edit on the second account).
+    html, pdf = paths
+    # pytest makes tmp_path owner-only as well, so a right of the folder's own —
+    # read for Users, inherited — is what tells the two ACLs apart.
+    _REAL_RUN(["icacls", str(pdf.parent), "/grant", "*S-1-5-32-545:(OI)(CI)(RX)"],
+              capture_output=True, check=True)
+    monkeypatch.setattr(md2pdf, "browser_candidates", lambda: ["/fake/edge"])
+    monkeypatch.setattr(md2pdf.subprocess, "run", FakeBrowser(writes=NEW_PDF))
+
+    md2pdf.html_to_pdf(html, pdf)
+
+    control = pdf.parent / "control.pdf"
+    control.write_bytes(NEW_PDF)
+    assert _acl(pdf) == _acl(control)
+
+
 # ── the right size is not the right document ────────────────────────────────
 #
 # The guard above catches "printed nothing" and "printed a stub". The incident
@@ -391,6 +423,23 @@ def test_no_link_target_in_the_pdf_is_a_local_file(md2pdf, tmp_path, monkeypatch
     printed = (tmp_path / "links.pdf").read_bytes()
     assert b"/URI (file:" not in printed, printed[:600]
     assert b"/URI (https://example.com/page)" in printed, "web links must stay clickable"
+
+
+def test_a_bare_file_name_is_not_a_link(md2pdf, tmp_path):
+    # linkify-it also links a bare host name, and `.md`, `.py`, `.sh` are
+    # country domains: "strategy.md" in plain text printed as a link to
+    # http://strategy.md/ (2026-10-16). Kept: what GFM autolinks — a scheme,
+    # `www.`, an e-mail address.
+    pytest.importorskip("linkify_it")
+    md = tmp_path / "doc.md"
+    md.write_text("See strategy.md, setup.py and README.md.\n\n"
+                  "Still links: https://example.com/a, www.example.org and me@example.com.\n",
+                  encoding="utf-8")
+
+    body = md2pdf.md_to_html(md).partition("<body>")[2]
+
+    assert re.findall(r'href="([^"]*)"', body) == [
+        "https://example.com/a", "http://www.example.org", "mailto:me@example.com"]
 
 
 def test_images_still_resolve_to_the_file_the_print_needs(md2pdf, tmp_path):

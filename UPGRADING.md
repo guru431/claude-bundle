@@ -104,6 +104,21 @@ variables you lack as well as the top-level keys — the template shipped
 you set keeps your value; to run without a limit, set it to a value of your own
 rather than deleting it, or the next re-install adds it back.
 
+### md2pdf on Windows: PDFs another account could not rebuild
+
+Under Python 3.13 and later, a PDF the converter printed carried an owner-only
+ACL (`SYSTEM`, `Administrators`, `OWNER RIGHTS`) instead of its folder's
+permissions, so a second Windows account could neither read nor rebuild it — the
+md2pdf hook failed there with `PermissionError`. New prints take the folder's
+permissions; a PDF printed before keeps the closed ACL until it is reset. From
+an elevated prompt, for each folder that holds paired PDFs:
+
+```
+icacls "C:\path\to\docs\*.pdf" /reset /T
+```
+
+A machine where one account prints and reads the PDFs needs nothing.
+
 ### Key values in `.env` are now guarded
 
 `git-push-all.sh` and `github-push.sh` compare every outgoing commit with the

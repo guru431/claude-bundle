@@ -21,6 +21,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -391,12 +392,50 @@ def test_cleanup_leaves_the_tree_of_a_live_run_alone(tmp_path, monkeypatch):
     into. Stubbing liveness in the two tests above removed the only place this
     branch was exercised, so it gets an explicit one."""
     monkeypatch.setattr(sweep.tempfile, "gettempdir", lambda: str(tmp_path))
-    monkeypatch.setattr(sweep, "_owner_alive", lambda name: name == "sweep-run-111")
+    monkeypatch.setattr(sweep, "_owner_alive", lambda path: Path(path).name == "sweep-run-111")
     (tmp_path / "sweep-run-111").mkdir()
     (tmp_path / "sweep-run-333").mkdir()
 
     assert sweep.cleanup_temp_roots() == ["sweep-run-333"]
     assert (tmp_path / "sweep-run-111").is_dir()
+
+
+def _fake_psutil(create_times: dict):
+    """A psutil whose only live processes are `create_times` (pid -> create_time)."""
+    class NoSuchProcess(Exception):
+        pass
+
+    class Process:
+        def __init__(self, pid):
+            if pid not in create_times:
+                raise NoSuchProcess(pid)
+            self.pid = pid
+
+        def create_time(self):
+            return create_times[self.pid]
+
+    mod = types.ModuleType("psutil")
+    mod.NoSuchProcess, mod.Process = NoSuchProcess, Process
+    return mod
+
+
+@pytest.mark.parametrize("started_offset, survives", [(-60, True), (3600, False), (None, False)])
+def test_cleanup_tells_a_reused_pid_from_the_living_owner(
+        tmp_path, monkeypatch, started_offset, survives):
+    """A dead sweep's pid was reused: "the pid exists" kept its directory for as
+    long as the other process lived. One started after the directory was last
+    changed is not its owner; no process at all is no owner either."""
+    monkeypatch.setattr(sweep.tempfile, "gettempdir", lambda: str(tmp_path))
+    run_dir = tmp_path / "sweep-run-4242"
+    run_dir.mkdir()
+    touched = 1_700_000_000
+    os.utime(run_dir, (touched, touched))
+    alive = {} if started_offset is None else {4242: touched + started_offset}
+    monkeypatch.setitem(sys.modules, "psutil", _fake_psutil(alive))
+
+    removed = sweep.cleanup_temp_roots()
+    assert run_dir.is_dir() is survives
+    assert removed == ([] if survives else ["sweep-run-4242"])
 
 
 # ── reaping abandoned pytest processes ───────────────────────────────────────
@@ -1205,6 +1244,43 @@ def test_pester_wrapper_files_share_a_process_but_not_its_failures(tmp_path):
     for name in ("A", "B", "C", "D"):
         assert re.search(rf"^TESTS_DURATION \d+\.\d+s {name}\.Tests\.ps1$", out, re.M), out
     assert out.strip().splitlines()[-1] == "TESTS_RESULT pass=1 fail=3 skip=0", out
+
+
+@pytest.mark.integration   # a PowerShell process, and a hang waited out
+@pytest.mark.parametrize("body", ["Start-Sleep -Seconds 120", "throw 'broken module'"],
+                         ids=["hang", "crash"])
+def test_pester_wrapper_startup_failure_is_env_not_the_first_file(tmp_path, body):
+    """Before the first file's marker the process only starts and imports
+    Pester. A hang or a crash there was charged to the first file of the pass
+    (TESTS_TIMEOUT or FAILED), which never began. A fake Pester 99.0 on
+    PSModulePath: the wrapper picks it as the newest, the child hangs or dies
+    importing it."""
+    host = _pester_host()
+    if not host:
+        pytest.skip("no PowerShell host")
+    mod = tmp_path / "mods" / "Pester" / "99.0.0"
+    mod.mkdir(parents=True)
+    (mod / "Pester.psd1").write_text(
+        "@{ ModuleVersion = '99.0.0'; RootModule = 'Pester.psm1'; GUID = "
+        "'a7b3c8d2-0f4e-4b6a-9c1d-2e3f4a5b6c7d' }\n", encoding="utf-8")
+    (mod / "Pester.psm1").write_text(body + "\n", encoding="utf-8")
+    suite = tmp_path / "suite"
+    suite.mkdir()
+    (suite / "First.Tests.ps1").write_text(
+        "Describe 'first' { It 'passes' { 1 | Should -Be 1 } }\n", encoding="utf-8")
+    env = dict(os.environ)
+    env["PSModulePath"] = str(tmp_path / "mods") + os.pathsep + env.get("PSModulePath", "")
+
+    res = subprocess.run([host, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                          str(PESTER), "-Path", str(suite), "-TimeoutSec", "5"],
+                         capture_output=True, timeout=180, check=False, env=env)
+    out = res.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
+
+    assert res.returncode == 2, out
+    assert re.search(r"^TESTS_ENV .+First\.Tests\.ps1 on did not run$", out, re.M), out
+    assert "TESTS_TIMEOUT" not in out and "FAILED: First.Tests.ps1" not in out, out
+    assert not re.search(r"^TESTS_DURATION .+First\.Tests\.ps1$", out, re.M), out
+    assert sweep.parse_result("pester", res.returncode, out)["status"] == "env"
 
 
 @pytest.mark.integration

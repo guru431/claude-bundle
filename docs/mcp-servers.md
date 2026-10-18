@@ -103,6 +103,9 @@ and just flags resolver wrappers and running processes that shouldn't be there. 
 `~/.claude.json` — including the per-project servers `claude mcp add` keeps there by
 default — plugin-provided configs, and the `.mcp.json` of every project directly under
 `projects_root` (from `bundle.local.yaml`, else the `PROJECTS_ROOT` environment variable).
+A server of a project's `.mcp.json` that the project's `.claude/settings.json` or
+`settings.local.json` lists in `disabledMcpjsonServers` is shown as `off` — Claude Code
+does not start it — and neither counted nor probed.
 
 ## When a plugin declares the server for you
 

@@ -340,7 +340,7 @@ def basetemp_for(key: str) -> Path:
 _SWEEP_DIR_RE = re.compile(r"^sweep-run-(\d+)$")
 
 
-def _owner_alive(name: str) -> bool:
+def _owner_alive(path: Path | str) -> bool:
     """Does a live process own this `sweep-run-<pid>` directory?
 
     ClaudeTestSweep (daily 05:15, timeout 2h) and ClaudeTestSweepFull (weekly
@@ -356,8 +356,14 @@ def _owner_alive(name: str) -> bool:
     be "a leftover from an older layout, safe to reclaim" — and `%TEMP%/sweep-*`
     is a namespace any program can use, so the sweep deleted other people's
     directories on that reasoning.
+
+    "The pid exists" is not enough either: a dead sweep's pid is reused, and its
+    directory then read as owned for as long as that other process lived — a
+    slow leak of `%TEMP%`. The owner changed the directory while it was running,
+    so a process that started AFTER the directory was last modified is not it.
     """
-    m = _SWEEP_DIR_RE.match(name)
+    path = Path(path)
+    m = _SWEEP_DIR_RE.match(path.name)
     if not m:
         return True
     pid = int(m.group(1))
@@ -370,7 +376,18 @@ def _owner_alive(name: str) -> bool:
         # live: leaving a stale directory behind costs disk, deleting a live
         # one costs somebody else's whole run.
         return True
-    return psutil.pid_exists(pid)
+    try:
+        started = psutil.Process(pid).create_time()
+    except psutil.NoSuchProcess:
+        return False
+    except Exception:                 # AccessDenied and the like: the safe side
+        return True
+    try:
+        touched = path.stat().st_mtime
+    except OSError:
+        return True
+    # Slack for the coarseness of file-system timestamps and process clocks.
+    return started <= touched + 2
 
 
 def cleanup_temp_roots(keep: Path | None = None) -> list[str]:
@@ -392,7 +409,7 @@ def cleanup_temp_roots(keep: Path | None = None) -> list[str]:
             continue
         if not _SWEEP_DIR_RE.match(path.name):
             continue
-        if path != RUN_ROOT and _owner_alive(path.name):
+        if path != RUN_ROOT and _owner_alive(path):
             continue
         try:
             rmtree_force(path)

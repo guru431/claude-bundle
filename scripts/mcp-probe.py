@@ -380,13 +380,43 @@ def running_wrappers() -> list[str]:
     return found
 
 
+def disabled_in_project(mcp_json: Path) -> set[str]:
+    """The servers of this `.mcp.json` its project's `.claude/settings*.json`
+    switch off (`disabledMcpjsonServers`).
+
+    The standard way to decline a server that arrives in someone else's file —
+    a fork carrying its upstream's `.mcp.json`: Claude Code does not start it,
+    so it has no resolver at session start either, and editing the file for the
+    audit's sake conflicts with every upstream merge.
+    """
+    if mcp_json.name != ".mcp.json":
+        return set()
+    names: set[str] = set()
+    for settings in (mcp_json.parent / ".claude" / "settings.json",
+                     mcp_json.parent / ".claude" / "settings.local.json"):
+        if not settings.is_file():
+            continue
+        try:
+            data = json.loads(settings.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue                      # unreadable: the server stays in the audit
+        off = data.get("disabledMcpjsonServers") if isinstance(data, dict) else None
+        names.update(str(n) for n in (off if isinstance(off, list) else ()))
+    return names
+
+
 def check_wrappers(configs: list[Path]) -> int:
     print("Auditing MCP declarations (nothing is launched)\n")
     problems = 0
     seen = 0
     for path in configs:
+        off = disabled_in_project(path)
         for name, spec, where in declared_servers(path):
             seen += 1
+            if name in off:
+                print(f"  off      {name:<14} disabledMcpjsonServers in the project's "
+                      f".claude/settings*.json — not started ({where})")
+                continue
             wrapper = is_wrapper(spec)
             if wrapper:
                 problems += 1
@@ -493,8 +523,12 @@ def main() -> int:
 
     print(f"Probing {len(servers)} server(s) from {path}\n")
     failures = 0
+    off = disabled_in_project(path)
     for name, spec, _where in servers:
         if args.servers and name not in args.servers:
+            continue
+        if name in off:
+            print(f"  off   {name}: disabled in the project's .claude/settings*.json — not probed")
             continue
         if not probe(name, spec):
             failures += 1

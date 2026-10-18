@@ -173,6 +173,27 @@ def test_a_calendar_task_killed_by_the_scheduler_is_a_failure(run_task_status):
     assert "SomebodysTask" not in out, out
 
 
+def test_a_launch_lost_to_a_shutdown_is_started_again_once(run_task_status, monkeypatch):
+    """0x8007045B: the launch fell on a Windows shutdown — an update's reboot.
+    StartWhenAvailable does not repeat such a launch, so a Daily task stayed
+    silent for a day. The monitor starts a registry calendar task again; a
+    service is the port probe's, a foreign task's schedule is unknown."""
+    calls = []
+    monkeypatch.setattr(monitor_checks, "restart_task", lambda name: calls.append(name) or "")
+    lost = 0x8007045B
+    out = run_task_status([_task("ClaudeNightly", result=lost, state="Ready"),
+                           _task("ClaudeDaemon", result=lost),
+                           _task("SomebodysTask", result=lost, state="Ready")])
+
+    assert calls == ["ClaudeNightly"], calls
+    line = next(ln for ln in out.splitlines() if ln.startswith("ClaudeNightly:"))
+    assert "fell on a Windows shutdown → started again by the monitor" in line, line
+    pattern = re.search(r"grep -cE '([^']+)'", SCRIPT.read_text(encoding="utf-8")).group(1)
+    assert re.search(pattern, line), f"TASK_FAIL_COUNT does not count: {line}"
+    assert "started again" not in next(ln for ln in out.splitlines()
+                                       if ln.startswith("SomebodysTask:")), out
+
+
 def test_a_service_that_recovers_and_dies_again_is_news_again(run_task_status, monkeypatch):
     """Alert once per failure — and a second crash is a second failure.
 
@@ -597,3 +618,54 @@ def test_the_stderr_folder_follows_the_registrys_launcher(tmp_path):
     assert monitor_checks.stderr_dir(reg).as_posix().endswith("D:/local/cron/logs/task-stderr")
     reg.write_text(r"launcher: <bundle-install-path>\bin\_run-hidden.vbs" "\n", encoding="utf-8")
     assert monitor_checks.stderr_dir(reg) == tmp_path / "logs" / "task-stderr"
+
+
+# ── Windows Update: a stuck update is said once ──────────────────────────────
+
+def _wu_event(guid: str, time_: str, ok: bool = False) -> dict:
+    """One WindowsUpdateClient event the way the stage's collection returns it."""
+    return {"Ok": ok, "Time": time_, "Code": "" if ok else "0x80073712",
+            "Title": f"Security Update ({guid})", "Guid": guid}
+
+
+def _run_wu(cron: Path, events: list[dict], monkeypatch, capsys, rc: int = 0) -> str:
+    payload = json.dumps(events).encode("utf-8")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: types.SimpleNamespace(
+        returncode=rc, stdout=b"" if rc else payload, stderr=b"Get-WinEvent : denied"))
+    monkeypatch.setattr(sys, "argv", ["-", str(cron)])
+    try:
+        exec(compile(_heredoc("WU_STUCK"), f"{SCRIPT.name}:WU_STUCK", "exec"),
+             {"__name__": "__main__"})
+    except SystemExit as exc:
+        assert exc.code in (0, None), exc.code
+    return capsys.readouterr().out
+
+
+def test_a_stuck_update_is_reported_once_and_next_month_is_news(tmp_path, monkeypatch, capsys):
+    """A cumulative update failing every day for months, and nothing said so.
+    Reported once; next month's update is another GUID, so news again."""
+    sept = [_wu_event("kb-sept", f"2026-10-0{d} 05:00") for d in (1, 2, 3)]
+
+    out = _run_wu(tmp_path, sept, monkeypatch, capsys)
+    assert "Security Update (kb-sept): 3 failures since 2026-10-01 05:00" in out, out
+    assert "0x80073712" in out
+    assert _run_wu(tmp_path, sept, monkeypatch, capsys).strip() == "", "said twice"
+
+    octo = [_wu_event("kb-oct", f"2026-10-1{d} 05:00") for d in (4, 5, 6)]
+    out = _run_wu(tmp_path, sept + octo, monkeypatch, capsys)
+    assert "kb-oct" in out and "kb-sept" not in out, out
+
+
+def test_a_success_resets_the_failure_count(tmp_path, monkeypatch, capsys):
+    """Failures before a successful install do not count: it installed."""
+    events = [_wu_event("kb", f"2026-10-0{d} 05:00") for d in (1, 2, 3)]
+    events += [_wu_event("kb", "2026-10-04 05:00", ok=True), _wu_event("kb", "2026-10-05 05:00")]
+    assert _run_wu(tmp_path, events, monkeypatch, capsys).strip() == ""
+    state = json.loads((tmp_path / "state" / "task-monitor-seen.json").read_text(encoding="utf-8"))
+    assert state["<wu>"] == {}
+
+
+def test_an_unread_event_log_is_said_not_taken_for_clean(tmp_path, monkeypatch, capsys):
+    out = _run_wu(tmp_path, [], monkeypatch, capsys, rc=1)
+    assert out.startswith("NOTE: Windows Update was not checked"), out
+    assert "denied" in out

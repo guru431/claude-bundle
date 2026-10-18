@@ -295,6 +295,23 @@ _TASK_ITEM = re.compile(r"^\s*-\s+name:\s*\S")
 _TASK_FIELD = re.compile(r"^\s+[A-Za-z0-9_]+:(?:\s|$)")
 _BLOCK_SCALAR = re.compile(r"^(\s*)(?:-\s+)?([A-Za-z0-9_]+):\s*([|>][0-9+-]*)\s*(?:#.*)?$")
 _QUOTED_VALUE = re.compile(r"^\s*(?:-\s+)?([A-Za-z0-9_]+):\s*(['\"])(.*)$")
+_LIST_VALUE = re.compile(r"^\s*(?:-\s+)?([A-Za-z0-9_]+):\s*(\[.*\])\s*(?:#.*)?$")
+_LIST_DQ_ITEM = re.compile(r'[\[,]\s*"((?:[^"\\]|\\.)*)"')
+_DQ_ESCAPE = re.compile(r"\\(.?)")
+
+
+def _bad_escapes(line: str) -> tuple[str, list[str]]:
+    """The key and the escapes inside its double-quoted scalars that
+    registry-parse.ps1 refuses: it expands `\\"` and `\\\\` only."""
+    m = _QUOTED_VALUE.match(line)
+    if m and m.group(2) == '"':
+        key, bodies = m.group(1), [m.group(3).rstrip()[:-1]]
+    else:
+        m = _LIST_VALUE.match(line)
+        if not m:
+            return "", []
+        key, bodies = m.group(1), _LIST_DQ_ITEM.findall(m.group(2))
+    return key, [e for b in bodies for e in _DQ_ESCAPE.findall(b) if e not in ('"', "\\")]
 
 
 def check_subset(text: str) -> list[str]:
@@ -322,6 +339,12 @@ def check_subset(text: str) -> list[str]:
             block_indent = len(m.group(1))
             prev_reported = False
             continue
+        key, bad = _bad_escapes(line)
+        if bad:
+            problems.append(
+                f"line {no}: `{key}:` has the escape `\\{bad[0]}` inside double "
+                f"quotes — sync-tasks.ps1 reads only \\\" and \\\\ there and refuses "
+                f"the registry; use single quotes")
         m = _QUOTED_VALUE.match(line)
         if m and not m.group(3).rstrip().endswith(m.group(2)):
             problems.append(

@@ -259,6 +259,24 @@ def test_default_configs_include_each_projects_mcp_json(tmp_path, monkeypatch, c
     assert mod.check_wrappers(configs) == 1
 
 
+def test_a_server_disabled_in_the_project_is_listed_not_counted(tmp_path, monkeypatch, capsys):
+    """A fork carries its upstream's `.mcp.json`; the server it does not want is
+    switched off in `.claude/settings.local.json` (`disabledMcpjsonServers`).
+    Claude Code does not start it — no resolver at session start — and the
+    upstream's file is not edited for the audit's sake."""
+    mod = _load()
+    monkeypatch.setattr(mod, "running_wrappers", lambda: [])
+    _work, config = _project_with_wrapper(tmp_path)
+    (config.parent / ".claude").mkdir()
+    (config.parent / ".claude" / "settings.local.json").write_text(
+        json.dumps({"disabledMcpjsonServers": ["docs"]}), encoding="utf-8")
+
+    assert mod.check_wrappers([config]) == 0
+    assert "off      docs" in capsys.readouterr().out
+    config.write_text(json.dumps({"mcpServers": {"docs": NPX, "other": NPX}}), encoding="utf-8")
+    assert mod.check_wrappers([config]) == 1, "the server next to it is still a finding"
+
+
 def test_a_disabled_plugins_cache_is_not_a_declaration(tmp_path, monkeypatch):
     """A disabled plugin's cache stays on disk, and Claude Code does not load it.
     The audit read every cached .mcp.json, so a wrapper in a plugin switched off

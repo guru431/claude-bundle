@@ -4670,12 +4670,20 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
                 return LLMResult(None, "deterministic", f"{label} empty content")
             _FORBIDDEN_STREAK.pop(provider, None)   # the door opened
             return LLMResult(content, "ok")
-        except Exception as e:
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                requests.exceptions.ChunkedEncodingError) as e:
             _audit_attempt(provider, model, f"exception:{type(e).__name__}", None, fallback_from)
             print(f"  {label} error: {e}", file=sys.stderr)
             if attempt < max_retries - 1:
                 time.sleep(cfg["retry_sleep"])
                 continue
+            return LLMResult(None, "transient", f"{label} {type(e).__name__}: {e}")
+        except Exception as e:
+            # Not the transport: a 200 whose body is not JSON, or JSON of another
+            # shape. The same request gets the same answer, so the retries only
+            # added max_retries × retry_sleep to every call of the batch.
+            _audit_attempt(provider, model, f"exception:{type(e).__name__}", None, fallback_from)
+            print(f"  {label} error (not retried): {type(e).__name__}: {e}", file=sys.stderr)
             return LLMResult(None, "transient", f"{label} {type(e).__name__}: {e}")
     return LLMResult(None, "transient", f"{label} exhausted retries")
 

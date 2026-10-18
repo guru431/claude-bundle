@@ -141,6 +141,8 @@
 #   So: set it to roughly two to three times the task's real runtime, not to a
 #   number that "surely can't be exceeded". A task killed at its ceiling shows up
 #   as a failed run — which is the point; the next trigger then gets to run.
+#   For a Daily task that means well under 24: with a ceiling of a day or more
+#   one hung run silently eats the next day's trigger, and the one after that.
 #   ClaudeTaskMonitor also alerts on a task that is still `running` past its own
 #   timeout_hours, so a ceiling that is far too high blinds that check as well.
 #   The LLM tasks are the exception in degree, not in kind: their calls queue

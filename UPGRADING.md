@@ -225,6 +225,15 @@ Then run `sync.cmd` once (step 4 above).
 - **A calendar task that Task Scheduler killed (`267014`) is reported** by
   `ClaudeTaskMonitor` — normally its `timeout_hours` ceiling. It used to count as
   a success. Expect it once for any such task whose last run ended that way.
+- **Escapes inside double quotes** are read as YAML reads them: `\\` is one
+  backslash (it used to reach Task Scheduler as two) and `\"` no longer ends a
+  quoted list item. Any other escape (`\n`, `\t`, `\x41`…) now stops the sync,
+  and `check-registry.py` (with it `self-test.ps1 -InstallPath`) names the line:
+  write such a value in single quotes, where a backslash is just a backslash.
+- **`ClaudeTaskMonitor` starts a calendar task again** when its launch fell on a
+  Windows shutdown (`0x8007045B`, usually an update's reboot), and it reports a
+  Windows update that failed 3 times since its last install — once per update.
+  The first run after the upgrade reports any update already stuck.
 - **Uninstalling a first install made by an older `install.ps1`:** that
   manifest recorded the bootstrapped registry as the installer's own file, and
   `uninstall.ps1` would delete it. Re-run the installer once before you ever

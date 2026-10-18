@@ -91,6 +91,17 @@ def test_text_after_a_closing_quote_is_rejected():
     assert len(problems) == 1 and "closing quote" in problems[0], problems
 
 
+def test_an_escape_the_subset_parser_refuses_is_rejected():
+    """registry-parse.ps1 expands `\\"` and `\\\\` inside double quotes and
+    refuses any other escape, in a value and in a list item alike."""
+    assert subset('    description: "say \\"hi\\", C:\\\\x"\n'
+                  '    script_args: ["a\\"b, c", \'C:\\new\']\n') == []
+    for line in ('    description: "two\\nlines"\n',
+                 '    script_args: [--x, "a\\tb"]\n'):
+        problems = subset(line)
+        assert len(problems) == 1 and "has the escape `\\" in problems[0], problems
+
+
 def test_a_value_on_the_tasks_line_is_rejected():
     problems = check_registry.check_subset("version: 1\ntasks: []\n")
     assert len(problems) == 1 and "tasks:" in problems[0], problems

@@ -187,6 +187,52 @@ def test_a_403_for_an_override_model_neither_latches_nor_counts(cron_copy: Path,
     assert len(calls) == 4
 
 
+def _stub_raising_requests(monkeypatch, exc_name: str | None) -> list:
+    """A fake `requests` whose post() raises its own `exceptions.<exc_name>`, or,
+    with None, answers 200 with a body that is not JSON. Returns the calls."""
+    exceptions = types.SimpleNamespace(
+        ConnectionError=type("ConnectionError", (OSError,), {}),
+        Timeout=type("Timeout", (OSError,), {}),
+        ChunkedEncodingError=type("ChunkedEncodingError", (OSError,), {}))
+    calls = []
+
+    class NotJson(_Resp):
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    def post(url, **kw):
+        calls.append(url)
+        if exc_name:
+            raise getattr(exceptions, exc_name)("connection refused")
+        return NotJson(200, text="<html>")
+
+    fake = types.ModuleType("requests")
+    fake.post, fake.exceptions = post, exceptions
+    monkeypatch.setitem(sys.modules, "requests", fake)
+    return calls
+
+
+def test_only_a_transport_failure_is_retried(cron_copy: Path, monkeypatch):
+    """Every exception used to be retried, a 200 whose body is not JSON too: the
+    same answer max_retries times, retry_sleep apart, for each call of the
+    batch. A refused connection or a timeout is still retried."""
+    monkeypatch.setenv("DEEPSEEK_KEY", "unit-test-placeholder")
+    u = _load_utils(cron_copy, "utils_exception_retry")
+    slept = []
+    monkeypatch.setattr(u.time, "sleep", slept.append)
+
+    calls = _stub_raising_requests(monkeypatch, None)
+    res = u._llm_openai_compat("deepseek", "hi")
+    assert (res.text, res.kind) == (None, "transient")
+    assert len(calls) == 1 and slept == [], "a body that is not JSON was retried"
+
+    retries = u.PROVIDERS["deepseek"]["max_retries"]
+    for name in ("ConnectionError", "Timeout"):
+        calls = _stub_raising_requests(monkeypatch, name)
+        assert u._llm_openai_compat("deepseek", "hi").kind == "transient"
+        assert len(calls) == retries, f"{name} was not retried"
+
+
 @pytest.mark.parametrize("status,kind", [(400, "deterministic"), (503, "transient")])
 def test_a_provider_nobody_set_up_does_not_decide_the_chains_verdict(cron_copy: Path,
                                                                    monkeypatch,

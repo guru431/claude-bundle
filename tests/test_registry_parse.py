@@ -69,7 +69,9 @@ def differences(dump: Path, text: str) -> list[str]:
 # person editing the file might: quoting both ways, a `''` escape, '#' inside a
 # quoted value and after an unquoted one, inline lists with a quoted comma, a
 # quoted '#' and a single element, every YAML boolean spelling, a top-level key
-# after `tasks:`, and a number too large for Int32 (the parser's cast threw on it).
+# after `tasks:`, a number too large for Int32 (the parser's cast threw on it),
+# and the `\"` and `\\` escapes of double quotes (`\\` stayed two backslashes,
+# and a `\"` closed a list item, so the comma after it split the item in two).
 SUBSET_FIXTURE = """\
 # header comment
 version: 1
@@ -131,6 +133,14 @@ tasks:
     timeout_hours: 1
     script_args: [--chat, -1001234567890, 1717171717171]
 
+  - name: Escapes
+    description: "say \\"hi\\", C:\\\\x"
+    script: C:\\bundle\\cron\\esc.py
+    kind: python
+    trigger: Daily 03:00
+    timeout_hours: 1
+    script_args: ["a\\"b, c", "C:\\\\x"]
+
 extra_top_level: after-the-list
 """
 
@@ -161,3 +171,17 @@ def test_the_comparison_catches_a_block_scalar(tmp_path: Path, capsys):
     assert check_registry.check(fixture, dump) == 1
     out = capsys.readouterr().out
     assert "Words.description: YAML reads 'folded over two lines', sync-tasks.ps1 reads '>-'" in out, out
+
+
+def test_an_escape_the_parser_does_not_know_is_refused_by_both(tmp_path: Path):
+    """`"a\\nb"` is a newline to PyYAML; the subset parser registered the
+    backslash and the `n`. It now refuses the registry (check-registry.py
+    reports the line: tests/test_check_registry.py)."""
+    text = SUBSET_FIXTURE.replace('    description: "double-quoted"\n',
+                                  '    description: "two\\nlines"\n')
+    fixture = tmp_path / "escape.yaml"
+    fixture.write_text(text, encoding="utf-8")
+
+    r = run_ps(f"$ErrorActionPreference = 'Stop'\n. {ps_quote(PARSER)}\n"
+               f"$null = Parse-RegistryYaml {ps_quote(fixture)}", tmp_path)
+    assert r.returncode != 0 and "unsupported escape" in r.stdout + r.stderr, r.stdout + r.stderr

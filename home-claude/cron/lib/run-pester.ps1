@@ -70,7 +70,7 @@ if ($files.Count -eq 0) {
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("run-pester-" + $PID)
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-$pass = 0; $fail = 0; $skip = 0; $hung = 0
+$pass = 0; $fail = 0; $skip = 0; $hung = 0; $envBroken = $false
 $excludeLine = ''
 if ($ExcludeTag.Count -gt 0) {
     $quoted = ($ExcludeTag | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ','
@@ -116,14 +116,15 @@ for (`$i = $from; `$i -lt `$files.Count; `$i++) {
 }
 "@
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child))
-        $startedAt = Get-Date
         $p = Start-Process $hostExe -NoNewWindow -PassThru `
             -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc `
             -RedirectStandardOutput $out -RedirectStandardError $err
         # The current file is the last one with a marker. Before the first
         # marker the process is starting and importing Pester: that runs under
         # a limit of its own, not the first file's, so a file's timeout runs
-        # from its own start, as its TESTS_DURATION does.
+        # from its own start, as its TESTS_DURATION does. A hang or a crash
+        # BEFORE the marker is the environment, not a file: the check below
+        # prints TESTS_ENV and does not blame the first file of the pass.
         $cur = $from - 1
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $timedOut = $false
@@ -163,10 +164,20 @@ for (`$i = $from; `$i -lt `$files.Count; `$i++) {
                 Write-Output "TESTS_DURATION ${secs}s $name"
                 continue
             }
-            # No result. A file the process never reached goes to the next pass;
-            # the first file of a pass counts as started even without a marker.
+            # No result. A file the process never reached goes to the next pass.
             if ($k -gt $from -and -not (Test-Path -LiteralPath $mark)) { $next = $k; break }
-            $began = $(if (Test-Path -LiteralPath $mark) { (Get-Item -LiteralPath $mark).LastWriteTime } else { $startedAt })
+            if (-not (Test-Path -LiteralPath $mark)) {
+                # No marker for the first file of the pass either: the process
+                # hung or died starting up or importing Pester. The file has
+                # nothing to do with it, and a new pass would hit the same wall,
+                # so the run stops here.
+                $why = $(if ($timedOut) { "did not finish in ${TimeoutSec}s" } else { "died (exit code $($p.ExitCode))" })
+                Write-Output "TESTS_ENV the PowerShell start and the Pester import $why; files from $name on did not run"
+                $envBroken = $true
+                $next = $files.Count
+                break
+            }
+            $began = (Get-Item -LiteralPath $mark).LastWriteTime
             $secs = [string]::Format($inv, '{0:F1}', ($endedAt - $began).TotalSeconds)
             Write-Output "TESTS_DURATION ${secs}s $name"
             if ($timedOut) {
@@ -190,5 +201,6 @@ for (`$i = $from; `$i -lt `$files.Count; `$i++) {
 
 Write-Output "Tests Passed: $pass, Failed: $($fail + $hung), Skipped: $skip"
 Write-Output "TESTS_RESULT pass=$pass fail=$($fail + $hung) skip=$skip"
+if ($envBroken) { exit 2 }
 if ($fail -gt 0 -or $hung -gt 0) { exit 1 }
 exit 0

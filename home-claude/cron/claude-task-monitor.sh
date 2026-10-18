@@ -14,7 +14,7 @@
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=a failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the TITLES of stale findings from every allowed project, the last stderr lines of a failed bash/python task, and the names of allowed repos whose changes have not reached their remote for 48h (only with ClaudeGitPushAll on) -> Telegram Bot API; an empty GET after a clean run -> the watcher at MONITOR_PULSE_URL (only when set) money=no writes=$HOME/task-monitor-fatal.log OUTSIDE the bundle (a start-up failure, or the full text of an alert it could not deliver: task names, Password/S4U task command lines), and cron/state/task-monitor-seen.json
+# bundle-io: offbox=a failure summary (failed tasks, down services, a down LLM chain's providers, and the full command line — script paths, share host names — of any Password/S4U task that breaks the session-0 path policy) plus the TITLES of stale findings from every allowed project, the last stderr lines of a failed bash/python task, the titles of Windows updates that failed 3 times since their last install, and the names of allowed repos whose changes have not reached their remote for 48h (only with ClaudeGitPushAll on) -> Telegram Bot API; an empty GET after a clean run -> the watcher at MONITOR_PULSE_URL (only when set) money=no writes=$HOME/task-monitor-fatal.log OUTSIDE the bundle (a start-up failure, or the full text of an alert it could not deliver: task names, Password/S4U task command lines), and cron/state/task-monitor-seen.json; starts again (`schtasks /end` + `/run`) a registry calendar task whose launch a Windows shutdown swallowed (0x8007045B)
 
 BUNDLE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -z "$BUNDLE_ROOT" ] || [ ! -d "$BUNDLE_ROOT/cron" ]; then
@@ -251,6 +251,21 @@ for t in tasks:
     failures.append(t)
     seen[t['Name']] = t['LastRun']
 
+# 0x8007045B (ERROR_SHUTDOWN_IN_PROGRESS): the launch fell on a Windows shutdown,
+# usually the reboot of an update. StartWhenAvailable does not repeat it (the
+# attempt "took place"), and the task stays silent until its next trigger — a
+# day, a week, a month. A registry task with a calendar trigger is started again
+# here, once: after /run its LastResult is another one. A service is the port
+# probe's business; a foreign task's schedule is not known here.
+SHUTDOWN_COLLISION = 0x8007045B
+for f in failures:
+    trigger = str(REGISTRY.get(f['Name'], {}).get('trigger') or '')
+    if (f['LastResult'] == SHUTDOWN_COLLISION
+            and trigger.split(' ', 1)[0] in ('Daily', 'Weekly', 'Monthly')):
+        err = monitor_checks.restart_task(f['Name'])
+        f['_relaunched'] = (f' → relaunch failed: {err}' if err
+                            else ' → started again by the monitor')
+
 # The LLM provider chain (cron/state/chain-dead.json, written by
 # utils.record_chain_dead). This monitor is its voice rather than the
 # healthcheck: it needs no LLM to say so, and the root cause lands on top of the
@@ -292,9 +307,11 @@ if failures:
                          f"should have killed it; every later trigger is being "
                          f"dropped [{tag}]")
         else:
-            killed = (' — killed by Task Scheduler (its timeout_hours ceiling, or /end)'
-                      if f['LastResult'] == TERMINATED else '')
-            lines.append(f"{f['Name']}: exit {f['LastResult']}{killed} (last run: {f['LastRun']}) [{tag}]")
+            killed = {TERMINATED: ' — killed by Task Scheduler (its timeout_hours ceiling, or /end)',
+                      SHUTDOWN_COLLISION: ' — the launch fell on a Windows shutdown'
+                      }.get(f['LastResult'], '')
+            lines.append(f"{f['Name']}: exit {f['LastResult']}{killed}{f.get('_relaunched', '')} "
+                         f"(last run: {f['LastRun']}) [{tag}]")
             entry = REGISTRY.get(f['Name'], {})
             if entry.get('kind') in ('bash', 'python'):
                 lines += monitor_checks.stderr_tail(STDERR_DIR, entry.get('script'), f['LastRun'])
@@ -542,6 +559,116 @@ if [ -n "$FINDINGS_ALERT" ]; then
     echo "Findings check: $FINDINGS_ALERT" >> "$LOG_FILE"
     ALERTS="${ALERTS:+$ALERTS
 }$FINDINGS_ALERT"
+fi
+
+# --- Windows Update: the same update failing again and again ---
+# A cumulative update that fails to install (0x80073712, a damaged component
+# store, is the usual one) is retried every day and fails every day, for months:
+# a machine without security fixes, and nothing on it says so. Read here from
+# this machine's WindowsUpdateClient events. An update with WU_FAIL_MIN failures
+# since its last successful install is reported once, like the stale findings
+# above; next month's cumulative update is a new GUID and news again.
+echo "TRACE: stage=wu $(date '+%H:%M:%S')" >> "$LOG_FILE"
+WU_STUCK=$(PYTHONIOENCODING=utf-8 "$PYTHON" -X utf8 - "$CRON_DIR" 2>>"$LOG_FILE" <<'PYSCRIPT'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+STATE = Path(sys.argv[1]) / 'state' / 'task-monitor-seen.json'
+STATE_KEY = '<wu>'
+WU_FAIL_MIN = 3
+
+# The events' properties, not their text: the text is localized. Event 20
+# (failure): [0] the code, [1] the title, [2] the update's GUID; event 19
+# (success): [0] the title, [1] the GUID. Get-WinEvent reports "no events" as an
+# error — that is an empty list; any other error takes powershell down, so an
+# unread log never passes for "everything installs".
+ps_cmd = r"""
+[Console]::OutputEncoding=[System.Text.Encoding]::UTF8
+try {
+    $raw = Get-WinEvent -ErrorAction Stop -FilterHashtable @{
+        LogName = 'System'; ProviderName = 'Microsoft-Windows-WindowsUpdateClient'
+        Id = 19, 20; StartTime = (Get-Date).AddDays(-14) }
+} catch {
+    if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw }
+    $raw = @()
+}
+$ev = @($raw | ForEach-Object {
+    if ($_.Id -eq 20) {
+        $code = '0x{0:X8}' -f $_.Properties[0].Value
+        $title = $_.Properties[1].Value; $guid = $_.Properties[2].Value
+    } else {
+        $code = ''; $title = $_.Properties[0].Value; $guid = $_.Properties[1].Value
+    }
+    [PSCustomObject]@{ Ok = ($_.Id -eq 19); Time = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm')
+                       Code = $code; Title = "$title"; Guid = "$guid" }
+})
+ConvertTo-Json -InputObject $ev -Compress
+"""
+
+try:
+    r = subprocess.run(['powershell', '-NoProfile', '-Command', ps_cmd],
+                       capture_output=True, timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError(f"powershell exited {r.returncode}: "
+                           + r.stderr.decode('utf-8', errors='replace').strip()[:200])
+    out = r.stdout.decode('utf-8', errors='replace').strip()
+    events = json.loads(out) if out and out != 'null' else []
+except (subprocess.SubprocessError, OSError, RuntimeError, ValueError) as exc:
+    print(f'NOTE: Windows Update was not checked ({type(exc).__name__}: {exc})')
+    sys.exit(0)
+if isinstance(events, dict):
+    events = [events]
+
+# Per update: the failures since its last successful install.
+stuck = {}
+for e in sorted(events, key=lambda e: str(e.get('Time'))):
+    guid = str(e.get('Guid') or '')
+    if not guid:
+        continue
+    if e.get('Ok'):
+        stuck.pop(guid, None)
+        continue
+    s = stuck.setdefault(guid, {'title': str(e.get('Title') or guid), 'fails': 0,
+                                'first': e.get('Time')})
+    s['fails'] += 1
+    s['last'], s['code'] = e.get('Time'), e.get('Code') or '?'
+stuck = {g: s for g, s in stuck.items() if s['fails'] >= WU_FAIL_MIN}
+
+try:
+    seen = json.loads(STATE.read_text(encoding='utf-8'))
+    seen = seen if isinstance(seen, dict) else {}
+except (OSError, ValueError):
+    seen = {}
+before = seen.get(STATE_KEY)
+before = before if isinstance(before, dict) else {}
+seen[STATE_KEY] = {g: s['title'] for g, s in stuck.items()}
+fresh = [s for g, s in stuck.items() if g not in before]
+
+if fresh:
+    print(f'Windows Update: {len(fresh)} update(s) not installing '
+          f'(>={WU_FAIL_MIN} failures in a row)')
+    for s in fresh:
+        print(f"  {s['title']}: {s['fails']} failures since {s['first']}, "
+              f"the last {s['last']} ({s['code']})")
+for s in stuck.values():
+    sys.stderr.write(f"wu: {s['title']} — {s['fails']} failures, the last {s['last']} ({s['code']})\n")
+sys.stderr.write(f'wu: {len(events)} events, {len(stuck)} stuck, {len(fresh)} new\n')
+try:
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_name(STATE.name + '.tmp')      # temp + replace, as above
+    tmp.write_text(json.dumps(seen, indent=1), encoding='utf-8')
+    tmp.replace(STATE)
+except OSError as exc:
+    sys.stderr.write(f'wu: state not written ({exc}) — the next run repeats the alert\n')
+PYSCRIPT
+)
+
+if [ -n "$WU_STUCK" ]; then
+    echo "$WU_STUCK" >> "$LOG_FILE"
+    ALERTS="${ALERTS:+$ALERTS
+}$WU_STUCK"
 fi
 
 # --- Changes that have not reached their remote for >48h ---

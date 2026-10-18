@@ -128,6 +128,66 @@ The short list; UPGRADING.md has the steps.
   reports `ClaudeDaemonWatch` `updated` once (its description changed).
 - **`uninstall.ps1` / `uninstall.sh`** exit 2 also when a file could not be
   removed; they used to stop at the first one.
+- **Registry escapes:** inside double quotes `\\` is one backslash and `\"` no
+  longer ends a list item; any other escape stops the sync (single quotes
+  instead). **`ClaudeTaskMonitor`** starts again a calendar task whose launch a
+  Windows shutdown swallowed (`0x8007045B`) and reports a Windows update that
+  failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
+  the Pester import hangs or dies before the first file.
+
+### Ported from the meta-repo: eight fixes since the last comparison
+
+The shared files were compared again, commit by commit. Eight changes made in
+the meta-repo since the last port apply here; each comes with a test that fails
+on the code it replaces.
+
+- **The registry parser reads `\\` and `\"` as YAML does.** Inside double
+  quotes only `\"` was expanded, so `"C:\\x"` reached Task Scheduler with both
+  backslashes, and a `\"` inside a quoted list item closed it — the comma after
+  it split the item in two. Any other escape is now refused rather than
+  registered as a literal backslash, and `check-registry.py` reports the line.
+- **The Windows task monitor starts a calendar task again when its launch fell
+  on a shutdown.** `0x8007045B` (ERROR_SHUTDOWN_IN_PROGRESS) is what an update's
+  reboot leaves on a task that was due at that minute; StartWhenAvailable does
+  not repeat such a launch, and a Daily task stayed silent for a day. A registry
+  task with a calendar trigger is restarted once, and the alert line says so.
+- **The Windows task monitor reports an update that does not install.** The
+  WindowsUpdateClient events of the last 14 days, by update GUID (the text is
+  localized): three failures since the last successful install are one alert
+  per update; next month's update is a new GUID and news again. An event log it
+  could not read is a NOTE, not "everything installs".
+- **`run-pester.ps1` no longer blames the first file for a broken start.** A
+  hang or a crash before the first file's marker — PowerShell starting, Pester
+  importing — was charged to that file as TESTS_TIMEOUT or FAILED, though it
+  never began; it is `TESTS_ENV` and exit 2 now.
+- **`agents-md-sync-check.py` takes `OK.` and `**OK**` for "no drift".** Read as
+  drift, they went on to the larger fix call and a finding about nothing.
+- **`_llm_openai_compat` retries only a transport failure** — a refused
+  connection, a timeout, a body cut off mid-way. A 200 whose body is not JSON
+  was retried as well: the same answer `max_retries` times, `retry_sleep`
+  apart, for every call of the batch.
+- **`mcp-probe.py`: a server a project switches off is not a finding.** A
+  `.mcp.json` server listed in that project's `.claude/settings*.json`
+  `disabledMcpjsonServers` is not started by Claude Code; the audit shows it as
+  `off` and neither counts nor probes it.
+- **`test-sweep.py` reclaims a dead sweep's directory when its pid is reused.**
+  "The pid exists" kept `%TEMP%/sweep-run-<pid>` for as long as any later
+  process held that pid; a process started after the directory was last
+  changed is not its owner.
+
+Also from the meta-repo: the registry header says why a Daily task's
+`timeout_hours` stays well under a day (a hung run eats the next trigger).
+
+Checked and not ported: an empty `script:` for `kind: exec` refused (here it is
+optional on purpose — the arguments of a daemon that takes none), the
+`WIKI_LLM_LOCK_*` parsing and a failed secret scan with nothing to show (both
+already so here), the interpreter search and the pulse's shared-secret header
+of the task monitor (`runtime.sh` resolves the interpreter, the pulse here is a
+GET to a URL that is its own secret), the auth-status check of one particular
+service in `daemon-watch.py` and the meta-repo's own tasks and timeout values.
+The fast suite and project guards from the test contract in `ci-precheck.py`
+wait for a design of their own: here the contract lives in `bundle.local.yaml`,
+keyed by project name, and the gate does not import `utils`.
 
 ### Findings: 17 resolved, 9 declined
 

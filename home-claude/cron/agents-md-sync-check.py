@@ -498,6 +498,18 @@ def append_to_findings(findings_path: Path, project: str, report: str) -> bool:
         priority="P3", project=project)
 
 
+def is_ok_response(response: str) -> bool:
+    """The model's "no drift" answer.
+
+    Besides a bare `OK` the model writes `OK.` and `**OK**`; read as drift,
+    such an answer went on to the larger fix call with a report of nothing.
+    """
+    if response == "OK" or response.startswith(("OK\n", "OK ")):
+        return True
+    first = response.split("\n", 1)[0].strip().strip("*_`").strip()
+    return re.fullmatch(r"OK[.!]?", first) is not None
+
+
 def check_pair(project: str, claude_path: Path, agents_path: Path,
                findings_path: Path, log_path: Path) -> tuple[bool, int, bool | None]:
     """Check one CLAUDE.md / AGENTS.md pair.
@@ -558,7 +570,7 @@ def check_pair(project: str, claude_path: Path, agents_path: Path,
     # to the drift branch and paid for a second, larger fix call to rewrite a
     # file that was already in sync.
     response = strip_edge_fences(response)
-    if response == "OK" or response.startswith(("OK\n", "OK ")):
+    if is_ok_response(response):
         log(f"  {project}: OK", log_path)
         return False, 0, True
 

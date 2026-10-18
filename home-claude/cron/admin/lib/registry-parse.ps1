@@ -33,7 +33,16 @@ function Unwrap-Value([string]$v) {
     # unwrapped to the non-empty STRING "false", which is truthy: the task was
     # registered as enabled.
     if ($v.Length -ge 2 -and $v[0] -eq '"' -and $v[-1] -eq '"') {
-        $v = $v.Substring(1, $v.Length - 2) -replace '\\"', '"'
+        # Inside "..." YAML expands escapes. `\"` and `\\` are expanded here as
+        # PyYAML does (only `\"` was, so `"C:\\x"` reached Task Scheduler with
+        # both backslashes); any other escape (`\n`, `\t`, `\x41`...) is refused
+        # rather than registered as a literal backslash.
+        $v = [regex]::Replace($v.Substring(1, $v.Length - 2), '\\(.?)', [Text.RegularExpressions.MatchEvaluator] {
+            param($m)
+            $c = $m.Groups[1].Value
+            if ($c -eq '"' -or $c -eq '\') { return $c }
+            throw "unsupported escape '\$c' in double-quoted value $v (only \"" and \\; use single quotes)"
+        })
         # Fall through to the scalar coercions below so a quoted 'false' is
         # still recognised as the boolean it is written to be.
     }
@@ -65,11 +74,16 @@ function Parse-InlineArray([string]$body) {
     $items = @()
     $cur = ''
     $q = ''
+    $esc = $false
     foreach ($c in $body.ToCharArray()) {
         $ch = [string]$c
-        if ($q -ne '') {
+        if ($esc) {
+            $cur += $ch; $esc = $false
+        } elseif ($q -ne '') {
             $cur += $ch
-            if ($ch -eq $q) { $q = '' }
+            # `\"` inside "..." does not close the scalar.
+            if ($q -eq '"' -and $ch -eq '\') { $esc = $true }
+            elseif ($ch -eq $q) { $q = '' }
         } elseif ($ch -eq "'" -or $ch -eq '"') {
             $q = $ch; $cur += $ch
         } elseif ($ch -eq ',') {

@@ -377,3 +377,29 @@ def test_a_run_that_examined_nothing_exits_nonzero(sync, tmp_path, monkeypatch):
     # first; the per-test value this comment used to credit never reaches it.
 
     assert sync.main() == 1
+
+
+# ── the "no drift" answer ──────────────────────────────────────────────────
+
+@pytest.mark.parametrize("answer", ["OK", "OK.", "OK!", "**OK**", "**OK.**", "`OK`",
+                                    "OK\nall in sync", "OK — no drift"])
+def test_ok_answer_variants_are_recognised(sync, answer):
+    assert sync.is_ok_response(answer)
+
+
+@pytest.mark.parametrize("answer", ["OKAY", "Not OK", "- AGENTS.md never mentions `x`",
+                                    "OK?", "### CRITICAL_MISSING_IN_AGENTS\n- `x`"])
+def test_non_ok_answers_are_not_taken_for_ok(sync, answer):
+    assert not sync.is_ok_response(answer)
+
+
+def test_ok_with_a_dot_does_not_trigger_the_autofix(sync, tmp_path, monkeypatch):
+    """`OK.` read as drift: a second, larger fix call and a finding about nothing."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Project\n", encoding="utf-8")
+    monkeypatch.setattr(sync, "llm_call", lambda *a, **k: "**OK.**\n")
+    monkeypatch.setattr(sync, "autofix", lambda *a, **k: pytest.fail("autofix on an OK"))
+
+    assert sync.check_pair("myproject", tmp_path / "CLAUDE.md", tmp_path / "AGENTS.md",
+                           tmp_path / "FINDINGS.md", tmp_path / "run.log") == (False, 0, True)
+    assert not (tmp_path / "FINDINGS.md").exists()

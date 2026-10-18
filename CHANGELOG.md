@@ -135,6 +135,13 @@ The short list; UPGRADING.md has the steps.
   failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
   the Pester import hangs or dies before the first file.
 
+### self-test: an absolute `core.hooksPath` is an active guard
+
+§10 accepted only the literal `.githooks`; a clone whose `core.hooksPath` points
+at its own `.githooks` by absolute path was told "secret-guard hook not active"
+on every run while its hooks fired. Both spellings now pass; a path to another
+directory still warns.
+
 ### Ported from the meta-repo: eight fixes since the last comparison
 
 The shared files were compared again, commit by commit. Eight changes made in

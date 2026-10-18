@@ -679,7 +679,12 @@ if ((-not $deployed) -and (Test-Path $hook) -and (Test-Path (Join-Path $root '.g
     # NativeCommandError, which killed the self-test between §9 and §15.
     $hp = (Invoke-Checked { & git -C $root config core.hooksPath }).Trim()
     # Matched as a LINE: git's own stderr shares the captured output with it.
-    if ($hp -match '(?m)^\.githooks\s*$') { Ok "secret-guard hook active (core.hooksPath=.githooks)" }
+    # An absolute path to this clone's .githooks is just as active: a clone set
+    # up that way was warned about on every run although its hooks were firing.
+    $want = ((Join-Path $root '.githooks') -replace '/', '\').TrimEnd('\')
+    $active = @($hp -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object {
+        $_ -eq '.githooks' -or (($_ -replace '/', '\').TrimEnd('\') -eq $want) })
+    if ($active) { Ok "secret-guard hook active (core.hooksPath=$($active[0]))" }
     else { Warn "secret-guard hook not active — run scripts/enable-guard.ps1 (git config core.hooksPath .githooks)" }
 }
 

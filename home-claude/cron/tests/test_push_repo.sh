@@ -495,4 +495,19 @@ grep -q "scan-error: git ls-files failed" "$LOG_FILE" || fail "T30: the preview 
 grep -q "staged secret-scan: clean" "$LOG_FILE" && fail "T30: the preview called unread files clean"
 cd "$TMP" || exit 1
 
-echo "PASS: push_repo (33 scenarios)"
+# === Test 31: ... and neither is a failed listing of the NEW file names ===
+# Those names went through one pipe with `2>/dev/null`: a git that failed handed
+# the name table nothing, while the real run fails the repo on the same failure.
+R31="$TMP/r31"; mkrepo "$R31"; echo change >> "$R31/app.py"
+mkdir -p "$TMP/stubs-git-names"
+printf '#!/bin/bash\ncase "$*" in *"diff -z HEAD --name-only"*) exit 128 ;; esac\nexec %q "$@"\n' \
+    "$(command -v git)" > "$TMP/stubs-git-names/git"
+chmod +x "$TMP/stubs-git-names/git"
+: > "$LOG_FILE"
+( export PATH="$TMP/stubs-git-names:$PATH"; DRY_RUN=1
+  reset_counters; push_repo "$R31" "r31" "Auto-commit: test" )
+grep -q "scan-error: git diff --name-only failed" "$LOG_FILE" || fail "T31: the preview did not report the failed name listing"
+grep -q "staged secret-scan: clean" "$LOG_FILE" && fail "T31: the preview called unchecked names clean"
+cd "$TMP" || exit 1
+
+echo "PASS: push_repo (34 scenarios)"

@@ -69,14 +69,19 @@ TRIGGER_SIMPLE = ("AtLogOn", "AtStartup")
 
 
 def load_tasks(registry: Path | None = None) -> list[dict]:
-    text = (registry or REGISTRY).read_text(encoding="utf-8")
+    path = registry or REGISTRY
     try:
         import yaml
-        return yaml.safe_load(text)["tasks"]
-    except Exception:
+    except ImportError:
         print("ERROR: PyYAML is required for gen-scheduler "
               "(pip install pyyaml)", file=sys.stderr)
         raise
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    # Its own message: one `except Exception` around the import and this lookup
+    # reported a registry without the list as a missing PyYAML.
+    if not isinstance(data, dict) or not isinstance(data.get("tasks"), list):
+        raise ValueError(f"{path} has no `tasks:` list")
+    return data["tasks"]
 
 
 def iso_hours(dur: str) -> int | None:
@@ -443,7 +448,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: registry not found: {registry}", file=sys.stderr)
         return 1
     print(f"registry: {registry}")
-    tasks = load_tasks(registry)
+    try:
+        tasks = load_tasks(registry)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     targets = ["systemd", "launchd"] if args.target == "both" else [args.target]
 
     if args.check:

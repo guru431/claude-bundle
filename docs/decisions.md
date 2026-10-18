@@ -176,11 +176,14 @@ every call, an unparseable `WIKI_ALLOW_OFFBOX` means "off-box refused", a missin
 included, and in both push scripts — and a `.sanitize-patterns` line that grep
 cannot compile blocks them too, instead of switching the denylist off.
 
-Two things fail OPEN, on purpose, and both are logged when they do:
+Three things fail OPEN, on purpose, and all are logged when they do:
 
 - **The LLM queue** (`cron/state/.llm.lock`). A call that cannot take the queue
   slot proceeds anyway. Risking a 429 beats silently skipping a nightly job, and
   the queue is a courtesy to a rate limit, not a safety property.
+- **The FINDINGS.md lock** (`cron/state/.findings.lock`). A writer that cannot
+  take it within 10 seconds files its finding unlocked: the lock keeps two
+  writers from losing one entry, and skipping the entry would lose it for sure.
 - **`bash-guard.py`**. A missing or malformed rules file disables the guard
   instead of blocking every Bash call on the machine. It is a habit guard (D-08),
   and one broken YAML file must not stop the user working.

@@ -299,7 +299,7 @@ guard_secrets_preview() {
         echo "[$label] [DRY] secret-scan lib unavailable — the real run WOULD SKIP this repo (fail closed)" >> "$LOG_FILE"
         return 0
     fi
-    local hits untracked f fhits bad bin_hits diff
+    local hits untracked added f fhits bad bin_hits diff
     # Its own command with its code read, as in guard_secrets: in a pipe a git
     # that failed handed the scanner nothing, and the preview said "clean" for a
     # repository the real run fails.
@@ -319,9 +319,15 @@ guard_secrets_preview() {
         untracked=""
     fi
     # New paths only, as in staged_sensitive_paths: an edit of a tracked `*.key`
-    # is not a sensitive name entering the repository.
-    bad=$( { secret_scan_git_paths diff HEAD --name-only --diff-filter=AR -- "${SWEEP_EXCLUDES[@]}"
-             printf '%s\n' "$untracked"; } 2>/dev/null | secret_scan_paths)
+    # is not a sensitive name entering the repository. The list is its own
+    # command there too: in one pipe with the table, a git that failed handed it
+    # nothing, and the preview checked no names where the real run fails the repo.
+    if ! added=$(secret_scan_git_paths diff HEAD --name-only --diff-filter=AR -- "${SWEEP_EXCLUDES[@]}" 2>/dev/null); then
+        hits="${hits:+$hits
+}scan-error: git diff --name-only failed, so the names of new files were NOT checked"
+        added=""
+    fi
+    bad=$(printf '%s\n%s\n' "$added" "$untracked" | secret_scan_paths)
     if [ -n "$bad" ]; then
         echo "[$label] [DRY] sensitive path(s) in the working tree — the real run WOULD FAIL this repo:" >> "$LOG_FILE"
         printf '%s\n' "$bad" | sed 's/^/    /' >> "$LOG_FILE"

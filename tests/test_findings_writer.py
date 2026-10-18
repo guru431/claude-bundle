@@ -73,6 +73,24 @@ def test_a_missing_file_is_created_with_the_header(utils, tmp_path):
     assert findings.read_text(encoding="utf-8").startswith(_header(utils))
 
 
+def test_a_finding_is_read_and_written_under_one_lock(utils, tmp_path, monkeypatch):
+    """Read, dedup, insert, replace — with nothing held across them, two writers
+    (the pipeline and test-sweep share the bundle's FINDINGS.md) could both read
+    the file before either replaced it, and one finding was lost."""
+    findings = tmp_path / "FINDINGS.md"
+    held = []
+    for name in ("_finding_offsets", "atomic_write_text"):
+        def spy(*a, _real=getattr(utils, name), **k):
+            held.append(utils.FINDINGS_LOCK.exists())
+            return _real(*a, **k)
+        monkeypatch.setattr(utils, name, spy)
+
+    assert utils.append_finding(findings, TITLE, "ctx", "what", "how") is True
+    assert utils.close_finding(findings, TITLE) is True
+    assert held and all(held), held
+    assert not utils.FINDINGS_LOCK.exists(), "the lock outlived the write"
+
+
 def test_closing_an_entry_keeps_fenced_lines_and_its_neighbours(utils, tmp_path):
     """close_finding cut at the next `## ` line, fenced or not: an entry whose
     fenced example held a `## ` line lost only its head, and the tail stayed as

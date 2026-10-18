@@ -173,6 +173,11 @@ def check_task(task: dict) -> list[str]:
             continue
         if isinstance(val, bool) or not isinstance(val, int):
             problems.append(f"{key}: must be an integer, got {type(val).__name__} ({val!r})")
+        # The range monitor_checks.health_port() accepts: outside it the monitors
+        # take the task for one without a port, and the probe is skipped in silence.
+        elif key == "health_port" and not 1 <= val <= 65535:
+            problems.append(f"health_port: {val} is not a TCP port (1-65535) — the "
+                            f"monitors would never probe it")
         elif val < 0:
             problems.append(f"{key}: must be >= 0, got {val}")
     if task.get("script_args") is not None and not isinstance(task["script_args"], list):
@@ -196,6 +201,19 @@ def check_task(task: dict) -> list[str]:
             f"AtStartup/AtLogOn only and is ignored here")
     if task.get("restart_interval") and not task.get("restart_count"):
         problems.append("restart_interval is set without restart_count — no retry happens")
+    # Task Scheduler repeats INSIDE a window: repeat_for, or P1D on a calendar
+    # trigger (sync-tasks.ps1 Get-RepeatDuration). An interval as long as the
+    # window never fires in it, and a longer one is refused at registration
+    # (`Duration:P1D`), while gen-scheduler.py writes the one daily hour for
+    # either: `Daily 01:00` every PT48H read like "every other day".
+    rep_every = gen.iso_seconds(str(task.get("repeat_every") or ""))
+    window = gen.iso_seconds(str(task.get("repeat_for") or "P1D"))
+    if (rep_every and window and rep_every >= window
+            and trig_kind in ("daily", "weekly", "monthly")):
+        problems.append(
+            f"repeat_every '{task.get('repeat_every')}' is not shorter than the "
+            f"repetition window ('{task.get('repeat_for') or 'P1D'}') — it never "
+            f"fires; the trigger alone decides when the task runs")
 
     # RUN the POSIX generator over this task. check-registry validated the
     # trigger grammar with its own regex while gen-scheduler.py returned None —

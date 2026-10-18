@@ -197,6 +197,17 @@ Then run `sync.cmd` once (step 4 above).
 - **New optional fields:** `logon_type: s4u` (runs before logon with no stored
   password, and no network credentials) and `health_port` (a service the
   monitors probe on loopback). See the registry header.
+- **`health_port` must be a TCP port (1–65535), and `repeat_every` shorter than
+  its repetition window** — `repeat_for`, or `P1D` on a Daily / Weekly / Monthly
+  trigger. `check-registry.py` (and `self-test.ps1 -InstallPath`) rejects
+  anything else: the monitors skipped a port outside the range in silence, and
+  an interval as long as the window never fires — a longer one Task Scheduler
+  refuses to register, while the systemd unit ran the task daily.
+- **A `platform: posix` task no longer makes the sync partial.** The shipped
+  registry has one (`ClaudeTaskMonitorPosix`), so every `sync.cmd` exited 3 and
+  the installer reported "NOT every task was registered"; now it exits 0.
+  `ClaudeDaemonWatch` has a new description: `sync.cmd` reports it `updated`
+  once.
 - **`ClaudeWikiLint` passes `script_args: ["--save-baseline"]`.** Only that run
   moves the lint's regression baseline now; a kept registry without the line
   leaves the baseline frozen and compares every week against the old one. Copy

@@ -868,11 +868,16 @@ def _compile(rec: dict) -> int:
     log_file = CRON_LOG_DIR / f"wiki-compile-sessions_{DATE}.log"
 
     def log(msg):
+        # Best effort, like wiki-flush-sessions' log(): a locked or unwritable
+        # log file must not take the compile down while it applies page edits.
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
         print(line)
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError as exc:
+            print(f"  (log not written: {exc})", file=sys.stderr)
 
     log(f"=== Wiki Compile Sessions {DATE} ===")
     for line in config_report():

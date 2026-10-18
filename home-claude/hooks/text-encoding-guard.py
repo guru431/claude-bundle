@@ -72,7 +72,9 @@ def ps1_rule(path: str, data: bytes) -> tuple[bytes | None, str]:
 
 
 def sh_rule(path: str, data: bytes) -> tuple[bytes | None, str]:
-    if data.startswith(UTF16_BOMS):
+    # NUL bytes as in ps1_rule: UTF-16 without a BOM has none to recognise it
+    # by, and its CRLF is `\r\0\n\0`, which the replace below never sees.
+    if data.startswith(UTF16_BOMS) or b"\x00" in data:
         return None, (f"WARNING: {path} is UTF-16 — bash cannot run it. Left as "
                       f"is; re-save it as UTF-8 without a BOM, LF line endings.")
     new = data[len(BOM):] if data.startswith(BOM) else data

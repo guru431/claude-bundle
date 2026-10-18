@@ -139,6 +139,10 @@ TABLE = [
     ("cat .env.dist", PASS),
     ("grep -c '^NAME=' .env", PASS),
     ("cat .environment-notes.md", PASS),
+    # direnv's .envrc — in the sensitive-path table, so the Read tool asks for it
+    ("cat .envrc", ASK),
+    ("tail ~/proj/.envrc && ls", ASK),
+    ("cat .envrc.example", PASS),
     # --no-verify
     ("git commit --no-verify -m wip", ASK),
     ("git -C /work/repo push --no-verify", ASK),

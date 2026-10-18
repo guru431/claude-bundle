@@ -122,6 +122,66 @@ The short list; UPGRADING.md has the steps.
   now adds missing `env` variables too — yours win.
 - **md2pdf on Windows:** a PDF printed under Python 3.13+ keeps an owner-only
   ACL until it is reset (`icacls … /reset`); new prints take the folder's.
+- **Registry:** a `health_port` outside 1–65535 and a `repeat_every` not
+  shorter than its repetition window are schema errors. `sync-tasks.ps1` exits
+  0, not 3, when the only tasks it leaves out are `platform: posix`, and
+  reports `ClaudeDaemonWatch` `updated` once (its description changed).
+- **`uninstall.ps1` / `uninstall.sh`** exit 2 also when a file could not be
+  removed; they used to stop at the first one.
+
+### Findings: 17 resolved, 9 declined
+
+The weekly code review of 2026-10-17 filed 26 findings; each was checked against
+the code. Resolved, each with a test that fails on the code it replaces:
+
+- **`sync-tasks.ps1`**: a `platform: posix` task is left out by design and no
+  longer counts as a skipped one. The shipped registry carries
+  `ClaudeTaskMonitorPosix`, so every sync exited 3 (partial) and `install.ps1`
+  said "NOT every task was registered".
+- **`check-registry.py`** rejects a `health_port` outside 1–65535 — the monitors
+  skipped such a port in silence — and a `repeat_every` not shorter than its
+  repetition window (`repeat_for`, `P1D` on a calendar trigger): Task Scheduler
+  refuses a longer one at registration, an equal one never fires, and the
+  systemd unit ran the task daily.
+- **`uninstall.ps1`** and its POSIX twin go on past a file they cannot remove
+  (held open by another process, a directory without write permission): the
+  rest is removed, the manifest kept, the summary printed, exit 2. The first
+  such file used to end the run with a raw error.
+- **`install.ps1 -Diff`** takes the pipeline root from the manifest unless
+  `-PipelineRoot` names one; on a split-root deployment every file in `cron/`,
+  `wiki/` and `bin/` read as new.
+- **`git-push-all.sh`**: the dry-run preview reports a failed listing of the new
+  file names instead of checking none — the real run fails the repo there.
+- **`agents-md-sync-check.py`**: a project without CLAUDE.md is not a pair.
+  Counted as one nobody could examine, a projects_root of such folders failed
+  every run as "LLM unreachable for all".
+- **FINDINGS.md** is read and written under one lock
+  (`cron/state/.findings.lock`, fail-open), so two tasks filing at once cannot
+  lose an entry.
+- **`wiki-flush-sessions.py`** reads `history.jsonl` with `errors="replace"`:
+  one byte that was not UTF-8 took the whole run down.
+- **Logs**: `wiki-compile-sessions.py`, `wiki-compile-kb.py`, `wiki-lint.py`
+  and `md2pdf-sync.py` write their log best-effort, like the other cron
+  scripts — a locked log file ended the run where it stood. A test now holds
+  every cron `log()` to that.
+- **`wiki-lint.py`** records an undelivered error alert as `delivery: failed`
+  in the run ledger; it said `n/a`.
+- **`mcp-probe.py`** no longer falls back to `tasklist`, which lists no command
+  lines: its answer could only ever read as "no resolver wrappers".
+- **`gen-scheduler.py`** says a registry has no `tasks:` list instead of
+  "PyYAML is required".
+- **Hooks**: `bash-deny.yaml` asks before printing direnv's `.envrc`, which the
+  sensitive-path table already covered; `text-encoding-guard.py` warns about a
+  UTF-16 `.sh` without a BOM and leaves it alone, as it does a `.ps1`.
+- **Docs**: `ClaudeDaemonWatch` alerts at most every 6 h per service *and
+  outcome* (restarted / still down), as its code always did, so a "still down"
+  is never held back behind a "restarted". `wiki-pipeline.py` declares its index
+  writes in words `check-io-matrix.py` reads as local.
+
+Found on the way and fixed with them: the same unguarded `log()` in three more
+scripts, and the same unguarded delete in the prune steps of both uninstallers.
+
+The 9 declined, with the reason for each, are in the local findings archive.
 
 ### md2pdf: the folder's permissions, and no link to `strategy.md`
 

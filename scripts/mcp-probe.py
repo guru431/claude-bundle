@@ -343,8 +343,10 @@ def running_wrappers() -> list[str]:
     `wmic` is REMOVED from Windows 11 24H2 and Server 2025. It used to be the
     only Windows path here, and an OSError was swallowed into an empty list —
     so on a current Windows the audit printed a confident "no resolver wrappers
-    running" whether or not any were. Three attempts now, and a failure of all
-    three says so instead of reading as a clean result.
+    running" whether or not any were. Every attempt now lists COMMAND LINES —
+    `tasklist`, once the fallback, has no such column, so its answer could only
+    ever read as clean — and a failure of all of them says so instead of reading
+    as a clean result.
     """
     found = []
     out = ""
@@ -352,7 +354,6 @@ def running_wrappers() -> list[str]:
         attempts = [
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
              "Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }"],
-            ["tasklist", "/v", "/fo", "csv"],
             ["wmic", "process", "get", "commandline"],
         ]
     else:

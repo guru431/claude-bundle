@@ -171,6 +171,37 @@ def test_a_generator_that_cuts_the_day_at_midnight_is_caught(monkeypatch, start,
     assert bool([p for p in problems if "fires at hours" in p]) is caught, problems
 
 
+@pytest.mark.parametrize("port, ok", [(8080, True), (65535, True), (0, False),
+                                      (80800, False), (-1, False)])
+def test_health_port_is_a_tcp_port(port, ok):
+    """monitor_checks.health_port() returns None outside 1-65535, so a typo'd
+    port passed `>= 0` here and the probe was skipped in silence."""
+    problems = check_registry.check_task(_task(health_port=port))
+    assert (problems == []) is ok, problems
+    if not ok:
+        assert any(p.startswith("health_port:") and "65535" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("trigger, repeat_every, repeat_for, platform, ok", [
+    ("Daily 01:00", "PT12H", None, None, True),
+    ("Daily 01:00", "PT24H", None, None, False),     # the next day's trigger comes first
+    ("Daily 01:00", "PT48H", None, None, False),
+    ("Daily 01:00", "PT48H", None, "windows", False),
+    ("Weekly Mon 01:00", "PT48H", "P7D", "windows", True),
+    ("AtStartup", "PT48H", None, None, True),        # open-ended: repeats every 48h
+])
+def test_a_repetition_not_shorter_than_its_window_is_rejected(trigger, repeat_every,
+                                                              repeat_for, platform, ok):
+    """`Daily 01:00` every PT48H read like "every other day". Task Scheduler
+    repeats inside a window — P1D on a calendar trigger, unless repeat_for
+    says otherwise — and refuses an interval longer than it at registration;
+    one as long never fires. The systemd unit kept the one daily hour, and the
+    guard said nothing."""
+    problems = check_registry.check_task(_task(trigger=trigger, repeat_every=repeat_every,
+                                               repeat_for=repeat_for, platform=platform))
+    assert (not [p for p in problems if "never fires" in p]) is ok, problems
+
+
 def test_s4u_is_a_logon_type():
     task = {"name": "T", "script": "C:\\b\\x.py", "trigger": "Daily 02:00",
             "timeout_hours": 1, "logon_type": "s4u", "platform": "windows"}

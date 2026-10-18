@@ -1694,6 +1694,23 @@ def test_an_undelivered_regression_alert_does_not_move_the_baseline(bundle: Path
     assert lint.BASELINE_FILE.read_text(encoding="utf-8") == before
 
 
+def test_an_undelivered_error_alert_is_a_failed_delivery(bundle: Path, monkeypatch):
+    """The answer of the error alert was thrown away: the ledger said delivery
+    "n/a" for a run whose alert was due and never arrived."""
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_error_alert", "wiki-lint.py")
+    monkeypatch.setattr(lint, "ENABLE_TELEGRAM_ALERTS", True)
+    monkeypatch.setattr(lint, "check_index_sync", lambda _pages: ["ERROR: index out of sync"])
+    monkeypatch.setattr(lint.notify, "send", lambda *_a, **_k: False)
+    recorded: dict = {}
+    monkeypatch.setattr(lint, "record_run", lambda **kw: recorded.update(kw))
+    monkeypatch.setattr(sys, "argv", ["wiki-lint.py"])
+
+    with pytest.raises(SystemExit):
+        lint.main()
+
+    assert recorded["delivery"] == "failed", recorded
+
+
 def test_a_failed_baseline_write_leaves_the_old_baseline(bundle: Path, monkeypatch):
     """The baseline was written in place, so a run killed mid-write left a
     truncated file — no baseline at all to the next run, which then reported

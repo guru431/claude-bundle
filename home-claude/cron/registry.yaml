@@ -402,7 +402,7 @@ tasks:
 
   - name: ClaudeDaemonWatch
     project: main
-    description: Every 10 minutes, restart a registry service whose health_port stopped listening (after two probes; not in the first 10 minutes after boot); Telegram at most every 6h per service. Disabled by default — enable it once a task declares health_port.
+    description: Every 10 minutes, restart a registry service whose health_port stopped listening (after two probes; not in the first 10 minutes after boot); Telegram at most every 6h per service and outcome (restarted / still down). Disabled by default — enable it once a task declares health_port.
     script: <bundle-install-path>\cron\daemon-watch.py
     kind: python
     platform: windows

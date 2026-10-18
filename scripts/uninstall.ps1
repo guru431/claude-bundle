@@ -29,7 +29,8 @@
 #   powershell -File scripts/uninstall.ps1 -ClaudeHome D:\claude -Confirm
 #
 # Exit codes: 0 = ok (or dry run), 1 = missing / unreadable manifest,
-#             2 = finished, but some files were skipped,
+#             2 = finished, but some files were kept (changed since install, or
+#                 could not be removed — held open by another process, say),
 #             3 = this deployment's scheduled tasks are still registered (not
 #                 elevated, -Unregister failed, or the deployment's syncer is
 #                 gone) — nothing was deleted.
@@ -259,6 +260,7 @@ if ($mf.tier -eq 'full') {
 $removed = 0
 $gone = 0
 $skipped = 0
+$failed = 0
 $rejected = 0
 # Parents of what we actually removed — the ONLY directories step 3 may prune.
 $touchedDirs = New-Object System.Collections.Generic.HashSet[string]
@@ -294,7 +296,12 @@ foreach ($f in @($mf.written)) {
         continue
     }
     $touchedDirs.Add((Split-Path $full -Parent)) | Out-Null
-    if ($apply) { Remove-Item $full -Force; $removed++ }
+    if ($apply) {
+        # Under ErrorActionPreference=Stop one file another process holds open
+        # threw out of the loop: the rest stayed, with no summary and no exit code.
+        try { Remove-Item $full -Force; $removed++ }
+        catch { Warn "could not remove $($f.path) — $($_.Exception.Message)"; $failed++ }
+    }
     else { Info "[dry-run] would remove $($f.path)"; $removed++ }
 }
 
@@ -323,22 +330,25 @@ if ($apply) {
         # the installer's own closing self-test creates it. Only .pyc content is
         # ours to assume; anything else in there is left alone.
         $cache = Join-Path $d '__pycache__'
+        # A directory that will not go stays — it costs nothing, unlike the
+        # summary and the exit code a throw here would take with it.
         if ((Test-Path $cache) -and
             -not (Get-ChildItem $cache -Recurse -Force | Where-Object { $_.Extension -ne '.pyc' })) {
-            Remove-Item $cache -Recurse -Force
-            $pruned++
+            try { Remove-Item $cache -Recurse -Force; $pruned++ }
+            catch { Warn "could not prune $cache — $($_.Exception.Message)" }
         }
         if (-not (Get-ChildItem $d -Force)) {
-            Remove-Item $d -Force
-            $pruned++
+            try { Remove-Item $d -Force; $pruned++ }
+            catch { Warn "could not prune $d — $($_.Exception.Message)" }
         }
     }
 }
 
 # ── 4. The manifest itself (kept while it still describes skipped files) ────
 if ($apply) {
-    if ($skipped -eq 0) { Remove-Item $mfPath -Force; Good "removed .bundle-manifest.json" }
-    else { Warn "kept .bundle-manifest.json — $skipped file(s) still listed in it were skipped" }
+    $kept = $skipped + $failed
+    if ($kept -eq 0) { Remove-Item $mfPath -Force; Good "removed .bundle-manifest.json" }
+    else { Warn "kept .bundle-manifest.json — $kept file(s) still listed in it were kept" }
 }
 
 # ── 5. Summary ──────────────────────────────────────────────────────────────
@@ -349,7 +359,7 @@ if ($mf.preserved) {
 }
 Info ""
 Info "--- Summary -----------------------------------------------------"
-Info "removed: $removed   already gone: $gone   skipped (modified): $skipped   rejected (bad path): $rejected   empty dirs pruned: $pruned"
+Info "removed: $removed   already gone: $gone   skipped (modified): $skipped   could not remove: $failed   rejected (bad path): $rejected   empty dirs pruned: $pruned"
 if ($mf.tier -eq 'full') {
     # Registry-driven, not `schtasks /delete`: this project forbids touching the
     # scheduler directly because it drifts from registry.yaml — telling users to
@@ -370,5 +380,5 @@ if (-not $apply) {
     Info "Dry run — nothing was deleted. Re-run with -Confirm to apply."
     exit 0
 }
-if ($skipped -gt 0) { exit 2 }
+if ($skipped -gt 0 -or $failed -gt 0) { exit 2 }
 exit 0

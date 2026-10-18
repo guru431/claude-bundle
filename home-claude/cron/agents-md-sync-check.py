@@ -499,19 +499,24 @@ def append_to_findings(findings_path: Path, project: str, report: str) -> bool:
 
 
 def check_pair(project: str, claude_path: Path, agents_path: Path,
-               findings_path: Path, log_path: Path) -> tuple[bool, int, bool]:
+               findings_path: Path, log_path: Path) -> tuple[bool, int, bool | None]:
     """Check one CLAUDE.md / AGENTS.md pair.
 
     Returns (was a finding filed, items fixed automatically, was the pair
     actually examined). The third value is what separates "checked and found
     nothing" from "never reached the provider": without it a night where every
-    project returned LLM_FAIL looked exactly like a clean sweep.
+    project returned LLM_FAIL looked exactly like a clean sweep. It is None
+    when there is no pair — no CLAUDE.md — which is neither: counted as "not
+    examined", a projects_root of such folders read as an unreachable LLM.
     """
+    if not claude_path.exists():
+        log(f"  {project}: SKIP (no CLAUDE.md)", log_path)
+        return False, 0, None
     claude_md = read_file(claude_path)
     agents_md = read_file(agents_path)
 
     if claude_md is None:
-        log(f"  {project}: SKIP (no CLAUDE.md)", log_path)
+        log(f"  {project}: SKIP (CLAUDE.md could not be read)", log_path)
         return False, 0, False
     if agents_md is None:
         if has_open_drift_finding(findings_path, project):
@@ -663,6 +668,8 @@ def _check_projects(args, rec: dict) -> int:
             project_dir / "FINDINGS.md",
             log_path,
         )
+        if reached is None:
+            continue                     # no CLAUDE.md: not a pair to check
         drift_count += int(drifted)
         fixed_count += fixed
         checked += 1

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,33 @@ $lines += 'orphaned-confirm=' + $LASTEXITCODE
     # nothing, so every task carrying the marker counts.
     assert got["unreadable"] == would, got
     assert "unregistered in step 1b" not in " ".join(got.values())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="an open file blocks its deletion on Windows only")
+@pytest.mark.integration   # one uninstall run, ~1.2 s
+def test_a_file_that_cannot_be_removed_does_not_end_the_sweep(tmp_path: Path):
+    """Remove-Item under ErrorActionPreference=Stop: one file another process
+    held open threw out of the loop — the files after it stayed, and there was
+    no summary and no exit code that said so."""
+    home = tmp_path / "home"
+    (home / "skills").mkdir(parents=True)
+    held, other = home / "skills" / "held.md", home / "skills" / "other.md"
+    for path in (held, other):
+        path.write_text(path.name, encoding="utf-8")
+    (home / ".bundle-manifest.json").write_text(json.dumps({
+        "bundle_version": "0.0.0", "installed_at": "2026-01-01T00:00:00Z", "tier": "lite",
+        "claude_home": str(home), "pipeline_root": str(home),
+        "written": [{"root": "claude_home", "path": f"skills/{p.name}", "sha256": _sha256(p)}
+                    for p in (held, other)],
+        "preserved": []}), encoding="utf-8")
+
+    with open(held, "rb"):                  # no FILE_SHARE_DELETE: it cannot go
+        r = run_ps_file(UNINSTALL, "-ClaudeHome", home, "-Confirm", cwd=tmp_path)
+
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "could not remove skills/held.md" in r.stdout and "could not remove: 1" in r.stdout, r.stdout
+    assert held.exists() and not other.exists()
+    assert (home / ".bundle-manifest.json").exists(), "the manifest still describes a kept file"
 
 
 def test_uninstall_finds_the_manifest_under_claude_config_dir(tmp_path: Path):

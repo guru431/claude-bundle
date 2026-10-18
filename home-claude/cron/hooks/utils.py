@@ -1390,6 +1390,20 @@ _FINDING_TITLE_RE = re.compile(r"^##\s+\d{4}-\d{2}-\d{2}\s+·\s+(.+?)(?:\s+\[[^\
 _FINDING_STATUS_RE = re.compile(r"(?mi)^\*\*Status:\*\*[ \t]*(.*)$")
 _FINDING_CLOSED_RE = re.compile(r"(?i)^(?:done|superseded)\b|\b(?:wontfix|deferred)\b")
 
+# Read, dedup, insert, replace: with nothing held across those, two writers —
+# the pipeline and test-sweep share the bundle's FINDINGS.md — could both read
+# the file before either replaced it, and one finding was lost. ONE lock for
+# every FINDINGS.md the bundle writes: a lock file next to each would be a stray
+# file in somebody's repository, which ClaudeGitPushAll commits. Fail-open — a
+# finding filed unlocked beats none — and an O_EXCL file that is gone once
+# released; the hold is milliseconds, so one older than `stale` is abandoned.
+FINDINGS_LOCK = BUNDLE_ROOT / "cron" / "state" / ".findings.lock"
+
+
+def _findings_lock():
+    return _file_lock(FINDINGS_LOCK, wait=10.0, stale=60.0, fail_open=True,
+                      label="findings lock")
+
 
 def _finding_offsets(text: str) -> list[int]:
     """Offsets of the `## ` lines that lie outside ``` / ~~~ fences."""
@@ -1446,21 +1460,22 @@ def append_finding(path: Path, title: str, context: str, what: str,
              f"**Proposal:** {masked(proposal)}\n"
              f"**Status:** open\n\n")
     try:
-        existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
-        # Against the MASKED title, the form the entry is written in: the raw one
-        # never matched a title mask_secrets changes, and every retry filed a
-        # duplicate.
-        if masked(title) in _open_finding_titles(existing):
-            return False
-        first = _finding_offsets(existing)[:1]
-        if existing.lstrip().startswith("# Findings") and first:
-            head, body = existing[:first[0]].rstrip("\n") + "\n\n", existing[first[0]:]
-        elif existing.lstrip().startswith("# Findings"):
-            head, body = existing.rstrip("\n") + "\n\n", ""
-        else:
-            head, body = findings_header(project or path.parent.name), existing
-        atomic_write_text(path, head + entry + body)
-        return True
+        with _findings_lock():
+            existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+            # Against the MASKED title, the form the entry is written in: the raw
+            # one never matched a title mask_secrets changes, and every retry
+            # filed a duplicate.
+            if masked(title) in _open_finding_titles(existing):
+                return False
+            first = _finding_offsets(existing)[:1]
+            if existing.lstrip().startswith("# Findings") and first:
+                head, body = existing[:first[0]].rstrip("\n") + "\n\n", existing[first[0]:]
+            elif existing.lstrip().startswith("# Findings"):
+                head, body = existing.rstrip("\n") + "\n\n", ""
+            else:
+                head, body = findings_header(project or path.parent.name), existing
+            atomic_write_text(path, head + entry + body)
+            return True
     except OSError as exc:
         print(f"WARNING: could not file a finding in {path}: {exc}", file=sys.stderr)
         return False
@@ -1476,28 +1491,29 @@ def close_finding(path: Path, title: str) -> bool:
     them. Cutting at any `## ` line left the tail of an entry whose fenced
     example held one, and took a fenced quote of the title for the entry itself.
     """
-    try:
-        if not path.exists():
+    with _findings_lock():               # see FINDINGS_LOCK
+        try:
+            if not path.exists():
+                return False
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
             return False
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    bounds = _finding_offsets(text)
-    want = masked(title)
-    kept: list[str] = []
-    for start, end in zip(bounds, bounds[1:] + [len(text)]):
-        block = text[start:end]
-        m = _FINDING_TITLE_RE.match(block.split("\n", 1)[0])
-        if not (m and m.group(1).strip() == want):
-            kept.append(block)
-    new = (text[:bounds[0]] if bounds else text) + "".join(kept)
-    if new == text:
-        return False
-    try:
-        atomic_write_text(path, new.rstrip("\n") + "\n")
-    except OSError:
-        return False
-    return True
+        bounds = _finding_offsets(text)
+        want = masked(title)
+        kept: list[str] = []
+        for start, end in zip(bounds, bounds[1:] + [len(text)]):
+            block = text[start:end]
+            m = _FINDING_TITLE_RE.match(block.split("\n", 1)[0])
+            if not (m and m.group(1).strip() == want):
+                kept.append(block)
+        new = (text[:bounds[0]] if bounds else text) + "".join(kept)
+        if new == text:
+            return False
+        try:
+            atomic_write_text(path, new.rstrip("\n") + "\n")
+        except OSError:
+            return False
+        return True
 
 
 def append_bundle_finding(title: str, context: str, what: str,

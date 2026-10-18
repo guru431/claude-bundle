@@ -194,6 +194,27 @@ def test_a_direct_interpreter_is_not_flagged(spec):
     assert _load().is_wrapper(spec) is None
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows process listing")
+def test_a_process_list_without_command_lines_is_not_a_clean_result(monkeypatch, capsys):
+    """`tasklist /v /fo csv` has no CommandLine column, so `npx`/`uv run` can
+    never show in it. With PowerShell unavailable it answered, and the audit
+    printed "no resolver wrappers" without the warning a failed listing gets."""
+    mod = _load()
+
+    def fake_run(cmd, **_kw):
+        if cmd[0] == "tasklist":
+            return subprocess.CompletedProcess(cmd, 0, stdout=(
+                '"Image Name","PID","Session Name","Session#","Mem Usage","Status",'
+                '"User Name","CPU Time","Window Title"\n'
+                '"node.exe","4242","Console","1","80,000 K","Running","u","0:00:01","N/A"\n'),
+                stderr="")
+        raise OSError(f"{cmd[0]} is not here")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    assert mod.running_wrappers() == []
+    assert "NOT a verified result" in capsys.readouterr().err
+
+
 def test_the_audit_fails_on_a_cmd_wrapped_npx(tmp_path, monkeypatch, capsys):
     mod = _load()
     # Enumerating live processes spawns PowerShell or ps; not what is tested here.

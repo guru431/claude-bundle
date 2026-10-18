@@ -10,6 +10,7 @@ Run: pytest tests/ -q
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import os
@@ -999,6 +1000,27 @@ def test_flush_carries_an_unreadable_transcript_over_instead_of_filing_it(
     assert state["flush"]["seen_unprocessed"] == ["readme/s.jsonl"]
 
 
+def test_flush_reads_a_history_line_that_is_not_utf8(bundle_tree: Path, monkeypatch):
+    """history.jsonl was the one source flush read strictly: a byte that is not
+    UTF-8 raised UnicodeDecodeError — not the OSError it caught — and took the
+    whole run down."""
+    home = bundle_tree / "fake-home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "history.jsonl").write_bytes(b'{"cwd": "C:/work/alpha"}\n'
+                                         b'{"cwd": "C:/work/beta", "display": "caf\xe9"}\n')
+    monkeypatch.setenv("CLAUDE_HOME", str(home))
+    monkeypatch.syspath_prepend(str(bundle_tree / "cron"))
+    monkeypatch.syspath_prepend(str(bundle_tree / "cron" / "hooks"))
+    for name in ("utils", "untrusted", "runs"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    spec = importlib.util.spec_from_file_location(
+        "wiki_flush_history", bundle_tree / "cron" / "wiki" / "wiki-flush-sessions.py")
+    flush = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(flush)
+
+    assert flush.parse_history_activity() == {"alpha": 1, "beta": 1}
+
+
 def test_a_journaled_compile_kb_failure_is_not_migrated_as_processed(bundle_tree: Path,
                                                                     monkeypatch):
     """compile-kb journals a failure as `(ERROR: <kind>)`; the migration skipped
@@ -1226,3 +1248,34 @@ def test_reading_a_corrupt_ledger_writes_nothing_and_its_overwrite_keeps_one_cop
     utils.STATE_PATH.write_text("[]", encoding="utf-8")
     utils.state_add("flush", "processed_jsonls", ["p/d.jsonl@1"])
     assert len(copies()) == 2
+
+
+# ── a log line is never worth the run ─────────────────────────────────────────
+
+def _catches_oserror(handler) -> bool:
+    names = (handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type])
+    return any(n is None or (isinstance(n, ast.Name) and n.id in ("OSError", "Exception"))
+               for n in names)
+
+
+def test_every_cron_log_function_is_best_effort():
+    """An open() in a log() with no `except OSError` around it: an antivirus or a
+    backup holding the day's log raised out of the log call, and the run died
+    where it stood — wiki-compile-sessions in the middle of applying page edits.
+    Most cron scripts already wrote their log best-effort; four did not."""
+    offenders = []
+    for path in sorted(CRON.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not (isinstance(fn, ast.FunctionDef) and fn.name == "log"):
+                continue
+            guarded = {id(inner) for node in ast.walk(fn) if isinstance(node, ast.Try)
+                       and any(_catches_oserror(h) for h in node.handlers)
+                       for stmt in node.body for inner in ast.walk(stmt)}
+            for node in ast.walk(fn):
+                func = getattr(node, "func", None)
+                opens = (isinstance(func, ast.Name) and func.id == "open") or \
+                        (isinstance(func, ast.Attribute) and func.attr == "open")
+                if opens and id(node) not in guarded:
+                    offenders.append(f"{path.relative_to(ROOT).as_posix()}:{node.lineno}")
+    assert offenders == [], "log() must not raise on a log it cannot write: " + ", ".join(offenders)

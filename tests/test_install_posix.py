@@ -108,6 +108,31 @@ def test_uninstall_keeps_a_changed_file_unless_forced(bi, tmp_path, capsys):
     assert not (home / "CLAUDE.md").exists() and not (home / ".bundle-manifest.json").exists()
 
 
+def test_a_file_that_cannot_be_removed_does_not_end_the_sweep(bi, tmp_path, capsys,
+                                                              monkeypatch):
+    """`path.unlink()` raised on the first file it could not delete — a
+    directory without write permission — and the traceback took the files after
+    it, the manifest step and the summary with it."""
+    home = tmp_path / "home"
+    (home / "skills").mkdir(parents=True)
+    for name in ("held.md", "other.md"):
+        (home / "skills" / name).write_text(name, encoding="utf-8")
+    _manifest(home, ["skills/held.md", "skills/other.md"])
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if self.name == "held.md":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    assert bi.main(["uninstall", "--claude-home", str(home), "--confirm"]) == 2
+    out = capsys.readouterr().out
+    assert "could not remove skills/held.md" in out and "could not remove: 1" in out, out
+    assert (home / "skills" / "held.md").is_file() and not (home / "skills" / "other.md").exists()
+    assert (home / ".bundle-manifest.json").is_file(), "the manifest still describes a kept file"
+
+
 def test_uninstall_without_a_manifest_removes_nothing(bi, tmp_path):
     home = tmp_path / "home"
     home.mkdir()

@@ -141,6 +141,30 @@ def test_a_lite_install_keeps_the_users_settings_and_leaves_out_wiki(tmp_path: P
     assert json.loads(settings.read_text(encoding="utf-8-sig"))["myOwnKey"] == "mine"
 
 
+@pytest.mark.integration   # one -Diff run over the full tree
+def test_diff_finds_the_pipeline_where_the_manifest_says_it_is(tmp_path: Path):
+    """-Diff takes the tier of the deployment from its manifest, but not the
+    pipeline root: without -PipelineRoot it compared cron/, wiki/ and bin/ of a
+    split-root deployment with ClaudeHome, and every one of them read as new."""
+    home = tmp_path / "home"
+    (home / "AppData" / "Local").mkdir(parents=True)   # see the first test
+    claude_home, pipe = home / ".claude", tmp_path / "pipeline"
+    (pipe / "bin").mkdir(parents=True)
+    shutil.copy(ROOT / "home-claude" / "bin" / "_run-hidden.vbs", pipe / "bin" / "_run-hidden.vbs")
+    claude_home.mkdir()
+    (claude_home / ".bundle-manifest.json").write_text(json.dumps({
+        "bundle_version": "0.0.0", "tier": "full", "claude_home": str(claude_home),
+        "pipeline_root": str(pipe), "preserved": [], "written": []}), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+    env.update(USERPROFILE=str(home), HOME=str(home))
+    r = run_ps_file(ROOT / "scripts" / "install.ps1", "-Diff", "-NonInteractive",
+                    "-ClaudeHome", claude_home, env=env, cwd=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    assert f"PipelineRoot: {pipe}" in r.stdout, r.stdout
+    assert "_run-hidden.vbs" not in r.stdout, "an unchanged pipeline file was listed"
+
+
 @pytest.mark.integration   # one lite install, ~1.5 s
 def test_an_older_installs_commands_readme_is_reported_and_no_longer_tracked(tmp_path: Path):
     """Claude Code makes a slash command of every .md in commands/, so the README

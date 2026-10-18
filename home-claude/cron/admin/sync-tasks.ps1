@@ -867,7 +867,10 @@ if ($Only) { Write-Host "Only:     $($Only -join ', ')" }
 Write-Host "Tasks in registry: $($reg.tasks.Count)"
 Write-Host ""
 
-$summary = @{ created = 0; updated = 0; unchanged = 0; skipped = 0; failed = 0 }
+# posix_only is its own count: those are left out by design, and counted as
+# `skipped` they made every sync of the shipped registry — which carries the
+# POSIX task monitor — exit 3, a partial sync that was nothing of the kind.
+$summary = @{ created = 0; updated = 0; unchanged = 0; skipped = 0; failed = 0; posix_only = 0 }
 
 foreach ($task in $reg.tasks) {
     if ($Only -and ($Only -notcontains $task.name)) { continue }
@@ -878,7 +881,7 @@ foreach ($task in $reg.tasks) {
     # precisely to say it should not.
     if ("$($task.platform)".ToLower() -eq 'posix') {
         Write-Host ("[skipped: posix-only] " + $task.name + " — platform: posix, this task belongs to systemd/launchd") -ForegroundColor DarkGray
-        $summary.skipped++
+        $summary.posix_only++
         continue
     }
 

@@ -74,6 +74,17 @@ def _rows(out: str, status: str) -> list[str]:
                   if line.strip().startswith(status + " "))
 
 
+@pytest.mark.parametrize("text", ["version: 1\n", "version: 1\ntasks:\n", "[]\n"])
+def test_a_registry_without_a_task_list_says_so(gs, tmp_path, capsys, text):
+    """One `except Exception` used to cover the import AND the lookup, so a
+    registry with no `tasks:` list was reported as a missing PyYAML."""
+    path = tmp_path / "registry.yaml"
+    path.write_text(text, encoding="utf-8")
+    assert gs.main(["--registry", str(path), "--out-dir", str(tmp_path / "out")]) == 1
+    err = capsys.readouterr().err
+    assert "no `tasks:` list" in err and "PyYAML" not in err, err
+
+
 def test_every_unit_is_new_on_a_clean_machine_and_nothing_is_written(gs, registry,
                                                                      tmp_path, capsys):
     units = tmp_path / "installed"

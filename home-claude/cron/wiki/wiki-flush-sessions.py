@@ -697,7 +697,9 @@ def parse_history_activity() -> dict[str, int]:
         return activity
 
     try:
-        with open(HISTORY_JSONL, "r", encoding="utf-8") as f:
+        # errors="replace", as _read_text_safe: a byte that is not UTF-8 raised
+        # UnicodeDecodeError — a ValueError, not the OSError caught below.
+        with open(HISTORY_JSONL, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:

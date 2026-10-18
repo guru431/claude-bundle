@@ -30,7 +30,7 @@ Usage:
 # Declared I/O for scripts/check-io-matrix.py, which fails when this line and
 # the table in docs/cron-architecture.md disagree. This is the UNION of the
 # phases it runs — it makes no LLM call of its own, only the two Telegram lines.
-# bundle-io: offbox=session/daily-log text of allowed projects -> LLM provider (via the flush and compile phases); a failure alert, and on the last dry_run_until night a preview summary (project names, sizes, provider), -> Telegram money=tokens writes=wiki/daily/, wiki/projects/, wiki/kb/ and the vault indexes
+# bundle-io: offbox=session/daily-log text of allowed projects -> LLM provider (via the flush and compile phases); a failure alert, and on the last dry_run_until night a preview summary (project names, sizes, provider), -> Telegram money=tokens writes=wiki/daily/, wiki/projects/, wiki/kb/ and wiki indexes
 import json
 import os
 import shutil

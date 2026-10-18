@@ -669,11 +669,16 @@ def main():
     log_file = CRON_LOG_DIR / f"wiki-lint_{DATE}.log"
 
     def log(msg):
+        # Best effort, like wiki-flush-sessions' log(): a locked or unwritable
+        # log file must not cost the run its ledger record.
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
         print(line)
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError as exc:
+            print(f"  (log not written: {exc})", file=sys.stderr)
 
     log(f"=== Wiki Lint {DATE} ===")
 
@@ -732,11 +737,17 @@ def main():
 
     # Opt-in via ENABLE_TELEGRAM_ALERTS at the top of this file — broken
     # links in compiled kb pages tend to produce weekly noise.
+    # Its answer goes to the ledger only. The baseline below is about growth,
+    # and an error count is not relative to it: a lost error alert is due again
+    # on the next run that still finds the errors.
+    error_alert_lost = False
     if stats["errors"] > 0:
-        send_telegram_alert(
+        error_alert_lost = not send_telegram_alert(
             f"wiki-lint {DATE}: {stats['errors']} errors, "
             f"{stats['warnings']} warnings ({stats['pages']} pages)"
         )
+        if error_alert_lost:
+            log("ERROR: the error alert was not delivered")
 
     # Second signal, orthogonal to the error count above: growth per check class
     # against the previous run. This is what catches a regression buried in a
@@ -771,7 +782,8 @@ def main():
     # clean bill of health, which is what "0 errors over 0 pages" reads as.
     failed = stats["errors"] > 0 or alert_lost
     record_run(task="ClaudeWikiLint", process_rc=1 if failed else 0,
-               useful_items=stats["pages"], delivery="failed" if alert_lost else "n/a",
+               useful_items=stats["pages"],
+               delivery="failed" if alert_lost or error_alert_lost else "n/a",
                note=f"{stats['errors']} error(s), {stats['warnings']} warning(s)")
 
     # Lint errors (index desync) are a hard failure: skip the heartbeat and exit

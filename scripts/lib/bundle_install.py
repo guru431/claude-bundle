@@ -500,11 +500,11 @@ def uninstall(args) -> int:
     print(f"Files:        {len(manifest['written'])} written by the installer")
     print(f"Mode:         {'DELETE' if apply else 'dry run - re-run with --confirm to delete'}\n")
 
-    removed = gone = skipped = 0
+    removed = gone = skipped = failed = 0
     touched: set[Path] = set()
 
     def remove(path: Path, label: str, recorded_hash: str) -> None:
-        nonlocal removed, gone, skipped
+        nonlocal removed, gone, skipped, failed
         if not path.is_file():
             gone += 1
             return
@@ -512,12 +512,19 @@ def uninstall(args) -> int:
             print(f"[warn] changed since install - keeping {label} (use --force to delete it anyway)")
             skipped += 1
             return
-        removed += 1
         if apply:
-            path.unlink()
+            # One file that will not go (a directory without write permission)
+            # raised out of the sweep: the rest stayed, with no summary.
+            try:
+                path.unlink()
+            except OSError as e:
+                print(f"[warn] could not remove {label} - {e}")
+                failed += 1
+                return
             touched.add(path.parent)
         else:
             print(f"[dry-run] would remove {label}")
+        removed += 1
 
     units, rejected = scheduler_units(manifest)
     if rejected:
@@ -548,18 +555,22 @@ def uninstall(args) -> int:
         for directory in sorted(candidates, key=lambda p: len(str(p)), reverse=True):
             if not directory.is_dir():
                 continue
-            cache = directory / "__pycache__"
-            if cache.is_dir() and all(p.is_file() and p.suffix == ".pyc" for p in cache.rglob("*")):
-                shutil.rmtree(cache)
-                pruned += 1
-            if not any(directory.iterdir()):
-                directory.rmdir()
-                pruned += 1
-        if skipped == 0:
+            # A directory that will not go stays; it costs nothing, the summary does.
+            try:
+                cache = directory / "__pycache__"
+                if cache.is_dir() and all(p.is_file() and p.suffix == ".pyc" for p in cache.rglob("*")):
+                    shutil.rmtree(cache)
+                    pruned += 1
+                if not any(directory.iterdir()):
+                    directory.rmdir()
+                    pruned += 1
+            except OSError as e:
+                print(f"[warn] could not prune {directory} - {e}")
+        if skipped + failed == 0:
             (claude_home / MANIFEST).unlink()
             print(f"[ok]   removed {MANIFEST}")
         else:
-            print(f"[warn] kept {MANIFEST} - {skipped} file(s) still listed in it were skipped")
+            print(f"[warn] kept {MANIFEST} - {skipped + failed} file(s) still listed in it were kept")
 
     if manifest.get("preserved"):
         print("\nKept (yours - the installer never claimed these):")
@@ -567,11 +578,12 @@ def uninstall(args) -> int:
             print(f"  {rel}")
     print("\n--- Summary -----------------------------------------------------")
     print(f"removed: {removed}   already gone: {gone}   skipped (modified): {skipped}   "
-          f"rejected (bad path): {rejected}   empty dirs pruned: {pruned}")
+          f"could not remove: {failed}   rejected (bad path): {rejected}   "
+          f"empty dirs pruned: {pruned}")
     if not apply:
         print("\nDry run - nothing was deleted. Re-run with --confirm to apply.")
         return 0
-    return 2 if skipped else 0
+    return 2 if skipped or failed else 0
 
 
 def main(argv: list[str] | None = None) -> int:

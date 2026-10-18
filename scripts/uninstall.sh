@@ -17,8 +17,9 @@
 #
 # Needs Python 3.9+ (the manifest is JSON).
 # Exit: 0 removed or dry run; 1 nothing was attempted — bad arguments, no /
-#       unreadable manifest, or no Python; 2 finished, but changed files were
-#       kept; 3 a timer could not be disabled — nothing was removed.
+#       unreadable manifest, or no Python; 2 finished, but files were kept —
+#       changed since install, or they could not be removed; 3 a timer could
+#       not be disabled — nothing was removed.
 set -eu
 
 here="$(cd "$(dirname "$0")/.." && pwd)"

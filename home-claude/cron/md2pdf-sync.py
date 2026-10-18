@@ -120,10 +120,15 @@ TG_LIMIT = 3800  # leave headroom under Telegram's 4096
 
 
 def log(msg: str) -> None:
+    # Best effort, like wiki-flush-sessions' log(): a locked or unwritable log
+    # file must not take the sweep down halfway through the tree.
     line = f"{datetime.now():%H:%M:%S} {msg}"
     print(line)
-    with LOG_FILE.open("a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
+    try:
+        with LOG_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError as exc:
+        print(f"  (log not written: {exc})", file=sys.stderr)
 
 
 def load_last_run() -> float | None:

@@ -407,6 +407,27 @@ def test_verify_reads_enabled_the_way_the_sync_registers_it(tmp_path: Path):
 
 @windows_only
 @pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
+def test_a_posix_only_task_does_not_make_the_sync_partial(tmp_path: Path):
+    """`platform: posix` is left out by design, and was counted with the tasks
+    that could NOT be registered: the shipped registry has one (the POSIX task
+    monitor), so every sync of it exited 3 and install.ps1 said "NOT every task
+    was registered"."""
+    name = f"ClaudeBundleTest-{uuid.uuid4().hex[:12]}"
+    reg = _deployment(tmp_path, (
+        f"  - name: {name}\n"
+        f"    script: {tmp_path / 'job.py'}\n"
+        "    kind: python\n"
+        "    platform: posix\n"
+        "    trigger: Daily 02:00\n"
+        "    timeout_hours: 1\n"))
+    env = dict(os.environ, TEMP=str(tmp_path), TMP=str(tmp_path))
+    r = run_ps_file(SYNC, "-DryRun", "-RegistryPath", reg, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"[skipped: posix-only] {name}" in r.stdout, r.stdout
+
+
+@windows_only
+@pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
 def test_an_only_name_the_registry_lacks_is_refused(tmp_path: Path):
     """A typo'd -Only name was skipped in silence and the sync exited 0 without
     touching what it was called for. `A,B` on a direct -File call is split."""

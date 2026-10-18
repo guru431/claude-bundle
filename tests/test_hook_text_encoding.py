@@ -37,6 +37,8 @@ CASES = [
     ("crlf.sh", b"#!/bin/bash\r\necho hi\r\n", b"#!/bin/bash\necho hi\n", "CRLF"),
     ("both.SH", BOM + b"#!/bin/bash\r\necho hi\r\n", b"#!/bin/bash\necho hi\n", "BOM and"),
     ("clean.sh", b"#!/bin/bash\necho hi\n", None, None),
+    # No BOM to recognise it by — the NUL bytes give it away, as for a .ps1.
+    ("utf16-nobom.sh", "#!/bin/bash\r\necho hi\r\n".encode("utf-16-le"), None, "UTF-16"),
     ("notes.txt", BOM + b"a\r\nb\r\n", None, None),
 ]
 

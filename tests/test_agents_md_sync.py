@@ -319,16 +319,28 @@ def test_open_finding_is_detected_for_dedup(sync, tmp_path):
 def test_pair_without_claude_md_is_skipped(sync, tmp_path):
     """No CLAUDE.md means there is nothing to be the source of truth.
 
-    The third value is `examined`: a skipped pair was NOT verified, and main()
-    counts on that distinction to tell "checked everything, all in sync" from
-    "could not check anything".
+    The third value is `examined`, and main() counts on it to tell "checked
+    everything, all in sync" from "could not check anything". Here it is None:
+    there is no pair at all, so it is neither verified nor missed.
     """
     drifted, fixed, examined = sync.check_pair(
         "myproject", tmp_path / "CLAUDE.md", tmp_path / "AGENTS.md",
         tmp_path / "FINDINGS.md", tmp_path / "run.log")
 
-    assert (drifted, fixed, examined) == (False, 0, False)
+    assert (drifted, fixed, examined) == (False, 0, None)
     assert not (tmp_path / "FINDINGS.md").exists()
+
+
+def test_projects_without_claude_md_do_not_fail_the_run(sync, tmp_path, monkeypatch):
+    """A project with no CLAUDE.md counted as a pair nobody could examine, so a
+    projects_root of such folders failed every run as "LLM unreachable for
+    all" — without one call made."""
+    for name in ("myproject", "otherproject"):
+        (tmp_path / name).mkdir()
+    monkeypatch.setattr(sync, "PROJECTS_ROOT", tmp_path)
+    monkeypatch.setattr(sync, "llm_call", lambda *a, **k: pytest.fail("no pair, no call"))
+
+    assert sync.main() == 0
 
 
 def test_missing_agents_md_is_filed_once(sync, tmp_path):

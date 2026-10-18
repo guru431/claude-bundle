@@ -680,10 +680,18 @@ function Get-UpgradeNotes($prev, [string]$tier) {
 }
 
 # -Diff describes the deployment you HAVE, so it takes its tier from the
-# manifest instead of prompting for one.
-if ($Diff -and -not $Profile) {
-    $mfTier = [string](Read-InstallManifest).tier
-    $Profile = if ($mfTier -in @('lite', 'full')) { $mfTier } else { 'lite' }
+# manifest instead of prompting for one — and its pipeline root, unless
+# -PipelineRoot names one: a split-root deployment had cron/, wiki/ and bin/
+# compared with ClaudeHome, and every file there read as new.
+if ($Diff) {
+    $mfDiff = Read-InstallManifest
+    if (-not $Profile) {
+        $mfTier = [string]$mfDiff.tier
+        $Profile = if ($mfTier -in @('lite', 'full')) { $mfTier } else { 'lite' }
+    }
+    if (-not $PSBoundParameters.ContainsKey('PipelineRoot') -and $mfDiff.pipeline_root) {
+        $PipelineRoot = [string]$mfDiff.pipeline_root
+    }
 }
 if (-not $Profile) { $Profile = Ask 'Profile (lite/full)' 'lite' }
 if ($Profile -notin @('lite', 'full')) {

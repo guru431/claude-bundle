@@ -607,7 +607,9 @@ never runs it. The gate asks `test-sweep.py --contract <dir>` for the entry
 rather than reading the manifest itself: that takes `utils`, which would load
 the bundle's `.env` into the process that runs a project's tests. Without a
 contract the gate runs a bare `pytest` from the project's pytest config and no
-guards.
+guards. The project's `cron/tests/test_*.sh` run as well, the fast level only: a
+suite with a `# test-level: integration` line in its header is named and left to
+CI — mark one by measurement, as a pytest test is marked.
 
 How the result is read, per runner:
 

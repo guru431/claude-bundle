@@ -2,6 +2,9 @@
 # Test that telegram-send.sh actually sends the message TEXT.
 # Run: bash cron/tests/test_telegram_send.sh
 #
+# Integration level, by measurement: 25 s under Git Bash (see test_push_repo.sh).
+# test-level: integration
+#
 # Why this exists: the splitter was fed the message on a pipe while `python -`
 # took its program from a heredoc on the same stdin. The heredoc won, the
 # splitter read an empty string, and every alert went out with text="" — HTTP

@@ -161,6 +161,41 @@ def test_a_shell_suite_that_does_not_finish_here_does_not_block(repo: Path, monk
     assert res.blocking and "test_red.sh" in res.detail and "test_slow.sh" in res.detail
 
 
+def test_an_integration_shell_suite_is_left_to_ci(repo: Path, monkeypatch):
+    """The gate runs the fast level: test_push_repo.sh took 172 s of it under Git
+    Bash, seconds on Linux. A marked suite is not run and is named; a red
+    unmarked one still blocks; with every suite marked there is nothing to run."""
+    tests = repo / "home-claude" / "cron" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test_slow.sh").write_bytes(b"#!/bin/bash\n# A note.\n# test-level: integration\n")
+    (tests / "test_fast.sh").write_bytes(b"#!/bin/bash\n")
+    monkeypatch.setattr(gate, "find_bash", lambda: "bash")
+    ran, rc = [], [0]
+    monkeypatch.setattr(gate.subprocess, "run", lambda cmd, **kw: ran.append(Path(cmd[1]).name)
+                        or subprocess.CompletedProcess(cmd, rc[0], "", ""))
+
+    res = gate.check_shell_tests(repo)
+    assert ran == ["test_fast.sh"]
+    assert res.status == "ok" and "test_slow.sh" in res.detail
+
+    rc[0] = 1
+    assert gate.check_shell_tests(repo).blocking
+
+    (tests / "test_fast.sh").unlink()
+    ran.clear()
+    res = gate.check_shell_tests(repo)
+    assert ran == [] and res.status == "skip" and "test_slow.sh" in res.detail
+
+
+def test_the_slow_shell_suites_carry_the_mark():
+    """By measurement under Git Bash: push_repo 172 s, push_visibility 52 s,
+    telegram_send 25 s — a fast level has 60 s for everything."""
+    tests = ROOT / "home-claude" / "cron" / "tests"
+    marked = sorted(t.name for t in tests.glob("test_*.sh")
+                    if gate.INTEGRATION_MARK.search(t.read_text(encoding="utf-8")))
+    assert marked == ["test_push_repo.sh", "test_push_visibility.sh", "test_telegram_send.sh"]
+
+
 def test_the_test_command_follows_the_config_and_the_venv(repo: Path):
     (repo / "tests").mkdir()
     assert gate._test_command(repo) is None                     # no pytest config

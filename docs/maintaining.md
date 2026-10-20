@@ -159,7 +159,9 @@ the `script:` path guard, the five guard scripts, the exec-bit and encoding
 guards, the generated-table checks (`secret-scan.sh` and
 `docs/config-reference.md` must match their generators), the secret-format
 guard (`.github/` included), shellcheck over every tracked shell script,
-`cron/tests/*.sh`, and pytest — the fast suite and `-m integration`.
+every `cron/tests/*.sh` (the publication gate leaves those marked
+`# test-level: integration` to CI: 25–172 s each under Git Bash, seconds here),
+and pytest — the fast suite and `-m integration`.
 **Windows**: a PowerShell parse-check under BOTH pwsh 7 and Windows PowerShell
 5.1 (the scripts execute under 5.1, and parsing them only with 7 let 7-only
 syntax through), `scripts/self-test.ps1` with requirements.txt installed, and

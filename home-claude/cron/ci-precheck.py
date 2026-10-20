@@ -49,6 +49,8 @@ for _stream in (sys.stdout, sys.stderr):
 
 TEST_TIMEOUT = int(os.environ.get("CI_PRECHECK_TEST_TIMEOUT", "300"))
 BOM = b"\xef\xbb\xbf"
+# The level mark of a cron/tests/*.sh suite (check_shell_tests).
+INTEGRATION_MARK = re.compile(r"^# test-level: integration$", re.M)
 TEST_SWEEP = Path(__file__).resolve().parent / "test-sweep.py"
 
 # A note after the codes is read as part of the directive, and shellcheck then
@@ -372,11 +374,22 @@ def check_shell_tests(repo: Path) -> Result:
     inside `home-claude/`: a gate that looked only at the top found none and
     skipped every live suite — a check that does not find its tests is no
     better than none.
+
+    The gate runs the fast level only, as it does for pytest: a suite whose
+    header carries `# test-level: integration` is left to CI. Marked by
+    measurement — this bundle's push suites take 25-172 s each under Git Bash,
+    where every process costs 40-100 ms, and seconds on Linux.
     """
     tests = sorted(set((repo / "cron" / "tests").glob("test_*.sh"))
                    | set((repo / "home-claude" / "cron" / "tests").glob("test_*.sh")))
     if not tests:
         return Result("shell tests", "skip", "no cron/tests/*.sh")
+    integration = [t.name for t in tests if INTEGRATION_MARK.search(
+        t.read_text(encoding="utf-8", errors="replace"))]
+    tests = [t for t in tests if t.name not in integration]
+    left = f"integration, left to CI: {', '.join(integration)}" if integration else ""
+    if not tests:
+        return Result("shell tests", "skip", left)
     bash = find_bash()
     if not bash:
         return Result("shell tests", "skip", "no bash found — CI checks after the push")
@@ -399,7 +412,8 @@ def check_shell_tests(repo: Path) -> Result:
     if unfinished:
         return Result("shell tests", "skip",
                       "; ".join(unfinished) + " — ci-watch checks after the push")
-    return Result("shell tests", "ok", f"{len(tests)} suites green")
+    green = f"{len(tests)} suites green"
+    return Result("shell tests", "ok", f"{green}; {left}" if left else green)
 
 
 def check_encodings(repo: Path) -> Result:

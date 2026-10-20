@@ -47,7 +47,11 @@ prevent one of those.
    timeout per test file.
 8. **The rules hold for every runner**, not only pytest: Bash, Pester, xunit and
    JS suites are split into the same fast default level (60 s budget) and a full
-   one.
+   one. A `cron/tests/*.sh` suite goes to the full level with a
+   `# test-level: integration` line in its header, which the bundle's
+   publication gate (`cron/ci-precheck.py`) honours. Measure where the fast level
+   runs: under Git Bash every process costs tens of milliseconds, and a suite of
+   seconds on Linux took minutes there.
 9. **Test commands are declared once.** Three levels per project — targeted
    (one module), fast, full — with runner and interpreter, in the `tests:` key
    of `~/.claude/bundle.local.yaml` (or, without the bundle's sweep, in the

@@ -5,6 +5,9 @@
 # the address as configured.
 # Run: bash cron/tests/test_push_visibility.sh
 #
+# Integration level, by measurement: 52 s under Git Bash (see test_push_repo.sh).
+# test-level: integration
+#
 # File-scope SC2034: the globals set here (the counters, DRY_RUN,
 # GIT_PUSH_PUBLIC_REPOS) are read by the sourced script.
 # shellcheck disable=SC2034

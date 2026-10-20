@@ -137,6 +137,25 @@ The short list; UPGRADING.md has the steps.
   failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
   the Pester import hangs or dies before the first file.
 
+### Shell suites get an integration level the publication gate leaves to CI
+
+The gate ran every `cron/tests/*.sh`, and under Git Bash three of them took 25,
+52 and 172 s — over four minutes of a gate whose fast level has 60 s, and the
+reason a loaded machine pushed `test_push_repo.sh` past its 300 s. There is no
+hot spot to fix: a profile of that suite shows ~1100 git calls and ~1500 other
+processes, each costing 40–100 ms to start under Git Bash (`/usr/bin/true`
+included) and about a millisecond on Linux, where CI runs all five suites in
+10 s.
+
+- **`# test-level: integration`** in a suite's header moves it to the full
+  level. `ci-precheck.py` runs the unmarked suites and names the marked ones as
+  left to CI; with every suite marked the check is a skip. CI still runs every
+  suite. On this repository the gate's shell check takes 6.5 s instead of
+  ~4 minutes.
+- **Marked by measurement:** `test_push_repo.sh`, `test_push_visibility.sh`,
+  `test_telegram_send.sh`. `tests/test_ci_precheck.py` pins the set, so a typo
+  in the mark cannot quietly put them back into the gate.
+
 ### The publication gate no longer fails at random on a busy machine
 
 The local gate of `github-push.sh` cancelled publications that CI would have

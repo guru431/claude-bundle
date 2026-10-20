@@ -5,6 +5,11 @@
 # commits, which the old copy-pasted blocks skipped).
 # Run: bash cron/tests/test_push_repo.sh
 #
+# Integration level, by measurement: 172 s under Git Bash, where every process
+# costs 40-100 ms, and seconds on Linux. The publication gate (ci-precheck.py)
+# leaves it to CI, which runs every suite.
+# test-level: integration
+#
 # File-scope SC2034: this harness drives a SOURCED script, so several of the
 # globals it sets (DRY_RUN, the counters) are read there and never here. The
 # resets after each scenario have no reader at all by design — leaving a flag

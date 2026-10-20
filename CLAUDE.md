@@ -158,7 +158,7 @@ touches your real `~/.claude/`.
 | Windows offline check | `powershell -File scripts/self-test.ps1` |
 | PowerShell parse-check | the `powershell` job in `.github/workflows/ci.yml` |
 | Wiki pipeline, spends nothing | `WIKI_LLM_PROVIDER=mock python home-claude/cron/wiki/wiki-pipeline.py --dry-run`, or `--demo` on the shipped example |
-| Shell tests (push guards, `runtime.sh`, `telegram-send.sh`) | `for t in home-claude/cron/tests/test_*.sh; do bash "$t"; done` |
+| Shell tests (push guards, `runtime.sh`, `telegram-send.sh`), every level — the publication gate skips `# test-level: integration` | `for t in home-claude/cron/tests/test_*.sh; do bash "$t"; done` |
 
 **Test levels.** The commands of each level — targeted, fast, full — are
 declared once, in the test contract the maintainer's machine keeps outside this

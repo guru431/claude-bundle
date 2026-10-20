@@ -750,6 +750,9 @@ def test_a_valid_contract_loads(tmp_path):
     ([_suite(cwd="../elsewhere")], "leaves the project"),
     ([_suite(cwd="/abs/path")], "relative to the project"),
     ([_suite(cwd="missing")], "not a directory"),
+    ([_suite(precheck="python scripts/check.py")], "precheck: a non-empty list"),
+    ([_suite(precheck=[])], "precheck: a non-empty list"),
+    ([_suite(precheck=["python x.py", " "])], "precheck: a non-empty list"),
 ])
 def test_contract_errors_are_named_and_discard_the_entry(tmp_path, raw, fragment):
     """Half a contract would quietly drop a suite somebody declared."""
@@ -759,6 +762,33 @@ def test_contract_errors_are_named_and_discard_the_entry(tmp_path, raw, fragment
     suites, errors = sweep.load_contract("demo", raw, project)
     assert suites == []
     assert errors and fragment in " ".join(errors), errors
+
+
+# ── `precheck` and `--contract`: what the publication gate reads ─────────────
+
+def test_precheck_is_the_one_optional_key(tmp_path):
+    """The gate's guards (ci-precheck.py); the sweep accepts them and never runs them."""
+    suites, errors = sweep.load_contract(
+        "demo", [_suite(precheck=["python scripts/check-registry.py"])], tmp_path)
+    assert errors == [] and suites[0]["precheck"] == ["python scripts/check-registry.py"]
+
+
+def test_the_gate_gets_one_projects_contract_as_json(tmp_path, monkeypatch, capsys):
+    """Asked with --contract: no ledger record, a question is not a sweep run."""
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "other").mkdir()
+    monkeypatch.setattr(sweep, "tests_contract",
+                        lambda: ({"demo": [_suite(precheck=["python g.py"])]}, []))
+
+    def no_record(*a, **kw):
+        raise AssertionError("a ledger record was opened")
+    monkeypatch.setattr(sweep, "terminal_record", no_record)
+
+    assert sweep.main(["--contract", str(tmp_path / "demo")]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["errors"] == []
+    assert out["suites"] == [_suite(precheck=["python g.py"])]    # no key/dir: not JSON
+    assert sweep.contract_of(tmp_path / "other") == {"suites": [], "errors": []}
 
 
 # ── result parsing per runner ────────────────────────────────────────────────

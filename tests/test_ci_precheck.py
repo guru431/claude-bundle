@@ -149,6 +149,99 @@ def test_the_test_command_follows_the_config_and_the_venv(repo: Path):
     assert gate._test_command(repo)[0] == str(venv_py)
 
 
+# --- the test contract: `fast` and the project's guards -----------------------
+# The gate ran neither a project's own CI guards (this bundle's `scripts/check-*.py`)
+# nor its `fast` command: a bare `pytest -q` dropped the `-n auto` this suite
+# needs to stay inside its budget.
+
+def _contract(monkeypatch, *, errors=(), **suite) -> None:
+    base = {"name": "main", "cwd": ".", "runner": "pytest", "fast": "python -m pytest -q -n auto"}
+    monkeypatch.setattr(gate, "project_contract", lambda _repo: {
+        "suites": [{**base, **suite}], "errors": list(errors)})
+
+
+def _stub_commands(monkeypatch, rc: int = 0, out: str = "") -> list:
+    ran = []
+    monkeypatch.setattr(gate, "find_bash", lambda: "bash")
+    monkeypatch.setattr(gate, "_run_contract_command", lambda bash, cmd, cwd: ran.append((cmd, cwd))
+                        or subprocess.CompletedProcess(cmd, rc, out, ""))
+    return ran
+
+
+@pytest.mark.skipif(gate.find_bash() is None, reason="no bash")
+def test_a_failing_project_guard_blocks(repo: Path, monkeypatch):
+    _contract(monkeypatch, precheck=[
+        'python -c "pass"',
+        'python -c "import sys; print(\'XDG_CACHE_HOME undocumented\'); sys.exit(3)"'])
+    res = gate.check_project_guards(repo)
+    assert res.status == "fail" and res.blocking
+    assert "rc 3" in res.detail and "XDG_CACHE_HOME undocumented" in res.detail
+    assert 'python -c "pass"' not in res.detail          # a green guard is not reported
+
+
+def test_project_guards_run_from_the_suite_dir(repo: Path, monkeypatch):
+    ran = _stub_commands(monkeypatch)
+    _contract(monkeypatch, cwd="scripts", precheck=["python check-a.py"])
+    assert gate.check_project_guards(repo).status == "ok"
+    assert ran == [("python check-a.py", repo / "scripts")]
+
+
+def test_no_declared_guards_is_a_skip(repo: Path, monkeypatch):
+    _contract(monkeypatch)
+    assert gate.check_project_guards(repo).status == "skip"
+
+
+def test_an_unusable_contract_blocks_with_its_errors(repo: Path, monkeypatch):
+    """Its guards did not run — a typo must not switch them off without a word."""
+    monkeypatch.setattr(gate, "project_contract", lambda _repo: {
+        "suites": [], "errors": ["tests.repo[0] (main): precheck: a non-empty list"]})
+    res = gate.check_project_guards(repo)
+    assert res.blocking and "precheck: a non-empty list" in res.detail
+
+
+def test_fast_tests_come_from_the_contract(repo: Path, monkeypatch):
+    """The flags of `fast` (here `-n auto`) reach the run; the config does not override them."""
+    (repo / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n", encoding="utf-8")
+    ran = _stub_commands(monkeypatch, out="5 passed in 1.0s\n")
+    _contract(monkeypatch)
+    res = gate.check_fast_tests(repo)
+    assert res.status == "ok" and "5 passed" in res.detail
+    assert ran == [("python -m pytest -q -n auto -p no:cacheprovider", repo / ".")]
+
+
+def test_a_red_contract_suite_blocks(repo: Path, monkeypatch):
+    _stub_commands(monkeypatch, rc=1, out="1 failed in 0.1s\n")
+    _contract(monkeypatch, runner="bash", fast="bash run.sh")
+    res = gate.check_fast_tests(repo)
+    assert res.status == "fail" and "1 failed" in res.detail
+
+
+def test_the_gate_reads_the_contract_the_sweep_validates(cron_copy: Path):
+    """Through test-sweep.py in a child process — the gate itself never imports utils."""
+    (cron_copy / "bundle.local.yaml").write_text(
+        "tests:\n  demo:\n"
+        "    - {name: main, cwd: ., runner: pytest, targeted: 'python -m pytest {path}',\n"
+        "       fast: python -m pytest -q, full: null, budget_s: 60,\n"
+        "       precheck: [python scripts/check-a.py]}\n"
+        "  broken:\n"
+        "    - {name: main, cwd: ., runner: pytest, targeted: 'python -m pytest {path}',\n"
+        "       fast: python -m pytest -q, full: null, budget_s: 60, precheck: []}\n",
+        encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(
+        "ci_precheck_copy", cron_copy / "cron" / "ci-precheck.py")
+    copy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(copy)
+    for name in ("demo", "broken", "other"):
+        (cron_copy / "projects" / name).mkdir(parents=True)
+
+    demo = copy.project_contract(cron_copy / "projects" / "demo")
+    assert demo["errors"] == [] and "unread" not in demo
+    assert demo["suites"][0]["precheck"] == ["python scripts/check-a.py"]
+    broken = copy.project_contract(cron_copy / "projects" / "broken")
+    assert broken["suites"] == [] and "precheck" in " ".join(broken["errors"])
+    assert copy.project_contract(cron_copy / "projects" / "other") == {"suites": [], "errors": []}
+
+
 def test_python_versions_only_in_ci_are_reported_not_blocking(repo: Path):
     wf = repo / ".github" / "workflows"
     wf.mkdir(parents=True)
@@ -168,22 +261,24 @@ def test_the_bash_for_shell_tests_is_never_the_wsl_launcher(monkeypatch):
 
 
 # --- the whole run ------------------------------------------------------------
-# shellcheck is left out of these three (one subprocess less per test): the
-# defects they plant are caught by the encoding check and compileall.
+# shellcheck and the test contract are left out of these (a subprocess less per
+# check; the contract is read twice per pass): the defects they plant are caught
+# by the encoding check and compileall, and the contract has a test of its own.
 
 @pytest.fixture()
-def no_shellcheck(monkeypatch):
+def fewer_spawns(monkeypatch):
     monkeypatch.setattr(gate.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(gate, "project_contract", lambda _repo: {"suites": [], "errors": []})
 
 
-def test_a_clean_repo_exits_0(repo: Path, monkeypatch, no_shellcheck):
+def test_a_clean_repo_exits_0(repo: Path, monkeypatch, fewer_spawns):
     add(repo, "ok.py", b"value = 1\n")
     monkeypatch.setattr(sys, "argv", ["ci-precheck.py", str(repo)])
     assert gate.main() == 0
 
 
 def test_a_check_that_cannot_run_is_a_skip_not_a_traceback(repo: Path, monkeypatch,
-                                                           no_shellcheck, capsys):
+                                                           fewer_spawns, capsys):
     """The header's contract. An interpreter that will not start raised out of
     the gate, and github-push.sh read the traceback's rc 1 as a red CI."""
     wf = repo / ".github" / "workflows"
@@ -195,7 +290,7 @@ def test_a_check_that_cannot_run_is_a_skip_not_a_traceback(repo: Path, monkeypat
     assert "[skip] python matrix — could not run" in capsys.readouterr().out
 
 
-def test_an_autofix_stops_the_publication_with_rc_2(repo: Path, monkeypatch, no_shellcheck, capsys):
+def test_an_autofix_stops_the_publication_with_rc_2(repo: Path, monkeypatch, fewer_spawns, capsys):
     """The fix sits in the working tree and a push sends commits: going on would
     publish without it."""
     add(repo, "bad.sh", BOM + b"#!/bin/bash\ntrue\n")
@@ -205,7 +300,7 @@ def test_an_autofix_stops_the_publication_with_rc_2(repo: Path, monkeypatch, no_
     assert "STOPPED" in capsys.readouterr().out
 
 
-def test_a_defect_without_an_autofix_blocks(repo: Path, monkeypatch, no_shellcheck, capsys):
+def test_a_defect_without_an_autofix_blocks(repo: Path, monkeypatch, fewer_spawns, capsys):
     add(repo, "x.py", b"def broken(:\n")
     monkeypatch.setattr(sys, "argv", ["ci-precheck.py", str(repo), "--fix"])
     assert gate.main() == 1

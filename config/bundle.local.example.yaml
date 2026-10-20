@@ -47,14 +47,14 @@ known_projects: []
 projects_root:
 #   projects_root: ~/projects
 
-# ── Test contract (read by ClaudeTestSweep / ClaudeTestSweepFull only) ───────
+# ── Test contract (read by the test sweeps and the github-push.sh gate) ──────
 # How each project's tests are run, declared ONCE: agents read it for their
 # targeted and fast runs, and the nightly sweep runs `fast` daily and `full`
 # weekly. A project with no entry keeps the old behaviour — the sweep discovers
 # its pytest suite. Keys are project directory names under projects_root,
 # matched the way the privacy policy matches names.
 #
-# Every suite key is required, and no other is accepted:
+# Every suite key is required except `precheck`, and no other is accepted:
 #   name      `main` for the project's main suite, else a short name (A-Z a-z 0-9 _ . -)
 #   cwd       the suite's directory, relative to the project (must stay inside it)
 #   runner    pytest | bash | dotnet | pester | js — how the result is read
@@ -63,6 +63,10 @@ projects_root:
 #   full      the full level (integration included); null = the suite has none
 #   budget_s  the fast level's budget in seconds; two green nights over it in a
 #             row file a P3 finding with the five slowest parts
+#   precheck  optional: a list of the project's own guard commands (CI steps that
+#             are not tests). Run by the github-push.sh gate, cron/ci-precheck.py,
+#             together with `fast`; a red one blocks the publication. The sweep
+#             only validates it.
 #
 # Commands run through bash from <project>/<cwd>; a bare `python` is the
 # sweep's own interpreter. For a pytest suite the sweep APPENDS
@@ -83,6 +87,7 @@ tests: {}
 #       fast: .venv/bin/python -m pytest -q
 #       full: .venv/bin/python -m pytest -q -m "not manual" --timeout=300
 #       budget_s: 60
+#       precheck: [python scripts/check-docs.py]
 #     - name: scripts
 #       cwd: scripts
 #       runner: bash

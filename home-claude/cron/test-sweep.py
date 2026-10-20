@@ -18,6 +18,8 @@ Modes:
   --full     the full level (weekly) — a contract suite's `full` command; for a
              discovered suite plus `integration`: `-m "not manual"` overrides
              addopts
+  --contract DIR  print one project's validated contract as JSON and exit — the
+             publication gate cron/ci-precheck.py asks for it this way
 
 A contract suite's result is read per runner (parse_result): pytest, Bash
 (`TESTS_RESULT` marker), `dotnet test`, Pester (cron/lib/run-pester.ps1),
@@ -175,6 +177,11 @@ RUNNERS = ("pytest", "bash", "dotnet", "pester", "js")
 # Every key is required and no other is accepted: an extra key is almost always
 # a typo (`budjet_s`), and a typo'd budget is a budget that silently does nothing.
 SUITE_KEYS = ("name", "cwd", "runner", "targeted", "fast", "full", "budget_s")
+# The one exception. `precheck` — the project's own guards (its CI steps such as
+# `python scripts/check-*.py`) — is run by the publication gate
+# cron/ci-precheck.py, never by the sweep; it is validated here all the same, so
+# a typo cannot switch the guards off without a word.
+OPTIONAL_KEYS = ("precheck",)
 _SUITE_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 # The over-budget finding waits for the SECOND night in a row: one night is
 # noise (a neighbour task, a cold disk), and a finding per outlier would turn
@@ -830,7 +837,7 @@ def load_contract(project: str, raw, root: Path) -> tuple[list[dict], list[str]]
             errors.append(f"{where}: missing key(s) {', '.join(missing)}")
             continue
         problems = []
-        unknown = sorted(str(k) for k in set(s) - set(SUITE_KEYS))
+        unknown = sorted(str(k) for k in set(s) - set(SUITE_KEYS) - set(OPTIONAL_KEYS))
         if unknown:
             problems.append(f"unknown key(s) {', '.join(unknown)}")
         name = s["name"]
@@ -850,6 +857,11 @@ def load_contract(project: str, raw, root: Path) -> tuple[list[dict], list[str]]
             problems.append("fast and full are both null — the suite never runs")
         if not isinstance(s["targeted"], str) or "{path}" not in s["targeted"]:
             problems.append("targeted: a command with a {path} placeholder")
+        if "precheck" in s:
+            pre = s["precheck"]
+            if (not isinstance(pre, list) or not pre
+                    or not all(isinstance(c, str) and c.strip() for c in pre)):
+                problems.append("precheck: a non-empty list of command strings")
         cwd = s["cwd"]
         if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).anchor:
             problems.append(f"cwd {cwd!r}: a directory relative to the project")
@@ -869,6 +881,25 @@ def load_contract(project: str, raw, root: Path) -> tuple[list[dict], list[str]]
         seen.add(name)
         suites.append({**s, "key": suite_key(project, name), "dir": root / cwd})
     return ([] if errors else suites), errors
+
+
+def contract_of(project_dir: Path) -> dict:
+    """The validated contract of the project at `project_dir`, for ci-precheck.py.
+
+    The gate cannot read it itself: finding the entry takes utils (the manifest,
+    normalize_project_name), and importing utils loads the bundle's `.env` into
+    the importing process — the gate's, which runs a project's tests. It asks
+    this script in a child process instead, so the entry is found and validated
+    exactly as for the nightly run. Both lists empty — no entry.
+    """
+    root = project_dir.resolve()
+    contracts, _ = tests_contract()
+    raw = contracts.get(normalize_project_name(root.name))
+    if raw is None:
+        return {"suites": [], "errors": []}
+    suites, errors = load_contract(root.name, raw, root)
+    return {"suites": [{k: s[k] for k in SUITE_KEYS + OPTIONAL_KEYS if k in s} for s in suites],
+            "errors": errors}
 
 
 def contract_env() -> dict:
@@ -1176,7 +1207,14 @@ def main(argv=None) -> int:
     ap.add_argument("--full", action="store_true", help="include integration tests")
     ap.add_argument("--project", help="a single project directory name")
     ap.add_argument("--dry-run", action="store_true", help="print the plan and exit")
+    ap.add_argument("--contract", metavar="DIR",
+                    help="print the validated test contract of the project at DIR "
+                         "as JSON and exit (asked by ci-precheck.py)")
     args = ap.parse_args(argv)
+    if args.contract:
+        # Before the ledger record: a question from the gate is not a sweep run.
+        print(json.dumps(contract_of(Path(args.contract)), ensure_ascii=False))
+        return 0
     task = "ClaudeTestSweepFull" if args.full else "ClaudeTestSweep"
 
     # ONE terminal ledger record per run, the crash included (cron/runs.py).

@@ -107,7 +107,9 @@ The short list; UPGRADING.md has the steps.
   List the repositories you publish on purpose before the next night.
 - **`github-push.sh` runs a CI gate**: local checks before the push, and a wait
   for the GitHub Actions run after it. A gate failure cancels the publication;
-  `GITHUB_PUSH_NO_CI=1` skips both halves for one run.
+  `GITHUB_PUSH_NO_CI=1` skips both halves for one run. A project with a test
+  contract (`tests:` in `bundle.local.yaml`) has its `fast` commands and its
+  new, optional `precheck` guards run there — and a contract with errors blocks.
 - **New task `ClaudeDaemonWatch`** (off, Windows only) restarts a registry
   service whose `health_port` stopped listening; `MONITOR_PULSE_URL` (optional)
   gives both task monitors a dead-man's switch outside the machine.
@@ -134,6 +136,31 @@ The short list; UPGRADING.md has the steps.
   Windows shutdown swallowed (`0x8007045B`) and reports a Windows update that
   failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
   the Pester import hangs or dies before the first file.
+
+### ci-precheck: the fast suite and the project's guards from the test contract
+
+Ported from the meta-repo in a design of its own. The publication gate built
+the fast suite as a bare `pytest -q` from the pytest config, so a `fast`
+command with flags — this repository's `-n auto` — ran serially, twice over
+its budget; and it never ran a project's own CI guards, so a publication could
+pass the gate and go red in CI on a `scripts/check-*.py` step.
+
+- **`ci-precheck.py` runs the contract.** Each suite's `fast` (a `pytest` one
+  with `-p no:cacheprovider`) and every command of the new `precheck` list, the
+  way the sweep runs a command: `bash -c` from `<project>/<cwd>`, `CI=1`, the
+  gate's interpreter as a bare `python`. A red command blocks, and so does a
+  contract with errors — its guards did not run. Without a contract nothing
+  changes: a bare `pytest` from the config, no guards.
+- **`precheck` is the contract's first optional key**: a non-empty list of
+  command strings. `test-sweep.py` validates it — a typo is a contract error,
+  not a guard switched off — and never runs it.
+- **The gate asks the sweep for the contract**: `test-sweep.py --contract <dir>`
+  prints one project's validated entry as JSON, without a ledger record. The
+  meta-repo reads its registry directly; here matching a repository to its
+  entry takes `utils` (the manifest, `normalize_project_name`), and importing
+  `utils` would load the bundle's `.env` into the process that runs a project's
+  tests. The child process keeps it out, and the entry means the same to the
+  nightly sweep and to the gate.
 
 ### self-test: an absolute `core.hooksPath` is an active guard
 
@@ -193,8 +220,9 @@ of the task monitor (`runtime.sh` resolves the interpreter, the pulse here is a
 GET to a URL that is its own secret), the auth-status check of one particular
 service in `daemon-watch.py` and the meta-repo's own tasks and timeout values.
 The fast suite and project guards from the test contract in `ci-precheck.py`
-wait for a design of their own: here the contract lives in `bundle.local.yaml`,
-keyed by project name, and the gate does not import `utils`.
+needed a design of their own — here the contract lives in `bundle.local.yaml`,
+keyed by project name, and the gate does not import `utils` — and came
+separately (the ci-precheck section above).
 
 ### Findings: 17 resolved, 9 declined
 

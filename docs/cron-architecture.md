@@ -573,10 +573,12 @@ tests:
       fast: .venv/bin/python -m pytest -q
       full: .venv/bin/python -m pytest -q -m "not manual" --timeout=300
       budget_s: 60
+      precheck:                # optional: the project's own guards, see below
+        - python scripts/check-docs.py
 ```
 
-Every key is required and no other is accepted (an extra key is a typo, such as
-`budjet_s`). The three levels: `targeted` runs one file or test (`{path}`) and
+Every key is required except `precheck`, and no other is accepted (an extra key
+is a typo, such as `budjet_s`). The three levels: `targeted` runs one file or test (`{path}`) and
 is for agents only — the sweep validates it but never runs it; `fast` is what
 the daily sweep runs, held to `budget_s`; `full` is what the weekly sweep runs,
 `integration` included. `fast` or `full` may be `null` when the suite has no
@@ -592,6 +594,20 @@ is a known one. For a `pytest` suite the sweep appends
 `-p no:cacheprovider --durations=5 --basetemp <dir>` — end the command with
 pytest's own arguments. Only local execution: no host, container or remote key
 exists, and a command that wants one has to do it itself.
+
+**The publication gate reads the same contract.** `cron/ci-precheck.py`, the
+local CI gate of `github-push.sh`, runs each suite's `fast` (a `pytest` one with
+`-p no:cacheprovider` appended) and each command of its `precheck` list — the
+project's CI steps that are not tests, such as `python scripts/check-*.py` —
+the way the sweep runs a command: through bash from `<project>/<cwd>`, with
+`CI=1` and the gate's interpreter as a bare `python`. A red command blocks the
+publication, and so does a contract with errors, because its guards did not
+run. The sweep validates `precheck` (a non-empty list of command strings) but
+never runs it. The gate asks `test-sweep.py --contract <dir>` for the entry
+rather than reading the manifest itself: that takes `utils`, which would load
+the bundle's `.env` into the process that runs a project's tests. Without a
+contract the gate runs a bare `pytest` from the project's pytest config and no
+guards.
 
 How the result is read, per runner:
 
@@ -649,7 +665,8 @@ A discovered suite keeps its single entry and title for both, as before.
 **Contract errors.** An entry the sweep cannot use — not a list, a missing or
 unknown key, an unknown runner, a `cwd` outside the project or not a directory,
 a `budget_s` that is not a positive whole number, a `targeted` without
-`{path}`, a project name that matches no directory, two entries for one
+`{path}`, a `precheck` that is not a non-empty list of commands, a project
+name that matches no directory, two entries for one
 project — files ONE P2 finding in the bundle's own `FINDINGS.md`
 (`~/.claude/FINDINGS.md`), rewritten only when the set of errors changes and
 closed by the first run that finds the contract valid. Until then the project

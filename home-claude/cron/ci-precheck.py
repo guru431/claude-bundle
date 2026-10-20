@@ -14,9 +14,15 @@ runs the portable subset that catches most of these failures; ci-watch.py
 catches the rest after the push, from the real run.
 
 Checks: shellcheck over tracked shell · compileall over tracked Python · the
-project's fast test suite · its cron/tests/*.sh · encodings and line endings
-(a BOM or CRLF in .sh, a .ps1 with non-ASCII text and no BOM) · which Python
-versions of the CI matrix were not tried here.
+project's fast test suite · its own guards · its cron/tests/*.sh · encodings
+and line endings (a BOM or CRLF in .sh, a .ps1 with non-ASCII text and no BOM)
+· which Python versions of the CI matrix were not tried here.
+
+The fast suite and the guards come from the project's test contract — its
+`tests:` entry in bundle.local.yaml (docs/cron-architecture.md § "The test
+sweep and the test contract"): the `fast` and `precheck` commands of its
+suites. Without a contract the fast suite is derived from the pytest config and
+no guards run.
 
 Autofix (`--fix`) only does what is deterministic: SC1125 directives, a BOM in
 .sh, CRLF in .sh. Having fixed something, the gate STOPS the publication (rc 2):
@@ -29,6 +35,7 @@ blocking problem, 2 — an autofix was applied and needs a commit.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -42,6 +49,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 TEST_TIMEOUT = int(os.environ.get("CI_PRECHECK_TEST_TIMEOUT", "300"))
 BOM = b"\xef\xbb\xbf"
+TEST_SWEEP = Path(__file__).resolve().parent / "test-sweep.py"
 
 # A note after the codes is read as part of the directive, and shellcheck then
 # IGNORES the rest of it (SC1125) — the suppression may not apply at all.
@@ -204,7 +212,74 @@ def _test_command(repo: Path) -> list[str] | None:
     return None
 
 
+def project_contract(repo: Path) -> dict:
+    """The project's test contract, as test-sweep.py validates it.
+
+    Asked of test-sweep.py in a child process, not read here: finding the entry
+    takes utils, and importing utils loads the bundle's .env into the gate (see
+    find_bash). The sweep's own load_contract then validates it, so a contract
+    means the same to the nightly run and to the gate.
+
+    {"suites": [...], "errors": [...]} — both empty when the project has no
+    entry; "unread" — why the contract could not be read at all.
+    """
+    try:
+        done = subprocess.run([sys.executable, str(TEST_SWEEP), "--contract", str(repo)],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"suites": [], "errors": [], "unread": f"{type(exc).__name__}: {exc}"}
+    lines = done.stdout.strip().splitlines()
+    try:
+        data = json.loads(lines[-1]) if done.returncode == 0 and lines else None
+    except ValueError:
+        data = None
+    if not (isinstance(data, dict) and isinstance(data.get("suites"), list)
+            and isinstance(data.get("errors"), list)):
+        why = (done.stderr.strip().splitlines() or [f"rc {done.returncode}"])[-1]
+        return {"suites": [], "errors": [], "unread": f"test-sweep.py --contract: {why}"}
+    return data
+
+
+def _run_contract_command(bash: str, cmd: str, cwd: Path) -> subprocess.CompletedProcess:
+    """A contract command as the sweep runs it: `bash -c` from the suite's cwd,
+    a bare `python` being this interpreter (the sweep's is its own)."""
+    py_dir = Path(sys.executable).parent
+    dirs = [str(py_dir)] + ([str(py_dir / "Scripts")] if os.name == "nt" else [])
+    env = dict(os.environ, CI="1",   # parity with CI, where a skipped dependency fails
+               PATH=os.pathsep.join(dirs + [os.environ.get("PATH", "")]))
+    return subprocess.run([bash, "-c", cmd], cwd=str(cwd), capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=TEST_TIMEOUT, env=env)
+
+
+def _contract_fast_tests(repo: Path, suites: list[dict]) -> Result:
+    bash = find_bash()
+    if not bash:
+        return Result("fast tests", "skip",
+                      "no bash found for the test contract — CI checks after the push")
+    passed = []
+    for s in suites:
+        cmd = s["fast"] + (" -p no:cacheprovider" if s["runner"] == "pytest" else "")
+        try:
+            done = _run_contract_command(bash, cmd, repo / s["cwd"])
+        except subprocess.TimeoutExpired:
+            return Result("fast tests", "skip", f"{s['name']}: did not finish in "
+                          f"{TEST_TIMEOUT}s — ci-watch checks after the push")
+        if done.returncode != 0:
+            tail = "\n".join((done.stdout + done.stderr).strip().splitlines()[-25:])
+            return Result("fast tests", "fail", f"{s['name']}: {s['fast']}\n{tail}")
+        lines = [ln for ln in done.stdout.splitlines() if ln.strip()]
+        passed.append(f"{s['name']}: {lines[-1].strip() if lines else 'rc 0'}")
+    return Result("fast tests", "ok", "; ".join(passed))
+
+
 def check_fast_tests(repo: Path) -> Result:
+    # The contract first: the bare `pytest -q` below drops the flags of a `fast`
+    # command — this repository's `-n auto` among them, without which its suite
+    # ran serially, twice over its budget.
+    suites = [s for s in project_contract(repo)["suites"] if isinstance(s.get("fast"), str)]
+    if suites:
+        return _contract_fast_tests(repo, suites)
     cmd = _test_command(repo)
     if cmd is None:
         return Result("fast tests", "skip", "no pytest config or tests/")
@@ -225,8 +300,46 @@ def check_fast_tests(repo: Path) -> Result:
     return Result("fast tests", "fail", tail)
 
 
+def check_project_guards(repo: Path) -> Result:
+    """The project's own guards — the `precheck` commands of its contract suites.
+
+    The gate does not repeat a project's CI steps, so a red one was visible only
+    in the e-mail: this bundle once went public with every CI job red on
+    `check-env-ref.py`, a guard no check here ran. Which guards matter is the
+    project's to say, so the list lives next to its test commands.
+    """
+    contract = project_contract(repo)
+    if contract.get("unread"):
+        return Result("project guards", "skip",
+                      f"the test contract could not be read ({contract['unread']})")
+    if contract["errors"]:
+        # A typo in the contract must not switch its guards off without a word.
+        return Result("project guards", "fail", "the test contract is not usable, so "
+                      "its guards did not run:\n" + "\n".join(contract["errors"]))
+    guards = [(s, cmd) for s in contract["suites"] for cmd in s.get("precheck") or ()]
+    if not guards:
+        return Result("project guards", "skip", "no `precheck` in the test contract")
+    bash = find_bash()
+    if not bash:
+        return Result("project guards", "skip", "no bash found — CI checks after the push")
+    failed = []
+    for s, cmd in guards:
+        try:
+            done = _run_contract_command(bash, cmd, repo / s["cwd"])
+        except subprocess.TimeoutExpired:
+            failed.append(f"{cmd}: did not finish in {TEST_TIMEOUT}s")
+            continue
+        if done.returncode != 0:
+            tail = "\n".join((done.stdout + done.stderr).strip().splitlines()[-8:])
+            failed.append(f"{cmd}: rc {done.returncode}\n{tail}")
+    if failed:
+        return Result("project guards", "fail", "\n".join(failed))
+    return Result("project guards", "ok", f"{len(guards)} commands")
+
+
 def find_bash() -> str | None:
-    """A bash for the shell tests: BASH_EXE, else on Windows Git's MSYS bash.
+    """A bash for the shell tests and the test contract's commands: BASH_EXE,
+    else on Windows Git's MSYS bash.
 
     `Git\\usr\\bin\\bash.exe`, not `Git\\bin\\bash.exe`: the latter puts
     /mingw64/bin:/usr/bin at the FRONT of PATH and shadows the stubs the tests
@@ -342,8 +455,8 @@ def check_python_matrix(repo: Path) -> Result:
                   "version differences are ci-watch's to catch")
 
 
-CHECKS = (check_shellcheck, check_compileall, check_fast_tests, check_shell_tests,
-          check_encodings, check_python_matrix)
+CHECKS = (check_shellcheck, check_compileall, check_fast_tests, check_project_guards,
+          check_shell_tests, check_encodings, check_python_matrix)
 
 
 def run_checks(repo: Path) -> list[Result]:

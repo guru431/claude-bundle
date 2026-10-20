@@ -380,20 +380,25 @@ def check_shell_tests(repo: Path) -> Result:
     bash = find_bash()
     if not bash:
         return Result("shell tests", "skip", "no bash found — CI checks after the push")
-    failed = []
+    failed, unfinished = [], []
     for t in tests:
         try:
             done = subprocess.run([bash, str(t)], cwd=str(repo), capture_output=True,
                                   text=True, encoding="utf-8", errors="replace",
                                   timeout=TEST_TIMEOUT)
         except subprocess.TimeoutExpired:
-            failed.append(f"{t.name}: did not finish in {TEST_TIMEOUT}s")
+            # Not red, as for the fast suite: a 172-second suite went past the
+            # limit on a busy machine and cancelled a publication CI passed.
+            unfinished.append(f"{t.name}: did not finish in {TEST_TIMEOUT}s")
             continue
         if done.returncode != 0:
             tail = "\n".join((done.stdout + done.stderr).strip().splitlines()[-8:])
             failed.append(f"{t.name}:\n{tail}")
     if failed:
-        return Result("shell tests", "fail", "\n".join(failed))
+        return Result("shell tests", "fail", "\n".join(failed + unfinished))
+    if unfinished:
+        return Result("shell tests", "skip",
+                      "; ".join(unfinished) + " — ci-watch checks after the push")
     return Result("shell tests", "ok", f"{len(tests)} suites green")
 
 

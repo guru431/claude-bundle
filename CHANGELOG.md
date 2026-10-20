@@ -137,6 +137,31 @@ The short list; UPGRADING.md has the steps.
   failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
   the Pester import hangs or dies before the first file.
 
+### The publication gate no longer fails at random on a busy machine
+
+The local gate of `github-push.sh` cancelled publications that CI would have
+passed — five times in a week, a different set of tests each time, every one
+green on its own. Three causes, each fixed with a test that fails without it.
+
+- **A released lock could stay behind (`utils._file_lock`, the findings lock
+  and the LLM queue).** Windows refuses to delete a file another process has
+  open, and the waiters open the lock many times a second to read its owner's
+  PID. A release that met such a reader gave up without a word: the file stayed,
+  owned by a live PID, and every waiter sat out its whole wait until the lock
+  was `stale` seconds old. Eight processes taking the findings lock ten times
+  each, doing nothing under it, needed 102 s and timed out 63 waits; the release
+  now retries for up to a second, and the same run takes 2.5 s. In the suite it
+  crashed xdist workers: a test that files findings five times waited out
+  pytest-timeout's 30 s. The sweep tests' fixture also keeps the lock in tmp
+  now — every worker used to queue on one file in the checkout.
+- **The 3 s gate of `CI=1` times serial runs only.** CI runs the suite serially;
+  in an xdist worker a call's wall time is the machine's, and the gate's
+  `CI=1 -n auto` failed tests that take 0.75–2.3 s alone. A skipped dependency
+  still fails in a worker.
+- **A shell test that does not finish within the gate's limit is a skip**, as a
+  fast suite that does not finish already was: `test_push_repo.sh` takes 172 s
+  and went past the 300 s on a loaded machine. A red one still blocks.
+
 ### ci-precheck: the fast suite and the project's guards from the test contract
 
 Ported from the meta-repo in a design of its own. The publication gate built

@@ -1195,6 +1195,30 @@ def test_a_holder_that_was_taken_over_leaves_the_new_lock_alone(bundle: Path):
     assert "waiter-token" in u.LLM_LOCK.read_text(encoding="utf-8")
 
 
+def test_a_release_that_meets_a_reader_still_frees_the_lock(bundle: Path, monkeypatch):
+    """Windows refuses to delete a file another process has open, and waiters
+    open the lock many times a second to read its owner's PID. A release that
+    lost that race gave up without a word: the lock stayed behind, owned by a
+    live PID, and every waiter sat out its whole wait until the file was `stale`
+    seconds old. Eight processes taking the findings lock ten times each, to do
+    nothing under it, needed 102 s; 63 of the waits timed out."""
+    u = _load_utils(bundle, "utils_release_race")
+    monkeypatch.setattr(u.time, "sleep", lambda _s: None)
+    real_unlink, refused = Path.unlink, []
+
+    def in_use(self, *a, **kw):
+        if self == u.FINDINGS_LOCK and len(refused) < 2:
+            refused.append(1)
+            raise PermissionError(13, "being used by another process", str(self))
+        return real_unlink(self, *a, **kw)
+    monkeypatch.setattr(Path, "unlink", in_use)
+
+    with u._findings_lock():
+        assert u.FINDINGS_LOCK.exists()
+    assert refused, "the race was not staged"
+    assert not u.FINDINGS_LOCK.exists(), "the lock outlived its release"
+
+
 def test_putting_a_stolen_lock_back_never_overwrites_a_newer_one(bundle: Path,
                                                                  monkeypatch):
     """A steal undone with os.replace clobbered a lock taken in the meantime.

@@ -1012,6 +1012,25 @@ def _lock_put_back(steal: Path, path: Path) -> None:
     steal.unlink(missing_ok=True)
 
 
+def _unlink_released(path: Path, tries: int = 50) -> None:
+    """Delete a released lock file, waiting out a reader for up to a second.
+
+    Windows refuses to delete a file another process has open, and the waiters
+    open this one many times a second to read its owner's PID. One refusal used
+    to end the release: the lock stayed behind under a live PID, and every
+    waiter sat out its whole `wait` until the file was `stale` seconds old.
+    A reader holds it for microseconds, so a short retry is enough.
+    """
+    for attempt in range(tries):
+        try:
+            path.unlink()
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(0.02)
+
+
 # errno values meaning "somebody else holds it"; anything else from the OS lock
 # call means this filesystem cannot lock at all (ENOLCK on an NFS mount without
 # a lock daemon, EOPNOTSUPP on some FUSE/SMB mounts).
@@ -1206,7 +1225,7 @@ def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
         if acquired:
             try:
                 if path.read_bytes() == token:
-                    path.unlink()
+                    _unlink_released(path)
                 else:
                     print(f"  {label}: held past {int(stale)}s and taken over — "
                           f"leaving the new holder's lock in place", file=sys.stderr)

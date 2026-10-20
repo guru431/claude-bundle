@@ -222,6 +222,29 @@ def test_on_ci_a_call_slow_only_once_is_the_runners_stall(pytester, monkeypatch)
     result.stdout.fnmatch_lines(["*when run again: counted as the runner's stall*"])
 
 
+def test_on_ci_an_xdist_worker_does_not_time_calls(pytester, monkeypatch):
+    """A worker shares the cores with the other workers and with the rest of the
+    machine. The publication gate's `CI=1 -n auto` went red on tests over 3 s
+    that take 0.75-2.3 s alone — a different set each run. Serial CI times
+    calls; a skipped dependency still fails in a worker."""
+    monkeypatch.setenv("CI", "1")
+    result = _session(pytester, monkeypatch, """
+        import time
+        import pytest
+
+        def test_slow():
+            time.sleep(0.15)
+
+        def test_needs_it():
+            pytest.importorskip("no_such_module_anywhere")
+    """, "\n_SLOW_CALL_SECONDS = 0.05\n\n"
+         "@pytest.hookimpl(specname='pytest_configure')\n"
+         "def pytest_configure_as_an_xdist_worker(config):\n"
+         "    config.workerinput = {'workerid': 'gw0'}\n")
+    result.assert_outcomes(passed=1, failed=1)
+    result.stdout.fnmatch_lines(["*Skips are failures on CI*"])
+
+
 def test_without_bash_a_shell_test_fails_on_windows(pytester, monkeypatch):
     monkeypatch.delenv("CI", raising=False)
     result = _session(pytester, monkeypatch, """

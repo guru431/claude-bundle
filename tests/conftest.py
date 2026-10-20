@@ -278,8 +278,22 @@ _CI_SKIP_NOTE = ("\n\nCI installs requirements.txt, so a missing import here mea
 # shared Windows runner stalls now and then, and a test that only writes a few
 # files under tmp_path once took 3.8 s there (0.01 s anywhere else) — so a slow
 # call runs once more, and only a second slow call fails (see
-# pytest_runtest_protocol below).
+# pytest_runtest_protocol below). And only in a serial run (_times_calls).
 _SLOW_CALL_SECONDS = 3.0
+
+
+def _times_calls(config) -> bool:
+    """On CI, and not in an xdist worker.
+
+    CI runs the suite one test after another, and the gate is calibrated for
+    that. A worker shares the cores with the other workers and with whatever
+    else the machine runs, so a call's wall time there is the machine's: the
+    publication gate runs this suite with `CI=1 -n auto`, and on a busy
+    workstation it went red on tests over 3 s that take 0.75-2.3 s alone — a
+    different set each run, while the same code was green in 34 s an hour
+    before. The retry cannot help: it runs at once, under the same load.
+    """
+    return _on_ci() and not hasattr(config, "workerinput")
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -304,7 +318,7 @@ def pytest_runtest_makereport(item, call):
     if report.when in ("setup", "call") and _missing_dependency(report):
         report.outcome = "failed"
         report.longrepr = f"{report.longrepr}{_CI_SKIP_NOTE}"
-    elif (report.when == "call" and report.passed
+    elif (report.when == "call" and report.passed and _times_calls(item.config)
           and report.duration > _SLOW_CALL_SECONDS
           and not any(item.get_closest_marker(m) for m in ("integration", "manual"))):
         report.outcome = "failed"

@@ -137,6 +137,30 @@ def test_tests_that_do_not_finish_here_do_not_block(repo: Path, monkeypatch):
     assert res.status == "skip" and not res.blocking
 
 
+def test_a_shell_suite_that_does_not_finish_here_does_not_block(repo: Path, monkeypatch):
+    """As for the fast suite: a 172-second suite went past the 300 s on a busy
+    machine and cancelled a publication CI would have passed. A red one still
+    blocks, and the unfinished one is named next to it."""
+    tests = repo / "cron" / "tests"
+    tests.mkdir(parents=True)
+    for name in ("test_slow.sh", "test_red.sh"):
+        (tests / name).write_bytes(b"#!/bin/bash\n")
+    monkeypatch.setattr(gate, "find_bash", lambda: "bash")
+    red_rc = [0]
+
+    def run(cmd, **kw):
+        if cmd[1].endswith("test_slow.sh"):
+            raise subprocess.TimeoutExpired(cmd, timeout=1)
+        return subprocess.CompletedProcess(cmd, red_rc[0], "FAIL: x\n", "")
+    monkeypatch.setattr(gate.subprocess, "run", run)
+    res = gate.check_shell_tests(repo)
+    assert res.status == "skip" and not res.blocking and "test_slow.sh" in res.detail
+
+    red_rc[0] = 1
+    res = gate.check_shell_tests(repo)
+    assert res.blocking and "test_red.sh" in res.detail and "test_slow.sh" in res.detail
+
+
 def test_the_test_command_follows_the_config_and_the_venv(repo: Path):
     (repo / "tests").mkdir()
     assert gate._test_command(repo) is None                     # no pytest config

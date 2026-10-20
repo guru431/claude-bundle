@@ -168,5 +168,8 @@ the same two pytest runs. Every pytest run in CI sets `CI=1`, which
 collection, in setup or in the call — is a failure, and so is a fast-suite test
 whose call takes over 3 seconds twice in a row (a slow call runs once more with
 fresh fixtures: a shared runner's one-off stall is a warning, not a red run).
+The timing gate holds in a serial run only, as CI's is: in an xdist worker —
+the publication gate runs `CI=1 -n auto` — a call's wall time belongs to the
+machine, and a busy one failed a different set of tests on each run.
 Keep CI independent of any LLM provider:
 anyone forking the repo must be able to run it.

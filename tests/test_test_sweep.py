@@ -512,6 +512,9 @@ def sweep_env(tmp_path, monkeypatch):
     monkeypatch.setattr(sweep, "tests_contract", lambda: ({}, []))
     (tmp_path / "bundle").mkdir()
     monkeypatch.setattr(sweep.bundle_utils, "BUNDLE_ROOT", tmp_path / "bundle")
+    # Its lock as well: FINDINGS_LOCK is derived from BUNDLE_ROOT at import, so
+    # every xdist worker queued its findings on ONE file in this checkout.
+    monkeypatch.setattr(sweep.bundle_utils, "FINDINGS_LOCK", tmp_path / "bundle" / ".findings.lock")
     return project, sent
 
 

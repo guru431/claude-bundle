@@ -352,6 +352,19 @@ def test_cleanup_removes_run_dirs_and_keeps_the_named_one(tmp_path, monkeypatch)
     assert keep.is_dir() and (tmp_path / "unrelated").is_dir()
 
 
+def test_stale_pytest_runs_are_removed_and_fresh_kept(tmp_path, monkeypatch):
+    """Older than a day goes; a run in progress, `pytest-current` and foreign names stay."""
+    monkeypatch.setattr(sweep.tempfile, "gettempdir", lambda: str(tmp_path))
+    now = 1_700_000_000
+    base = tmp_path / "pytest-of-user"
+    for name, age_h in (("pytest-5", 30), ("pytest-9", 2), ("pytest-current", 30), ("notes", 30)):
+        (base / name).mkdir(parents=True)
+        os.utime(base / name, (now - age_h * 3600,) * 2)
+
+    assert sweep.cleanup_stale_pytest_runs(now=now) == ["pytest-of-user/pytest-5"]
+    assert sorted(p.name for p in base.iterdir()) == ["notes", "pytest-9", "pytest-current"]
+
+
 def test_cleanup_never_deletes_a_directory_the_sweep_did_not_create(tmp_path, monkeypatch):
     """`%TEMP%/sweep-*` is anybody's namespace.
 

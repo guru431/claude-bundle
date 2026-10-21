@@ -137,6 +137,19 @@ The short list; UPGRADING.md has the steps.
   failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
   the Pester import hangs or dies before the first file.
 
+### Stale pytest temp directories no longer fill the system drive
+
+Manual test runs in parallel sessions left `%TEMP%/pytest-of-<user>` holding ten
+old runs (1.3 GB) on a morning drive C: dropped to zero mid-test: pytest keeps the
+last three runs whole and does not clean up after a parallel session.
+
+- **`test-sweep.py`** removes `pytest-<N>` runs older than a day from
+  `pytest-of-*` in its own temp. A run in progress, the `pytest-current` link and
+  other names stay.
+- **`pytest.ini`** sets `tmp_path_retention_policy = failed`: only failed tests
+  keep their `tmp_path`. Set the same in your projects — the sweep cannot reach
+  another account's temp.
+
 ### Shell suites get an integration level the publication gate leaves to CI
 
 The gate ran every `cron/tests/*.sh`, and under Git Bash three of them took 25,

@@ -426,6 +426,36 @@ def cleanup_temp_roots(keep: Path | None = None) -> list[str]:
     return removed
 
 
+STALE_PYTEST_AGE_S = 24 * 3600
+_PYTEST_RUN_RE = re.compile(r"pytest-\d+")
+
+
+def cleanup_stale_pytest_runs(now: float | None = None) -> list[str]:
+    """Remove runs older than a day from `%TEMP%/pytest-of-<user>`.
+
+    The sweep writes to its own basetemp; `pytest-of-<user>` fills up from manual
+    runs in sessions. pytest keeps the last three by default and does not clean
+    up after parallel sessions: one morning ten stale runs held 1.3 GB there and
+    drive C: ran out mid-test. A day's age never touches a run in progress, and
+    only `pytest-<N>` names are taken — the `pytest-current` symlink and anything
+    else stay. Set `tmp_path_retention_policy = failed` in the projects' pytest
+    config as well: the sweep cannot reach another account's temp.
+    """
+    now = time.time() if now is None else now
+    removed = []
+    for path in sorted(Path(tempfile.gettempdir()).glob("pytest-of-*/pytest-*")):
+        if not _PYTEST_RUN_RE.fullmatch(path.name):
+            continue
+        try:
+            if not path.is_dir() or now - path.stat().st_mtime < STALE_PYTEST_AGE_S:
+                continue
+            rmtree_force(path)
+            removed.append(f"{path.parent.name}/{path.name}")
+        except OSError:
+            continue                      # busy or foreign — not a reason to fail
+    return removed
+
+
 def ensure_basetemp(path: Path) -> tuple[Path, str | None]:
     """Return a usable basetemp: this path, or a spare if it is poisoned.
 
@@ -1412,6 +1442,8 @@ def _sweep(args, rec: dict) -> int:
 
     if (removed := cleanup_temp_roots()):
         log(f"temp directories removed: {len(removed)}")
+    if (stale := cleanup_stale_pytest_runs()):
+        log(f"stale pytest-of-* runs removed: {len(stale)}")
 
     red = [k for k, r in results.items() if r["status"] in ALERTING]
     env = [k for k, r in results.items() if r["status"] == "env"]

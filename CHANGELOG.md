@@ -137,6 +137,15 @@ The short list; UPGRADING.md has the steps.
   failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
   the Pester import hangs or dies before the first file.
 
+### The dead-owner lock test no longer depends on which PIDs are in use
+
+`test_llm_queue_reclaims_a_dead_owners_lock_at_once` patched `_pid_alive`, an
+alias `_file_lock` never called, so it asked Windows about PID 4242 for real.
+Windows ignores the low two bits of a PID: 4242 is 4240, and after a reboot gave
+that PID to a svchost the test waited out pytest-timeout's 30 s — one red test
+and a fast suite at 60 s instead of 38. The test patches `pid_alive`; the alias
+is gone, so patching the old name now fails at once instead of doing nothing.
+
 ### Stale pytest temp directories no longer fill the system drive
 
 Manual test runs in parallel sessions left `%TEMP%/pytest-of-<user>` holding ten

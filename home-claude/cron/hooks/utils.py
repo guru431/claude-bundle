@@ -961,10 +961,6 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
-# Kept as the private spelling the tests monkeypatch.
-_pid_alive = pid_alive
-
-
 def _lock_owner_pid(path: Path) -> int | None:
     """PID from the first field of the lock file, or None if unreadable."""
     try:

@@ -1274,7 +1274,10 @@ def test_llm_queue_reclaims_a_dead_owners_lock_at_once(bundle: Path, monkeypatch
 
     # Fresh by mtime, but the owning process is gone.
     u.LLM_LOCK.write_text("4242 killed-by-timeout\n", encoding="utf-8")
-    monkeypatch.setattr(u, "_pid_alive", lambda pid: pid != 4242)
+    # Patch the name _file_lock calls. Patching an alias of it changed nothing,
+    # and the test then asked Windows about 4242 for real — read as 4240 (the
+    # low two bits of a PID are ignored), which a reboot can hand to a svchost.
+    monkeypatch.setattr(u, "pid_alive", lambda pid: pid != 4242)
 
     with u._llm_queue():
         assert u._lock_owner_pid(u.LLM_LOCK) == os.getpid(), "the queue was not entered"

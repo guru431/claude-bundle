@@ -645,6 +645,9 @@ def _decode(data: bytes | None) -> str:
         return data.decode("cp1251", errors="replace")
 
 
+LOST_OUTPUT = "the suite's output is lost: a process outside the killed tree holds the pipe"
+
+
 def _spawn(cmd: list[str], cwd: Path, timeout: int, env: dict) -> tuple[int | None, str, str]:
     """Run one suite; a return code of None means it was killed on timeout.
 
@@ -674,11 +677,57 @@ def _spawn(cmd: list[str], cwd: Path, timeout: int, env: dict) -> tuple[int | No
         kill_tree(proc.pid)
         # Drain after the kill: otherwise a pipe pair is left open and the tail
         # pytest had already written — the reason it hung — is lost with it.
+        lost = ""
         try:
             out_b, err_b = proc.communicate(timeout=60)
         except subprocess.TimeoutExpired:
-            out_b, err_b = b"", b""
-        return None, _decode(out_b), f"timeout after {timeout}s\n" + _decode(err_b)
+            # A grandchild outside the killed tree still holds the pipe. Said
+            # plainly: empty output reads as "pytest wrote nothing".
+            out_b, err_b, lost = b"", b"", LOST_OUTPUT + "\n"
+        return None, _decode(out_b), f"timeout after {timeout}s\n" + lost + _decode(err_b)
+
+
+# pytest-timeout's thread method dumps the stack of EVERY thread, and the hung
+# test's frame sits at the start of the dump: never in the 12 lines of the tail.
+# A finding about a hung suite pointed at the day's log, which held one line
+# `+++ Timeout +++`. The limit only guards against a giant output; a dump fits.
+HANG_LOG_MAX_CHARS = 1_000_000
+
+
+def save_hang_output(key: str, output: str) -> dict:
+    """A hung suite's full output, to `test-sweep_<date>_<suite>.hang.log`.
+
+    Returns the result fields: `hang_log` — the file name or None, and
+    `hang_trace` — what the finding and the log say about the stack: where it
+    is, or why there is none.
+    """
+    if LOST_OUTPUT in output:
+        return {"hang_log": None, "hang_trace": f"stack not saved: {LOST_OUTPUT}"}
+    # Masked before it is cut: a cut through a secret would leave a piece of it.
+    text = mask_secrets(output.replace("\r\n", "\n"))
+    if len(text) > HANG_LOG_MAX_CHARS:
+        text = (f"(start of the output cut: {len(text) - HANG_LOG_MAX_CHARS} characters)\n"
+                + text[-HANG_LOG_MAX_CHARS:])
+    name = f"test-sweep_{DATE}_{re.sub(r'[^A-Za-z0-9_.-]', '-', key)}.hang.log"
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        # Appended: a manual re-run the same day must not erase the night's stack.
+        with (LOG_DIR / name).open("a", encoding="utf-8") as fh:
+            fh.write(f"=== {key} ===\n{text}\n")
+    except OSError as exc:
+        return {"hang_log": None, "hang_trace": f"stack not saved: {name} not written ({exc})"}
+    where = f"cron/logs/{name}"
+    if _PYTEST_HANG.search(text):
+        return {"hang_log": name, "hang_trace": f"the suite's full output, stack included, "
+                                                f"is in {where}"}
+    return {"hang_log": name, "hang_trace": f"the suite's full output is in {where}; "
+                                            f"it holds no pytest-timeout stack dump"}
+
+
+def _keep_hang(res: dict, key: str, output: str) -> dict:
+    if res["status"] == "timeout" or res.get("hung"):
+        res.update(save_hang_output(key, output))
+    return res
 
 
 def run_suite(suite: Path, key: str, full: bool) -> dict:
@@ -720,7 +769,7 @@ def run_suite(suite: Path, key: str, full: bool) -> dict:
            "tail": tail, "note": temp_note}
     if env_kind:
         res["env_kind"] = env_kind
-    return res
+    return _keep_hang(res, f"{key}@full" if full else key, out + err)
 
 
 def summary_line(text: str) -> str:
@@ -978,10 +1027,12 @@ def run_contract(suite: dict, level: str) -> dict:
     elif basetemp is not None and status == "failed" and is_env_failure(text, basetemp):
         status, env_kind = "env", "basetemp"
         note = note or f"{basetemp.name} was unavailable during cleanup — run is unreliable"
-    return {"status": status, "seconds": round(time.time() - started, 1),
-            "tail": mask_secrets("\n".join(text.replace("\r\n", "\n").strip().splitlines()[-12:])),
-            "note": note, "summary": parsed["summary"], "slowest": slowest(text),
-            "hung": parsed.get("hung"), "env_kind": env_kind}
+    return _keep_hang(
+        {"status": status, "seconds": round(time.time() - started, 1),
+         "tail": mask_secrets("\n".join(text.replace("\r\n", "\n").strip().splitlines()[-12:])),
+         "note": note, "summary": parsed["summary"], "slowest": slowest(text),
+         "hung": parsed.get("hung"), "env_kind": env_kind},
+        f"{suite['key']}@full" if level == "full" else suite["key"], text)
 
 
 def _summary(res: dict) -> str:
@@ -1047,8 +1098,8 @@ def append_finding(project_dir: Path, project: str, suite: str, res: dict,
     cron = "ClaudeTestSweepFull" if full else "ClaudeTestSweep"
     detail = _summary(res) or res["status"]
     if res["status"] == "timeout":
-        what = (f"the suite hung: {res.get('hung') or detail}. The tail of its output, "
-                f"stack included, is in cron/logs/test-sweep_{DATE}.log")
+        what = (f"the suite hung: {res.get('hung') or detail}; "
+                f"{res.get('hang_trace') or 'the sweep did not save its output'}")
         proposal = ("find in the stack what the test waits for (network, a service, a "
                     "subprocess, a lock) and fix it, or mark it `integration` by "
                     "measurement. A per-test time limit (pytest-timeout `timeout = 30`, "
@@ -1363,6 +1414,8 @@ def _sweep(args, rec: dict) -> int:
         if res["status"] in ALERTING:
             if res.get("hung"):
                 log(f"     hung: {res['hung']}")
+            if res["status"] == "timeout" and res.get("hang_trace"):
+                log(f"     {res['hang_trace']}")
             # The FAILED/ERROR lines specifically, not the last line of the
             # tail: that one holds `1 failed, 259 passed`, which does not say
             # WHICH test failed, so triage starts with a blind re-run.

@@ -90,6 +90,20 @@ def test_the_task_starts_at_the_last_prompt_a_human_typed(hook, tmp_path: Path):
     assert hook.turn_started(str(t)) == datetime(2026, 1, 2, 10, 0, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("text", ['check the "toolUseResult', "toolUseResult"])
+def test_a_prompt_mentioning_tool_use_result_still_counts(hook, tmp_path: Path, text):
+    """The cheap filter skipped every line holding `"toolUseResult"` — and so does
+    a prompt ending in that word: the prompt was skipped and the task was timed
+    from the one before it."""
+    t = _transcript(tmp_path / "s.jsonl", [
+        _user("2026-01-02T08:00:00Z", "an earlier task", **HUMAN),
+        _user("2026-01-02T08:00:01Z", [{"type": "tool_result", "content": "x"}],
+              toolUseResult={"ok": True}),
+        _user("2026-01-02T09:00:00Z", text, **HUMAN),
+    ])
+    assert hook.turn_started(str(t)) == datetime(2026, 1, 2, 9, 0, tzinfo=timezone.utc)
+
+
 def test_a_transcript_from_before_origin_existed(hook, tmp_path: Path):
     """`origin` is not a documented field. Without it the task starts at the LAST
     plain-text prompt — which is why the transcript opens with an earlier one:

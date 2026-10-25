@@ -402,6 +402,9 @@ def test_s4u_tasks_are_held_to_the_session_0_path_policy(monkeypatch, capsys):
 
 @pytest.mark.parametrize("reply", [
     types.SimpleNamespace(returncode=0, stdout=b"{not json", stderr=b""),
+    # The collection prints an object even with no task: empty is a failure.
+    types.SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
+    types.SimpleNamespace(returncode=0, stdout=b"null\r\n", stderr=b""),
     types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"Get-ScheduledTask: access denied"),
     subprocess.TimeoutExpired("powershell", 60),
 ])

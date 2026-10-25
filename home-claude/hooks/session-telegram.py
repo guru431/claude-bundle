@@ -174,8 +174,10 @@ def turn_started(transcript_path: str) -> datetime | None:
     """
     try:
         for raw in _lines_backwards(transcript_path):
-            # Cheap filter first: most lines are tool output, often large.
-            if b'"user"' not in raw or b'"toolUseResult"' in raw:
+            # Cheap filter first: most lines are tool output, often large. It
+            # looks for the KEY (with its colon): a bare `"toolUseResult"` is
+            # also what a prompt ending in that word looks like.
+            if b'"user"' not in raw or b'"toolUseResult":' in raw:
                 continue
             obj = _parse(raw)
             if obj and _is_human_prompt(obj):

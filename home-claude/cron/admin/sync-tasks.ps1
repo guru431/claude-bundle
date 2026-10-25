@@ -601,9 +601,16 @@ function Test-UserChanged([string]$current, [string]$wanted) {
     return ((($current -split '\\')[-1]) -ne (($wanted -split '\\')[-1]))
 }
 
+# An unparsable duration is not zero: zero is what an EMPTY one gives, and a
+# <Repetition> with a garbage interval then compared equal to no repetition at
+# all and printed [unchanged]. $null equals no TimeSpan: the task is re-registered.
 function ConvertTo-DurationSpan([string]$iso) {
     if (-not $iso) { return [TimeSpan]::Zero }
-    try { return [System.Xml.XmlConvert]::ToTimeSpan($iso) } catch { return [TimeSpan]::Zero }
+    try { return [System.Xml.XmlConvert]::ToTimeSpan($iso) }
+    catch {
+        Write-Host ("   WARN: duration '{0}' is not ISO-8601 - treated as changed" -f $iso) -ForegroundColor Yellow
+        return $null
+    }
 }
 
 # ── mapped-drive predicate ───────────────────────────────────────────────────

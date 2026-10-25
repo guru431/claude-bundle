@@ -270,6 +270,58 @@ def test_autofix_still_applies_an_ordinary_addition(sync, tmp_path, monkeypatch)
     assert "ruff check" in agents.read_text(encoding="utf-8")
 
 
+def test_autofix_refuses_a_path_into_a_missing_directory(sync, tmp_path, monkeypatch):
+    """The model completed a path from CLAUDE.md against the wrong root: a
+    correct `dashboard/app/web/static/views/<view>.js` became
+    `dashboard/static/views/<view>.js` — no such directory — and was applied."""
+    (tmp_path / "dashboard" / "app" / "web" / "static" / "views").mkdir(parents=True)
+    monkeypatch.setattr(sync, "PROJECTS_ROOT", tmp_path / "projects")
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text(AGENTS_FIXTURE, encoding="utf-8")
+    _stub_fix_answer(sync, monkeypatch, [{
+        "item": "dashboard views", "old": "- tests: `pytest -q`\n",
+        "new": "- tests: `pytest -q`\n- views: `dashboard/static/views/<view>.js`\n"}])
+
+    applied, failed = sync.autofix("myproject", "# CLAUDE.md\n", AGENTS_FIXTURE,
+                                   "- drift", agents, public=False)
+
+    assert applied == []
+    assert any("dashboard/static/views" in item for item in failed), failed
+    assert agents.read_text(encoding="utf-8") == AGENTS_FIXTURE
+
+
+def test_autofix_accepts_a_placeholder_path_in_an_existing_directory(sync, tmp_path,
+                                                                     monkeypatch):
+    """The directory before `<…>` exists — the edit applies."""
+    (tmp_path / "app" / "views").mkdir(parents=True)
+    monkeypatch.setattr(sync, "PROJECTS_ROOT", tmp_path / "projects")
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text(AGENTS_FIXTURE, encoding="utf-8")
+    _stub_fix_answer(sync, monkeypatch, [{
+        "item": "views", "old": "- tests: `pytest -q`\n",
+        "new": "- tests: `pytest -q`\n- `app/views/<view>.js`\n"}])
+
+    applied, failed = sync.autofix("myproject", "# CLAUDE.md\n", AGENTS_FIXTURE,
+                                   "- drift", agents, public=False)
+
+    assert failed == [] and applied == ["views"]
+    assert "app/views/<view>.js" in agents.read_text(encoding="utf-8")
+
+
+def test_remote_home_and_url_paths_are_not_checked(sync, tmp_path):
+    new = ("`/etc/app/env` `~/.claude/x/y.md` `https://a.b/c/d` `host:/opt/x/y`"
+           " `c:/none/x` `$HOME/a/b` `<project>/FINDINGS.md` `README.md`")
+    assert sync.missing_path_dirs(new, "", (tmp_path,)) == []
+    assert sync.missing_path_dirs("`nowhere/x.md`", "", (tmp_path,)) == [
+        ("nowhere/x.md", "nowhere")]
+    # a path the file already holds is not this edit's business
+    assert sync.missing_path_dirs("`nowhere/x.md`", "see nowhere/x.md", (tmp_path,)) == []
+    # a sibling project's path is found under the second root, projects_root
+    (tmp_path / "projects" / "sibling" / "scripts").mkdir(parents=True)
+    assert sync.missing_path_dirs("`sibling/scripts/x.py`", "",
+                                  (tmp_path / "here", tmp_path / "projects")) == []
+
+
 # ── file handling ──────────────────────────────────────────────────────────
 
 def test_detect_newline_preserves_the_files_own_style(sync, tmp_path):
@@ -341,6 +393,43 @@ def test_projects_without_claude_md_do_not_fail_the_run(sync, tmp_path, monkeypa
     monkeypatch.setattr(sync, "llm_call", lambda *a, **k: pytest.fail("no pair, no call"))
 
     assert sync.main() == 0
+
+
+def test_agents_md_linking_to_claude_md_is_not_a_drift(sync, tmp_path, monkeypatch):
+    """A git symlink AGENTS.md → CLAUDE.md, checked out with core.symlinks=false,
+    is a one-line file reading `CLAUDE.md`. The model saw an empty AGENTS.md,
+    the fix was refused as a balloon, and a drift finding was filed every week."""
+    (tmp_path / "CLAUDE.md").write_text("# rules\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("CLAUDE.md", encoding="utf-8")
+    monkeypatch.setattr(sync, "llm_call", lambda *a, **k: pytest.fail("the link reached the LLM"))
+
+    assert sync.check_pair("myproject", tmp_path / "CLAUDE.md", tmp_path / "AGENTS.md",
+                           tmp_path / "FINDINGS.md", tmp_path / "run.log") == (False, 0, None)
+    assert not (tmp_path / "FINDINGS.md").exists()
+    assert "SKIP (AGENTS.md is a link to CLAUDE.md)" in (
+        tmp_path / "run.log").read_text(encoding="utf-8")
+
+
+def test_a_failing_pair_does_not_stop_the_others(sync, tmp_path, monkeypatch):
+    for name in ("alpha", "beta"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# rules\n", encoding="utf-8")
+    monkeypatch.setattr(sync, "PROJECTS_ROOT", tmp_path)
+    seen = []
+
+    def check(project, *a):
+        seen.append(project)
+        if project == "alpha":
+            raise PermissionError("AGENTS.md is busy")
+        return False, 0, True
+    monkeypatch.setattr(sync, "check_pair", check)
+
+    assert sync.main() == 1, "a pair that could not be checked must reach the monitor"
+    assert seen == ["alpha", "beta"]
+    text = "".join(p.read_text(encoding="utf-8")
+                   for p in sync.LOG_DIR.glob("agents-md-sync-check_*.log"))
+    assert "alpha: FAILED to check the pair — PermissionError" in text
+    assert "1 pair(s) seen, 1 actually examined" in text
 
 
 def test_missing_agents_md_is_filed_once(sync, tmp_path):

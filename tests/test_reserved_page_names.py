@@ -75,6 +75,19 @@ def test_pages_that_merely_discuss_findings_are_kept(u, path):
     assert u.normalize_wiki_path(path) == path
 
 
+@pytest.mark.parametrize("path", [
+    "projects/myapp-",
+    "projects/myapp/.md",
+    "projects/myapp/...md",
+    "kb/concepts/.md",
+])
+def test_an_empty_name_or_folder_is_rejected(u, monkeypatch, path):
+    """A degenerate path from the model was repaired into `projects/myapp/.md` —
+    a page with no name, which write_page created."""
+    monkeypatch.setattr(u, "KNOWN_PROJECTS", ["myapp"])
+    assert u.normalize_wiki_path(path) == ""
+
+
 def test_index_and_log_remain_rejected(u):
     assert u.normalize_wiki_path("projects/myapp/index.md") == ""
     assert u.normalize_wiki_path("projects/myapp/_log.md") == ""

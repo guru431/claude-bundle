@@ -57,9 +57,19 @@ If kind = "python-daemon" Then kind = "python"
 ' quoting early, and everything after it was re-split by the child's own parser.
 ' It happened to work for `"--full"` because the two layers of quoting cancelled
 ' out; an argument containing a space would have fallen apart.
+' Trailing backslashes are doubled too: by the argv rules of the C runtime and
+' MSYS, `"C:\x y\"` reads `\"` as an escaped quote, and the argument swallowed
+' everything after it.
+Dim arg, tail
 extra = ""
 For i = 2 To WScript.Arguments.Count - 1
-    extra = extra & " """ & Replace(WScript.Arguments(i), """", """""") & """"
+    arg = Replace(WScript.Arguments(i), """", """""")
+    tail = ""
+    Do While Right(arg, 1) = "\"
+        arg = Left(arg, Len(arg) - 1)
+        tail = tail & "\\"
+    Loop
+    extra = extra & " """ & arg & tail & """"
 Next
 
 Set shell = CreateObject("WScript.Shell")

@@ -157,8 +157,14 @@ for (`$i = $from; `$i -lt `$files.Count; `$i++) {
             $name = $files[$k].Name
             $res = Join-Path $tmp "$k.json"
             $mark = Join-Path $tmp "$k.start"
+            # A truncated result (the process killed mid-write) is "no result",
+            # not a reason to take the runner down without TESTS_RESULT: under
+            # Stop, ConvertFrom-Json threw and the files after it never ran.
+            $r = $null
             if (Test-Path -LiteralPath $res) {
-                $r = Get-Content -LiteralPath $res -Raw -Encoding UTF8 | ConvertFrom-Json
+                try { $r = Get-Content -LiteralPath $res -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $r = $null }
+            }
+            if ($r) {
                 $pass += [int]$r.passed; $fail += [int]$r.failed; $skip += [int]$r.skipped
                 $secs = [string]::Format($inv, '{0:F1}', [double]$r.seconds)
                 Write-Output "TESTS_DURATION ${secs}s $name"

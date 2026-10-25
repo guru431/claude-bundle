@@ -136,6 +136,26 @@ def test_a_tasks_stderr_is_kept_and_its_exit_code_still_arrives(tmp_path):
         f'"{task}" "--full"'
 
 
+def test_an_argument_ending_in_a_backslash_arrives_whole(tmp_path):
+    """Every argument was re-quoted as-is, so `C:\\x y\\` became `"C:\\x y\\"`, whose
+    `\\"` the child's argv parser reads as an escaped quote: the argument ran on
+    into the next one. Trailing backslashes are doubled now."""
+    import sys
+    bundle = _bundle(tmp_path)
+    script = tmp_path / "argv.py"
+    out = tmp_path / "argv.txt"
+    script.write_text("import sys\nopen(sys.argv[1], 'w').write(repr(sys.argv[2:]))\n",
+                      encoding="ascii")
+    env = {k: v for k, v in os.environ.items() if k != "BASH_EXE"}
+    env["PYTHON_EXE"] = sys.executable
+    # A string, as Task Scheduler hands it over: a list would be quoted by
+    # subprocess's own CRT rules, and WSH does not parse backslashes at all.
+    line = (f'"{CSCRIPT}" //B //nologo "{bundle / "bin" / "_run-hidden.vbs"}" python '
+            f'"{script}" "{out}" "a b" c "C:\\x y\\"')
+    assert subprocess.run(line, env=env, timeout=60).returncode == 0
+    assert out.read_text(encoding="ascii") == repr(["a b", "c", "C:\\x y\\"])
+
+
 def test_a_quiet_run_leaves_no_stderr_file(tmp_path):
     bundle = _bundle(tmp_path)
     interpreter = _talker(tmp_path / "py" / "python.cmd", exit_code=0)

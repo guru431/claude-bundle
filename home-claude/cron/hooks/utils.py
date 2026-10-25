@@ -3999,6 +3999,10 @@ def normalize_wiki_path(path: str) -> str:
     # "projects/../CLAUDE.md" must never resolve outside its project folder.
     if any(p in (".", "..") for p in parts):
         return ""
+    # An empty page name or project folder: `projects/myapp-` was repaired into
+    # `projects/myapp/.md`, a page with no name that write_page then created.
+    if any(not p.strip(".") for p in (parts[1], parts[2][:-3])):
+        return ""
     # Dedup: if a similarly-named file already exists, return that path.
     folder = WIKI_ROOT / parts[0] / parts[1]
     existing = find_existing_page_by_name(folder, parts[2])

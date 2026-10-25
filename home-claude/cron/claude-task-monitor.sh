@@ -420,7 +420,11 @@ try:
     if r.returncode != 0:
         raise RuntimeError(f"PowerShell exited {r.returncode}: "
                            + r.stderr.decode('utf-8', errors='replace').strip()[:200])
-    collected = json.loads(out) if out and out != 'null' else {}
+    # The collection prints a {Mapped, Tasks} object even with no task at all,
+    # so an empty stdout at rc 0 is a failed collection too, not "no violation".
+    if not out or out == 'null':
+        raise ValueError("PowerShell exited 0 with empty stdout")
+    collected = json.loads(out)
     if not isinstance(collected, dict):
         raise ValueError(f"expected a JSON object, got {type(collected).__name__}")
     mapped = {str(letter).upper() for letter in (collected.get('Mapped') or [])}

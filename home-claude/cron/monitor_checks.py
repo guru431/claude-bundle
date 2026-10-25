@@ -398,7 +398,11 @@ _SWEEP_EXCLUDED = re.compile(r"(^|/)(\.env(\.[^/]+)?|\.md2pdf-[^/]*)(/|$)")
 
 
 def _git(repo: Path, *args: str) -> str:
-    r = subprocess.run(["git", "-C", str(repo), "-c", "core.quotePath=false", *args],
+    # --no-optional-locks: `status` refreshes the index under index.lock, and a
+    # git killed by the timeout left that lock behind — the next night's
+    # git-push-all then could not commit in that repository at all.
+    r = subprocess.run(["git", "-C", str(repo), "--no-optional-locks",
+                        "-c", "core.quotePath=false", *args],
                        capture_output=True, timeout=120)
     if r.returncode != 0:
         err = r.stderr.decode("utf-8", errors="replace").strip().splitlines()

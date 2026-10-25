@@ -134,6 +134,26 @@ foreach ($c in @(@('AtStartup', ''), @('AtLogOn', ''), @('AtStartup', 'PT8H'),
     ], r.stdout
 
 
+def test_an_unparsable_duration_is_not_the_empty_one(tmp_path: Path):
+    """An unparsable duration came out as the same zero as an empty one: a
+    repetition with a garbage interval compared equal to none at all, and the
+    <Repetition> change printed [unchanged]. Now a WARN, and a value equal to
+    nothing — the task is re-registered."""
+    code = define_functions(SYNC, ["ConvertTo-DurationSpan"]) + r"""
+foreach ($c in @(@('garbage-vs-empty', '10m', ''), @('empty-vs-empty', '', ''),
+                 @('P1D-vs-PT24H', 'P1D', 'PT24H'), @('PT1H-vs-PT2H', 'PT1H', 'PT2H'))) {
+    $ne = (ConvertTo-DurationSpan $c[1]) -ne (ConvertTo-DurationSpan $c[2])
+    Write-Output ("{0}|{1}" -f $c[0], $ne)
+}
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    got = dict(line.split("|", 1) for line in r.stdout.splitlines() if "|" in line)
+    assert got == {"garbage-vs-empty": "True", "empty-vs-empty": "False",
+                   "P1D-vs-PT24H": "False", "PT1H-vs-PT2H": "True"}, got
+    assert "WARN" in r.stdout and "10m" in r.stdout, r.stdout
+
+
 def test_a_time_of_day_out_of_range_is_refused_not_rolled_over(tmp_path: Path):
     """`Daily 25:00` passed the trigger regex, and the start boundary was built
     with AddHours(25): the task was registered, silently, for one o'clock the

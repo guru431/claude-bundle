@@ -369,13 +369,46 @@ def is_public_repo(project_dir: Path) -> bool:
     return not all(private(u) for u in urls)
 
 
-def apply_edits(agents_md: str, edits: list[dict],
-                public: bool) -> tuple[str, list[str], list[str]]:
+_PLACEHOLDER_RE = re.compile(r"[<*{\[]")
+
+
+def missing_path_dirs(new: str, text: str, roots: tuple[Path, ...]) -> list[tuple[str, str]]:
+    """Backticked paths in `new` whose directory exists under none of `roots`.
+
+    The model completes a relative path from CLAUDE.md against the wrong root: a
+    correct `dashboard/app/web/static/views/<view>.js` came back as
+    `dashboard/static/views/<view>.js`, a directory that does not exist, and the
+    edit was applied. Only the directory is checked (the part before the first
+    `<…>`/`*`, or before the file name): an edit may name a new file before it
+    exists. Not checked: paths the file already holds (this edit did not bring
+    them), absolute and remote ones (`/etc/…`, `c:/…`, `host:path`), home paths
+    (`~/…`), URLs and environment variables. Returns [(path, directory)].
+    """
+    bad: list[tuple[str, str]] = []
+    for token in _IDENT_RE.findall(new):
+        for word in token.split():
+            if word in text or not _PATH_SEP.search(word):
+                continue
+            if word[0] in "/\\~" or any(c in word for c in ":$%@"):
+                continue
+            head = _PLACEHOLDER_RE.split(word, 1)[0]
+            cut = max(head.rfind("/"), head.rfind("\\"))
+            if cut <= 0:
+                continue
+            folder = head[:cut]
+            if not any((root / folder).is_dir() for root in roots):
+                bad.append((word, folder))
+    return bad
+
+
+def apply_edits(agents_md: str, edits: list[dict], public: bool,
+                roots: tuple[Path, ...] = ()) -> tuple[str, list[str], list[str]]:
     """Apply narrow edits to the AGENTS.md text.
 
     Returns (new text, applied items, unfixed items with a reason). An edit is
     applied only when `old` occurs exactly once; for a public repo `new` must
-    also clear the leak gate.
+    also clear the leak gate. With `roots`, an edit that writes in a path into a
+    directory that does not exist is refused (missing_path_dirs).
     """
     text = agents_md
     applied: list[str] = []
@@ -397,6 +430,12 @@ def apply_edits(agents_md: str, edits: list[dict],
             continue
         if public and PUBLIC_LEAK_RE.search(new):
             failed.append(f"{item} — edit would carry private data into a public repo")
+            continue
+        broken = missing_path_dirs(new, text, roots) if roots else []
+        if broken:
+            word, folder = broken[0]
+            failed.append(f"{item} — edit writes in the path `{word}`, "
+                          f"and there is no directory `{folder}`")
             continue
         text = text.replace(old, new, 1)
         applied.append(item)
@@ -426,7 +465,10 @@ def autofix(project: str, claude_md: str, agents_md: str, report: str,
     if not edits:
         return [], ["whole report — the edit response did not parse"]
 
-    new_text, applied, failed = apply_edits(agents_md, edits, public)
+    # Paths are checked from the project and from projects_root: AGENTS.md may
+    # point at a sibling project as `<sibling>/scripts/...`.
+    roots = tuple(r for r in (agents_path.parent, PROJECTS_ROOT) if r is not None)
+    new_text, applied, failed = apply_edits(agents_md, edits, public, roots)
     if not applied:
         return [], failed
 
@@ -518,7 +560,8 @@ def check_pair(project: str, claude_path: Path, agents_path: Path,
     actually examined). The third value is what separates "checked and found
     nothing" from "never reached the provider": without it a night where every
     project returned LLM_FAIL looked exactly like a clean sweep. It is None
-    when there is no pair — no CLAUDE.md — which is neither: counted as "not
+    when there is no pair — no CLAUDE.md, or an AGENTS.md that is only a link
+    to it — which is neither: counted as "not
     examined", a projects_root of such folders read as an unreachable LLM.
     """
     if not claude_path.exists():
@@ -538,6 +581,14 @@ def check_pair(project: str, claude_path: Path, agents_path: Path,
         append_to_findings(findings_path, project,
                            "AGENTS.md is missing while CLAUDE.md exists.")
         return True, 0, True
+    # AGENTS.md is a git symlink to CLAUDE.md; with core.symlinks=false it is
+    # checked out as a one-line file reading `CLAUDE.md`. One instruction set,
+    # nothing to compare — and a "fix" would replace the link with a copy. Sent
+    # to the model it read as an empty AGENTS.md, the fix was refused as a
+    # balloon, and a drift finding came back every week.
+    if agents_path.is_symlink() or agents_md.strip() == claude_path.name:
+        log(f"  {project}: SKIP (AGENTS.md is a link to CLAUDE.md)", log_path)
+        return False, 0, None
 
     if is_dry_run():
         # The most invasive task in the bundle — it edits files in OTHER
@@ -661,6 +712,7 @@ def _check_projects(args, rec: dict) -> int:
         return done(0, None, f"projects_root missing: {PROJECTS_ROOT}")
 
     drift_count = fixed_count = checked = examined = 0
+    failed_pairs: list[str] = []
     for project_dir in sorted(PROJECTS_ROOT.iterdir()):
         if not project_dir.is_dir():
             continue
@@ -673,13 +725,22 @@ def _check_projects(args, rec: dict) -> int:
         if not working_copy_allowed(project):
             log(f"  skip {project} (privacy policy)", log_path)
             continue
-        drifted, fixed, reached = check_pair(
-            project,
-            project_dir / "CLAUDE.md",
-            project_dir / "AGENTS.md",
-            project_dir / "FINDINGS.md",
-            log_path,
-        )
+        # One pair's failure (a PermissionError writing AGENTS.md or
+        # FINDINGS.md, say) used to end the run: the projects after it were not
+        # checked that week.
+        try:
+            drifted, fixed, reached = check_pair(
+                project,
+                project_dir / "CLAUDE.md",
+                project_dir / "AGENTS.md",
+                project_dir / "FINDINGS.md",
+                log_path,
+            )
+        except Exception as exc:
+            log(f"  {project}: FAILED to check the pair — {type(exc).__name__}: {exc}",
+                log_path)
+            failed_pairs.append(project)
+            continue
         if reached is None:
             continue                     # no CLAUDE.md: not a pair to check
         drift_count += int(drifted)
@@ -688,8 +749,12 @@ def _check_projects(args, rec: dict) -> int:
         examined += int(reached)
 
     log(f"=== DONE: {checked} pair(s) seen, {examined} actually examined, "
-        f"{fixed_count} item(s) auto-fixed, {drift_count} finding(s) filed ===",
+        f"{fixed_count} item(s) auto-fixed, {drift_count} finding(s) filed, "
+        f"{len(failed_pairs)} pair(s) failed ===",
         log_path)
+    if failed_pairs:
+        return done(1, fixed_count or None,
+                    f"{examined}/{checked} pair(s) examined; failed: {', '.join(failed_pairs)}")
 
     # A run where every candidate project failed to reach the provider verified
     # NOTHING, and used to exit 0 all the same: main() returned None, so "did

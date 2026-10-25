@@ -137,6 +137,63 @@ The short list; UPGRADING.md has the steps.
   failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
   the Pester import hangs or dies before the first file.
 
+### Ported from the meta-repo: nine fixes since the last comparison
+
+The shared files were compared again, commit by commit. Nine changes made in
+the meta-repo since the last port apply here; each comes with a test that fails
+on the code it replaces.
+
+- **`test-sweep.py` keeps a hung suite's full output.** The finding said the
+  stack was in the day's log, which keeps a 12-line tail — and pytest-timeout's
+  dump puts the hung test's frame first, so the log held `+++ Timeout +++` and
+  nothing else. The whole output (masked, at most 1M characters) now goes to
+  `cron/logs/test-sweep_<date>_<suite>.hang.log`, and the finding names that
+  file — or says the output was lost to a process outside the killed tree.
+- **`normalize_wiki_path` refuses an empty page name or project folder.**
+  `projects/myapp-` was repaired into `projects/myapp/.md`, a page with no name
+  that `write_page` created.
+- **`session-telegram.py` times the task from the right prompt.** Its cheap
+  filter skipped any line holding `"toolUseResult"`, and a prompt ending in that
+  word holds it too; it now looks for the key with its colon.
+- **`agents-md-sync-check.py` leaves an AGENTS.md that is a link to CLAUDE.md
+  alone** — a git symlink, or the one-line `CLAUDE.md` it becomes with
+  `core.symlinks=false`. Sent to the model it read as an empty file, and a drift
+  finding came back every week.
+- **`agents-md-sync-check.py` refuses an edit that writes in a path into a
+  directory that does not exist** (the model completes a relative path from
+  CLAUDE.md against the wrong root), checked from the project and from
+  `projects_root`; the item goes to the finding instead. **One pair that fails
+  no longer ends the run:** it is logged, the others are checked, and the run
+  exits 1 naming it.
+- **The Windows task monitor's policy check fails on an empty collection.** The
+  PowerShell half prints an object even with no task at all, so an empty stdout
+  at exit 0 read as "no violation" exactly when nothing was looked at.
+- **The task monitor reads git without taking `index.lock`**
+  (`--no-optional-locks`). A `git status` killed by the 120 s timeout left the
+  lock behind, and the next night's `git-push-all` could not commit there.
+- **`sync-tasks.ps1`: an unparsable duration is not the empty one.** Both came
+  out as zero, so a `<Repetition>` with a garbage interval compared equal to none
+  and printed `[unchanged]`; it is a WARN and the task is registered again.
+  **`run-pester.ps1`** takes a truncated `<n>.json` (a process killed mid-write)
+  for no result: `ConvertFrom-Json` used to take the runner down, without the
+  files after it and without `TESTS_RESULT`.
+- **`_run-hidden.vbs` doubles an argument's trailing backslashes.** `C:\x y\`
+  became `"C:\x y\"`, whose `\"` the child's argv parser reads as an escaped
+  quote — the argument ran on into the next one.
+
+Checked and not ported: the meta-repo's `ci-precheck.py` and `test-sweep.py`
+changes of the same days are its twins of this repo's own (integration level of
+shell suites, an unfinished shell suite as a skip, the contract-driven gate,
+stale `pytest-of-*` runs); a full disk as `env` for every runner and a
+retry ceiling for a KB article with every path rejected are already so here
+(`run_contract`, marked processed at once); an unreadable project registry
+(there is none here — the contract errors are filed as a finding); the
+meta-repo's own LLM provider counters and pause file, its shell compile
+wrappers with their shared LLM lock (here the compilers are Python and the lock
+is `utils._file_lock`), and its own task timeouts. A retry of `os.replace` in
+`agents-md-sync-check.py`'s writer stays out: here it writes through the hub's
+`atomic_write_text`, and a retry there reaches every task.
+
 ### The dead-owner lock test no longer depends on which PIDs are in use
 
 `test_llm_queue_reclaims_a_dead_owners_lock_at_once` patched `_pid_alive`, an

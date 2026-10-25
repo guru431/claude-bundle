@@ -54,6 +54,9 @@ def _run_root_in_tmp(tmp_path, monkeypatch):
     temp directory.
     """
     monkeypatch.setattr(sweep, "RUN_ROOT", tmp_path / f"sweep-run-{os.getpid()}")
+    # A timed-out suite writes its full output next to the day's log; a test
+    # that times one out must not leave that file in the checkout's cron/logs.
+    monkeypatch.setattr(sweep, "LOG_DIR", tmp_path / "logs")
 
 
 # ── suite discovery ──────────────────────────────────────────────────────────
@@ -928,6 +931,40 @@ def test_contract_hang_is_a_timeout_naming_the_test(tmp_path, monkeypatch):
     assert res["hung"] == "test_net.py:42 test_waits_for_server"
 
 
+def test_a_hung_suite_keeps_its_full_output_in_a_file_of_its_own(tmp_path, monkeypatch):
+    """The finding promised "the tail of its output, stack included" in the
+    day's log, which keeps 12 lines; pytest-timeout's dump puts the hung test's
+    frame first, so the log held `+++ Timeout +++` and nothing to go on."""
+    monkeypatch.setattr(sweep, "find_bash", lambda: "bash-exe")
+    other_threads = "".join(f"  File \"x.py\", line {i}, in helper\n" for i in range(40))
+    _fake_popen(monkeypatch, returncode=1,
+                out=(PYTEST_HANG + other_threads + "token=hunter2-hunter2-hunter2\n").encode())
+    res = sweep.run_contract(_contract_suite(tmp_path), "full")
+
+    assert "test_waits_for_server" not in res["tail"], "the stack fits the tail after all"
+    assert res["hang_log"] == f"test-sweep_{sweep.DATE}_demo-full.hang.log"
+    saved = (sweep.LOG_DIR / res["hang_log"]).read_text(encoding="utf-8")
+    assert "test_net.py\", line 42, in test_waits_for_server" in saved
+    assert "hunter2-hunter2" not in saved, "the file is written unmasked"
+    assert res["hang_trace"].endswith(f"stack included, is in cron/logs/{res['hang_log']}")
+
+
+def test_a_hang_whose_output_was_lost_says_so(tmp_path, monkeypatch):
+    """A grandchild outside the killed tree keeps the pipe open: nothing to save,
+    and the finding says why instead of pointing at an empty file."""
+    class Stuck(_FakeProc):
+        def communicate(self, timeout=None):
+            raise sweep.subprocess.TimeoutExpired(cmd="pytest", timeout=timeout or 1)
+
+    monkeypatch.setattr(sweep.subprocess, "Popen", lambda *a, **k: Stuck())
+    monkeypatch.setattr(sweep, "kill_tree", lambda pid: None)
+    res = sweep.run_suite(tmp_path, "demo", full=False)
+
+    assert res["status"] == "timeout" and res["hang_log"] is None
+    assert res["hang_trace"] == f"stack not saved: {sweep.LOST_OUTPUT}"
+    assert not sweep.LOG_DIR.exists() or not list(sweep.LOG_DIR.iterdir())
+
+
 def test_contract_without_bash_is_env_not_red(tmp_path, monkeypatch):
     monkeypatch.setattr(sweep, "find_bash", lambda: None)
     monkeypatch.setattr(sweep.subprocess, "Popen", lambda *a, **k: pytest.fail("ran"))
@@ -1064,10 +1101,13 @@ def test_a_suite_without_the_level_is_not_run(contract):
 
 def test_contract_timeout_names_the_hung_test_in_finding_and_alert(contract):
     project, sent, plan, calls, script = contract
-    script.append(_contract_res("timeout", 600.0, hung="test_net.py:42 test_waits"))
+    trace = "the suite's full output, stack included, is in cron/logs/x.hang.log"
+    script.append(_contract_res("timeout", 600.0, hung="test_net.py:42 test_waits",
+                                hang_trace=trace))
     assert sweep.main([]) == 1
-    assert "the suite hung: test_net.py:42 test_waits" in _findings(project)
+    assert f"the suite hung: test_net.py:42 test_waits; {trace}" in _findings(project)
     assert any("test_net.py:42 test_waits" in m for m in sent)
+    assert trace in next(sweep.LOG_DIR.glob("test-sweep_*.log")).read_text(encoding="utf-8")
 
 
 def test_an_environment_problem_is_reported_once_and_files_nothing(contract):
@@ -1290,6 +1330,39 @@ def test_pester_wrapper_files_share_a_process_but_not_its_failures(tmp_path):
     for name in ("A", "B", "C", "D"):
         assert re.search(rf"^TESTS_DURATION \d+\.\d+s {name}\.Tests\.ps1$", out, re.M), out
     assert out.strip().splitlines()[-1] == "TESTS_RESULT pass=1 fail=3 skip=0", out
+
+
+@pytest.mark.integration   # two PowerShell processes importing Pester
+@pytest.mark.skipif(sys.platform != "win32", reason="finds the runner through Win32_Process")
+def test_pester_wrapper_takes_a_truncated_result_for_no_result(tmp_path):
+    """A process killed mid-write leaves a truncated `<n>.json`, and
+    ConvertFrom-Json under Stop took the runner itself down: the files after it
+    never ran and no TESTS_RESULT line was printed. The cut is staged: the file
+    writes a truncated result under its own number into the runner's directory
+    and kills its process."""
+    host = _pester_host_or_skip()
+    (tmp_path / "A.Tests.ps1").write_text(
+        "Describe 'a' { It 'passes' { 1 | Should -Be 1 } }\n", encoding="utf-8")
+    # The runner's directory is run-pester-<runner PID>; the runner is the
+    # parent of the process the files run in.
+    (tmp_path / "B.Tests.ps1").write_text(
+        "Describe 'b' { It 'truncates' {"
+        " $runner = (Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\").ParentProcessId;"
+        " $dir = Join-Path ([IO.Path]::GetTempPath()) \"run-pester-$runner\";"
+        " Set-Content -LiteralPath (Join-Path $dir '1.json') -Value '{ \"passed\": 3,' -Encoding UTF8;"
+        " [Environment]::Exit(3) } }\n", encoding="utf-8")
+    (tmp_path / "C.Tests.ps1").write_text(
+        "Describe 'c' { It 'passes' { 1 | Should -Be 1 } }\n", encoding="utf-8")
+
+    res = subprocess.run([host, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                          str(PESTER), "-Path", str(tmp_path), "-TimeoutSec", str(PESTER_TIMEOUT)],
+                         capture_output=True, timeout=180, check=False)
+    out = res.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
+
+    assert res.returncode == 1, out
+    assert "FAILED: B.Tests.ps1" in out, out
+    assert re.search(r"^TESTS_DURATION \d+\.\d+s C\.Tests\.ps1$", out, re.M), out
+    assert out.strip().splitlines()[-1] == "TESTS_RESULT pass=2 fail=1 skip=0", out
 
 
 @pytest.mark.integration   # a PowerShell process, and a hang waited out

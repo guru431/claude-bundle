@@ -108,3 +108,19 @@ def test_nothing_is_said_while_the_sweep_is_switched_off(tmp_path):
     assert monitor_checks.unpushed_report(seen, registry(tmp_path, False), tmp_path,
                                           tmp_path, now=NOW) == ("", "")
     assert seen == {}
+
+
+def test_git_reads_without_taking_index_lock(tmp_path, monkeypatch):
+    """`git status` refreshes the index under .git/index.lock; one killed by the
+    120 s timeout left the lock behind, and the next night's git-push-all could
+    not commit in that repository. --no-optional-locks takes no lock."""
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+    monkeypatch.setattr(monitor_checks.subprocess, "run", run)
+
+    monitor_checks._git(tmp_path, "status", "--porcelain", "-z")
+
+    assert seen[0][:4] == ["git", "-C", str(tmp_path), "--no-optional-locks"]

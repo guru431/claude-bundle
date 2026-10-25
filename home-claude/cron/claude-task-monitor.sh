@@ -85,11 +85,14 @@ import monitor_checks
 
 ps_cmd = r"""
 Get-ScheduledTask | Where-Object {
-    $_.TaskPath -notlike '*Microsoft*' -and $_.TaskPath -notlike '*Windows*'
+    $folders = $_.TaskPath -split '\\'
+    $folders -notcontains 'Microsoft' -and $folders -notcontains 'Windows'
 } | ForEach-Object {
-    $info = Get-ScheduledTaskInfo -TaskName $_.TaskName -ErrorAction SilentlyContinue
+    $info = Get-ScheduledTaskInfo -TaskPath $_.TaskPath -TaskName $_.TaskName -ErrorAction SilentlyContinue
     [PSCustomObject]@{
-        Name = $_.TaskName
+        # A task in a folder is named with it: two `backup`s in two folders
+        # shared one seen-state key. The registry's tasks live in `\`.
+        Name = if ($_.TaskPath -eq '\') { $_.TaskName } else { $_.TaskPath.Trim('\') + '\' + $_.TaskName }
         State = $_.State.ToString()
         LastResult = if ($info) { $info.LastTaskResult } else { -1 }
         LastRun = if ($info -and $info.LastRunTime) { $info.LastRunTime.ToString('yyyy-MM-dd HH:mm') } else { 'never' }
@@ -220,7 +223,9 @@ digest = []
 NOW = datetime.now()
 for t in tasks:
     code = t['LastResult']
-    if t['Name'] in EXCLUDE_TASKS:
+    # By the folder-qualified name or the bare one: a task in a folder used to be
+    # named without it, and an exclude written then must keep working.
+    if t['Name'] in EXCLUDE_TASKS or t['Name'].rpartition('\\')[2] in EXCLUDE_TASKS:
         continue
     # A DISABLED task is supposed to be silent. Its last result is frozen at
     # whatever it was when someone switched it off, and reporting that forever

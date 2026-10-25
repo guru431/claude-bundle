@@ -138,15 +138,20 @@ def compile_article(article_path: Path,
     """Call the LLM to compile one article into wiki pages → (changes, kind).
 
     `changes` is None when the article could not be compiled, and `kind` (an
-    LLMResult kind) says whether a retry can help.
+    LLMResult kind) says whether a retry can help — or "gone": the file is no
+    longer there, and there is nothing to compile.
     """
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
     try:
         article_text = article_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # Gone between find_new_files() and here (the KB Update writer may still
+        # be mutating the source directory). Not a failure of this run: it
+        # failed the run, and the monitor paged for a state that clears itself.
+        return None, "gone"
     except OSError as e:
-        # The file vanished between find_new_files() and here (the KB Update
-        # writer may still be mutating the source directory). Not marked
-        # processed, retried next run — and not counted: that clears itself.
+        # Locked or unreadable. Not marked processed, retried next run — and not
+        # counted against the ceiling; the run fails, so it is seen.
         print(f"  ERROR compile-kb {article_path.name}: cannot read it ({e})",
               file=sys.stderr)
         return None, "transient"
@@ -384,6 +389,9 @@ def _compile_kb(rec: dict) -> int:
         log(f"[{i+1}/{len(new_files)}] Processing: {rel}")
 
         changes, kind = compile_article(article_path, existing_pages)
+        if kind == "gone":
+            log("  → gone since the listing — skipped (nothing to compile)")
+            continue
         if changes is not None and not changes:
             # Valid empty result: the model read the article and found no entity
             # worth a page. That is a successful no-op — mark it processed so it

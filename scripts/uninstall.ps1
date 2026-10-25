@@ -290,6 +290,13 @@ foreach ($f in @($mf.written)) {
             continue
         }
     }
+    # No hash recorded is no proof the file is ours as installed: the entry of a
+    # hand-edited or damaged manifest was deleted unchecked.
+    if (-not $f.sha256 -and -not $Force) {
+        Warn "no sha256 in the manifest — keeping $($f.path) (use -Force to delete it anyway)"
+        $skipped++
+        continue
+    }
     if ($f.sha256 -and (Get-Sha256 $full) -ne $f.sha256 -and -not $Force) {
         Warn "changed since install — keeping $($f.path) (use -Force to delete it anyway)"
         $skipped++

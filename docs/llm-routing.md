@@ -336,7 +336,7 @@ another round trip to a door that is known to be shut — see
 | Answer | Latched | For |
 |---|---|---|
 | 402 (balance spent), 401 (key refused) | at once | 6 hours |
-| 403 (model not enabled for the account, or a WAF) | on the second in a row | 6 hours |
+| 403 (model not enabled for the account, or a WAF) | on the second in a row (any other answer between them resets the count) | 6 hours |
 | 429, 529, 500, 502, 503, 504 | once its retries are exhausted | 30 minutes |
 
 The latch is shared across processes through `cron/state/depleted.json`, each
@@ -353,12 +353,14 @@ must not silence it for every task that night.
 
 How a failure is classified decides what the task does with the source it was
 working on (`LLMResult` in `utils.py`). Only a failure about the payload — 400,
-413, 415, 422, or an answer that arrived empty or unusable — is
-*deterministic* and counts against `WIKI_RETRY_LIMIT`. Every other 4xx is the
-same answer for every request the setup sends — a 401 is the key, a 404 a typo
-in a model name or a base URL — so it is *configuration*, and it never
-quarantines a source: the source is not what is broken. 408, 429 and 5xx are
-*transient*.
+413, 415, 422, or an answer that arrived empty — is *deterministic* and counts
+against `WIKI_RETRY_LIMIT`. Every other 4xx is the same answer for every
+request the setup sends — a 401 is the key, a 404 a typo in a model name or a
+base URL — so it is *configuration*, and it never quarantines a source: the
+source is not what is broken. So is a 200 whose body is not the API's JSON (a
+base URL that serves a web page), and a `claude` provider whose CLI is not
+there. 408, 429 and 5xx are *transient*, as is a CLI that times out, exits
+non-zero or answers nothing.
 
 When the whole chain fails, the verdict comes from the providers that could
 have answered. One with no key or no model never saw the prompt, so it is left

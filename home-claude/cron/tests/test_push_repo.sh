@@ -160,6 +160,7 @@ reset_counters; push_repo "$R10" "r10" "Auto-commit: test"
 DRY_RUN=0
 grep -q "staged secret-scan: clean" "$LOG_FILE"   || fail "T10: no staged-scan verdict in the preview"
 grep -q "outgoing secret-scan: clean" "$LOG_FILE" || fail "T10: no outgoing-scan verdict in the preview"
+[ "$(grep -c "would push" "$LOG_FILE")" = "1" ] || fail "T10: the dry-run push is not logged exactly once"
 [ "$(git -C "$R10" rev-list --count HEAD)" = "2" ] || fail "T10: dry-run created a commit"
 [ "$(git -C "$R10" rev-parse "origin/$(br "$R10")")" != "$(git -C "$R10" rev-parse HEAD)" ] \
     || fail "T10: dry-run actually pushed"

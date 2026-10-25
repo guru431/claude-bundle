@@ -169,3 +169,32 @@ def test_an_undelivered_alert_is_sent_again_next_run(watcher):
 def test_all_listening_is_exit_0(watcher):
     watcher.outcome.clear()
     assert watch_mod.watch({}) == 0 and watcher.sent == []
+
+
+QUSER_OUT = (" USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME\n"
+             ">joanne                console             1  Active      none   10/25/2026 9:00\n"
+             " svc                                       2  Disc         1:02  10/24/2026 8:00\n"
+             " john smith            rdp-tcp#3           3  Active         .  10/25/2026 7:00\n")
+
+
+def test_a_session_is_found_by_its_username_column():
+    """A substring of quser's output found `ann` in joanne's session; the
+    column, read by its width, keeps a name with a space in it whole."""
+    assert watch_mod.quser_names(QUSER_OUT) == {"joanne", "svc", "john smith"}
+    localized = QUSER_OUT.replace(" USERNAME            ", " ИМЯ ПОЛЬЗОВАТЕЛЯ    ", 1)
+    assert watch_mod.quser_names(localized) == {"joanne", "svc", "john smith"}
+
+
+def test_has_session_takes_the_name_without_its_domain(monkeypatch):
+    """quser prints no domain: a registry `user: HOST\\svc` was never found."""
+    class Out:                  # the "oem" codec exists on Windows only
+        def decode(self, *args, **kwargs):
+            return QUSER_OUT
+
+    class Done:
+        stdout = Out()
+    monkeypatch.setattr(watch_mod.subprocess, "run", lambda *a, **k: Done())
+    assert watch_mod.has_session("HOST\\svc") is True
+    assert watch_mod.has_session("svc@corp.example") is True
+    assert watch_mod.has_session("John Smith") is True
+    assert watch_mod.has_session("ann") is False

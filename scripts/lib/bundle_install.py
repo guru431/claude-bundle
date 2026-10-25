@@ -508,6 +508,12 @@ def uninstall(args) -> int:
         if not path.is_file():
             gone += 1
             return
+        # No hash recorded is no proof the file is ours as installed: the entry
+        # of a hand-edited or damaged manifest was deleted unchecked.
+        if not recorded_hash and not args.force:
+            print(f"[warn] no sha256 in the manifest - keeping {label} (use --force to delete it anyway)")
+            skipped += 1
+            return
         if recorded_hash and recorded_hash.upper() != sha256(path) and not args.force:
             print(f"[warn] changed since install - keeping {label} (use --force to delete it anyway)")
             skipped += 1

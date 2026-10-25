@@ -108,6 +108,24 @@ def test_uninstall_keeps_a_changed_file_unless_forced(bi, tmp_path, capsys):
     assert not (home / "CLAUDE.md").exists() and not (home / ".bundle-manifest.json").exists()
 
 
+def test_uninstall_keeps_a_file_the_manifest_has_no_hash_for(bi, tmp_path, capsys):
+    """An entry without sha256 (a hand-edited or damaged manifest) passed as
+    "ours, unchanged" and was deleted however much it had been edited."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "CLAUDE.md").write_text("edited since", encoding="utf-8")
+    _manifest(home, [])
+    body = json.loads((home / ".bundle-manifest.json").read_text(encoding="utf-8"))
+    body["written"] = [{"root": "claude_home", "path": "CLAUDE.md"}]
+    (home / ".bundle-manifest.json").write_text(json.dumps(body), encoding="utf-8")
+
+    assert bi.main(["uninstall", "--claude-home", str(home), "--confirm"]) == 2
+    assert (home / "CLAUDE.md").is_file()
+    assert "no sha256 in the manifest - keeping CLAUDE.md" in capsys.readouterr().out
+    assert bi.main(["uninstall", "--claude-home", str(home), "--confirm", "--force"]) == 0
+    assert not (home / "CLAUDE.md").exists()
+
+
 def test_a_file_that_cannot_be_removed_does_not_end_the_sweep(bi, tmp_path, capsys,
                                                               monkeypatch):
     """`path.unlink()` raised on the first file it could not delete — a

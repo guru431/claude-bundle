@@ -73,8 +73,9 @@ git_commit() {
 }
 
 git_push() {
+    # Dry run: nothing logged here — the caller writes the one `[DRY] would
+    # push` line, with the repository's label (it was logged twice).
     if [ "$DRY_RUN" = "1" ]; then
-        echo "[DRY] would push: $*" >> "$LOG_FILE"
         return 0
     fi
     git_net push "$@" >> "$LOG_FILE" 2>&1

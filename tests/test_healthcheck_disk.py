@@ -25,7 +25,7 @@ GB = 1048576  # KB
 
 def _block() -> str:
     text = SCRIPT.read_text(encoding="utf-8")
-    exclude = re.search(r"^HEALTHCHECK_DISK_EXCLUDE=.*$", text, re.M)
+    exclude = re.search(r"^DISK_EXCLUDE_DEFAULT=.*\nHEALTHCHECK_DISK_EXCLUDE=.*$", text, re.M)
     block = re.search(r"^# --- Deterministic severity: free space on the tightest local "
                       r"filesystem ---\n(.*?)^# --- Optional: remote Linux server", text,
                       re.M | re.S)
@@ -92,6 +92,16 @@ def test_pseudo_filesystems_stay_excluded(bash, tmp_path):
         ("/dev/sda1", 200 * GB, 100 * GB, 100 * GB, 50, "/"),
     ])
     assert m["MIN_FREE_FS"] == "/" and m["MAX_DISK_FS"] == "/"
+
+
+def test_an_exclude_awk_cannot_compile_does_not_disable_the_check(bash, tmp_path):
+    """awk died on the bad ERE, nothing was measured, and nothing could page."""
+    m = measure(bash, tmp_path, [
+        ("/dev/loop0", 64000, 64000, 0, 100, "/snap/core/123"),
+        ("/dev/sda1", 20 * GB, 18 * GB, 2 * GB, 90, "/"),
+    ], HEALTHCHECK_DISK_EXCLUDE="^/(snap")
+    assert m["MIN_FREE_FS"] == "/", "the default exclude did not take over"
+    assert "HEALTHCHECK_DISK_EXCLUDE='^/(snap' is not a valid ERE" in m["log"], m["log"]
 
 
 @pytest.mark.parametrize("env, free_gb, pct, warns", [

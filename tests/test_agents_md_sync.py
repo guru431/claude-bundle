@@ -446,6 +446,21 @@ def test_missing_agents_md_is_filed_once(sync, tmp_path):
     assert findings.read_text(encoding="utf-8").count("sync drift") == 1
 
 
+def test_an_unreadable_agents_md_is_not_reported_missing(sync, tmp_path, monkeypatch):
+    """read_file gives None for an absent file and for one it cannot read, and
+    both were filed as "AGENTS.md is missing" — in a repository that has one."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Project\n", encoding="utf-8")
+    real = sync.read_file
+    monkeypatch.setattr(sync, "read_file",
+                        lambda p: None if p.name == "AGENTS.md" else real(p))
+    findings = tmp_path / "FINDINGS.md"
+
+    assert sync.check_pair("myproject", tmp_path / "CLAUDE.md", tmp_path / "AGENTS.md",
+                           findings, tmp_path / "run.log") == (False, 0, False)
+    assert not findings.exists(), "an unreadable AGENTS.md was filed as missing"
+
+
 def test_a_run_that_examined_nothing_exits_nonzero(sync, tmp_path, monkeypatch):
     """Every project failing to reach the provider is not a clean sweep.
 

@@ -4,8 +4,9 @@
 #
 # NOT a YAML parser. It reads a declared SUBSET: top-level `key: value` scalars
 # and a `tasks:` list whose items are single-line `key: value` fields, the first
-# of them `- name:`. Quotes are unwrapped, booleans and integers coerced, and
-# `[a, b]` inline lists split — nothing more. That is deliberate: a YAML module
+# of them `- name:`. Quotes are unwrapped (a quoted value stays a string, as in
+# YAML), unquoted booleans and integers coerced, and `[a, b]` inline lists
+# split — nothing more. That is deliberate: a YAML module
 # in a script that has to run on a bare Windows PowerShell 5.1 was rejected.
 #
 # The price of a subset is that a registry can be valid YAML — which is all that
@@ -22,6 +23,17 @@
 # deployed registry through it. A change to the subset here needs the matching
 # change in check-registry.py.
 
+# Every spelling YAML 1.1 reads as a boolean, not just true/false (-contains is
+# case-insensitive, like PyYAML's True/TRUE); $null for anything else. `enabled:
+# no` is a boolean to PyYAML, so check-registry.py passed it and gen-scheduler.py
+# left the task out — while this parser kept the non-empty STRING 'no', which is
+# truthy, and registered the task enabled. One list for both of its readers.
+function ConvertTo-YamlBool([string]$v) {
+    if (@('true', 'yes', 'on') -contains $v)  { return $true }
+    if (@('false', 'no', 'off') -contains $v) { return $false }
+    return $null
+}
+
 function Unwrap-Value([string]$v) {
     $v = $v.Trim()
     if ($v.Length -ge 2 -and $v[0] -eq "'" -and $v[-1] -eq "'") {
@@ -29,30 +41,26 @@ function Unwrap-Value([string]$v) {
     }
     # DOUBLE quotes too. Only single quotes were unwrapped, so a registry entry
     # written `- "--full"` — perfectly ordinary YAML — reached Task Scheduler as
-    # the literal three-character argument `"--full"`, and `enabled: "false"`
-    # unwrapped to the non-empty STRING "false", which is truthy: the task was
-    # registered as enabled.
+    # the literal three-character argument `"--full"`.
     if ($v.Length -ge 2 -and $v[0] -eq '"' -and $v[-1] -eq '"') {
         # Inside "..." YAML expands escapes. `\"` and `\\` are expanded here as
         # PyYAML does (only `\"` was, so `"C:\\x"` reached Task Scheduler with
         # both backslashes); any other escape (`\n`, `\t`, `\x41`...) is refused
         # rather than registered as a literal backslash.
-        $v = [regex]::Replace($v.Substring(1, $v.Length - 2), '\\(.?)', [Text.RegularExpressions.MatchEvaluator] {
+        #
+        # A quoted scalar is a STRING, as in YAML — no coercion below. Coerced,
+        # `script_args: ["yes"]` reached Task Scheduler as the argument `True`
+        # and `["8080"]` as a number, against PyYAML's strings. The quoted
+        # boolean of `enabled:` / `hidden:` is Parse-RegistryYaml's business.
+        return [regex]::Replace($v.Substring(1, $v.Length - 2), '\\(.?)', [Text.RegularExpressions.MatchEvaluator] {
             param($m)
             $c = $m.Groups[1].Value
             if ($c -eq '"' -or $c -eq '\') { return $c }
             throw "unsupported escape '\$c' in double-quoted value $v (only \"" and \\; use single quotes)"
         })
-        # Fall through to the scalar coercions below so a quoted 'false' is
-        # still recognised as the boolean it is written to be.
     }
-    # Every spelling YAML 1.1 reads as a boolean, not just true/false (-contains
-    # is case-insensitive, like PyYAML's True/TRUE). `enabled: no` is a boolean
-    # to PyYAML, so check-registry.py passed it and gen-scheduler.py left the
-    # task out — while this parser kept the non-empty STRING 'no', which is
-    # truthy, and registered the task enabled.
-    if (@('true', 'yes', 'on') -contains $v)  { return $true }
-    if (@('false', 'no', 'off') -contains $v) { return $false }
+    $b = ConvertTo-YamlBool $v
+    if ($null -ne $b) { return $b }
     if ($v -match '^-?\d+$') {
         # Int32 where it fits, Int64 past that. The bare [int] cast THREW on a
         # larger number — a chat id or a millisecond timestamp in script_args —
@@ -171,7 +179,17 @@ function Parse-RegistryYaml([string]$path) {
             continue
         }
         if ($line -match '^\s+([a-z_]+):\s*(.*)$' -and $currentTask) {
-            $currentTask[$Matches[1]] = Unwrap-Value $Matches[2]
+            $k = $Matches[1]
+            $val = Unwrap-Value $Matches[2]
+            # `enabled: "false"` is the string "false" to YAML — truthy, so the
+            # task would be registered ENABLED. check-registry.py rejects a
+            # quoted boolean; one that reaches sync-tasks.ps1 anyway is read as
+            # the boolean it was written to be, never as "on".
+            if (@('enabled', 'hidden') -contains $k -and $val -is [string]) {
+                $b = ConvertTo-YamlBool $val
+                if ($null -ne $b) { $val = $b }
+            }
+            $currentTask[$k] = $val
             continue
         }
     }

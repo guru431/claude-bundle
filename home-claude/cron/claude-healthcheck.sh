@@ -37,7 +37,8 @@ have_bash || exit 1
 # point). Without it `/snap/*` — squashfs images, permanently 100% full by
 # design — made every Linux morning open with a "disk 100%" alert, and macOS
 # added `devfs`. A daily false alarm is how a real one stops being read.
-HEALTHCHECK_DISK_EXCLUDE="${HEALTHCHECK_DISK_EXCLUDE:-^/(snap|dev|run|sys|proc|boot/efi)|^/System/Volumes|squashfs}"
+DISK_EXCLUDE_DEFAULT='^/(snap|dev|run|sys|proc|boot/efi)|^/System/Volumes|squashfs'
+HEALTHCHECK_DISK_EXCLUDE="${HEALTHCHECK_DISK_EXCLUDE:-$DISK_EXCLUDE_DEFAULT}"
 
 DATE=$(date +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/healthcheck_${DATE}.log"
@@ -175,6 +176,12 @@ DF_ROWS='NR > 1 { for (i = NF; i > 1; i--) if ($i ~ /^[0-9]+%$/) break
                   sub(/%/, "", $i); print $i, $(i - 1), prefix fs }'
 
 DISK_FREE_MIN_GB=$(disk_setting HEALTHCHECK_DISK_FREE_GB "${HEALTHCHECK_DISK_FREE_GB:-5}" 5)
+# The exclude too: awk dies on an ERE it cannot compile, the df filter printed
+# nothing, and "no local filesystem measured" meant no disk alert at all.
+if ! awk -v ex="$HEALTHCHECK_DISK_EXCLUDE" 'BEGIN { x = ("" ~ ex) }' >/dev/null 2>&1; then
+    echo "WARNING: HEALTHCHECK_DISK_EXCLUDE='$HEALTHCHECK_DISK_EXCLUDE' is not a valid ERE — using the default" >> "$LOG_FILE"
+    HEALTHCHECK_DISK_EXCLUDE="$DISK_EXCLUDE_DEFAULT"
+fi
 DISK_THRESHOLD=""
 if [ -n "${HEALTHCHECK_DISK_PCT:-}" ]; then
     DISK_THRESHOLD=$(disk_setting HEALTHCHECK_DISK_PCT "$HEALTHCHECK_DISK_PCT" 85 100)

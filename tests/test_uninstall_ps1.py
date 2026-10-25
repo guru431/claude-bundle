@@ -162,6 +162,26 @@ def test_a_file_that_cannot_be_removed_does_not_end_the_sweep(tmp_path: Path):
     assert (home / ".bundle-manifest.json").exists(), "the manifest still describes a kept file"
 
 
+@pytest.mark.integration   # one uninstall run, ~1 s
+def test_a_file_the_manifest_has_no_hash_for_is_kept(tmp_path: Path):
+    """The hash check ran only when a hash was recorded: the entry of a
+    hand-edited or damaged manifest was deleted however much it had changed."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "CLAUDE.md").write_text("edited since", encoding="utf-8")
+    (home / ".bundle-manifest.json").write_text(json.dumps({
+        "bundle_version": "0.0.0", "installed_at": "2026-01-01T00:00:00Z", "tier": "lite",
+        "claude_home": str(home), "pipeline_root": str(home),
+        "written": [{"root": "claude_home", "path": "CLAUDE.md"}],
+        "preserved": []}), encoding="utf-8")
+
+    r = run_ps_file(UNINSTALL, "-ClaudeHome", home, "-Confirm", cwd=tmp_path)
+
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "no sha256 in the manifest" in r.stdout, r.stdout
+    assert (home / "CLAUDE.md").is_file()
+
+
 def test_uninstall_finds_the_manifest_under_claude_config_dir(tmp_path: Path):
     """F56: install.ps1 honours CLAUDE_CONFIG_DIR and writes the manifest
     there; uninstall.ps1 looked in ~/.claude only and exited 1."""

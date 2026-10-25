@@ -72,6 +72,7 @@ def differences(dump: Path, text: str) -> list[str]:
 # after `tasks:`, a number too large for Int32 (the parser's cast threw on it),
 # and the `\"` and `\\` escapes of double quotes (`\\` stayed two backslashes,
 # and a `\"` closed a list item, so the comma after it split the item in two).
+# A quoted `"yes"` / `'8080'` stays a string (it was coerced to True and 8080).
 SUBSET_FIXTURE = """\
 # header comment
 version: 1
@@ -97,7 +98,7 @@ tasks:
   - name: 'Quoted'
     description: 'see #42 - it''s quoted'
     script: 'C:\\bundle\\cron\\quoted.sh'
-    script_args: ["--full", 'a,b,c', plain, "b #c", 'it''s #d']   # trailing comment
+    script_args: ["--full", 'a,b,c', plain, "b #c", 'it''s #d', "yes", '8080']   # trailing comment
     kind: bash
     trigger: "Weekly Sun 03:00"
     enabled: no
@@ -171,6 +172,23 @@ def test_the_comparison_catches_a_block_scalar(tmp_path: Path, capsys):
     assert check_registry.check(fixture, dump) == 1
     out = capsys.readouterr().out
     assert "Words.description: YAML reads 'folded over two lines', sync-tasks.ps1 reads '>-'" in out, out
+
+
+@pytest.mark.integration   # one more PowerShell start, 1.5-2.5 s
+def test_a_quoted_boolean_never_registers_a_task_enabled(tmp_path: Path, capsys):
+    """A quoted scalar is a string to YAML, and "no" is a truthy one: read as a
+    string, `enabled: "no"` registered the task enabled. The parser reads it as
+    the boolean it was written to be; the guard still refuses the registry."""
+    text = (SUBSET_FIXTURE.replace("    enabled: yes\n", '    enabled: "no"\n')
+            .replace("    hidden: on\n", "    hidden: 'off'\n"))
+    fixture = tmp_path / "quoted-bool.yaml"
+    fixture.write_text(text, encoding="utf-8")
+    dump, = ps_dump([fixture], tmp_path)
+    words = next(t for t in json.loads(dump.read_text(encoding="utf-8"))["tasks"]
+                 if t["name"] == "Words")
+    assert words["enabled"] is False and words["hidden"] is False, words
+    assert check_registry.check(fixture, dump) == 1
+    assert "Words: enabled: must be true/false" in capsys.readouterr().out
 
 
 def test_an_escape_the_parser_does_not_know_is_refused_by_both(tmp_path: Path):

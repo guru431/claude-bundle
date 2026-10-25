@@ -38,6 +38,7 @@ import ctypes
 import getpass
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -94,7 +95,32 @@ def has_session(user: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return True
     # With no session at all quser exits 1 and says "No User exists".
-    return user.lower() in r.stdout.decode("oem", errors="replace").lower()
+    name = user.rpartition("\\")[2].partition("@")[0].lower()
+    return name in quser_names(r.stdout.decode("oem", errors="replace"))
+
+
+def quser_names(text: str) -> set[str]:
+    """The USERNAME column of quser's output, lowercased.
+
+    A column, not a substring of the whole output: `ann` was "found" in
+    joanne's session, and the restart of ann's interactive task failed every
+    6 hours as "still down". quser prints the name without a domain, so the
+    caller drops the `DOMAIN\\` (or `@domain`) a registry `user:` may carry —
+    with it the user was never found at all.
+
+    Fixed-width: the column ends where the header's second one starts (the
+    first run of two spaces), so a name with a space in it stays whole. The
+    first character is the `>` that marks quser's own session, or a space.
+    """
+    lines = text.splitlines()
+    head = re.match(r"\s*\S.*?\s{2,}", lines[0]) if lines else None
+    end = head.end() if head else None
+    names = set()
+    for line in lines[1:]:
+        name = line[1:end].strip()
+        if name:
+            names.add(name.lower())
+    return names
 
 
 def read_state() -> dict:

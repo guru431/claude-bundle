@@ -236,6 +236,13 @@ def demo(argv: list[str]) -> int:
 
 
 def main() -> int:
+    # An unknown flag is an error, not ignored: `--dry_run` ran a real night —
+    # sessions sent to the provider — for someone who meant to preview it.
+    unknown = [a for a in sys.argv[1:] if a not in ("--demo", "--dry-run", "--no-llm")]
+    if unknown:
+        print(f"wiki-pipeline: unknown argument(s): {' '.join(unknown)} "
+              f"(known: --dry-run, --no-llm, --demo)", file=sys.stderr)
+        return 2
     if "--demo" in sys.argv[1:]:
         # Before log(): the demo must not write this install's pipeline log either.
         return demo(sys.argv[1:])

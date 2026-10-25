@@ -919,9 +919,14 @@ foreach ($task in $reg.tasks) {
     # there produces a perfectly valid scheduled task that fails every night with
     # exit 127 and writes no log — a "registered successfully" that never ran.
     # Checked here, at registration, where the answer is still actionable.
+    # For kind=exec `script:` is the ARGUMENTS (Build-Action): a path only when it
+    # is not a switch. `/c ...` or `--out=C:\logs\x` was refused as a missing
+    # file; the script an interpreter runs (`C:\svc\server.py`) is still checked.
     $targets = @()
     if ($task.kind -eq 'exec') { $targets += $task.execute }
-    if ($task.script) { $targets += $task.script }
+    if ($task.script -and -not ($task.kind -eq 'exec' -and "$($task.script)" -match '^[-/]')) {
+        $targets += $task.script
+    }
     $missing = $targets | Where-Object {
         $_ -and ($_ -match '[\\/]') -and -not (Test-Path -LiteralPath $_)
     } | Select-Object -First 1

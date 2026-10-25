@@ -174,6 +174,21 @@ Then run `sync.cmd` once (step 4 above).
 - **`enabled: no` / `off` / `"false"` in a task of your own** used to register
   the task ENABLED: the syncer read those words as non-empty strings. They now
   disable it, as YAML says. Check that is what you meant.
+- **A quoted value is a string, as YAML reads it.** The syncer coerced a
+  double-quoted one: `script_args: ["yes"]` reached Task Scheduler as the
+  argument `True`, `["8080"]` as a number. A task of your own with such an
+  argument shows `updated` once. A quoted `enabled:` / `hidden:` is still read
+  as the boolean it spells (single quotes too — `enabled: 'false'` used to
+  register the task enabled), and `check-registry.py` still rejects it.
+- **The task monitor names a task in a Task Scheduler folder with the folder**
+  (`Vendor\backup`): two tasks of one name in two folders shared one entry of
+  the "already reported" state. A failing one is reported once more under the
+  new name. `MONITOR_EXCLUDE_TASKS` takes either form.
+- **A `kind: exec` task whose arguments are a switch** (`/c …`,
+  `--out=C:\logs\x`) was skipped as a missing target: `script:` holds the
+  arguments of an exec task, and the check took them for a path. `sync.cmd` now
+  registers it; a `script:` that is a path (the script an interpreter runs) is
+  still checked.
 - **`enabled:` or `hidden:` with nothing after the colon** is now a schema
   error in `check-registry.py` (and `self-test.ps1 -InstallPath`). The syncer
   reads the empty value as false and registers the task Disabled; the POSIX

@@ -187,6 +187,21 @@ def test_a_403_for_an_override_model_neither_latches_nor_counts(cron_copy: Path,
     assert len(calls) == 4
 
 
+def test_two_403s_with_another_answer_between_them_are_not_in_a_row(cron_copy: Path,
+                                                                   monkeypatch, clock):
+    """Only a success cleared the count: 403, then a 400, then 403 latched the
+    provider for six hours on two refusals that were not consecutive."""
+    u = _load_utils(cron_copy, "utils_403_streak")
+    monkeypatch.setenv("DEEPSEEK_KEY", "unit-test-placeholder")
+    for status in (403, 400, 403):
+        _stub_requests(monkeypatch, _Resp(status, text="nope"))
+        u._llm_openai_compat("deepseek", "hi")
+    assert not u._is_depleted("deepseek"), "403, 400, 403 was taken for two in a row"
+    _stub_requests(monkeypatch, _Resp(403, text="nope"))
+    u._llm_openai_compat("deepseek", "hi")
+    assert u._is_depleted("deepseek"), "two consecutive 403s must still latch"
+
+
 def _stub_raising_requests(monkeypatch, exc_name: str | None) -> list:
     """A fake `requests` whose post() raises its own `exceptions.<exc_name>`, or,
     with None, answers 200 with a body that is not JSON. Returns the calls."""
@@ -215,7 +230,10 @@ def _stub_raising_requests(monkeypatch, exc_name: str | None) -> list:
 def test_only_a_transport_failure_is_retried(cron_copy: Path, monkeypatch):
     """Every exception used to be retried, a 200 whose body is not JSON too: the
     same answer max_retries times, retry_sleep apart, for each call of the
-    batch. A refused connection or a timeout is still retried."""
+    batch. A refused connection or a timeout is still retried.
+
+    The body that is not JSON is config, not transient: it is not this API,
+    whatever the payload, so waiting does not fix it and no source is to blame."""
     monkeypatch.setenv("DEEPSEEK_KEY", "unit-test-placeholder")
     u = _load_utils(cron_copy, "utils_exception_retry")
     slept = []
@@ -223,7 +241,7 @@ def test_only_a_transport_failure_is_retried(cron_copy: Path, monkeypatch):
 
     calls = _stub_raising_requests(monkeypatch, None)
     res = u._llm_openai_compat("deepseek", "hi")
-    assert (res.text, res.kind) == (None, "transient")
+    assert (res.text, res.kind) == (None, "config")
     assert len(calls) == 1 and slept == [], "a body that is not JSON was retried"
 
     retries = u.PROVIDERS["deepseek"]["max_retries"]
@@ -534,8 +552,34 @@ def test_the_claude_cli_is_resolved_through_pathext(cron_copy: Path, monkeypatch
         return subprocess.CompletedProcess(argv, 0, stdout="answer\n", stderr="")
 
     monkeypatch.setattr(u, "_run_tree", fake_run)
-    assert u._llm_claude("hi") == "answer"
+    assert u._llm_claude("hi").text == "answer"
     assert argvs[0][0] == shim
+
+
+@pytest.mark.parametrize("cli,outcome,kind", [
+    ("missing", OSError(2, "No such file or directory"), "config"),  # no CLI to start
+    ("present", OSError(28, "No space left on device"), "transient"),  # not the CLI's absence
+    ("present", subprocess.CompletedProcess([], 1, stdout="", stderr="usage limit"), "transient"),
+    ("present", subprocess.CompletedProcess([], 0, stdout="  \n", stderr="notice"), "transient"),
+])
+def test_a_claude_cli_failure_says_whose_fault_it_is(cron_copy: Path, monkeypatch,
+                                                     cli, outcome, kind):
+    """Every failure of the CLI came back `transient`: a CLI that is not there
+    at all — the same for every call — was retried each night as an outage.
+    Only that is config; nothing else says the payload is at fault."""
+    exe = cron_copy / "claude-cli.exe"
+    if cli == "present":
+        exe.write_bytes(b"")
+    monkeypatch.setenv("CLAUDE_BIN", str(exe))
+    u = _load_utils(cron_copy, f"utils_claude_kind_{cli}_{kind}")
+
+    def fake_run(argv, **kw):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(u, "_run_tree", fake_run)
+    assert (u._llm_claude("hi").text, u._llm_claude("hi").kind) == (None, kind)
 
 
 def _stub_claude(root: Path) -> Path:
@@ -575,7 +619,7 @@ def test_the_claude_cli_gets_the_subscription_and_the_caller_keeps_its_env(
         monkeypatch.setenv(name, value)
     u = _load_utils(cron_copy, "utils_claude_env")
 
-    assert u._llm_claude("hi", timeout=60) == "answer"
+    assert u._llm_claude("hi", timeout=60).text == "answer"
 
     child = {k.upper(): v for k, v in json.loads(
         (cron_copy / "claude-env.json").read_text(encoding="utf-8")).items()}
@@ -604,7 +648,7 @@ def test_the_claude_cli_gets_no_tools_no_mcp_and_no_project_dir(cron_copy: Path,
         return subprocess.CompletedProcess(argv, 0, stdout="answer\n", stderr="")
 
     monkeypatch.setattr(u, "_run_tree", fake_run)
-    assert u._llm_claude("hi") == "answer"
+    assert u._llm_claude("hi").text == "answer"
 
     argv = seen["argv"]
     assert argv[argv.index("--tools") + 1] == ""
@@ -629,5 +673,5 @@ def test_a_timeout_ends_a_claude_cli_started_through_a_shim(cron_copy: Path, mon
     u = _load_utils(cron_copy, "utils_claude_timeout")
 
     started = time.monotonic()
-    assert u._llm_claude("hi", timeout=1) is None
+    assert u._llm_claude("hi", timeout=1).kind == "transient"
     assert time.monotonic() - started < 8, "the timeout waited for the CLI to finish by itself"

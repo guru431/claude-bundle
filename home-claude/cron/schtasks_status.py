@@ -163,17 +163,22 @@ def normalize_last_run(raw: str, formats: tuple[str, ...] | None = None) -> str:
 
 
 def is_system_task(task_name: str) -> bool:
-    """Windows' own tasks are dropped by path, exactly as the CIM branch does."""
-    path = task_name.rpartition('\\')[0]
-    return 'Microsoft' in path or 'Windows' in path
+    """Windows' own tasks are dropped by path, exactly as the CIM branch does.
+
+    By folder NAME, case-insensitive: a substring test also dropped a user's
+    `\\MyWindowsJobs\\` folder, and its failed tasks never reached the alert.
+    """
+    folders = task_name.rpartition('\\')[0].split('\\')
+    return any(f.casefold() in ('microsoft', 'windows') for f in folders)
 
 
 def parse_schtasks_csv(text: str) -> list[dict]:
     """Parse `schtasks /query /v /fo csv` output into CIM-branch records.
 
-    Deduplication by name is mandatory: for a task with several triggers
-    schtasks prints one row per trigger, and without it a single failure would
-    be reported several times.
+    Deduplication is mandatory: for a task with several triggers schtasks
+    prints one row per trigger, and without it a single failure would be
+    reported several times. By the FULL path, which is what is unique: by the
+    bare name, `\\Jobs\\backup` hid a failed `\\Archive\\backup`.
     """
     rows = list(csv.reader(io.StringIO(text)))
     tasks: list[dict] = []
@@ -192,10 +197,12 @@ def parse_schtasks_csv(text: str) -> list[dict]:
             continue
         if is_system_task(full_name):
             continue
-        name = full_name.rpartition('\\')[2]
-        if name in seen:
+        if full_name in seen:
             continue
-        seen.add(name)
+        seen.add(full_name)
+        # Named with its folder, as the CIM branch names it: `\` (the registry's
+        # tasks) gives the bare name, `\Archive\backup` is `Archive\backup`.
+        name = full_name.lstrip('\\')
         tasks.append({
             'Name': name,
             'State': row[COL_STATUS],

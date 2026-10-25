@@ -131,4 +131,15 @@ retry_case "400 120" 1 1 "a refusal on the merits — not retried"
 retry_case "$(printf '000 0\n000 0\n000 0')" 3 1 "the schedule ends — exit 1"
 grep -qF 'curl: (28)' "$TMP/stderr" || fail "curl's own error is not in the report"
 
+# --- Case 5: a schedule that is not numbers is not globbed into one ---
+# Split unquoted, `*` became the names of the files in the working directory.
+printf '%s\n' "200 10" > "$ANSWERS"
+rm -f "$CALLS"
+long=$(printf 'glob probe %.0s' $(seq 1 900))     # ~10k chars: several parts
+(cd "$TMP" && PATH="$TMP/rbin:$PATH" TELEGRAM_RETRY_GAPS='*' bash "$SCRIPT" "$long" \
+    > /dev/null 2> "$TMP/stderr") || fail "TELEGRAM_RETRY_GAPS='*': the send failed"
+[ "$(cat "$CALLS")" -gt 1 ] || fail "T5: the long message went out in one part"
+[ "$(grep -cF "is not a list of seconds" "$TMP/stderr")" = "1" ] \
+    || fail "TELEGRAM_RETRY_GAPS='*' was taken for a retry schedule, or warned once per part"
+
 echo "PASS: test_telegram_send.sh"

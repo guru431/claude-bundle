@@ -350,6 +350,34 @@ def test_compile_kb_survives_a_source_that_is_not_utf8(bundle: Path):
     assert "ClaudeWikiCompileKB" in ledger, "the crashed run left no ledger record"
 
 
+def test_compile_kb_a_source_gone_since_the_listing_is_not_a_failure(bundle: Path,
+                                                                     monkeypatch):
+    """The KB writer may still be moving files: a source gone between the
+    listing and the read failed the run, and the monitor paged for a state
+    that clears itself."""
+    _kb_article(bundle, "fine.md", b"A perfectly ordinary article.\n")
+    moved = _kb_article(bundle, "moved.md", b"Moved away by the writer.\n")
+    resp = bundle / "kb_empty.json"
+    resp.write_text("[]", encoding="utf-8")
+    for key in ("DEEPSEEK_KEY", "OPENCODE_GO_API_KEY", "OPENCODE_GO_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("WIKI_LLM_PROVIDER", "mock")
+    monkeypatch.setenv("WIKI_LLM_MOCK_RESPONSE", str(resp))
+    monkeypatch.setenv("WIKI_LLM_PACE_SECONDS", "0")
+    kb = _load_wiki_script(bundle, monkeypatch, "compile_kb_gone", "wiki-compile-kb.py")
+    listed = kb.find_new_files
+
+    def list_then_move(processed):
+        files = listed(processed)
+        moved.unlink()
+        return files
+
+    monkeypatch.setattr(kb, "find_new_files", list_then_move)
+    assert kb.main() == 0
+    state = json.loads((bundle / "wiki" / ".processed.json").read_text(encoding="utf-8"))
+    assert state["compile_kb"]["processed"] == ["articles/fine.md"]
+
+
 def test_replay_is_scoped_to_its_project_and_previews_without_changes(bundle: Path):
     """`--replay DATE#demo --dry-run` cleared markers and retry counters, then
     printed "no state changes"; and `DATE#demo` also cleared `DATE#demo-app`."""
@@ -893,6 +921,17 @@ def test_the_last_preview_night_announces_what_the_first_real_one_sends(bundle: 
     assert "Provider: mock" in notice and "WIKI_ALLOW_OFFBOX=1" in notice, notice
     chars = int(re.search(r"flush would have sent (\d+) chars", notice).group(1))
     assert chars > 5000, f"the notice did not carry the preview's size: {notice}"
+
+
+def test_a_mistyped_brake_flag_runs_nothing(bundle: Path, monkeypatch, capsys):
+    """`--dry_run` was ignored, and the real night ran — sessions sent to the
+    provider — for someone who meant to preview it."""
+    monkeypatch.setattr(sys, "argv", ["wiki-pipeline.py", "--dry_run"])
+    pipe = _load_wiki_script(bundle, monkeypatch, "pipeline_argv", "wiki-pipeline.py")
+    monkeypatch.setattr(pipe.subprocess, "run",
+                        lambda *a, **k: pytest.fail("a phase was started"))
+    assert pipe.main() == 2
+    assert "unknown argument(s): --dry_run" in capsys.readouterr().err
 
 
 def test_the_preview_notice_reads_each_phase_once(bundle: Path, monkeypatch):
@@ -1786,6 +1825,34 @@ def test_lint_asks_the_page_reader_whether_a_page_has_frontmatter(bundle: Path, 
     warned = "\n".join(lint.check_missing_frontmatter(lint.find_all_pages()))
 
     assert "ruled.md" in warned and "sourced.md" not in warned
+
+
+def test_lint_content_checks_strip_the_frontmatter_read_page_finds(bundle: Path,
+                                                                   monkeypatch):
+    """strip_frontmatter was a second definition: `find("\\n---")` stopped at a
+    `----` rule and cut a page that has no frontmatter there."""
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_strip_fm", "wiki-lint.py")
+    ruled = "---\n# Ruled\n\nOpens with a rule.\n----\nThe rest.\n"
+    assert lint.strip_frontmatter(ruled) == ruled
+    assert lint.strip_frontmatter("---\ntitle: T\n---\n# T\n") == "# T\n"
+
+
+def test_project_collapse_counts_pages_not_every_markdown_file(bundle: Path, monkeypatch):
+    """Each project's _log.md and the drafts under .pending/ were counted as
+    pages, which moved the share of projects/main the check pages on."""
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_collapse", "wiki-lint.py")
+    projects = bundle / "wiki" / "projects"
+    for project, n in (("main", 8), ("alpha", 2)):
+        (projects / project / ".pending").mkdir(parents=True)
+        for i in range(n):
+            (projects / project / f"p{i}.md").write_text("# P\n", encoding="utf-8")
+        (projects / project / "_log.md").write_text("# Log\n", encoding="utf-8")
+    for i in range(3):
+        (projects / "alpha" / ".pending" / f"d{i}.md").write_text("# D\n", encoding="utf-8")
+
+    assert lint.check_project_collapse() == [
+        "WARN: project-collapse — projects/main holds 8/10 pages (80%); "
+        "check KNOWN_PROJECTS / normalize_project_name"]
 
 
 def test_a_second_section_of_a_compiled_project_is_sent_alone(bundle: Path):

@@ -101,6 +101,16 @@ if [ "$split_rc" -ne 0 ] || [ ! -f "$PARTS_DIR/part001.json" ]; then
     exit 1
 fi
 
+GAPS="${TELEGRAM_RETRY_GAPS-30,90}"
+# Numbers only: the list below is split unquoted, so a `*` in .env was globbed
+# into the names of the files here, and each became a "gap". Anything else falls
+# back to the default, as cron/lib/notify.py does. Once, not once per part.
+case "$GAPS" in
+    *[!0-9,[:space:]]*)
+        echo "telegram-send: TELEGRAM_RETRY_GAPS='$GAPS' is not a list of seconds — using 30,90" >&2
+        GAPS="30,90" ;;
+esac
+
 status=0
 for part in "$PARTS_DIR"/part*.json; do
     [ -f "$part" ] || continue
@@ -135,7 +145,7 @@ for part in "$PARTS_DIR"/part*.json; do
     # curl's stderr goes to its own file, not `2>&1`: the Windows CRT flushes it
     # AFTER stdout, so `curl: (28) …` landed on the last line where the HTTP code
     # belongs, and the retry never recognized the very failure it is for.
-    GAPS="${TELEGRAM_RETRY_GAPS-30,90}"
+    # (GAPS is read and checked above the loop.)
     ATTEMPT=0
     for gap in ${GAPS//,/ } ""; do
         ATTEMPT=$((ATTEMPT + 1))

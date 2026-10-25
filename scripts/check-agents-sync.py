@@ -81,10 +81,15 @@ PROSE_LISTS = [
 
 # Each file must name its own tool, its own rules file and its own home. Folding
 # these to a placeholder keeps that from reading as drift.
+#
+# Applied in order, to LOWERCASED text: the file and home names before the tool.
+# The file rule was written `CLAUDE\.md` and never matched lowercased text, and
+# the tool rule, applied first, made `claude.md` into `<tool>.md` and left
+# `agents.md` as it was — a mirrored mention of the two files read as drift.
 _SYNONYMS = [
+    (r"\bclaude\.md\b|\bagents\.md\b", "<rules-file>"),
+    (r"~/\.claude\b|~/\.codex\b", "<home>"),
     (r"\bclaude code\b|\bcodex cli\b|\bcodex\b|\bclaude\b", "<tool>"),
-    (r"CLAUDE\.md|AGENTS\.md", "<rules-file>"),
-    (r"~/\.claude|~/\.codex", "<home>"),
     # Each file names its own way of running a command: CLAUDE.md says "Bash"
     # (the tool), AGENTS.md says "shell". Same rule, different vocabulary.
     (r"\b(?:bash|shell) command\b", "<shell> command"),

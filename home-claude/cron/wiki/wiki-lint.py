@@ -33,8 +33,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (BUNDLE_ROOT, WIKI_ROOT, WIKI_NON_PAGES, LOG_MD,  # noqa: E402
                    _unescape_blob, atomic_write_text,
-                   is_reserved_page_name, mark_phase_success, read_page,
-                   sanitize_page_body, write_page)
+                   is_reserved_page_name, mark_phase_success, parse_frontmatter,
+                   read_page, sanitize_page_body, write_page)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from runs import record_run  # noqa: E402
@@ -301,10 +301,10 @@ def check_missing_frontmatter(pages: dict[str, list[Path]]) -> list[str]:
 
 
 def strip_frontmatter(text: str) -> str:
-    if not text.startswith("---"):
-        return text
-    end = text.find("\n---", 3)
-    return text[end + 4:] if end > 0 else text
+    """The body as read_page sees it — parse_frontmatter, not a second rule.
+    `find("\\n---")` also stopped at a `----` rule, and cut a page that opens
+    with a horizontal rule (no frontmatter to read_page) at its next one."""
+    return parse_frontmatter(text)[1]
 
 
 def strip_code(text: str) -> str:
@@ -570,7 +570,11 @@ def check_project_collapse() -> list[str]:
     counts: dict[str, int] = {}
     for sub in projects_dir.iterdir():
         if sub.is_dir():
-            n = sum(1 for _ in sub.rglob("*.md"))
+            # Pages as find_all_pages counts them: not every project's _log.md,
+            # nor the markdown under .pending/ or .git/.
+            n = sum(1 for f in sub.rglob("*.md")
+                    if f.name not in WIKI_NON_PAGES
+                    and not any(p in SKIP_PARTS for p in f.relative_to(sub).parts))
             if n:
                 counts[sub.name] = n
     total = sum(counts.values())

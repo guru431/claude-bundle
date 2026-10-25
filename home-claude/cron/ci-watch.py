@@ -16,8 +16,8 @@ Authorization header must NOT follow it there (the storage answers 401), so the
 redirect is handled by hand.
 
 Exit: 0 — the run is green, or there is none to wait for (no workflows, no
-github remote, Actions never ran in this repository); 1 — red, or it did not
-finish in time.
+github remote, Actions never ran in this repository, no commit yet); 1 — red,
+it did not finish in time, or git could not read HEAD.
 """
 from __future__ import annotations
 
@@ -98,9 +98,17 @@ def slug(repo: Path) -> str | None:
     return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
-def head_sha(repo: Path) -> str:
-    done = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+def head_sha(repo: Path) -> str | None:
+    """HEAD, or None when the repository has no commit yet (`--verify -q`
+    exits 1, silent). Any other failure of git — a broken .git — raises
+    RuntimeError. Both used to come back as "": the loop polled `head_sha=`
+    for the whole timeout and reported a CI that could not exist as red."""
+    done = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q", "HEAD"],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if done.returncode == 1 and not done.stderr.strip():
+        return None
+    if done.returncode != 0:
+        raise RuntimeError(done.stderr.strip() or f"git exited {done.returncode}")
     return done.stdout.strip()
 
 
@@ -152,7 +160,15 @@ def main() -> int:
     tok = token()
     poll = poll_seconds(tok)
 
-    sha = args.sha or head_sha(repo)
+    try:
+        sha = args.sha or head_sha(repo)
+    except RuntimeError as e:
+        # Not "nothing to wait for": nothing was checked, and 0 reads as green.
+        print(f"  ci-watch: HEAD cannot be read ({e}) — CI not checked", file=sys.stderr)
+        return 1
+    if not sha:
+        print("  ci-watch: no commit yet — nothing to wait for", file=sys.stderr)
+        return 0
     print(f"  ci-watch: waiting for the run of {slugname} @ {sha[:8]} (up to {args.timeout}s)")
     deadline = time.time() + args.timeout
     # No history: wait for a first run only briefly. A run for a fresh push can

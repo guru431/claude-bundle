@@ -2577,7 +2577,7 @@ _DEPLETED_PATH = BUNDLE_ROOT / "cron" / "state" / "depleted.json"
 # Consecutive 403s per provider, this process only. A shut door answers 403
 # every time, so the second one arrives within seconds; a proxy having a bad
 # minute answers it once. Only the former should latch — see the 403 branch in
-# _llm_openai_compat. Any successful call clears the count.
+# _llm_openai_compat. Any other answer clears the count.
 _FORBIDDEN_STREAK: dict[str, int] = {}
 _DEPLETED_PROVIDERS: dict[str, str] = {}   # provider → why (401/402/403/429/5xx)
 _DEPLETED_UNTIL: dict[str, float] = {}     # provider → when its latch ends (epoch s)
@@ -4306,7 +4306,8 @@ def _llm_queue():
 #                   count it.
 #   config        — no key, no model, refused by a DLP gate, 401/402/403/404 and
 #                   every other 4xx, a redirect a local-only provider will not
-#                   follow. Nothing about tonight will fix this; it is fatal for
+#                   follow, a 200 that is not the API's JSON, no Claude CLI to
+#                   run. Nothing about tonight will fix this; it is fatal for
 #                   the run.
 class LLMResult(NamedTuple):
     text: str | None
@@ -4435,8 +4436,7 @@ def _llm_call_unlocked(prompt: str, timeout: int = 600,
                        model: str | None = None) -> LLMResult:
     """Body of llm_call without the queue — the provider chain as-is."""
     if LLM_PROVIDER == "claude":
-        text = _llm_claude(prompt, timeout)
-        return LLMResult(text, "ok" if text else "transient")
+        return _llm_claude(prompt, timeout)
     if LLM_PROVIDER in PROVIDERS:
         return _llm_openai_compat(LLM_PROVIDER, prompt, timeout, model=model)
 
@@ -4582,6 +4582,11 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
             )
             _audit_attempt(provider, model, resp.status_code,
                            int((time.monotonic() - t0) * 1000), fallback_from)
+            if resp.status_code != 403:
+                # "In a row" means consecutive answers. Only a success cleared
+                # the count, so 403 → 401 → 403 latched the provider for six
+                # hours on two 403s that were not consecutive.
+                _FORBIDDEN_STREAK.pop(provider, None)
             if resp.status_code == 402:
                 # An out-of-credit provider is dead for the rest of the run, so
                 # don't pay the latency of calling it again for every remaining
@@ -4687,7 +4692,6 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
             if not content:
                 print(f"  {label} empty content (reasoning_only?)", file=sys.stderr)
                 return LLMResult(None, "deterministic", f"{label} empty content")
-            _FORBIDDEN_STREAK.pop(provider, None)   # the door opened
             return LLMResult(content, "ok")
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
                 requests.exceptions.ChunkedEncodingError) as e:
@@ -4701,9 +4705,15 @@ def _llm_openai_compat(provider: str, prompt: str, timeout: int = 600,
             # Not the transport: a 200 whose body is not JSON, or JSON of another
             # shape. The same request gets the same answer, so the retries only
             # added max_retries × retry_sleep to every call of the batch.
+            #
+            # And so does every OTHER request: what comes back is not this API
+            # (a base URL that serves a web page, a captive portal), whatever the
+            # payload. That is config, like a 404. As `transient` it was retried
+            # every night as if waiting would fix it; as `deterministic` it would
+            # quarantine every source over a one-line fix of the URL.
             _audit_attempt(provider, model, f"exception:{type(e).__name__}", None, fallback_from)
             print(f"  {label} error (not retried): {type(e).__name__}: {e}", file=sys.stderr)
-            return LLMResult(None, "transient", f"{label} {type(e).__name__}: {e}")
+            return LLMResult(None, "config", f"{label} {type(e).__name__}: {e}")
     return LLMResult(None, "transient", f"{label} exhausted retries")
 
 
@@ -4755,11 +4765,17 @@ def _run_tree(argv: list[str], *, input: str, env: dict, cwd: str,
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
-def _llm_claude(prompt: str, timeout: int = 600) -> str | None:
+def _llm_claude(prompt: str, timeout: int = 600) -> LLMResult:
     """Claude CLI fallback (claude -p --model sonnet).
 
     Honors CLAUDE_BIN: a Password-mode task runs in session 0, where the user's
     PATH doesn't exist and a bare `claude` simply isn't found.
+
+    Every failure used to be `transient`, so a CLI that is not there — the same
+    for every call tonight — was retried each night as an outage. Now no CLI to
+    start is config; a timeout, a non-zero exit (a usage limit, a login that
+    lapsed) or an empty answer stays transient: nothing says the payload is at
+    fault, and counting it would quarantine sessions over a CLI problem.
 
     The CLI gets an environment of its own. This provider is the subscription
     you are signed in to, but Claude Code ranks ANTHROPIC_AUTH_TOKEN and
@@ -4804,9 +4820,23 @@ def _llm_claude(prompt: str, timeout: int = 600) -> str | None:
                 timeout=timeout,
                 cwd=sandbox,
             )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-        return None
-    except (subprocess.TimeoutExpired, OSError) as e:
+    except subprocess.TimeoutExpired as e:
         print(f"  Claude CLI error: {e}", file=sys.stderr)
-        return None
+        return LLMResult(None, "transient", f"Claude CLI timed out after {timeout}s")
+    except OSError as e:
+        # Config only when there is no CLI to start. The sandbox directory or a
+        # pipe failing is something else, and "set CLAUDE_BIN" would mislead.
+        if not os.path.isfile(claude_bin):
+            print(f"  Claude CLI not found ({claude_bin}): {e} — set CLAUDE_BIN to "
+                  f"its full path", file=sys.stderr)
+            return LLMResult(None, "config", f"Claude CLI not found: {claude_bin}")
+        print(f"  Claude CLI error: {e}", file=sys.stderr)
+        return LLMResult(None, "transient", f"Claude CLI error: {e}")
+    if result.returncode != 0 or not result.stdout.strip():
+        # Not the payload's fault as far as anyone can tell — a usage limit, a
+        # login that lapsed, a notice on stderr — so never counted.
+        print(f"  Claude CLI exited {result.returncode} with "
+              f"{'no answer' if not result.stdout.strip() else 'an answer'}: "
+              f"{result.stderr.strip()[:200]}", file=sys.stderr)
+        return LLMResult(None, "transient", f"Claude CLI exit {result.returncode}")
+    return LLMResult(result.stdout.strip(), "ok")

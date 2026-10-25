@@ -109,6 +109,10 @@ def test_system_tasks_filtered_like_cim_branch():
     assert st.is_system_task(r"\Windows\SomeTask") is True
     assert st.is_system_task(r"\ClaudeTaskMonitor") is False
     assert st.is_system_task(r"\VendorUpdater\Task") is False
+    # A folder NAME, not a substring: a user's folders stay monitored.
+    assert st.is_system_task(r"\MyWindowsJobs\backup") is False
+    assert st.is_system_task(r"\Microsoft-backup-tools\copy") is False
+    assert st.is_system_task(r"\microsoft\Office\Update") is True
 
 
 def test_parse_maps_fields_the_monitor_reads():
@@ -125,6 +129,15 @@ def test_multi_trigger_task_counted_once():
     """schtasks prints one row per trigger; the monitor must see one task."""
     tasks = st.parse_schtasks_csv(csv_text(row(), row(), row()))
     assert len(tasks) == 1
+
+
+def test_same_name_in_two_folders_is_two_tasks():
+    """Deduplicated by the full path, and named with the folder as the CIM
+    branch names them: by the bare name the second, failed `backup` dropped
+    out of the report, and the two shared one seen-state key."""
+    tasks = st.parse_schtasks_csv(csv_text(row(name="\\Jobs\\backup"),
+                                           row(name="\\Archive\\backup")))
+    assert [t["Name"] for t in tasks] == ["Jobs\\backup", "Archive\\backup"]
 
 
 def test_description_with_quote_does_not_lose_managed_marker():
@@ -172,7 +185,7 @@ def test_a_repeated_header_is_recognised_in_any_language():
     """
     text = "\n".join((HEADER_RU, row(), HEADER_RU, row(name="\\Other\\ClaudeX"))) + "\n"
     tasks = st.parse_schtasks_csv(text)
-    assert [t["Name"] for t in tasks] == ["ClaudeTaskMonitor", "ClaudeX"]
+    assert [t["Name"] for t in tasks] == ["ClaudeTaskMonitor", "Other\\ClaudeX"]
 
 
 def test_collect_raises_when_schtasks_gives_nothing(monkeypatch):

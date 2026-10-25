@@ -487,7 +487,18 @@ def check(registry: Path = REGISTRY, ps_parsed: Path | None = None) -> int:
         problems += [f"{name}: {p}" for p in check_task(task)]
 
     if ps_parsed is not None:
-        ps_doc = json.loads(ps_parsed.read_text(encoding="utf-8-sig"))
+        # A cut-short dump (an interrupted ConvertTo-RegistryJson) ended the
+        # guard in a traceback.
+        try:
+            ps_doc = json.loads(ps_parsed.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            print(f"REGISTRY SCHEMA ERRORS — fix {registry}:")
+            print(f"  the --ps-parsed dump {ps_parsed} is not readable JSON: {exc}")
+            return 1
+        if not isinstance(ps_doc, dict):
+            print(f"REGISTRY SCHEMA ERRORS — fix {registry}:")
+            print(f"  the --ps-parsed dump {ps_parsed} is not a JSON object")
+            return 1
         problems += compare_parsers(ps_doc, data)
 
     if problems:

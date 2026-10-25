@@ -287,3 +287,16 @@ def test_a_registry_that_is_not_yaml_is_a_problem_not_a_traceback(tmp_path: Path
     reg.write_text(HEAD + "    script_args: [unclosed\n", encoding="utf-8")
     assert check_registry.check(reg) == 1
     assert "not valid YAML" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("dump", ['{"top": {}, "tasks": [', "[]"])
+def test_a_broken_ps_dump_is_a_problem_not_a_traceback(tmp_path: Path, capsys, dump: str):
+    """A dump cut short by an interrupted ConvertTo-RegistryJson raised out of
+    json.loads; a list died on `.get` in compare_parsers."""
+    pytest.importorskip("yaml")
+    reg = tmp_path / "registry.yaml"
+    reg.write_text(HEAD + "    timeout_hours: 1\n", encoding="utf-8")
+    parsed = tmp_path / "parsed.json"
+    parsed.write_text(dump, encoding="utf-8")
+    assert check_registry.check(reg, parsed) == 1
+    assert "the --ps-parsed dump" in capsys.readouterr().out

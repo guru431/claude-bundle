@@ -573,6 +573,11 @@ def check_pair(project: str, claude_path: Path, agents_path: Path,
     if claude_md is None:
         log(f"  {project}: SKIP (CLAUDE.md could not be read)", log_path)
         return False, 0, False
+    # There but unreadable (a lock, the permissions) is not missing: it was
+    # filed as "AGENTS.md is missing" in a repository that has one.
+    if agents_md is None and agents_path.exists():
+        log(f"  {project}: SKIP (AGENTS.md could not be read)", log_path)
+        return False, 0, False
     if agents_md is None:
         if has_open_drift_finding(findings_path, project):
             log(f"  {project}: MISSING AGENTS.md — finding already open, skip", log_path)

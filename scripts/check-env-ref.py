@@ -605,7 +605,7 @@ if __name__ == "__main__":
         # dashes in this table would land as CP1251 bytes in a file everything
         # else reads as UTF-8.
         page = ROOT / "docs" / "config-reference.md"
-        page.write_text(emit_table(), encoding="utf-8")
+        page.write_text(emit_table(), encoding="utf-8", newline="\n")   # LF, as --emit-names
         print(f"wrote {page.relative_to(ROOT).as_posix()}")
         sys.exit(0)
     if "--check-table" in sys.argv:

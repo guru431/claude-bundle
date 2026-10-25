@@ -23,7 +23,11 @@ The short list; UPGRADING.md has the steps.
   (`0` = no limit), multi-line values are rejected — a registry kept from 0.17.0
   still carries five `description: >-` lines and fails `self-test -InstallPath`
   until they are made one line — and `repeat_for` must be `P1D` unless the task
-  is `platform: windows`. Five shipped tasks show "updated" once.
+  is `platform: windows`. Five shipped tasks show "updated" once. A quoted value
+  is a string, as in YAML: `script_args: ["yes"]` is no longer the argument
+  `True`. A `kind: exec` task whose arguments are a switch (`/c …`) is
+  registered instead of skipped as a missing target. The task monitor names a
+  task in a folder `Folder\Name` (`MONITOR_EXCLUDE_TASKS` takes either form).
 - **Privacy policy:** project names are compared normalized, so
   `allow_projects: [MyApp]` now matches the `myapp` directory and STARTS sending
   it; a typo'd key in `bundle.local.yaml` denies every project.
@@ -136,6 +140,62 @@ The short list; UPGRADING.md has the steps.
   Windows shutdown swallowed (`0x8007045B`) and reports a Windows update that
   failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
   the Pester import hangs or dies before the first file.
+
+### Findings: 22 resolved, 4 declined
+
+The weekly code review of 2026-10-24 filed 26 findings; each was checked against
+the code. Resolved, each with a test that fails on the code it replaces (or, for
+the comment-only one, a measurement):
+
+- **`registry-parse.ps1`**: a quoted value is a string, as PyYAML reads it —
+  `script_args: ["yes"]` reached Task Scheduler as `True`. A quoted boolean in
+  `enabled:` / `hidden:` is still read as one, single quotes too (`'false'`
+  registered the task enabled); `check-registry.py` still refuses it.
+- **`sync-tasks.ps1`**: the arguments of a `kind: exec` task (its `script:`)
+  are not checked as a file when they are a switch, so `/c …` is not
+  "[skipped: missing target]"; the script an interpreter runs still is.
+- **Task monitor**: Windows' own tasks are dropped by folder name, not by a
+  substring (`\MyWindowsJobs\` was not monitored), in the CIM branch and the
+  schtasks fallback alike; a task in a folder is named with it (`Vendor\backup`)
+  in both, so two `backup` tasks in two folders are two tasks and two entries
+  of the seen-state — the fallback had kept one, the CIM branch one key for
+  both; the CIM branch asks for a task's status by path and name.
+- **`daemon-watch.py`**: a session is found by quser's USERNAME column — `ann`
+  was "found" in joanne's — and a registry `user: HOST\name` is found at all.
+- **`ci-watch.py`**: a HEAD git cannot name is nothing to wait for, not 900 s of
+  polling and "CI red".
+- **`telegram-send.sh`**: a `TELEGRAM_RETRY_GAPS` that is not numbers falls back
+  to `30,90`, as `notify.py` does; a `*` was globbed into file names.
+- **`check-agents-sync.py`**: the rules-file and home synonyms match — one was
+  written in capitals for lowercased text, the other shadowed by the tool rule.
+- **`wiki-pipeline.py`**: an unknown argument is an error (exit 2). `--dry_run`
+  ran a real night.
+- **`wiki-compile-kb.py`**: a source gone between the listing and the read is
+  skipped, not a failed run.
+- **`claude-healthcheck.sh`**: an exclude ERE awk cannot compile falls back to
+  the default; it left no filesystem measured and no disk alert possible.
+- **`check-registry.py`**: a broken `--ps-parsed` dump is a reported problem,
+  not a traceback.
+- **`wiki-lint.py`**: the content checks strip the frontmatter `read_page` finds
+  (a `----` rule cut the body), and the project-collapse share counts pages,
+  not `_log.md` and drafts.
+- **`agents-md-sync-check.py`**: an AGENTS.md that exists but cannot be read is
+  skipped, not filed as missing.
+- **Uninstallers**: a manifest entry without a sha256 is kept unless forced, in
+  `bundle_install.py` and `uninstall.ps1` alike.
+- **LLM layer**: a 200 whose body is not the API's JSON is *config*, not
+  *transient* — it is the endpoint, the same for every request; a `claude`
+  provider whose CLI is not there is *config* (everything else it fails with
+  stays transient); any answer between two 403s breaks the "two in a row" that
+  latches a provider.
+- **Small ones**: `check-env-ref.py --emit-table` writes LF; `git-push-all.sh`
+  logs a dry-run push once; `runtime.sh` says why it prefers `Git\bin\bash.exe`
+  (measured: `usr\bin\bash.exe` with session 0's PATH has no sed or tail).
+
+Declined, with the reason for each in the local findings archive: the POSIX
+monitor's dedup key (by design, as on Windows), the `check-doc-counts.py` regex
+and `install.ps1`'s `$LASTEXITCODE` (both false — the latter measured), and a
+race in `load_state` (every caller that persists holds the state lock).
 
 ### Ported from the meta-repo: nine fixes since the last comparison
 

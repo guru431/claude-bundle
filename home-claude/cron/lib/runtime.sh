@@ -66,6 +66,12 @@ if [ -n "${BASH_EXE:-}" ] && [ -x "${BASH_EXE}" ]; then
     BASH_BIN="${BASH_EXE}"
 else
     BASH_BIN=""
+    # Git\bin before Git\usr\bin, as in cron/hooks/utils.py::find_bash. BASH_BIN
+    # runs telegram-send.sh, which needs sed and tail: the Git\bin launcher puts
+    # /mingw64/bin:/usr/bin at the front of PATH, and usr\bin\bash.exe started
+    # with session 0's PATH (System32 and Windows) finds neither — measured.
+    # ci-precheck.py::find_bash takes usr\bin on purpose for the opposite
+    # reason: its tests put stubs at the front of PATH, which Git\bin shadows.
     for _rt_cand in "$(command -v bash 2>/dev/null)" \
                     "/c/Program Files/Git/bin/bash.exe" \
                     "/c/Program Files/Git/usr/bin/bash.exe"; do

@@ -6,14 +6,18 @@ here reaches the network.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import urllib.error
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location(
     "ci_watch", ROOT / "home-claude" / "cron" / "ci-watch.py")
 ci_watch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ci_watch)
+HEAD_SHA = ci_watch.head_sha        # the real one; _no_run_for_head replaces it
 
 
 def test_a_failed_job_list_is_a_report_line_not_a_traceback(monkeypatch):
@@ -58,6 +62,23 @@ def test_a_repo_with_history_is_waited_for_to_the_end(monkeypatch):
     clock = _no_run_for_head(monkeypatch, history=5)
     assert ci_watch.main() == 1
     assert clock[0] - 1000.0 >= 900
+
+
+@pytest.mark.parametrize("repo_state, rc", [("unborn", 0), ("broken", 1)])
+def test_a_head_git_cannot_name_is_not_waited_for(monkeypatch, tmp_path, repo_state, rc):
+    """`rev-parse HEAD` failing came back as "": the whole timeout went on
+    polling `head_sha=` and ended "CI red". No commit yet is nothing to wait
+    for (0); a repository git cannot read is CI not checked (1), not green."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    if repo_state == "unborn":
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, timeout=30)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))   # no repo above it
+    clock = _no_run_for_head(monkeypatch, history=5)
+    monkeypatch.setattr(ci_watch, "head_sha", HEAD_SHA)
+    monkeypatch.setattr(ci_watch.sys, "argv", ["ci-watch.py", str(repo), "--timeout", "900"])
+    assert ci_watch.main() == rc
+    assert clock[0] == 1000.0, "it waited for a run of a commit that does not exist"
 
 
 def test_without_a_token_a_private_repo_is_not_waited_for(monkeypatch, capsys):

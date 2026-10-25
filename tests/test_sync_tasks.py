@@ -448,6 +448,28 @@ def test_a_posix_only_task_does_not_make_the_sync_partial(tmp_path: Path):
 
 @windows_only
 @pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
+def test_the_arguments_of_an_exec_task_are_not_a_target_to_find(tmp_path: Path):
+    """For kind=exec `script:` holds the arguments, and the target check took
+    them for a path: `--out=C:\\logs\\x` was "[skipped: missing target]". The
+    script an interpreter runs is a path, and a missing one is still refused."""
+    switch, script = (f"ClaudeBundleTest-{uuid.uuid4().hex[:12]}" for _ in range(2))
+    task = ("  - name: {name}\n"
+            "    kind: exec\n"
+            f"    execute: {sys.executable}\n"
+            "    script: {script}\n"
+            "    trigger: Daily 02:00\n"
+            "    timeout_hours: 1\n")
+    reg = _deployment(tmp_path, (
+        task.format(name=switch, script=f"--out={tmp_path / 'nowhere' / 'x.log'}")
+        + task.format(name=script, script=tmp_path / "nowhere" / "server.py")))
+    env = dict(os.environ, TEMP=str(tmp_path), TMP=str(tmp_path))
+    r = run_ps_file(SYNC, "-DryRun", "-RegistryPath", reg, env=env)
+    assert f"[skipped: missing target] {switch}" not in r.stdout, r.stdout
+    assert f"[skipped: missing target] {script}" in r.stdout, r.stdout
+
+
+@windows_only
+@pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
 def test_an_only_name_the_registry_lacks_is_refused(tmp_path: Path):
     """A typo'd -Only name was skipped in silence and the sync exited 0 without
     touching what it was called for. `A,B` on a direct -File call is split."""

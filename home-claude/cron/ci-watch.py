@@ -39,7 +39,7 @@ for _stream in (sys.stdout, sys.stderr):
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import vault_values  # noqa: E402
 
-DEFAULT_WAIT = int(os.environ.get("CI_WATCH_TIMEOUT", "900"))
+DEFAULT_WAIT = 900
 # How long to wait for the FIRST run of a repository that has never had one. A
 # fork does not run Actions until they are switched on in its Actions tab, while
 # the API still lists its workflows as active: the only sign is an empty history.
@@ -57,6 +57,20 @@ def token() -> str | None:
     except OSError:
         return None
     return (env.get("GITHUB_TOKEN") or "").strip() or None
+
+
+def default_wait() -> int:
+    """CI_WATCH_TIMEOUT, else 900 s. Read here, not at import: "15m" was a
+    traceback in the publication gate instead of a line saying what is wrong."""
+    raw = os.environ.get("CI_WATCH_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_WAIT
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"  ci-watch: CI_WATCH_TIMEOUT={raw!r} is not a number of seconds"
+              f" — using {DEFAULT_WAIT}", file=sys.stderr)
+        return DEFAULT_WAIT
 
 
 def poll_seconds(tok: str | None) -> int:
@@ -145,8 +159,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="wait for the CI run of HEAD")
     ap.add_argument("repo", nargs="?", default=".")
     ap.add_argument("--sha", default=None, help="the commit (default: HEAD)")
-    ap.add_argument("--timeout", type=int, default=DEFAULT_WAIT)
+    ap.add_argument("--timeout", type=int, default=None,
+                    help="seconds (default: CI_WATCH_TIMEOUT, else 900)")
     args = ap.parse_args()
+    if args.timeout is None:
+        args.timeout = default_wait()
 
     repo = Path(args.repo).resolve()
     if not has_workflows(repo):

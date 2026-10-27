@@ -29,11 +29,12 @@
 #   powershell -File scripts/uninstall.ps1 -ClaudeHome D:\claude -Confirm
 #
 # Exit codes: 0 = ok (or dry run), 1 = missing / unreadable manifest,
-#             2 = finished, but some files were kept (changed since install, or
-#                 could not be removed — held open by another process, say),
+#             2 = finished, but some files were kept (changed since install,
+#                 could not be removed — held open by another process, say — or
+#                 listed with a path outside its root),
 #             3 = this deployment's scheduled tasks are still registered (not
 #                 elevated, -Unregister failed, or the deployment's syncer is
-#                 gone) — nothing was deleted.
+#                 gone), or could not be listed — nothing was deleted.
 
 param(
     # Defaults to CLAUDE_CONFIG_DIR when set — the root install.ps1 wrote the
@@ -210,10 +211,20 @@ if ($mf.tier -eq 'full') {
         try {
             $managed = @(Select-DeploymentTasks @(Get-ScheduledTask -ErrorAction SilentlyContinue) $taskNames $taskMarker)
         } catch { $managed = @(); $listError = $_.Exception.Message }
-        if ($null -ne $listError) {
-            $taskStep = "could not be listed ($listError) — none were unregistered"
-        } elseif ($managed.Count -eq 0) {
+        if ($null -eq $listError -and $managed.Count -eq 0) {
             $taskStep = "none of this deployment's tasks are registered — nothing to unregister"
+        }
+    }
+    # Tasks that could not be listed are not "none registered": the sweep below
+    # would delete the syncer and the registry while they may still fire.
+    if ($null -ne $listError) {
+        if (-not $apply) {
+            $taskStep = "could not be listed ($listError) — a real run refuses (exit 3)"
+        } else {
+            Write-Host "ERROR: this deployment's scheduled tasks could not be listed ($listError)." -ForegroundColor Red
+            Write-Host "       Removing the files without knowing could delete the tool that unregisters them." -ForegroundColor Red
+            Write-Host "       Check Task Scheduler, then run this again. Nothing has been removed." -ForegroundColor Red
+            exit 3
         }
     }
     if ($managed.Count -gt 0) {
@@ -353,9 +364,11 @@ if ($apply) {
 
 # ── 4. The manifest itself (kept while it still describes skipped files) ────
 if ($apply) {
-    $kept = $skipped + $failed
+    # A rejected entry was not acted on either: deleting the manifest with it
+    # erased the only record of it, and the run reported success.
+    $kept = $skipped + $failed + $rejected
     if ($kept -eq 0) { Remove-Item $mfPath -Force; Good "removed .bundle-manifest.json" }
-    else { Warn "kept .bundle-manifest.json — $kept file(s) still listed in it were kept" }
+    else { Warn "kept .bundle-manifest.json — $kept entr(y/ies) in it were not removed" }
 }
 
 # ── 5. Summary ──────────────────────────────────────────────────────────────
@@ -387,5 +400,5 @@ if (-not $apply) {
     Info "Dry run — nothing was deleted. Re-run with -Confirm to apply."
     exit 0
 }
-if ($skipped -gt 0 -or $failed -gt 0) { exit 2 }
+if ($kept -gt 0) { exit 2 }
 exit 0

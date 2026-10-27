@@ -403,17 +403,24 @@ def upgrade_notes(args) -> int:
 
 def diff(args) -> int:
     claude_home, source = Path(args.claude_home), Path(args.source)
-    bases = {"claude_home": claude_home, "pipeline_root": Path(args.pipeline_root)}
+    try:
+        manifest, unreadable = read_manifest(claude_home), None
+    except ValueError as exc:
+        manifest, unreadable = None, exc
+    # An empty --pipeline-root: the one the deployment was installed to, as
+    # install.ps1 -Diff does. A split-root deployment had cron/, wiki/ and bin/
+    # compared with claude_home, and every file there read as new.
+    recorded = (manifest or {}).get("pipeline_root")
+    pipeline_root = args.pipeline_root or (recorded if isinstance(recorded, str) and recorded
+                                           else str(claude_home))
+    bases = {"claude_home": claude_home, "pipeline_root": Path(pipeline_root)}
     print("\n=== claude-bundle install diff (nothing will be written) ===")
     print(f"Profile:      {args.profile}")
     print(f"ClaudeHome:   {claude_home}")
     print(f"PipelineRoot: {bases['pipeline_root']}")
     print(f"Source:       {source / 'home-claude'}")
-    try:
-        manifest = read_manifest(claude_home)
-    except ValueError as exc:
-        print(f"[warn] {exc} - diffing against the source only")
-        manifest = None
+    if unreadable:
+        print(f"[warn] {unreadable} - diffing against the source only")
     if manifest:
         print(f"Manifest:     {claude_home / MANIFEST} - tier {manifest.get('tier')}, "
               f"{len(manifest.get('written') or [])} file(s), installed {manifest.get('installed_at')}")
@@ -572,11 +579,13 @@ def uninstall(args) -> int:
                     pruned += 1
             except OSError as e:
                 print(f"[warn] could not prune {directory} - {e}")
-        if skipped + failed == 0:
+        # A rejected entry was not acted on either: deleting the manifest with
+        # it erased the only record of it, and the run reported success.
+        if skipped + failed + rejected == 0:
             (claude_home / MANIFEST).unlink()
             print(f"[ok]   removed {MANIFEST}")
         else:
-            print(f"[warn] kept {MANIFEST} - {skipped + failed} file(s) still listed in it were kept")
+            print(f"[warn] kept {MANIFEST} - {skipped + failed + rejected} entr(y/ies) in it were not removed")
 
     if manifest.get("preserved"):
         print("\nKept (yours - the installer never claimed these):")
@@ -589,7 +598,7 @@ def uninstall(args) -> int:
     if not apply:
         print("\nDry run - nothing was deleted. Re-run with --confirm to apply.")
         return 0
-    return 2 if skipped or failed else 0
+    return 2 if skipped or failed or rejected else 0
 
 
 def main(argv: list[str] | None = None) -> int:

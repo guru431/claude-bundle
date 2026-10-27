@@ -65,6 +65,10 @@ $configRoot = if ($ClaudeHome) { $ClaudeHome.TrimEnd('\', '/') } else { $home_cl
 $deployRoot = if ($deployed) { $home_claude }
     elseif ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR.TrimEnd('\', '/') }
     else { Join-Path $env:USERPROFILE '.claude' }
+# A lite deployment has no cron/ (nor bin/, nor hooks/). The checks of those
+# skip it with a WARN, as compileall does: they used to FAIL a complete lite
+# install on registry.yaml, both smoke-tested hooks and sync-tasks.ps1.
+$liteDeploy = $deployed -and -not (Test-Path (Join-Path $home_claude 'cron'))
 
 # The ONE PowerShell .env parser (scripts/lib/dotenv.ps1). It is always next to
 # this script in a checkout; the guard exists so a partial copy of the bundle
@@ -229,11 +233,14 @@ if ($py) {
     # A missing PyYAML makes python print a ModuleNotFoundError traceback to
     # stderr — Invoke-Checked keeps that from aborting the run (see its comment),
     # so the WARN branch below is reachable.
-    $out = Invoke-Checked { & $py -c $code $reg }
-    $rc = $script:lastRc
-    if ($rc -eq 0) { Ok "registry.yaml parses ($out tasks)" }
-    elseif ($out -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped registry.yaml parse" }
-    else { Bad "registry.yaml parse error: $out" }
+    if ($liteDeploy) { Warn "a lite deployment (no cron/) — skipped registry.yaml parse" }
+    else {
+        $out = Invoke-Checked { & $py -c $code $reg }
+        $rc = $script:lastRc
+        if ($rc -eq 0) { Ok "registry.yaml parses ($out tasks)" }
+        elseif ($out -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped registry.yaml parse" }
+        else { Bad "registry.yaml parse error: $out" }
+    }
 
     # Manifest schema. Checked for the committed template (source-tree file; $root
     # is always the bundle source) AND for the DEPLOYED bundle.local.yaml when one
@@ -326,6 +333,7 @@ if ($py) {
         # -PipelineRoot can move away from the pipeline tree. Looking under the
         # pipeline root reported PASS/FAIL for a path settings.json never names.
         $hp = Join-Path $configRoot "hooks/$h"
+        if ($liteDeploy) { Warn "a lite deployment (no hooks) — skipped hook smoke: $h"; continue }
         if (-not (Test-Path $hp)) { Bad "hook missing: $h"; continue }
         $hooks[$h] | & $py $hp | Out-Null
         if ($LASTEXITCODE -eq 0) { Ok "hook smoke: $h (exit 0)" }
@@ -406,7 +414,9 @@ if ($deployed) {
 
 # ── 6. sync-tasks -DryRun (parser/guard, not actual scheduling) ──────────────
 $st = Join-Path $home_claude 'cron/admin/sync-tasks.ps1'
-if (Test-Path $st) {
+if ($liteDeploy) {
+    Warn "a lite deployment (no cron/) — skipped sync-tasks -DryRun"
+} elseif (Test-Path $st) {
     try {
         # -AllStreams: *>&1 captures Write-Host (info stream) too
         $out = Invoke-Checked { & $st -DryRun } -AllStreams

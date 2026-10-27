@@ -83,6 +83,27 @@ def test_log_retention_refuses_bad_window(tmp_path: Path, value: str):
 
 # ── flush: a negative backlog cap must not select the whole archive ──────────
 
+@pytest.mark.parametrize("heading", ["## Project: main", "## [[Project: main]]",
+                                     "## Project: finance", "## [[Project: finance]]"])
+def test_a_bracketed_project_heading_is_retargeted_like_a_plain_one(
+        bundle_tree: Path, monkeypatch, heading: str):
+    """The `Project:` prefix was cut from the label before its brackets were:
+    `[[Project: main]]` kept the prefix, missed the default-project test, and
+    was demoted under the session's project while `Project: main` was not."""
+    monkeypatch.setenv("CLAUDE_HOME", str(bundle_tree / "fake-home"))
+    monkeypatch.syspath_prepend(str(bundle_tree / "cron" / "hooks"))
+    monkeypatch.syspath_prepend(str(bundle_tree / "cron" / "wiki"))
+    for name in ("utils", "untrusted", "runs"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    spec = importlib.util.spec_from_file_location(
+        "wiki_flush_retarget", bundle_tree / "cron" / "wiki" / "wiki-flush-sessions.py")
+    flush = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(flush)
+    name = "main" if "main" in heading else "finance"
+    out = flush._retarget_subproject_headers(f"{heading}\n- a fact\n", "widgets")
+    assert out.splitlines()[0] == f"## {name}", out
+
+
 def test_backlog_max_negative_disables_sweep(bundle_tree: Path, monkeypatch):
     """WIKI_BACKLOG_MAX=-1 must mean "disabled", not "everything but one file".
 
@@ -962,6 +983,50 @@ def test_a_non_utf8_byte_does_not_empty_or_crash_a_transcript(bundle_tree: Path,
     # Resuming from a byte offset still lands on a line boundary.
     assert utils.parse_jsonl_delta(str(jf), len(good) + len(bad))[0][0]["text"] == "hello"
     assert len(utils.parse_jsonl_messages(str(jf), last_n=0)) == 3
+
+
+def test_the_same_subsection_under_two_sections_is_kept_twice(bundle_tree: Path, monkeypatch):
+    """Sections were deduplicated by heading and text across the whole page:
+    `### Notes` under `## Beta` was cut for matching the one under `## Alpha`.
+    A replayed snapshot — the case the dedup is for — still goes."""
+    utils = _import_utils(monkeypatch, bundle_tree)
+    page = "## Alpha\n\n### Notes\nsame\n\n## Beta\n\n### Notes\nsame\n"
+    assert utils.sanitize_page_body(page).count("### Notes") == 2
+    snapshot = "## Current state\nX\n\n### Sub\nY\n\n"
+    assert utils.sanitize_page_body(snapshot * 2).count("### Sub") == 1
+
+
+def test_the_manifests_projects_root_is_the_one_children_see(bundle_tree: Path, monkeypatch):
+    """setdefault() left a different PROJECTS_ROOT from .env in the environment:
+    utils used the manifest's, md2pdf-sync and every child the other one."""
+    pytest.importorskip("yaml")
+    canon, stale = bundle_tree / "work", bundle_tree / "old"
+    (bundle_tree / "bundle.local.yaml").write_text(
+        f"projects_root: '{canon.as_posix()}'\n", encoding="utf-8")
+    monkeypatch.setenv("PROJECTS_ROOT", str(stale))
+    utils = _import_utils(monkeypatch, bundle_tree)
+    assert utils.PROJECTS_ROOT == canon
+    assert Path(os.environ["PROJECTS_ROOT"]) == canon
+    assert "overrides .env::PROJECTS_ROOT" in utils.PROJECTS_ROOT_SOURCE
+
+
+def test_a_line_still_being_written_is_read_whole_next_time(bundle_tree: Path, monkeypatch):
+    """The offset went past a last line with no newline yet; the next read
+    began in its middle, and the message never parsed."""
+    utils = _import_utils(monkeypatch, bundle_tree)
+    jf = bundle_tree / "s.jsonl"
+    good = b'{"type": "user", "message": {"role": "user", "content": "hello"}}\n'
+    late = b'{"type": "assistant", "message": {"role": "assistant", "content": "late"}}\n'
+    jf.write_bytes(good + late[:30])
+
+    messages, end = utils.parse_jsonl_delta(str(jf), 0)
+    assert [m["text"] for m in messages] == ["hello"] and end == len(good)
+    jf.write_bytes(good + late)
+    messages, end = utils.parse_jsonl_delta(str(jf), end)
+    assert [m["text"] for m in messages] == ["late"] and end == len(good + late)
+    # A whole last line without its newline is read, not waited for forever.
+    jf.write_bytes(good + late.rstrip(b"\n"))
+    assert [m["text"] for m in utils.parse_jsonl_delta(str(jf), len(good))[0]] == ["late"]
 
 
 def test_an_unreadable_transcript_is_a_failure_not_an_empty_delta(bundle_tree: Path,

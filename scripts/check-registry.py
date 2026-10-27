@@ -232,6 +232,12 @@ def check_task(task: dict) -> list[str]:
                 + " is valid for Task Scheduler but gen-scheduler.py cannot "
                   "express it, so the POSIX unit would be SKIPPED — the same "
                   "line would run on two different schedules")
+        # The kind too: cmd / vbs / exec have no POSIX command line, and the
+        # generator skips such a task as surely as an unexpressible trigger.
+        if gen.exec_argv(task, "") is None:
+            problems.append(
+                f"kind '{task.get('kind')}' runs on Windows only — gen-scheduler.py "
+                f"would SKIP the POSIX unit. Mark the task platform: windows")
         # A unit that IS emitted can still keep a different clock. Task
         # Scheduler repeats for `repeat_for`; gen-scheduler.py never reads the
         # field and repeats through the whole day, so `Daily 01:00` + PT4H +

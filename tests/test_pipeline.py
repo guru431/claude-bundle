@@ -1708,6 +1708,20 @@ def test_lint_walkers_skip_the_same_folders(bundle: Path, monkeypatch):
         "a link from outside the vault kept a page from being reported as an orphan"
 
 
+def test_a_page_linking_only_to_itself_is_an_orphan(bundle: Path, monkeypatch):
+    """Every link of every page went into one set, its own included: a page
+    that named itself counted as linked."""
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_self", "wiki-lint.py")
+    proj = bundle / "wiki" / "projects" / "myproject"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "selfish.md").write_text("# Selfish\n\nSee [[projects/myproject/selfish]] and [[selfish]].\n",
+                                     encoding="utf-8")
+    pages = lint.find_all_pages()
+    assert "WARN: orphan page: projects/myproject/selfish" in lint.check_orphan_pages(pages)
+    (proj / "fan.md").write_text("# Fan\n\n[[selfish]]\n", encoding="utf-8")
+    assert "WARN: orphan page: projects/myproject/selfish" not in lint.check_orphan_pages(pages)
+
+
 def test_lint_resolves_links_the_way_obsidian_does(bundle: Path, monkeypatch):
     """Case-insensitively. Obsidian resolves `[[Hugo]]` to `hugo.md`, the
     compilers dedupe page names case-insensitively, and so do the Windows and

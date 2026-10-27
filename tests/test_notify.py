@@ -101,6 +101,15 @@ def test_the_timeout_covers_the_senders_whole_retry_schedule(monkeypatch):
     assert notify.timeout_for("x") > single   # unset = the default "30 90"
 
 
+def test_a_signed_gap_is_the_default_as_the_sender_reads_it(monkeypatch):
+    """telegram-send.sh takes digits, commas and spaces only and falls back to
+    30,90 otherwise; int() read "-5" as a gap and sized a wait too short."""
+    default = notify.timeout_for("x")
+    for raw in ("-5", "+5", "30,-90", "1_000"):
+        monkeypatch.setenv("TELEGRAM_RETRY_GAPS", raw)
+        assert notify.timeout_for("x") == default, raw
+
+
 # ── the guard: no *.py calls telegram-send.sh around notify.py ───────────────
 
 _SKIP_DIRS = {"node_modules", "venv", "__pycache__", "tests", "worktrees", "logs", "state"}

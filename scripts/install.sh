@@ -91,6 +91,7 @@ absolute() {
     printf '%s' "$p"
 }
 claude_home="$(absolute "$claude_home")"
+pipeline_root_given="$pipeline_root"
 pipeline_root="$(absolute "${pipeline_root:-$claude_home}")"
 
 # A Python that RUNS and is new enough, in the order cron/lib/runtime.sh resolves
@@ -188,7 +189,10 @@ fi
 
 if [ "$diff_only" = 1 ]; then
     [ -n "$PY" ] || die 1 "--diff needs Python 3.9+: it compares sha256 sums and reads the JSON manifest"
-    "$PY" "$helper" diff --claude-home "$claude_home" --pipeline-root "$pipeline_root" \
+    # No --pipeline-root: an empty one, and the helper takes the manifest's.
+    diff_root=""
+    [ -z "$pipeline_root_given" ] || diff_root="$pipeline_root"
+    "$PY" "$helper" diff --claude-home "$claude_home" --pipeline-root "$diff_root" \
         --source "$here" --plan "$plan" --profile "$profile"
     exit 0
 fi

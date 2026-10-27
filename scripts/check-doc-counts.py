@@ -178,13 +178,18 @@ def check_triggers(problems: list[str], tasks: list[dict]) -> None:
     Matching is by task NAME plus a HH:MM on the same line, in either order:
     the schedule lives in `| task | Daily 02:30 |` tables and in inline prose,
     and a name-then-time regex would silently skip half of them. Tasks with a
-    timeless trigger (AtStartup/AtLogOn) are not compared.
+    timeless trigger (AtStartup/AtLogOn) are not compared. The hour may be one
+    digit (`Daily 3:00`, as gen-scheduler.py reads it): such a task was never
+    compared at all. Both sides are compared as HH:MM.
     """
+    def hhmm(found: list[tuple[str, str]]) -> list[str]:
+        return [f"{int(h):02d}:{mi}" for h, mi in found]
+
     by_time = {}
     for t in tasks:
-        m = re.search(r"\d{2}:\d{2}", str(t.get("trigger", "")))
-        if m:
-            by_time[t["name"]] = (m.group(0), t["trigger"])
+        found = hhmm(re.findall(r"\b(\d{1,2}):(\d{2})\b", str(t.get("trigger", ""))))
+        if found:
+            by_time[t["name"]] = (found[0], t["trigger"])
     for rel in DOCS:
         p = ROOT / rel
         if not p.is_file():
@@ -192,7 +197,7 @@ def check_triggers(problems: list[str], tasks: list[dict]) -> None:
         for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
             if HISTORY_RE.search(line):
                 continue
-            times = re.findall(r"\b\d{2}:\d{2}\b", line)
+            times = hhmm(re.findall(r"\b(\d{1,2}):(\d{2})\b", line))
             if not times:
                 continue
             for name, (reg_time, trigger) in by_time.items():

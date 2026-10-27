@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import locale
 import os
 import re
 import shlex
@@ -636,13 +637,16 @@ def _decode(data: bytes | None) -> str:
     Python on Windows writes to a pipe in the locale's code page (cp1251 on a
     Russian system, for one), Git Bash and node in UTF-8. Decoding UTF-8 with
     replacement turned every non-ASCII test name into `?????` in the log, the
-    findings and Telegram.
+    findings and Telegram. The machine's own code page, not cp1251 by name:
+    that one was right on a Russian system only. locale.getencoding() (3.11+)
+    is the ANSI code page even in UTF-8 mode, where getpreferredencoding is not.
     """
     data = data or b""
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
-        return data.decode("cp1251", errors="replace")
+        ansi = getattr(locale, "getencoding", lambda: locale.getpreferredencoding(False))()
+        return data.decode(ansi, errors="replace")
 
 
 LOST_OUTPUT = "the suite's output is lost: a process outside the killed tree holds the pipe"
@@ -1428,14 +1432,21 @@ def _sweep(args, rec: dict) -> int:
         # Neither a finding nor an alert must take the whole sweep down:
         # FINDINGS.md can be open, just deleted, or on an unreachable share —
         # and then the remaining projects would simply never run.
-        if res["status"] in ALERTING and previous != res["status"]:
+        if res["status"] in ALERTING:
+            # The alert on a change of status; the entry on every red night
+            # with none open. Filed on the change alone, an entry that could
+            # not be written that night was lost for the whole red stretch:
+            # the next night saw the same status and never came back to it.
+            #
             # Only ONE open entry per suite. Every transition between two
             # red statuses (failed → timeout → failed) passes the change
             # filter, and each used to append another entry about the same
             # broken suite.
+            news = previous != res["status"]
             try:
                 if has_open_finding(root, key, full_level):
-                    log(f"     finding already open for {key} — not filing a duplicate")
+                    if news:
+                        log(f"     finding already open for {key} — not filing a duplicate")
                 else:
                     # The alert goes out even when the entry could not be
                     # written (utils reports that by returning False rather
@@ -1444,12 +1455,14 @@ def _sweep(args, rec: dict) -> int:
                     # share is how a red suite stays unnoticed.
                     if not append_finding(root, name, key, res, full=full_level,
                                           contract=not auto):
-                        log(f"     finding NOT written to {name}/FINDINGS.md "
-                            f"— alerting anyway")
-                    changed.append((key, res))
+                        log(f"     finding NOT written to {name}/FINDINGS.md — "
+                            + ("alerting anyway" if news else "the next run tries again"))
+                    if news:
+                        changed.append((key, res))
             except OSError as exc:
                 log(f"     finding not written to {name}/FINDINGS.md: {exc}")
-                changed.append((key, res))
+                if news:
+                    changed.append((key, res))
         elif res["status"] in RECOVERED and previous in ALERTING:
             # Red → green. Nothing reported this before: Telegram stayed
             # silent, so nobody learned the fix had worked, and the entry

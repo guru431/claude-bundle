@@ -138,6 +138,19 @@ def test_repeat_for_must_be_a_day_where_the_posix_generator_runs(repeat_for, pla
     assert (not [p for p in problems if "repeat_for" in p]) is ok, problems
 
 
+@pytest.mark.parametrize("kind, platform, ok", [
+    ("python", None, True),
+    ("cmd", None, False),      # gen-scheduler.py skips it on Linux and macOS
+    ("vbs", "all", False),
+    ("cmd", "windows", True),
+])
+def test_a_windows_only_kind_is_marked_platform_windows(kind, platform, ok):
+    """The guard asked the POSIX generator about the trigger only: a `kind: cmd`
+    task with the default `platform: all` passed, and gen-scheduler.py skipped it."""
+    problems = check_registry.check_task(_task(kind=kind, platform=platform))
+    assert (problems == []) is ok, problems
+
+
 @pytest.mark.parametrize("repeat_for, platform, ok", [
     (None, None, True),        # open-ended on every platform
     ("P1D", None, False),      # a day after boot on Windows, forever on systemd

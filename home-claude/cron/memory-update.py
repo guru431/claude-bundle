@@ -686,15 +686,17 @@ def run_incident_extract() -> None:
     # A ceiling, like every other child of this task (the alert send has one too). A
     # user script that hangs held the task forever: no terminal record, and the
     # scheduler dropped every later trigger of a task that was still "running".
+    # The whole tree goes on a timeout: subprocess.run killed the script alone,
+    # and what it had started kept running, writing into this log. A session of
+    # its own on POSIX, so that notify._kill_tree can signal the group.
     with open(LOG_FILE, "a", encoding="utf-8") as f:
+        proc = subprocess.Popen([sys.executable, str(extract)], stdout=f,
+                                stderr=subprocess.STDOUT,
+                                start_new_session=(os.name != "nt"))
         try:
-            rc = subprocess.run(
-                [sys.executable, str(extract)],
-                stdout=f,
-                stderr=subprocess.STDOUT,
-                timeout=INCIDENT_EXTRACT_TIMEOUT,
-            ).returncode
+            rc = proc.wait(timeout=INCIDENT_EXTRACT_TIMEOUT)
         except subprocess.TimeoutExpired:
+            notify._kill_tree(proc)
             rc = f"killed after {INCIDENT_EXTRACT_TIMEOUT}s"
     log(f"=== End Incident Extract (rc={rc}) ===")
 

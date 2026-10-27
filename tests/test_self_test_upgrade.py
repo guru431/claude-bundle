@@ -53,3 +53,23 @@ def test_a_deployment_gets_the_hook_doctor_and_its_deprecations(tmp_path: Path):
     assert "not-installed.py" in out
     assert "[WARN] hook doctor: Stop" in out and "upgrade: the example now wires" in out, out
     assert "[WARN] deprecated: WIKI_OFFBOX_FALLBACK=0" in out, out
+
+
+@pytest.mark.integration   # one deployed-mode self-test of a lite tree
+def test_a_complete_lite_deployment_passes(tmp_path: Path):
+    """A lite deployment has no cron/ and no hooks/: the registry parse, both
+    hook smokes and the sync-tasks dry run each FAILED a complete install."""
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    for name in ("CLAUDE.md", "settings.json"):
+        shutil.copy2(HOME_SRC / name, deploy / name)
+    home = tmp_path / "home"
+    (home / "AppData" / "Local").mkdir(parents=True)
+    env = dict(os.environ, USERPROFILE=str(home), HOME=str(home),
+               LOCALAPPDATA=str(home / "AppData" / "Local"))
+    env.pop("CLAUDE_CONFIG_DIR", None)
+
+    r = run_ps_file(ROOT / "scripts" / "self-test.ps1", "-InstallPath", deploy,
+                    env=env, cwd=tmp_path, timeout=600)
+    assert "[FAIL]" not in r.stdout and r.returncode == 0, r.stdout + r.stderr
+    assert "a lite deployment (no cron/)" in r.stdout

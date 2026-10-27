@@ -141,6 +141,52 @@ The short list; UPGRADING.md has the steps.
   failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
   the Pester import hangs or dies before the first file.
 
+### Findings: 18 resolved, 3 declined
+
+The weekly code review of 2026-10-26 filed 21 findings; each was checked against
+the code. Resolved, each with a test that fails on the code it replaces:
+
+- **`uninstall.ps1`**: scheduled tasks that cannot be listed stop the uninstall
+  (exit 3, nothing removed) — the sweep went on as if none were registered and
+  deleted the syncer and the registry. A manifest entry outside its root keeps
+  the manifest and exits 2 there and in `uninstall.sh`: the manifest, its only
+  record, was deleted and the run reported success.
+- **`install.sh --diff`** takes the pipeline root from the manifest, as
+  `install.ps1 -Diff` does; on a split-root deployment every `cron/` file read
+  as new.
+- **`self-test.ps1 -InstallPath`** on a lite deployment: the registry parse,
+  both hook smokes and the `sync-tasks` dry run are skipped with a WARN — they
+  failed a complete lite install four times.
+- **`check-registry.py`**: a `cmd` / `vbs` / `exec` task without
+  `platform: windows` is an error — `gen-scheduler.py` skips it on POSIX, as it
+  does an unexpressible trigger. **`check-doc-counts.py`** compares a one-digit
+  trigger hour (`Daily 3:00`) with the docs; such a task was never compared.
+- **`wiki-flush-sessions.py`**: a pending draft covered by a filtered-out JSONL
+  is deleted on a night with nothing else to process — the early return came
+  before the cleanup, and the next night fed the draft on its own. A heading
+  `[[Project: main]]` is retargeted like `Project: main` (the prefix was cut
+  before the brackets).
+- **`utils.py`**: `parse_jsonl_delta` stops before a last line still being
+  written — the offset passed it and the next read began mid-line, losing the
+  message; a `## …` page's `### Notes` is not cut for matching another
+  section's; `bundle.local.yaml::projects_root` is exported over a different
+  `.env` value, which children (md2pdf-sync) used to keep.
+- **`test-sweep.py`**: a "tests are failing" entry that could not be written is
+  filed the next red night (the alert is still sent once); output that is not
+  UTF-8 is decoded in the machine's code page, not cp1251 by name.
+- **`memory-update.py`**: a hanging `incident-extract.py` is stopped with the
+  processes it started.
+- **`wiki-lint.py`**: a page linking only to itself is an orphan.
+- **Small ones**: `notify.py` reads a signed `TELEGRAM_RETRY_GAPS` as the
+  sender does (the default); `ci-watch.py` reads a `CI_WATCH_TIMEOUT` that is
+  not a number as 900 with a line saying so, instead of a traceback at import.
+
+Declined, with the reason for each in the local findings archive: an aware
+timestamp in the run ledger (its one writer writes naive local time), a UNC
+`PipelineRoot` warning (UNC is the documented safe path for Password-mode
+tasks), and repairing a non-dict state section on load (only a hand edit makes
+one; the task fails loudly, while a "repair" would silently re-send the backlog).
+
 ### Findings: 22 resolved, 4 declined
 
 The weekly code review of 2026-10-24 filed 26 findings; each was checked against

@@ -135,6 +135,59 @@ $lines += 'orphaned-confirm=' + $LASTEXITCODE
     assert "unregistered in step 1b" not in " ".join(got.values())
 
 
+@pytest.mark.integration   # two full-tier runs (ScheduledTasks module load)
+def test_tasks_that_cannot_be_listed_stop_the_uninstall(tmp_path: Path):
+    """A Get-ScheduledTask that threw left the task list empty, and the sweep
+    went on to delete the syncer and the registry as if no task were left."""
+    home = tmp_path / "home"
+    (home / "cron" / "admin").mkdir(parents=True)
+    (home / "cron" / "admin" / "sync-tasks.ps1").write_text("# never run\n", encoding="utf-8")
+    (home / "cron" / "registry.yaml").write_text(
+        "version: 1\nlauncher: C:\\b\\bin\\_run-hidden.vbs\ntasks:\n"
+        "  - name: ClaudeBundleTest-x\n    script: C:\\b\\cron\\t.py\n", encoding="utf-8")
+    ours = home / "ours.md"
+    ours.write_text("ours", encoding="utf-8")
+    (home / ".bundle-manifest.json").write_text(json.dumps({
+        "bundle_version": "0.0.0", "installed_at": "2026-01-01T00:00:00Z", "tier": "full",
+        "claude_home": str(home), "pipeline_root": str(home),
+        "written": [{"root": "claude_home", "path": "ours.md", "sha256": _sha256(ours)}],
+        "preserved": ["cron/registry.yaml"]}), encoding="utf-8")
+    out = tmp_path / "out.txt"
+    code = f"""
+$ErrorActionPreference = 'Stop'
+function Get-ScheduledTask {{ [CmdletBinding()] param() throw 'the scheduler service is down' }}
+$dry = & {ps_quote(UNINSTALL)} -ClaudeHome {ps_quote(home)} *>&1 | Out-String -Width 500
+& {ps_quote(UNINSTALL)} -ClaudeHome {ps_quote(home)} -Confirm *>&1 | Out-Null
+$lines = @('rc=' + $LASTEXITCODE) + @(($dry -split "`r?`n") | Where-Object {{ $_ -like 'scheduled tasks:*' }})
+[System.IO.File]::WriteAllLines({ps_quote(out)}, $lines, [System.Text.Encoding]::Unicode)
+"""
+    r = run_ps(code, tmp_path, cwd=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    rc, summary = out.read_text(encoding="utf-16").splitlines()
+    assert rc == "rc=3", (rc, summary)
+    assert "could not be listed" in summary and "exit 3" in summary, summary
+    assert ours.is_file() and (home / ".bundle-manifest.json").is_file(), "a refused run deleted something"
+
+
+@pytest.mark.integration   # one uninstall run, ~1 s
+def test_a_manifest_entry_outside_its_root_keeps_the_manifest(tmp_path: Path):
+    """A rejected entry was counted, not kept: the manifest, its only record,
+    was deleted and the run exited 0."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bundle-manifest.json").write_text(json.dumps({
+        "bundle_version": "0.0.0", "installed_at": "2026-01-01T00:00:00Z", "tier": "lite",
+        "claude_home": str(home), "pipeline_root": str(home),
+        "written": [{"root": "claude_home", "path": "../outside.md", "sha256": "00"}],
+        "preserved": []}), encoding="utf-8")
+
+    r = run_ps_file(UNINSTALL, "-ClaudeHome", home, "-Confirm", cwd=tmp_path)
+
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "rejected (bad path): 1" in r.stdout, r.stdout
+    assert (home / ".bundle-manifest.json").is_file()
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="an open file blocks its deletion on Windows only")
 @pytest.mark.integration   # one uninstall run, ~1.2 s
 def test_a_file_that_cannot_be_removed_does_not_end_the_sweep(tmp_path: Path):

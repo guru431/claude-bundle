@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import types
 from datetime import datetime
 from pathlib import Path
@@ -100,6 +101,29 @@ def test_a_hanging_incident_extract_is_stopped(memory, cron_copy: Path, monkeypa
     memory.run_incident_extract()
 
     assert "killed after 0.3s" in memory.LOG_FILE.read_text(encoding="utf-8")
+
+
+@pytest.mark.integration   # gives the grandchild time to start, ~3 s
+def test_a_hanging_incident_extract_is_stopped_with_what_it_started(memory, cron_copy: Path,
+                                                                    monkeypatch, tmp_path: Path):
+    """subprocess.run(timeout=) killed the script alone; a process it had
+    started stayed alive, writing into the task's log."""
+    psutil = pytest.importorskip("psutil")
+    marker = tmp_path / "grandchild.pid"
+    (cron_copy / "cron" / "incident-extract.py").write_text(
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"open(r'{marker}', 'w').write(str(child.pid))\n"
+        "time.sleep(120)\n", encoding="utf-8")
+    monkeypatch.setattr(memory, "INCIDENT_EXTRACT_TIMEOUT", 3)
+
+    memory.run_incident_extract()
+
+    pid = int(marker.read_text())
+    deadline = time.time() + 15
+    while time.time() < deadline and psutil.pid_exists(pid):
+        time.sleep(0.3)
+    assert not psutil.pid_exists(pid), f"grandchild {pid} survived the timeout"
 
 
 def test_both_prompts_mask_credentials_before_they_leave(memory, monkeypatch):

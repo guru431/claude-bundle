@@ -1765,6 +1765,10 @@ def parse_jsonl_delta(jsonl_path: str,
     offset means nothing: fall back to reading it whole. The returned offset is
     where this read actually stopped, not the file's size at some later moment,
     so a line written during the read is picked up next time rather than lost.
+    It stops BEFORE a last line still being written (no newline yet, and not
+    JSON): the offset used to pass it, and the next read began in its middle —
+    the message was lost for good. A last line that parses is whole without
+    its newline, and is read.
 
     The offset is None when the file could not be READ. A failure used to come
     back as no messages at `start_offset` — exactly what "nothing new" looks
@@ -1784,16 +1788,22 @@ def parse_jsonl_delta(jsonl_path: str,
         # bad byte costs its own line's accuracy instead of the whole read.
         with open(jsonl_path, "rb") as f:
             f.seek(start_offset)
+            end_offset = start_offset
             for raw in iter(f.readline, b""):
                 try:
                     line = raw.decode("utf-8")
                 except UnicodeDecodeError:
                     line = raw.decode("utf-8", errors="replace")
                     bad_lines += 1
+                if not raw.endswith(b"\n"):
+                    try:
+                        json.loads(line)
+                    except json.JSONDecodeError:
+                        break               # still being written: next time
                 msg = _jsonl_message(line)
                 if msg is not None:
                     messages.append(msg)
-            end_offset = f.tell()
+                end_offset = f.tell()
     except (OSError, ValueError) as e:
         print(f"  WARN: cannot read {os.path.basename(jsonl_path)}: {e}", file=sys.stderr)
         return [], None
@@ -2183,8 +2193,15 @@ def _resolve_projects_root() -> tuple[Path | None, str]:
     if _MANIFEST_PROJECTS_ROOT is not None:
         # Export it so Python children (and anything reading the environment
         # further down) see the same value without re-parsing the manifest.
-        os.environ.setdefault("PROJECTS_ROOT", str(_MANIFEST_PROJECTS_ROOT))
-        return _MANIFEST_PROJECTS_ROOT, "bundle.local.yaml::projects_root"
+        # Assigned, not setdefault: a different .env value was already in
+        # os.environ, kept its place, and md2pdf-sync walked that tree while
+        # this module used the manifest's. The source names the override.
+        other = (os.environ.get("PROJECTS_ROOT") or "").strip()
+        os.environ["PROJECTS_ROOT"] = str(_MANIFEST_PROJECTS_ROOT)
+        source = "bundle.local.yaml::projects_root"
+        if other and Path(other).expanduser() != _MANIFEST_PROJECTS_ROOT:
+            source += f" (overrides .env::PROJECTS_ROOT={other})"
+        return _MANIFEST_PROJECTS_ROOT, source
     raw = (os.environ.get("PROJECTS_ROOT") or "").strip()
     if not raw:
         return None, "not set"
@@ -3386,17 +3403,27 @@ def _dedup_sections(body: str) -> tuple[str, int]:
     The nightly compiler appends snapshots; replaying one daily (a retry) left
     two identical `## Current state` blocks on the page. Differing content is
     left alone — that is history, and the caller separates it.
+
+    An H3 is the same only under the same H2: two `### Notes` with one text
+    under two different sections are two things, and the second was cut out
+    of its section.
     """
     sections = _split_sections(body)
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     out: list[str] = []
     dropped = 0
+    parent = ""
     for heading, lines in sections:
         if heading is None:
             out.extend(lines)
             continue
-        key = (heading.strip().casefold(), "\n".join(lines).strip())
-        if key[1] and key in seen:
+        name = heading.strip().casefold()
+        if heading.startswith("## "):
+            parent, scope = name, ""
+        else:
+            scope = parent
+        key = (scope, name, "\n".join(lines).strip())
+        if key[2] and key in seen:
             dropped += 1
             continue
         seen.add(key)

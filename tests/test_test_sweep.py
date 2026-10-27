@@ -329,10 +329,13 @@ def test_a_full_disk_is_the_environment_not_a_red_suite(tmp_path, monkeypatch):
     assert (res["status"], res["env_kind"], res["note"]) == ("env", "other", sweep.DISK_FULL_NOTE)
 
 
-def test_a_suites_output_in_the_ansi_code_page_is_still_readable():
-    """Python on Windows writes to a pipe in the locale's code page."""
-    name = "test_кириллица"
-    assert sweep._decode(name.encode("cp1251")) == name
+@pytest.mark.parametrize("codepage, name", [("cp1251", "test_кириллица"),
+                                             ("cp1252", "test_café_ñandú")])
+def test_a_suites_output_in_the_ansi_code_page_is_still_readable(monkeypatch, codepage, name):
+    """Python on Windows writes to a pipe in the locale's code page — the
+    machine's, not cp1251 by name: a cp1252 system got its names garbled."""
+    monkeypatch.setattr(sweep.locale, "getencoding", lambda: codepage, raising=False)
+    assert sweep._decode(name.encode(codepage)) == name
     assert sweep._decode(name.encode("utf-8")) == name
 
 
@@ -554,6 +557,24 @@ def test_second_red_run_does_not_repeat_alert(sweep_env, monkeypatch):
     assert len(sent) == 1                        # the second run stays quiet
     assert (project / "FINDINGS.md").read_text(encoding="utf-8").count(
         "Tests are failing") == 1
+
+
+def test_a_finding_that_could_not_be_written_is_filed_the_next_night(sweep_env, monkeypatch):
+    """The entry was filed on a change of status only, and the state moved to
+    red whether it was written or not: a FINDINGS.md held open that night lost
+    the record for the whole red stretch. The alert still goes out once."""
+    project, sent = sweep_env
+    monkeypatch.setattr(sweep, "run_suite",
+                        lambda suite, key, full: {"status": "failed", "seconds": 1.0,
+                                                  "tail": "1 failed in 1.00s"})
+    real = sweep.append_finding
+    monkeypatch.setattr(sweep, "append_finding", lambda *a, **k: False)
+    sweep.main([])
+    assert not (project / "FINDINGS.md").exists() and len(sent) == 1
+    monkeypatch.setattr(sweep, "append_finding", real)
+    sweep.main([])
+    assert (project / "FINDINGS.md").read_text(encoding="utf-8").count("Tests are failing") == 1
+    assert len(sent) == 1, "a night with no change of status repeated the alert"
 
 
 def test_alert_returns_after_recovery(sweep_env, monkeypatch):

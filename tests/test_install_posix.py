@@ -88,9 +88,12 @@ def test_uninstall_never_leaves_its_roots(bi, tmp_path, capsys):
                       "units": [{"path": "victim.service", "sha256": _sha(elsewhere / "victim.service")}]}}
     (home / ".bundle-manifest.json").write_text(json.dumps(body), encoding="utf-8")
 
-    assert bi.main(["uninstall", "--claude-home", str(home), "--confirm"]) == 0
+    # Not success, and the manifest stays: it is the only record of the entries
+    # that were not acted on.
+    assert bi.main(["uninstall", "--claude-home", str(home), "--confirm"]) == 2
     assert victim.is_file() and (elsewhere / "victim.service").is_file()
     assert not (home / "ours.txt").exists()
+    assert (home / ".bundle-manifest.json").is_file()
     assert "rejected (bad path): 3" in capsys.readouterr().out
 
 
@@ -281,6 +284,26 @@ def test_diff_lists_new_modified_and_removed_from_bundle(bi, tmp_path, capsys):
     assert [line.split() for line in out.splitlines() if line.strip().startswith(
         ("new ", "modified ", "unchanged ", "removed-from-bundle "))][-4:] == [
         ["new", "1"], ["modified", "1"], ["unchanged", "1"], ["removed-from-bundle", "1"]]
+
+
+def test_diff_without_a_pipeline_root_takes_the_manifests(bi, tmp_path, capsys):
+    """install.sh --diff took the tier from the manifest but not the pipeline
+    root: on a split-root deployment every cron/ file read as new."""
+    source = tmp_path / "bundle"
+    (source / "home-claude" / "cron").mkdir(parents=True)
+    (source / "home-claude" / "cron" / "t.py").write_text("x", encoding="utf-8")
+    home, pipe = tmp_path / "home", tmp_path / "pipe"
+    (pipe / "cron").mkdir(parents=True)
+    (pipe / "cron" / "t.py").write_text("x", encoding="utf-8")
+    _manifest(home, [], tier="full", pipeline_root=str(pipe))
+    plan = tmp_path / "plan.tsv"
+    plan.write_text("pipeline_root\tcron/t.py\thome-claude/cron/t.py\n", encoding="utf-8")
+
+    assert bi.main(["diff", "--claude-home", str(home), "--pipeline-root", "",
+                    "--source", str(source), "--plan", str(plan), "--profile", "full"]) == 0
+    out = capsys.readouterr().out
+    assert f"PipelineRoot: {pipe}" in out
+    assert ["unchanged", "1"] in [line.split() for line in out.splitlines()], out
 
 
 # ── the scripts themselves ───────────────────────────────────────────────────

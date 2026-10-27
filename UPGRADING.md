@@ -184,6 +184,10 @@ Then run `sync.cmd` once (step 4 above).
   (`Vendor\backup`): two tasks of one name in two folders shared one entry of
   the "already reported" state. A failing one is reported once more under the
   new name. `MONITOR_EXCLUDE_TASKS` takes either form.
+- **A `kind: cmd` / `vbs` / `exec` task of your own needs `platform: windows`.**
+  `check-registry.py` (and `self-test.ps1 -InstallPath`) now rejects one left at
+  the default `platform: all`: `gen-scheduler.py` skips it on Linux and macOS,
+  so the line claimed a schedule it never had there.
 - **A `kind: exec` task whose arguments are a switch** (`/c …`,
   `--out=C:\logs\x`) was skipped as a missing target: `script:` holds the
   arguments of an exec task, and the check took them for a path. `sync.cmd` now
@@ -396,6 +400,9 @@ Then run `sync.cmd` once (step 4 above).
   files; `GIT_PUSH_ALL_DRY_RUN=1` previews which repositories would fail.
 - **`uninstall.sh` exits 1 for a bad argument** (was 2). 2 keeps its one
   meaning there: finished, but changed files were kept.
+- **Both uninstallers exit 2 for a manifest entry outside its root** (was 0)
+  and keep the manifest. **`uninstall.ps1` exits 3 when the scheduled tasks
+  cannot be listed** (it went on and removed the files) — nothing is removed.
 
 ### The bundle's own clone (maintainers)
 

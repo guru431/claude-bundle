@@ -747,10 +747,13 @@ def _retarget_subproject_headers(extracted: str, session_project: str) -> str:
     def repl(m: re.Match) -> str:
         label = m.group(2)
         # Strip a Project: prefix and unescape `\_` from the LLM markdown engine.
+        # Brackets first, then the prefix, for both the test and the name: the
+        # prefix was cut from the bracketed label, where it never matched, so
+        # `[[Project: main]]` kept it and was demoted while `Project: main` was not.
         stripped = label.strip("[] ")  # `[[Project: finance]]` → `Project: finance`
         named_project = bool(re.match(r"(?i)^project\s*:\s*\S", stripped))
-        cleaned = re.sub(r"(?i)^project\s*:\s*", "", label).replace(r"\_", "_")
-        cleaned = cleaned.strip("[] ")  # `[[Finance]]` → `Finance`
+        cleaned = re.sub(r"(?i)^project\s*:\s*", "", stripped).replace(r"\_", "_")
+        cleaned = cleaned.strip("[] ")  # `Project: [[Finance]]` → `Finance`
         norm = normalize_project_name(cleaned)
         # Promote ONLY on an explicit match with a known project that differs
         # from the session. normalize_project_name falls back to DEFAULT_PROJECT
@@ -1069,6 +1072,15 @@ def _flush(rec: dict) -> int:
         # A healthy night with no new sessions IS a successful run — without the
         # heartbeat here the monitor would report the phase as stale.
         log("Nothing to process. Exiting.")
+        # The drafts collected here are all covered by a JSONL (any other would
+        # have made a bucket) — consumed like the rest, so they go now. They
+        # used to stay: the next night read one as stuck and fed it on its own.
+        if not is_dry_run():
+            for pf, _bucket in pending_files:
+                try:
+                    pf.unlink()
+                except OSError:
+                    pass
         mark_phase_success("flush")
         # A terminal record even for the idle night: the ledger contract is one
         # record per run, and "the task never reported" must stay

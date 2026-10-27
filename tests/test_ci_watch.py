@@ -81,6 +81,20 @@ def test_a_head_git_cannot_name_is_not_waited_for(monkeypatch, tmp_path, repo_st
     assert clock[0] == 1000.0, "it waited for a run of a commit that does not exist"
 
 
+def test_a_timeout_that_is_not_seconds_is_the_default_not_a_traceback(monkeypatch, capsys):
+    """CI_WATCH_TIMEOUT was int()'d at import: "15m" crashed the publication
+    gate before argparse ran."""
+    monkeypatch.setenv("CI_WATCH_TIMEOUT", "15m")
+    assert ci_watch.default_wait() == ci_watch.DEFAULT_WAIT
+    assert "CI_WATCH_TIMEOUT" in capsys.readouterr().err
+    monkeypatch.setenv("CI_WATCH_TIMEOUT", "60")
+    assert ci_watch.default_wait() == 60
+    clock = _no_run_for_head(monkeypatch, history=5)
+    monkeypatch.setattr(ci_watch.sys, "argv", ["ci-watch.py", "repo"])
+    assert ci_watch.main() == 1
+    assert 60 <= clock[0] - 1000.0 < 900
+
+
 def test_without_a_token_a_private_repo_is_not_waited_for(monkeypatch, capsys):
     _no_run_for_head(monkeypatch, history=5, tok=None)
 

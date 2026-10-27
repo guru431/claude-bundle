@@ -219,9 +219,10 @@ def check_orphan_pages(pages: dict[str, list[Path]]) -> list[str]:
     the page's full path, or is a bare stem that is unique vault-wide. Comparing
     only the last path segment (as this once did) made [[projects/a/foo]] vouch
     for projects/b/foo — the busier a vault got, the fewer orphans it could see.
+    A page's link to itself is not an inbound link.
     """
     warnings = []
-    all_links: set[str] = set()
+    linked_from: dict[str, set[str]] = {}
     _, stems = vault_targets()
 
     for f in WIKI_ROOT.rglob("*.md"):
@@ -231,16 +232,18 @@ def check_orphan_pages(pages: dict[str, list[Path]]) -> list[str]:
         if rel.as_posix() in GENERATED_INDEXES:
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
+        source = link_key(rel.with_suffix("").as_posix())
         for link in extract_wikilinks(text):
-            all_links.add(link_key(link_target(link)))
+            linked_from.setdefault(link_key(link_target(link)), set()).add(source)
 
     for name, paths in pages.items():
         for path in paths:
             full = path.relative_to(WIKI_ROOT).with_suffix("").as_posix()
-            if link_key(full) in all_links:
+            own = link_key(full)
+            if linked_from.get(own, set()) - {own}:
                 continue
             # A bare stem only vouches for a page when nothing else shares it.
-            if stems.get(link_key(name), 0) == 1 and link_key(name) in all_links:
+            if stems.get(link_key(name), 0) == 1 and linked_from.get(link_key(name), set()) - {own}:
                 continue
             warnings.append(f"WARN: orphan page: {full}")
 

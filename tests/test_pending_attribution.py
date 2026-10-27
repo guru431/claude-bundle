@@ -188,6 +188,25 @@ def test_flush_drops_a_draft_from_a_skipped_directory_unread(bundle: Path,
         "a skip_dirs draft was kept in the queue"
 
 
+def test_a_covered_draft_goes_on_a_night_with_nothing_else(bundle: Path, tmp_path: Path):
+    """A draft whose session was filtered out (too short) is covered and skipped;
+    with nothing else that night the early "Nothing to process" return came
+    before the cleanup, and the draft stayed — read the next night as stuck."""
+    home = tmp_path / "home_flush_covered"
+    d = home / ".claude" / "projects" / "C--work-widgets"
+    d.mkdir(parents=True)
+    # Past the 10 KB pre-filter, so it is read — and filtered: one user message.
+    (d / "sess-short.jsonl").write_text(json.dumps({
+        "type": "user", "timestamp": f"{SESSION_DAY}T20:00:00.000Z",
+        "message": {"role": "user", "content": "hi " * 4000}}) + "\n", encoding="utf-8")
+    draft = _draft(bundle, "sess-short", ["Project: widgets", "Dir: C--work-widgets",
+                                          f"Day: {SESSION_DAY}"], "hi")
+    r = _flush(bundle, home, "- A durable fact. [[index]]\n")
+    assert r.returncode == 0, f"flush failed:\n{r.stdout}\n{r.stderr}"
+    assert "skipped as already covered" in r.stdout and "Nothing to process" in r.stdout, r.stdout
+    assert not draft.exists(), "a covered draft outlived a night with nothing else to process"
+
+
 def test_only_the_header_attributes_a_draft(bundle: Path, tmp_path: Path):
     """A legacy draft (no `Dir:`) whose TRANSCRIPT contains a `Dir:` line must not
     be re-attributed by that line."""

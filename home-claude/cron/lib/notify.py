@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -72,12 +73,13 @@ def find_bash() -> str | None:
 
 def _gaps() -> list[int]:
     """The sender's retry schedule — TELEGRAM_RETRY_GAPS, read the way the shell
-    reads it (unset = the default, empty = a single attempt)."""
+    reads it (unset = the default, empty = a single attempt). Digits, commas and
+    spaces only, as the shell's check: int() also took "-5" and "+5", which the
+    sender replaces with the default — a shorter wait killed its retries."""
     raw = os.environ.get("TELEGRAM_RETRY_GAPS", DEFAULT_GAPS)
-    try:
-        return [int(g) for g in raw.replace(",", " ").split()]
-    except ValueError:
-        return [int(g) for g in DEFAULT_GAPS.split(",")]
+    if not re.fullmatch(r"[0-9,\s]*", raw):
+        raw = DEFAULT_GAPS
+    return [int(g) for g in raw.replace(",", " ").split()]
 
 
 def timeout_for(text: str) -> int:

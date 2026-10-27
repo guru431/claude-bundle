@@ -58,6 +58,28 @@ def test_a_denied_projects_pages_never_reach_the_provider(cron_copy: Path, monke
     assert any("withheld by the privacy policy: 1" in ln for ln in wcr.log_lines)
 
 
+def test_a_page_that_cannot_be_read_does_not_end_the_scan(cron_copy: Path, monkeypatch):
+    """Deleted or held by a sync client between rglob and the read: one page
+    raised out of find_collisions, and no other page was looked at."""
+    _collision(cron_copy, "projects/alpha/setup.md", "Alpha setup")
+    _collision(cron_copy, "projects/beta/setup.md", "Beta setup")
+    wcr = _load(cron_copy, monkeypatch, "wcr_unreadable")
+    real_read = Path.read_text
+
+    def read(self, *a, **kw):
+        if self.parts[-2:] == ("alpha", "setup.md"):
+            raise PermissionError("held by a sync client")
+        return real_read(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    sent: list[str] = []
+    monkeypatch.setattr(wcr, "llm_call", lambda prompt, **kw: sent.append(prompt) or None)
+    monkeypatch.setattr(sys, "argv", ["wiki-conflict-resolve.py"])
+
+    assert wcr.main() == 0
+    assert len(sent) == 1 and "Beta setup" in sent[0]
+
+
 def _merge(prompt: str, **_kw) -> str:
     """A sane merge of whichever PAGE the prompt carries: one H1, both facts."""
     title = re.search(r"(?m)^# (.+) again$", prompt).group(1)

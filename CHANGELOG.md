@@ -141,6 +141,32 @@ The short list; UPGRADING.md has the steps.
   failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
   the Pester import hangs or dies before the first file.
 
+### Ported from the meta-repo: four fixes since the last comparison
+
+The shared files were compared again, commit by commit. Four changes made in
+the meta-repo since the last port apply here; each comes with a test that fails
+on the code it replaces.
+
+- **`test-sweep.py` masks the summary as well as the tail.** For a runner it
+  does not recognize, the summary is the last line of the raw output, and it
+  went to the log, Telegram and FINDINGS.md unmasked.
+- **`agents-md-sync-check.py`: a report section is never "no drift".** An
+  answer that opened with `OK` on its own line or `OK ` and went on with
+  `### CONTRADICTIONS` was read as OK and dropped.
+- **`wiki-compile-kb.py`: a page that cannot be written no longer ends the
+  run.** A full disk or a page a sync client holds raised out of the loop: the
+  rest of the batch went unprocessed and the run left no ledger record. The
+  article fails the run and is retried; the failure is not counted toward
+  give-up.
+- **`wiki-conflict-resolve.py` skips a page it cannot read** — deleted or held
+  between the listing and the read — instead of ending the scan.
+
+Checked and not ported: `ci-watch.py`'s unreadable HEAD (this repo's own fix of
+2026-10-25 is stricter), the meta-repo's Phase 2 ceiling for `memory-update.py`
+(here 1800 s inside a 4 h task timeout already), a `no_fallback` branch of a
+provider this repo does not have, and a second delivery channel for alerts (a
+meta-repo experiment, not a bundle feature).
+
 ### Findings: 18 resolved, 3 declined
 
 The weekly code review of 2026-10-26 filed 21 findings; each was checked against

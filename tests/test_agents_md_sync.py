@@ -492,7 +492,9 @@ def test_ok_answer_variants_are_recognised(sync, answer):
 
 
 @pytest.mark.parametrize("answer", ["OKAY", "Not OK", "- AGENTS.md never mentions `x`",
-                                    "OK?", "### CRITICAL_MISSING_IN_AGENTS\n- `x`"])
+                                    "OK?", "### CRITICAL_MISSING_IN_AGENTS\n- `x`",
+                                    "OK — except:\n### CONTRADICTIONS\n- `x`",
+                                    "OK\n## OUTDATED_IN_AGENTS\n- `y`"])
 def test_non_ok_answers_are_not_taken_for_ok(sync, answer):
     assert not sync.is_ok_response(answer)
 

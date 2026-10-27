@@ -403,8 +403,21 @@ def _compile_kb(rec: dict) -> int:
             # The directory actually read. A hardcoded `kb_news/` stamped every
             # page's provenance with the private pipeline's name that
             # _kb_source_dir exists to stop requiring — whatever was read.
-            applied, rejected = apply_changes(changes, existing_pages,
-                                              f"{KBNEWS_DIR.name}/{rel}")
+            try:
+                applied, rejected = apply_changes(changes, existing_pages,
+                                                  f"{KBNEWS_DIR.name}/{rel}")
+            except OSError as e:
+                # A page that cannot be written (a full disk, permissions, a file
+                # a sync client holds) used to end the run: the rest of the batch
+                # and its terminal record were lost. Not marked processed — the
+                # pages already written are re-applied as `skipped` — and not
+                # counted toward give_up: nothing says the answer is at fault.
+                hard_failure = True
+                print(f"  ERROR compile-kb {rel}: a page could not be written ({e})",
+                      file=sys.stderr)
+                log("  → ERROR: write failed — retried next run")
+                update_log(rel, ["(ERROR: write failed)"])
+                continue
             # Save the dropped payload for inspection BEFORE we mark it processed
             # (deterministic rejection is still recorded so it won't loop forever).
             if not applied:

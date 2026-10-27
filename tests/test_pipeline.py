@@ -378,6 +378,37 @@ def test_compile_kb_a_source_gone_since_the_listing_is_not_a_failure(bundle: Pat
     assert state["compile_kb"]["processed"] == ["articles/fine.md"]
 
 
+def test_compile_kb_a_page_that_cannot_be_written_does_not_end_the_run(bundle: Path,
+                                                                      monkeypatch):
+    """A full disk or a page a sync client holds raised out of the loop: the rest
+    of the batch went unprocessed and the run left no ledger record."""
+    _kb_article(bundle, "a_locked.md", b"Its page cannot be written.\n")
+    _kb_article(bundle, "b_fine.md", b"A perfectly ordinary article.\n")
+    resp = bundle / "kb_page.json"
+    resp.write_text(json.dumps([{"path": "kb/concepts/Gear.md", "action": "create",
+                                 "content": "# Gear\n\nA toothed wheel.\n"}]),
+                    encoding="utf-8")
+    for key in ("DEEPSEEK_KEY", "OPENCODE_GO_API_KEY", "OPENCODE_GO_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("WIKI_LLM_PROVIDER", "mock")
+    monkeypatch.setenv("WIKI_LLM_MOCK_RESPONSE", str(resp))
+    monkeypatch.setenv("WIKI_LLM_PACE_SECONDS", "0")
+    kb = _load_wiki_script(bundle, monkeypatch, "compile_kb_write_fails", "wiki-compile-kb.py")
+    real_write, calls = kb.write_page, []
+
+    def locked_once(*a, **kw):
+        calls.append(a[0])
+        if len(calls) == 1:
+            raise PermissionError("held by a sync client")
+        return real_write(*a, **kw)
+
+    monkeypatch.setattr(kb, "write_page", locked_once)
+    assert kb.main() != 0, "a page that was not written must fail the run"
+    assert len(calls) == 2, "the article after the failed write was never compiled"
+    state = json.loads((bundle / "wiki" / ".processed.json").read_text(encoding="utf-8"))
+    assert state["compile_kb"]["processed"] == ["articles/b_fine.md"]
+
+
 def test_replay_is_scoped_to_its_project_and_previews_without_changes(bundle: Path):
     """`--replay DATE#demo --dry-run` cleared markers and retry counters, then
     printed "no state changes"; and `DATE#demo` also cleared `DATE#demo-app`."""

@@ -1040,7 +1040,10 @@ def run_contract(suite: dict, level: str) -> dict:
 
 
 def _summary(res: dict) -> str:
-    return res.get("summary") or summary_line(res.get("tail") or "")
+    # Masked here too: for a runner it does not recognize, the summary is the
+    # last line of the RAW output, and it goes where the tail goes — the log,
+    # Telegram, FINDINGS.md.
+    return mask_secrets(res.get("summary") or summary_line(res.get("tail") or ""))
 
 
 def finding_marker(suite: str) -> str:

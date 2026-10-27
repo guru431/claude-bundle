@@ -545,7 +545,13 @@ def is_ok_response(response: str) -> bool:
 
     Besides a bare `OK` the model writes `OK.` and `**OK**`; read as drift,
     such an answer went on to the larger fix call with a report of nothing.
+
+    A section of the prompt's report format is never OK, however the answer
+    begins: "OK — except:\\n### CONTRADICTIONS ..." was dropped unread.
     """
+    if re.search(rf"^#+\s*({_MISSING_SECTION}|OUTDATED_IN_AGENTS|CONTRADICTIONS)\b",
+                 response, re.M):
+        return False
     if response == "OK" or response.startswith(("OK\n", "OK ")):
         return True
     first = response.split("\n", 1)[0].strip().strip("*_`").strip()

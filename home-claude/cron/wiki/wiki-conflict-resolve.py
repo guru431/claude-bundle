@@ -77,7 +77,13 @@ def find_collisions() -> list[Path]:
         # the same vault yielded a different page set depending on who asked.
         if f.name in WIKI_NON_PAGES:
             continue
-        body = strip_code(f.read_text(encoding="utf-8", errors="replace"))
+        try:
+            body = strip_code(f.read_text(encoding="utf-8", errors="replace"))
+        except OSError as e:
+            # Deleted, or held by a sync client, between rglob and the read: one
+            # page used to end the whole scan.
+            print(f"  skipped {f.relative_to(WIKI_ROOT)}: {e}", file=sys.stderr)
+            continue
         h1 = [h.lstrip("# ").strip().lower() for h in re.findall(r"^# .+$", body, re.M)]
         if len(h1) < 2:
             continue

@@ -155,6 +155,13 @@ def test_secrets_in_output_are_masked_before_they_are_stored(tmp_path, monkeypat
     assert "API_TOKEN" in res["tail"], "the name stays — only the value goes"
 
 
+def test_the_summary_of_an_unrecognized_runner_is_masked():
+    """Its summary is the raw output's last line, and it reaches Telegram."""
+    res = {"status": "failed", "summary": "rc=1: API_TOKEN=hunter2-hunter2-hunter2"}
+    assert "hunter2-hunter2-hunter2" not in sweep._summary(res)
+    assert "API_TOKEN" in sweep._summary(res)
+
+
 def test_suite_runs_in_its_own_process_group(tmp_path, monkeypatch):
     """A grandchild broadcasting CTRL_C to the console must not kill the sweep."""
     seen = _fake_popen(monkeypatch, returncode=0)

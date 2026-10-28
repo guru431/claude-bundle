@@ -141,6 +141,21 @@ The short list; UPGRADING.md has the steps.
   failed 3 times. **`run-pester.ps1`** exits 2 (`TESTS_ENV`) when PowerShell or
   the Pester import hangs or dies before the first file.
 
+### claude-switch: the `cleaner` mode for a Cleaner gateway
+
+`claude-switch.ps1 cleaner [model]` points Claude Code at a Cleaner gateway:
+`ANTHROPIC_BASE_URL` is `<CLEANER_URL>/agent/anthropic`, the gateway key
+(`CLEANER_KEY`, also through `-KeyHelper`) is sent as Bearer, every
+`ANTHROPIC_*_MODEL` is the given model or `CLEANER_MODEL`, the attribution
+block is off (`CLAUDE_CODE_ATTRIBUTION_HEADER=0`), and the self-signed Cleaner
+certificate is trusted through `NODE_EXTRA_CA_CERTS` from `CLEANER_CA_FILE` —
+TLS checks stay on. Without `CLEANER_URL` or `CLEANER_KEY` the switch stops
+with exit 2 and leaves the settings as they were; plain `http://` to a remote
+host is refused without `-AllowInsecureHttp`. `status` names the mode by the
+`/agent/anthropic` path, whatever host and port the gateway runs on. The four
+`CLEANER_*` variables are in `config/llm-providers.example.env`, and switching
+to another mode removes `NODE_EXTRA_CA_CERTS` and the attribution switch again.
+
 ### Ported from the meta-repo: four fixes since the last comparison
 
 The shared files were compared again, commit by commit. Four changes made in

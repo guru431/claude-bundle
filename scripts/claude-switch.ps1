@@ -1,10 +1,13 @@
-﻿# claude-switch.ps1 — switch the Claude Code backend between six modes:
+﻿# claude-switch.ps1 — switch the Claude Code backend between seven modes:
 #   anthropic — Claude (default — no env override)
 #   deepseek  — DeepSeek direct via api.deepseek.com/anthropic (V4-Flash / V4-Pro)
 #   minimax   — MiniMax direct via api.minimax.io/anthropic (M3 / M2.7)
 #   opencode  — OpenCode Go direct (minimax-m3 / qwen3.7-max) via opencode.ai/zen/go/v1
 #   ollama    — local/LAN Ollama via the Anthropic-native /v1/messages API
 #   ccr       — any OpenCode Go model via a local Claude Code Router proxy
+#   cleaner   — a Cleaner gateway (<CLEANER_URL>/agent/anthropic): the provider
+#               sees requests with sensitive values replaced, the agent gets
+#               answers and tool calls with the real values back
 #
 # Writes the env block into <project>/.claude/settings.local.json. The
 # permissions block is stable across modes; only `env` changes.
@@ -27,6 +30,8 @@
 #   .\claude-switch.ps1 opencode qwen3.7-max # OpenCode Go direct, specific model
 #   .\claude-switch.ps1 ollama qwen3.5:9b    # Ollama + specific model
 #   .\claude-switch.ps1 ccr glm-5.3          # CCR + specific model
+#   .\claude-switch.ps1 cleaner              # Cleaner gateway, model from CLEANER_MODEL
+#   .\claude-switch.ps1 cleaner <model>      # Cleaner gateway, a model the gateway key allows
 #   .\claude-switch.ps1 status               # show current mode without changing
 #
 # Optional parameters:
@@ -58,6 +63,10 @@
 #   CCR_API_KEY            — Claude Code Router shared secret (if you use CCR)
 #   CCR_HOST               — host:port of your CCR proxy (default 127.0.0.1:3456)
 #   OLLAMA_HOST            — host:port of your Ollama server (default 127.0.0.1:11434)
+#   CLEANER_URL            — address of a Cleaner instance, https://host:port
+#   CLEANER_KEY            — Cleaner gateway key (ck_…) with model access
+#   CLEANER_CA_FILE        — path to the Cleaner certificate (self-signed) for Node
+#   CLEANER_MODEL          — model the gateway key allows (or pass it as <model>)
 #
 # After switching: reload the VS Code window
 #   Ctrl+Shift+P → Developer: Reload Window
@@ -65,7 +74,7 @@
 
 param(
     [Parameter(Position=0)]
-    [ValidateSet("menu","status","anthropic","minimax","opencode","ollama","deepseek","ccr")]
+    [ValidateSet("menu","status","anthropic","minimax","opencode","ollama","deepseek","ccr","cleaner")]
     [string]$Mode = "menu",
 
     [Parameter(Position=1)]
@@ -443,6 +452,9 @@ function Get-CurrentMode($obj) {
     # `(?![0-9])` ends the port. Without it the port was matched as a plain
     # SUBSTRING, so with CCR_PORT=3456 a URL on port 34567 read as `ccr` — and
     # status/menu named a backend the user is not on. Same for ollama.
+    # A Cleaner gateway is known by its path, whatever host it runs on — checked
+    # first: on loopback its port could also be the one CCR or Ollama uses.
+    if ($url -match "/agent/anthropic/?$") { return "cleaner$modelStr  ($url)" }
     $portEnd = '(?![0-9])'
     # The host as New-BackendUrl writes it into the URL: an IPv6 literal in
     # brackets. Matched bare, `::1:11434` never met `[::1]:11434` (the `]` sits
@@ -494,7 +506,9 @@ $SWITCHER_ENV_KEYS = @(
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
     "DISABLE_TELEMETRY",
     "DISABLE_COST_WARNINGS",
-    "API_TIMEOUT_MS"
+    "API_TIMEOUT_MS",
+    "NODE_EXTRA_CA_CERTS",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER"
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -790,6 +804,64 @@ function Set-DeepseekDirect($obj, [string]$modelName) {
     return Set-Env $obj $envObj
 }
 
+function Set-Cleaner($obj, [string]$modelName) {
+    # Cleaner gateway: the provider behind it sees every request with sensitive
+    # values replaced, and the answer — text and tool calls — comes back with
+    # the real values. The key is a Cleaner gateway key (ck_…) with model access,
+    # sent as Bearer like DEEPSEEK_KEY; the provider key stays inside Cleaner.
+    $url = Get-EnvVar "CLEANER_URL"
+    if (-not $url) {
+        Write-Host "ERROR: env var 'CLEANER_URL' not set (the Cleaner address, https://host:port)." -ForegroundColor Red
+        exit 2
+    }
+    $uri = $null
+    if (-not [Uri]::TryCreate($url.Trim(), [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -notin @("https", "http")) {
+        Write-Host "ERROR: CLEANER_URL must look like https://host:port (got '$url')." -ForegroundColor Red
+        exit 2
+    }
+    if ($uri.Scheme -eq "http" -and -not (Test-IsLoopbackHost $uri.Host)) {
+        if (-not $AllowInsecureHttp) {
+            Write-Host "ERROR: CLEANER_URL is plain http:// to a remote host — the gateway key and your code would go in the clear. Use https://, or pass -AllowInsecureHttp." -ForegroundColor Red
+            exit 2
+        }
+        Write-Host "WARN: CLEANER_URL is remote and -AllowInsecureHttp is set — key/prompts/code will go in PLAINTEXT." -ForegroundColor Red
+    }
+    $key = Require-Key "CLEANER_KEY"
+    if (-not $modelName) { $modelName = Get-EnvVar "CLEANER_MODEL" }
+    if (-not $modelName) {
+        Write-Host "ERROR: no model — set CLEANER_MODEL or pass one: claude-switch.ps1 cleaner <model>." -ForegroundColor Red
+        exit 2
+    }
+    $base = $url.Trim().TrimEnd("/") + "/agent/anthropic"
+    $envObj = [pscustomobject]@{
+        ANTHROPIC_AUTH_TOKEN                     = $key
+        ANTHROPIC_BASE_URL                       = $base
+        ANTHROPIC_MODEL                          = $modelName
+        ANTHROPIC_SMALL_FAST_MODEL               = $modelName
+        ANTHROPIC_DEFAULT_SONNET_MODEL           = $modelName
+        ANTHROPIC_DEFAULT_OPUS_MODEL             = $modelName
+        ANTHROPIC_DEFAULT_HAIKU_MODEL            = $modelName
+        # The attribution block in the system prompt is for Anthropic only; a
+        # gateway to another provider does not need it.
+        CLAUDE_CODE_ATTRIBUTION_HEADER           = "0"
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+        DISABLE_TELEMETRY                        = "true"
+        DISABLE_COST_WARNINGS                    = "true"
+        API_TIMEOUT_MS                           = $apiTimeoutMs
+    }
+    # The Cleaner certificate is self-signed: Node trusts it through
+    # NODE_EXTRA_CA_CERTS — never by switching TLS checks off.
+    $ca = Get-EnvVar "CLEANER_CA_FILE"
+    if ($ca) {
+        $envObj | Add-Member -NotePropertyName "NODE_EXTRA_CA_CERTS" -NotePropertyValue $ca
+    } elseif ($uri.Scheme -eq "https") {
+        Write-Host "WARN: CLEANER_CA_FILE not set — Claude Code will reject a self-signed Cleaner certificate." -ForegroundColor Yellow
+    }
+    Write-Host "Mode: Cleaner gateway → $modelName ($base, key loaded)" -ForegroundColor Green
+    Set-KeyHelper $obj $envObj "CLEANER_KEY"
+    return Set-Env $obj $envObj
+}
+
 function Set-Ollama($obj, [string]$modelName) {
     # Ollama speaks the Anthropic /v1/messages API natively — direct, no proxy.
     # No key needed for a local Ollama, but Claude Code prefers a stored OAuth
@@ -899,12 +971,13 @@ function Show-Menu($currentMode) {
     Write-Host "  4) OpenCode Go direct  — minimax-m3 / qwen3.7-max via opencode.ai/zen/go/v1" -ForegroundColor Green
     Write-Host "  5) Ollama local        — local/LAN models via $ollamaAt (Anthropic-native)" -ForegroundColor Green
     Write-Host "  6) CCR                 — any model via local proxy $ccrAt" -ForegroundColor Green
+    Write-Host "  7) Cleaner gateway     — requests cleaned of sensitive values (CLEANER_URL)" -ForegroundColor Green
     Write-Host "  0) Exit" -ForegroundColor DarkGray
     Write-Host ""
 }
 
 function Read-Choice {
-    $choice = (Read-Host "Choice [1/2/3/4/5/6/0]").Trim().ToLower()
+    $choice = (Read-Host "Choice [1/2/3/4/5/6/7/0]").Trim().ToLower()
     switch ($choice) {
         "1"          { return "anthropic" }
         "anthropic"  { return "anthropic" }
@@ -924,6 +997,9 @@ function Read-Choice {
         "6"          { return "ccr" }
         "ccr"        { return "ccr" }
         "c"          { return "ccr" }
+        "7"          { return "cleaner" }
+        "cleaner"    { return "cleaner" }
+        "g"          { return "cleaner" }
         "0"          { return "exit" }
         "q"          { return "exit" }
         ""           { return "exit" }
@@ -1002,7 +1078,7 @@ if ($Mode -eq "menu") {
 
 if ($Mode -eq "status") {
     Write-Host ""
-    Write-Host "(no changes; pass 'anthropic'/'deepseek'/'minimax'/'opencode'/'ollama'/'ccr' to switch)" -ForegroundColor DarkGray
+    Write-Host "(no changes; pass 'anthropic'/'deepseek'/'minimax'/'opencode'/'ollama'/'ccr'/'cleaner' to switch)" -ForegroundColor DarkGray
     return
 }
 
@@ -1082,6 +1158,7 @@ switch ($Mode) {
     "opencode"  { $cfg = Set-OpencodeDirect $cfg $Model }
     "ollama"    { $cfg = Set-Ollama $cfg $Model }
     "ccr"       { $cfg = Set-CCR $cfg $Model }
+    "cleaner"   { $cfg = Set-Cleaner $cfg $Model }
 }
 
 # `anthropic` and `ollama` involve no provider key, so neither calls

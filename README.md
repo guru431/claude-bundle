@@ -118,7 +118,7 @@ claude-bundle/
 │   └── AGENTS-per-project.template.md per-project router template
 │
 ├── scripts/
-│   ├── claude-switch.ps1              switch session backend (Claude/DS/MM/OCG/Ollama/CCR)
+│   ├── claude-switch.ps1              switch session backend (Claude/DS/MM/OCG/Ollama/CCR/Cleaner)
 │   ├── get-key.ps1                   print one key from .env (for -KeyHelper)
 │   ├── install.ps1                    guided full/lite installer (Windows); -Diff previews an upgrade
 │   ├── uninstall.ps1                  remove what install.ps1 wrote (per manifest)
@@ -234,7 +234,10 @@ deployment; `--hooks` checks the hooks wired in your `settings.json`.
 
 - **`scripts/claude-switch.ps1`** — interactive menu (and CLI mode) to
   switch the active Claude Code session between Anthropic, DeepSeek,
-  MiniMax, OpenCode Go, local/LAN Ollama, and CCR (Claude Code Router).
+  MiniMax, OpenCode Go, local/LAN Ollama, CCR (Claude Code Router), and a
+  Cleaner gateway (`cleaner` mode: `CLEANER_URL`, `CLEANER_KEY`,
+  `CLEANER_CA_FILE`, `CLEANER_MODEL` — the provider sees requests with
+  sensitive values replaced, Claude Code gets the real values back).
   Writes to `<project>/.claude/settings.local.json`. With `-KeyHelper` it
   writes an `apiKeyHelper` command pointing at **`scripts/get-key.ps1`**
   instead of the key itself, so the secret stays in `.env` and never lands

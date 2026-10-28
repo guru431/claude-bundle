@@ -7,6 +7,7 @@ developer's real ones.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -101,6 +102,54 @@ def test_switching_to_anthropic_leaves_no_copy_of_the_key(tmp_path: Path):
     assert not (settings / "settings.local.json.bak").exists()
     for f in settings.iterdir():
         assert FAKE_KEY not in f.read_text(encoding="utf-8", errors="replace"), f.name
+
+
+CLEANER = {
+    "CLEANER_URL": "https://cleaner.example:5464/", "CLEANER_KEY": "ck_test-gateway-key",
+    "CLEANER_CA_FILE": r"C:\certs\cleaner.pem", "CLEANER_MODEL": "gateway-model-1",
+}
+
+
+def test_cleaner_mode_points_claude_code_at_the_gateway(tmp_path: Path):
+    """The `cleaner` mode: Claude Code talks to a Cleaner gateway, which cleans
+    every request before the provider sees it. URL, key, certificate and model
+    all come from the environment; the attribution block is switched off."""
+    project = tmp_path / "project"
+    project.mkdir()
+    r = _switch(project, "cleaner", **CLEANER)
+    assert r.returncode == 0, r.stdout + r.stderr
+    env = json.loads((project / ".claude" / "settings.local.json").read_text(encoding="utf-8"))["env"]
+    assert env["ANTHROPIC_BASE_URL"] == "https://cleaner.example:5464/agent/anthropic"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "ck_test-gateway-key"
+    assert env["NODE_EXTRA_CA_CERTS"] == r"C:\certs\cleaner.pem"
+    assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
+    models = {k: v for k, v in env.items() if k.startswith("ANTHROPIC_") and k.endswith("_MODEL")}
+    assert set(models) >= {"ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                           "ANTHROPIC_DEFAULT_HAIKU_MODEL"}
+    assert set(models.values()) == {"gateway-model-1"}
+
+
+def test_status_names_the_cleaner_gateway_by_its_path(tmp_path: Path):
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.local.json").write_text(
+        '{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:3456/agent/anthropic"}}', encoding="utf-8")
+    r = _switch(project, "status")          # on the CCR port, still the gateway
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Before: cleaner  (http://127.0.0.1:3456/agent/anthropic)" in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("missing", ["CLEANER_URL", "CLEANER_KEY"])
+def test_cleaner_mode_without_url_or_key_changes_nothing(tmp_path: Path, missing: str):
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    settings = project / ".claude" / "settings.local.json"
+    settings.write_text('{"env": {"FOREIGN": "kept"}}', encoding="utf-8")
+    env = {k: v for k, v in CLEANER.items() if k != missing}
+    r = _switch(project, "cleaner", **env)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert missing in r.stdout
+    assert settings.read_text(encoding="utf-8") == '{"env": {"FOREIGN": "kept"}}'
 
 
 def test_a_deployed_get_key_finds_the_parser_under_cron_lib(tmp_path: Path):

@@ -129,6 +129,38 @@ def test_cleaner_mode_points_claude_code_at_the_gateway(tmp_path: Path):
     assert set(models.values()) == {"gateway-model-1"}
 
 
+def test_cleaner_sub_mode_keeps_the_claude_ai_login(tmp_path: Path):
+    """The `cleaner-sub` mode: Claude Code keeps its claude.ai login — its own
+    Authorization goes through the gateway to Anthropic — and the gateway key
+    travels in a header of its own. A key the `cleaner` mode left behind (or an
+    apiKeyHelper) would replace that login, and the attribution switch would
+    change what the subscription requests carry, so all of them go. No model
+    is set: the subscription picks its own."""
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    settings = project / ".claude" / "settings.local.json"
+    settings.write_text(json.dumps({"apiKeyHelper": "powershell -File get-key.ps1 CLEANER_KEY", "env": {
+        "FOREIGN": "kept", "ANTHROPIC_BASE_URL": "https://cleaner.example:5464/agent/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "ck_old", "ANTHROPIC_API_KEY": "sk-old", "ANTHROPIC_MODEL": "gateway-model-1",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0"}}), encoding="utf-8")
+    r = _switch(project, "cleaner-sub", **CLEANER)
+    assert r.returncode == 0, r.stdout + r.stderr
+    cfg = json.loads(settings.read_text(encoding="utf-8"))
+    env = cfg["env"]
+    assert "apiKeyHelper" not in cfg and env["FOREIGN"] == "kept"
+    assert env["ANTHROPIC_BASE_URL"] == "https://cleaner.example:5464/agent/anthropic"
+    assert env["ANTHROPIC_CUSTOM_HEADERS"] == "X-Cleaner-Key: ck_test-gateway-key"
+    assert env["NODE_EXTRA_CA_CERTS"] == r"C:\certs\cleaner.pem"
+    for gone in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_ATTRIBUTION_HEADER", "ANTHROPIC_MODEL",
+                 "ANTHROPIC_DEFAULT_OPUS_MODEL"):
+        assert gone not in env, gone
+    assert "After:  cleaner-sub  (https://cleaner.example:5464/agent/anthropic)" in r.stdout, r.stdout
+    assert "gateway-model-1  (https://cleaner.example:5464/agent/anthropic)" in r.stdout, r.stdout     # Before: cleaner
+    r = _switch(project, "anthropic")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in json.loads(settings.read_text(encoding="utf-8")).get("env", {})
+
+
 def test_status_names_the_cleaner_gateway_by_its_path(tmp_path: Path):
     project = tmp_path / "project"
     (project / ".claude").mkdir(parents=True)
@@ -139,14 +171,15 @@ def test_status_names_the_cleaner_gateway_by_its_path(tmp_path: Path):
     assert "Before: cleaner  (http://127.0.0.1:3456/agent/anthropic)" in r.stdout, r.stdout
 
 
+@pytest.mark.parametrize("mode", ["cleaner", "cleaner-sub"])
 @pytest.mark.parametrize("missing", ["CLEANER_URL", "CLEANER_KEY"])
-def test_cleaner_mode_without_url_or_key_changes_nothing(tmp_path: Path, missing: str):
+def test_cleaner_mode_without_url_or_key_changes_nothing(tmp_path: Path, missing: str, mode: str):
     project = tmp_path / "project"
     (project / ".claude").mkdir(parents=True)
     settings = project / ".claude" / "settings.local.json"
     settings.write_text('{"env": {"FOREIGN": "kept"}}', encoding="utf-8")
     env = {k: v for k, v in CLEANER.items() if k != missing}
-    r = _switch(project, "cleaner", **env)
+    r = _switch(project, mode, **env)
     assert r.returncode == 2, r.stdout + r.stderr
     assert missing in r.stdout
     assert settings.read_text(encoding="utf-8") == '{"env": {"FOREIGN": "kept"}}'

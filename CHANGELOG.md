@@ -156,6 +156,22 @@ host is refused without `-AllowInsecureHttp`. `status` names the mode by the
 `CLEANER_*` variables are in `config/llm-providers.example.env`, and switching
 to another mode removes `NODE_EXTRA_CA_CERTS` and the attribution switch again.
 
+### claude-switch: the `cleaner-sub` mode — the gateway in front of your Claude subscription
+
+`claude-switch.ps1 cleaner-sub` (menu item 8) points Claude Code at the same
+gateway, `<CLEANER_URL>/agent/anthropic`, but keeps its claude.ai login: Claude
+Code sends its own Authorization, which the gateway passes on to Anthropic, and
+the gateway key — a subscription key an administrator issues on the Cleaner
+"Keys" page — travels as `ANTHROPIC_CUSTOM_HEADERS = "X-Cleaner-Key: <key>"`.
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `apiKeyHelper` are removed (each
+would replace the login), so is the attribution switch (it would change what
+the subscription requests carry); no model is set, and `-KeyHelper` has no
+effect. The certificate and the URL checks are those of the `cleaner` mode.
+`status` tells the two gateway modes apart by the `X-Cleaner-Key` header.
+`ANTHROPIC_CUSTOM_HEADERS` is now a key the switcher owns: switching to any other
+mode removes it, so the gateway key does not follow the project to another
+backend.
+
 ### Ported from the meta-repo: four fixes since the last comparison
 
 The shared files were compared again, commit by commit. Four changes made in

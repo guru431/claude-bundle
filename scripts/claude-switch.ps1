@@ -1,4 +1,4 @@
-﻿# claude-switch.ps1 — switch the Claude Code backend between seven modes:
+﻿# claude-switch.ps1 — switch the Claude Code backend between eight modes:
 #   anthropic — Claude (default — no env override)
 #   deepseek  — DeepSeek direct via api.deepseek.com/anthropic (V4-Flash / V4-Pro)
 #   minimax   — MiniMax direct via api.minimax.io/anthropic (M3 / M2.7)
@@ -8,6 +8,9 @@
 #   cleaner   — a Cleaner gateway (<CLEANER_URL>/agent/anthropic): the provider
 #               sees requests with sensitive values replaced, the agent gets
 #               answers and tool calls with the real values back
+#   cleaner-sub — the same gateway in front of your own Claude subscription:
+#               Claude Code keeps its claude.ai login, the gateway key goes in
+#               a header of its own (an admin-issued subscription key)
 #
 # Writes the env block into <project>/.claude/settings.local.json. The
 # permissions block is stable across modes; only `env` changes.
@@ -32,6 +35,7 @@
 #   .\claude-switch.ps1 ccr glm-5.3          # CCR + specific model
 #   .\claude-switch.ps1 cleaner              # Cleaner gateway, model from CLEANER_MODEL
 #   .\claude-switch.ps1 cleaner <model>      # Cleaner gateway, a model the gateway key allows
+#   .\claude-switch.ps1 cleaner-sub          # Cleaner gateway, your claude.ai subscription
 #   .\claude-switch.ps1 status               # show current mode without changing
 #
 # Optional parameters:
@@ -74,7 +78,7 @@
 
 param(
     [Parameter(Position=0)]
-    [ValidateSet("menu","status","anthropic","minimax","opencode","ollama","deepseek","ccr","cleaner")]
+    [ValidateSet("menu","status","anthropic","minimax","opencode","ollama","deepseek","ccr","cleaner","cleaner-sub")]
     [string]$Mode = "menu",
 
     [Parameter(Position=1)]
@@ -453,8 +457,14 @@ function Get-CurrentMode($obj) {
     # SUBSTRING, so with CCR_PORT=3456 a URL on port 34567 read as `ccr` — and
     # status/menu named a backend the user is not on. Same for ollama.
     # A Cleaner gateway is known by its path, whatever host it runs on — checked
-    # first: on loopback its port could also be the one CCR or Ollama uses.
-    if ($url -match "/agent/anthropic/?$") { return "cleaner$modelStr  ($url)" }
+    # first: on loopback its port could also be the one CCR or Ollama uses. The
+    # subscription mode carries the gateway key in its own header.
+    if ($url -match "/agent/anthropic/?$") {
+        $headers = ""
+        if ($envObj.PSObject.Properties.Match("ANTHROPIC_CUSTOM_HEADERS").Count -gt 0) { $headers = [string]$envObj.ANTHROPIC_CUSTOM_HEADERS }
+        if ($headers -match "(?im)^\s*X-Cleaner-Key\s*:") { return "cleaner-sub  ($url)" }
+        return "cleaner$modelStr  ($url)"
+    }
     $portEnd = '(?![0-9])'
     # The host as New-BackendUrl writes it into the URL: an IPv6 literal in
     # brackets. Matched bare, `::1:11434` never met `[::1]:11434` (the `]` sits
@@ -508,7 +518,8 @@ $SWITCHER_ENV_KEYS = @(
     "DISABLE_COST_WARNINGS",
     "API_TIMEOUT_MS",
     "NODE_EXTRA_CA_CERTS",
-    "CLAUDE_CODE_ATTRIBUTION_HEADER"
+    "CLAUDE_CODE_ATTRIBUTION_HEADER",
+    "ANTHROPIC_CUSTOM_HEADERS"
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -804,11 +815,9 @@ function Set-DeepseekDirect($obj, [string]$modelName) {
     return Set-Env $obj $envObj
 }
 
-function Set-Cleaner($obj, [string]$modelName) {
-    # Cleaner gateway: the provider behind it sees every request with sensitive
-    # values replaced, and the answer — text and tool calls — comes back with
-    # the real values. The key is a Cleaner gateway key (ck_…) with model access,
-    # sent as Bearer like DEEPSEEK_KEY; the provider key stays inside Cleaner.
+function Get-CleanerUri {
+    # CLEANER_URL checked once for both gateway modes; exits 2 before anything is
+    # written when it is missing, malformed or plain http:// to a remote host.
     $url = Get-EnvVar "CLEANER_URL"
     if (-not $url) {
         Write-Host "ERROR: env var 'CLEANER_URL' not set (the Cleaner address, https://host:port)." -ForegroundColor Red
@@ -826,13 +835,33 @@ function Set-Cleaner($obj, [string]$modelName) {
         }
         Write-Host "WARN: CLEANER_URL is remote and -AllowInsecureHttp is set — key/prompts/code will go in PLAINTEXT." -ForegroundColor Red
     }
+    return $uri
+}
+
+function Add-CleanerCa($envObj, $uri) {
+    # The Cleaner certificate is self-signed: Node trusts it through
+    # NODE_EXTRA_CA_CERTS — never by switching TLS checks off.
+    $ca = Get-EnvVar "CLEANER_CA_FILE"
+    if ($ca) {
+        $envObj | Add-Member -NotePropertyName "NODE_EXTRA_CA_CERTS" -NotePropertyValue $ca
+    } elseif ($uri.Scheme -eq "https") {
+        Write-Host "WARN: CLEANER_CA_FILE not set — Claude Code will reject a self-signed Cleaner certificate." -ForegroundColor Yellow
+    }
+}
+
+function Set-Cleaner($obj, [string]$modelName) {
+    # Cleaner gateway: the provider behind it sees every request with sensitive
+    # values replaced, and the answer — text and tool calls — comes back with
+    # the real values. The key is a Cleaner gateway key (ck_…) with model access,
+    # sent as Bearer like DEEPSEEK_KEY; the provider key stays inside Cleaner.
+    $uri = Get-CleanerUri
     $key = Require-Key "CLEANER_KEY"
     if (-not $modelName) { $modelName = Get-EnvVar "CLEANER_MODEL" }
     if (-not $modelName) {
         Write-Host "ERROR: no model — set CLEANER_MODEL or pass one: claude-switch.ps1 cleaner <model>." -ForegroundColor Red
         exit 2
     }
-    $base = $url.Trim().TrimEnd("/") + "/agent/anthropic"
+    $base = (Get-EnvVar "CLEANER_URL").Trim().TrimEnd("/") + "/agent/anthropic"
     $envObj = [pscustomobject]@{
         ANTHROPIC_AUTH_TOKEN                     = $key
         ANTHROPIC_BASE_URL                       = $base
@@ -849,16 +878,36 @@ function Set-Cleaner($obj, [string]$modelName) {
         DISABLE_COST_WARNINGS                    = "true"
         API_TIMEOUT_MS                           = $apiTimeoutMs
     }
-    # The Cleaner certificate is self-signed: Node trusts it through
-    # NODE_EXTRA_CA_CERTS — never by switching TLS checks off.
-    $ca = Get-EnvVar "CLEANER_CA_FILE"
-    if ($ca) {
-        $envObj | Add-Member -NotePropertyName "NODE_EXTRA_CA_CERTS" -NotePropertyValue $ca
-    } elseif ($uri.Scheme -eq "https") {
-        Write-Host "WARN: CLEANER_CA_FILE not set — Claude Code will reject a self-signed Cleaner certificate." -ForegroundColor Yellow
-    }
+    Add-CleanerCa $envObj $uri
     Write-Host "Mode: Cleaner gateway → $modelName ($base, key loaded)" -ForegroundColor Green
     Set-KeyHelper $obj $envObj "CLEANER_KEY"
+    return Set-Env $obj $envObj
+}
+
+function Set-CleanerSubscription($obj) {
+    # Cleaner gateway in front of your own Claude subscription: Claude Code keeps
+    # its claude.ai login and sends its own Authorization, which the gateway
+    # passes to Anthropic; the gateway key (an admin-issued subscription key)
+    # goes as X-Cleaner-Key. ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY or an
+    # apiKeyHelper would replace the claude.ai login, so the mode sets none of
+    # them (Set-Env drops what an earlier mode left), and no model: the
+    # subscription picks its own. The attribution switch is left out too — it
+    # would change what the subscription requests carry.
+    $uri = Get-CleanerUri
+    $key = Require-Key "CLEANER_KEY"
+    $base = (Get-EnvVar "CLEANER_URL").Trim().TrimEnd("/") + "/agent/anthropic"
+    $envObj = [pscustomobject]@{
+        ANTHROPIC_BASE_URL                       = $base
+        ANTHROPIC_CUSTOM_HEADERS                 = "X-Cleaner-Key: $key"
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+        DISABLE_TELEMETRY                        = "true"
+        API_TIMEOUT_MS                           = $apiTimeoutMs
+    }
+    Add-CleanerCa $envObj $uri
+    Write-Host "Mode: Cleaner gateway → your Claude subscription ($base, key loaded)" -ForegroundColor Green
+    if ($obj.PSObject.Properties.Match("apiKeyHelper").Count -gt 0) {
+        $obj.PSObject.Properties.Remove("apiKeyHelper")
+    }
     return Set-Env $obj $envObj
 }
 
@@ -972,12 +1021,13 @@ function Show-Menu($currentMode) {
     Write-Host "  5) Ollama local        — local/LAN models via $ollamaAt (Anthropic-native)" -ForegroundColor Green
     Write-Host "  6) CCR                 — any model via local proxy $ccrAt" -ForegroundColor Green
     Write-Host "  7) Cleaner gateway     — requests cleaned of sensitive values (CLEANER_URL)" -ForegroundColor Green
+    Write-Host "  8) Cleaner + Claude    — the same gateway, your claude.ai subscription" -ForegroundColor Green
     Write-Host "  0) Exit" -ForegroundColor DarkGray
     Write-Host ""
 }
 
 function Read-Choice {
-    $choice = (Read-Host "Choice [1/2/3/4/5/6/7/0]").Trim().ToLower()
+    $choice = (Read-Host "Choice [1/2/3/4/5/6/7/8/0]").Trim().ToLower()
     switch ($choice) {
         "1"          { return "anthropic" }
         "anthropic"  { return "anthropic" }
@@ -1000,6 +1050,8 @@ function Read-Choice {
         "7"          { return "cleaner" }
         "cleaner"    { return "cleaner" }
         "g"          { return "cleaner" }
+        "8"           { return "cleaner-sub" }
+        "cleaner-sub" { return "cleaner-sub" }
         "0"          { return "exit" }
         "q"          { return "exit" }
         ""           { return "exit" }
@@ -1078,7 +1130,7 @@ if ($Mode -eq "menu") {
 
 if ($Mode -eq "status") {
     Write-Host ""
-    Write-Host "(no changes; pass 'anthropic'/'deepseek'/'minimax'/'opencode'/'ollama'/'ccr'/'cleaner' to switch)" -ForegroundColor DarkGray
+    Write-Host "(no changes; pass 'anthropic'/'deepseek'/'minimax'/'opencode'/'ollama'/'ccr'/'cleaner'/'cleaner-sub' to switch)" -ForegroundColor DarkGray
     return
 }
 
@@ -1159,13 +1211,14 @@ switch ($Mode) {
     "ollama"    { $cfg = Set-Ollama $cfg $Model }
     "ccr"       { $cfg = Set-CCR $cfg $Model }
     "cleaner"   { $cfg = Set-Cleaner $cfg $Model }
+    "cleaner-sub" { $cfg = Set-CleanerSubscription $cfg }
 }
 
 # `anthropic` and `ollama` involve no provider key, so neither calls
 # Set-KeyHelper — but the switcher still owns `apiKeyHelper`, and one left by an
 # earlier -KeyHelper switch would go on answering with another backend's key.
 if ($null -ne $cfg) {
-    if ($KeyHelper -and $Mode -in @("anthropic", "ollama")) {
+    if ($KeyHelper -and $Mode -in @("anthropic", "ollama", "cleaner-sub")) {
         Write-Host "NOTE: -KeyHelper has no effect for '$Mode' (no provider key involved)." -ForegroundColor DarkGray
     }
     if ($Mode -in @("anthropic", "ollama") -and $cfg.PSObject.Properties.Match("apiKeyHelper").Count -gt 0) {

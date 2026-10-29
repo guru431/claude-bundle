@@ -237,7 +237,9 @@ deployment; `--hooks` checks the hooks wired in your `settings.json`.
   MiniMax, OpenCode Go, local/LAN Ollama, CCR (Claude Code Router), and a
   Cleaner gateway (`cleaner` mode: `CLEANER_URL`, `CLEANER_KEY`,
   `CLEANER_CA_FILE`, `CLEANER_MODEL` — the provider sees requests with
-  sensitive values replaced, Claude Code gets the real values back).
+  sensitive values replaced, Claude Code gets the real values back;
+  `cleaner-sub` — the same gateway in front of your own claude.ai
+  subscription, the key in `X-Cleaner-Key`).
   Writes to `<project>/.claude/settings.local.json`. With `-KeyHelper` it
   writes an `apiKeyHelper` command pointing at **`scripts/get-key.ps1`**
   instead of the key itself, so the secret stays in `.env` and never lands

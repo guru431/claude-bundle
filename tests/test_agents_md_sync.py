@@ -391,6 +391,7 @@ def test_projects_without_claude_md_do_not_fail_the_run(sync, tmp_path, monkeypa
         (tmp_path / name).mkdir()
     monkeypatch.setattr(sync, "PROJECTS_ROOT", tmp_path)
     monkeypatch.setattr(sync, "llm_call", lambda *a, **k: pytest.fail("no pair, no call"))
+    monkeypatch.setattr(sys, "argv", ["agents-md-sync-check.py"])
 
     assert sync.main() == 0
 
@@ -423,6 +424,7 @@ def test_a_failing_pair_does_not_stop_the_others(sync, tmp_path, monkeypatch):
             raise PermissionError("AGENTS.md is busy")
         return False, 0, True
     monkeypatch.setattr(sync, "check_pair", check)
+    monkeypatch.setattr(sys, "argv", ["agents-md-sync-check.py"])
 
     assert sync.main() == 1, "a pair that could not be checked must reach the monitor"
     assert seen == ["alpha", "beta"]
@@ -474,6 +476,7 @@ def test_a_run_that_examined_nothing_exits_nonzero(sync, tmp_path, monkeypatch):
     (project / "AGENTS.md").write_text("# Project\n", encoding="utf-8")
     monkeypatch.setattr(sync, "PROJECTS_ROOT", tmp_path)
     monkeypatch.setattr(sync, "llm_call", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["agents-md-sync-check.py"])
     # The ledger record is written by runs.terminal_record, into the RUNS_DIR that
     # `runs` resolved when it was IMPORTED — during collection, or in the module
     # fixture above, both before any per-test fixture exists. It lands in tmp
@@ -481,6 +484,15 @@ def test_a_run_that_examined_nothing_exits_nonzero(sync, tmp_path, monkeypatch):
     # first; the per-test value this comment used to credit never reaches it.
 
     assert sync.main() == 1
+
+
+def test_unknown_cli_flags_stop_before_checking_projects(sync, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["agents-md-sync-check.py", "--dryrun"])
+    monkeypatch.setattr(sync, "_check_projects",
+                        lambda *a: pytest.fail("unknown argument reached project writes"))
+    with pytest.raises(SystemExit) as exc:
+        sync.main()
+    assert exc.value.code == 2
 
 
 # ── the "no drift" answer ──────────────────────────────────────────────────

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ps_helpers import ROOT, requires_powershell, run_ps_file
+from ps_helpers import ROOT, ps_quote, requires_powershell, run_ps, run_ps_file
 
 # integration by measurement: a Windows PowerShell start costs ~2 s per test here.
 pytestmark = [requires_powershell, pytest.mark.integration]
@@ -46,6 +46,47 @@ def test_a_rerun_still_generates_projects_root(tmp_path: Path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert "No placeholders found" in r.stdout, r.stdout
     assert "PROJECTS_ROOT=D:\\work\\projects" in (root / ".env").read_text(encoding="utf-8")
+
+
+def test_generating_projects_root_backs_up_the_existing_env(tmp_path: Path):
+    root = _deployment(tmp_path)
+    original = b"# local settings\r\nPYTHON_EXE=\r\nPROJECTS_ROOT=\r\n"
+    (root / ".env").write_bytes(original)
+    (root / "bundle.local.yaml").write_text("projects_root: D:\\work\\projects\n",
+                                            encoding="utf-8")
+
+    r = run_ps_file(SCRIPT, "-InstallPath", root)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (root / ".env.bak").read_bytes() == original
+
+
+def test_a_concurrent_bootstrap_cannot_overwrite_the_env(tmp_path: Path):
+    root = _deployment(tmp_path)
+    original = b"PROJECTS_ROOT=\r\n"
+    (root / ".env").write_bytes(original)
+    (root / "bundle.local.yaml").write_text("projects_root: D:\\work\\projects\n",
+                                            encoding="utf-8")
+    code = f"""
+$ErrorActionPreference = 'Stop'
+$lock = [System.IO.File]::Open({ps_quote(root / '.env.lock')}, 'OpenOrCreate', 'ReadWrite', 'None')
+try {{ & {ps_quote(SCRIPT)} -InstallPath {ps_quote(root)} }}
+finally {{ $lock.Dispose() }}
+"""
+    r = run_ps(code, tmp_path)
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert (root / ".env").read_bytes() == original
+    assert not (root / ".env.bak").exists()
+
+    # The sidecar remains, but releasing the OS lock allows the next run.
+    r = run_ps_file(SCRIPT, "-InstallPath", root)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert b"PROJECTS_ROOT=D:\\work\\projects" in (root / ".env").read_bytes()
+    generated = (root / ".env").read_bytes()
+    r = run_ps_file(SCRIPT, "-InstallPath", root)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (root / ".env").read_bytes() == generated
+    assert (root / ".env.bak").read_bytes() == original
 
 
 def test_projects_root_is_generated_in_the_deployment_not_beside_the_registry(tmp_path: Path):

@@ -892,7 +892,13 @@ foreach ($task in $reg.tasks) {
         continue
     }
 
-    $actionInfo = Build-Action $task $launcher
+    try {
+        $actionInfo = Build-Action $task $launcher
+    } catch {
+        Write-Host ("[skipped  ] " + $task.name + " — action: " + $_.Exception.Message) -ForegroundColor DarkYellow
+        $summary.skipped++
+        continue
+    }
     $wantedExec = $actionInfo.execute
     $wantedArgs = $actionInfo.arguments
     try {

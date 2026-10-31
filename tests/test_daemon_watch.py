@@ -166,6 +166,41 @@ def test_an_undelivered_alert_is_sent_again_next_run(watcher):
     assert len(watcher.sent) == 4, "a failed delivery was marked as sent"
 
 
+def test_parallel_alerts_send_once_and_preserve_other_keys(watcher, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    sending, release, second_read = Event(), Event(), Event()
+    read = watch_mod.read_state
+
+    def read_state():
+        if sending.is_set() and not release.is_set():
+            second_read.set()
+        return read()
+
+    def send(text, log=None):
+        watcher.sent.append(text)
+        sending.set()
+        assert release.wait(5)
+        return True
+
+    monkeypatch.setattr(watch_mod, "read_state", read_state)
+    monkeypatch.setattr(watch_mod.notify, "send", send)
+    monkeypatch.setattr(watch_mod.time, "time", lambda: 100000.0)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(watch_mod.alert, "same", "first")
+        assert sending.wait(5)
+        second = pool.submit(watch_mod.alert, "same", "duplicate")
+        try:
+            assert not second_read.wait(0.15), "a second sender read state during delivery"
+        finally:
+            release.set()
+        assert first.result(timeout=5) and second.result(timeout=5)
+    assert watcher.sent == ["first"]
+    assert watch_mod.alert("other", "other")
+    assert read() == {"same": 100000.0, "other": 100000.0}
+
+
 def test_all_listening_is_exit_0(watcher):
     watcher.outcome.clear()
     assert watch_mod.watch({}) == 0 and watcher.sent == []

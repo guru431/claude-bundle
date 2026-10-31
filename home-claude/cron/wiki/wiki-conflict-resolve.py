@@ -241,7 +241,7 @@ def main() -> int:
             # projects is normal (setup, overview), and the second preview
             # overwrote the first.
             preview = PREVIEW_DIR / (rel.removesuffix(".md").replace("/", "__") + ".merged.md")
-            preview.write_text(merged, encoding="utf-8")
+            atomic_write_text(preview, merged)
             if args.apply:
                 try:
                     write_page(f, fm, merged)

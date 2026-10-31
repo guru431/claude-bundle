@@ -168,8 +168,24 @@ jobs:
           # And drop placeholder passwords like the hooks do: without
           # secret_scan_drop_placeholders this step failed on the README-style
           # `postgres://user:password@localhost` the library documents itself.
-          hits=$(git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/' \
-                 | grep -vF -e "$SECRET_SCAN_ALLOW" | secret_scan_drop_placeholders || true)
+          # grep status 1 is an empty result; status >1 means the scan failed.
+          # Check each stage separately so a failed scanner cannot say clean.
+          scan_rc=0
+          hits=$(git grep -nIE -e "$SECRET_SCAN_PATTERN" -- . ':(exclude).githooks/') || scan_rc=$?
+          if [ "$scan_rc" -gt 1 ]; then
+            echo "::error::git grep failed — tracked files were NOT scanned"
+            exit 1
+          fi
+          scan_rc=0
+          hits=$(printf '%s\n' "$hits" | grep -vF -e "$SECRET_SCAN_ALLOW") || scan_rc=$?
+          if [ "$scan_rc" -gt 1 ]; then
+            echo "::error::secret allow-marker filter failed"
+            exit 1
+          fi
+          if ! hits=$(printf '%s\n' "$hits" | secret_scan_drop_placeholders); then
+            echo "::error::secret placeholder filter failed"
+            exit 1
+          fi
           if [ -n "$hits" ]; then
             echo "$hits"
             echo "::error::Possible secret/token format found in tracked files"
@@ -197,6 +213,7 @@ jobs:
 
       - name: ShellCheck (every shell script in the repo)
         run: |
+          set -o pipefail
           # Not "if available … else skip": a missing shellcheck silently turned
           # this gate off and the step still passed green. It ships on
           # ubuntu-latest, so its absence is a broken runner, not a valid state.
@@ -212,10 +229,9 @@ jobs:
           # --severity=warning: gate on real issues (errors + warnings), not
           # style/info notes (SC2016/SC2129 etc.) on these working scripts.
           # SC1091: don't follow sourced files; scripts are deployed standalone.
-          files=$(git ls-files '*.sh'; git ls-files '.githooks/*')
-          echo "$files" | tr ' ' '\n' | sed 's/^/  /'
-          # shellcheck disable=SC2086 — intentional word splitting of the list
-          echo "$files" | xargs -r shellcheck --severity=warning -e SC1091
+          # NUL separators preserve spaces and newlines in tracked paths.
+          git ls-files -z '*.sh' '.githooks/*' \
+            | xargs -0 -r shellcheck --severity=warning -e SC1091 -f gcc
           echo "shellcheck: done"
 
       - name: Push-guard shell tests

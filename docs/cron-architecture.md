@@ -295,6 +295,28 @@ Configure `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in your `.env` to
 receive alerts — leave those two vars unset to silence every alert (the
 scripts self-guard on their presence).
 
+For a second channel, set `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN` and
+`MATRIX_ROOM_ID` in the same `.env`. All three ship empty: no Matrix request is
+made until they are configured. The homeserver is an origin such as
+`https://matrix.example.org` (no path or trailing slash); the room ID has the
+form `!room:example.org` or a domainless `!hash` in newer room versions, and the
+token's account must already have joined it.
+The mirror sends the same alert as plain `m.text` events, without end-to-end
+encryption; use an unencrypted room. The token and room are checked before
+entering curl's stdin config, and the token stays out of process arguments and
+logs. Partial or malformed settings produce a diagnostic and no Matrix request.
+
+Matrix messages are numbered in parts of at most 30000 characters, reduced
+when needed to keep the escaped UTF-8 content within 58000 bytes and leave room
+for the event envelope. Each part has one transaction ID reused by its retries,
+as required by the [Matrix transaction identifier contract](https://spec.matrix.org/latest/client-server-api/#transaction-identifiers).
+Unlike Telegram's POST, that PUT can be retried after an ambiguous upload
+without duplicating the event. `MATRIX_RETRY_GAPS` defaults to `10,30` seconds;
+commas or spaces are accepted, and an empty value means one attempt. Matrix
+failures go to stderr; the exit code and `notify.send()` result still report
+Telegram delivery. The Python timeout includes both channels' retry schedules,
+including Matrix credentials loaded by the shell child from `.env`.
+
 ## Data, cost & publishing per task
 
 Before enabling a task, know what it reaches out to. Everything not
@@ -313,6 +335,10 @@ carries a machine-readable `# bundle-io:` line, and
 `scripts/check-io-matrix.py` (CI) fails if a task that sends, spends or
 writes anything is missing from the table below. The code is the source;
 this table reflects it.
+
+Every Telegram alert in the table is also sent to your Matrix homeserver and
+room when the optional mirror above is configured, including alerts for which
+Telegram delivery failed. This adds the same alert payload and no LLM call.
 
 | Task | Sends data off-box (to whom) | Spends money | Publishes / pushes | Default state |
 |---|---|---|---|---|

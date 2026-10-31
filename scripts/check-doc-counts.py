@@ -277,7 +277,7 @@ def check_provider_chain(problems: list[str]) -> None:
     # Provider names as they are spelled in prose. A bare arrow means nothing on
     # its own (docs draw data flow with arrows too), so a line must also talk
     # about a fallback/chain before it counts as a claim about ordering.
-    aliases = [("deepseek", r"DeepSeek"), ("opencode", r"OpenCode\s*Go|\bOCG\b"),
+    aliases = [("deepseek", r"DeepSeek"), ("opencode", r"\bOpenCode\b|\bOCG\b"),
                ("deepinfra", r"DeepInfra"), ("local", r"\blocal\b")]
     chain_ctx = re.compile(r"(?i)fallback|chain")
     for rel in DOCS + ["docs/llm-routing.md"]:

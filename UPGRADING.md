@@ -47,6 +47,14 @@ explains why things changed; this file says what to do about it.
 
 ## Unreleased
 
+### Optional Matrix alerts
+
+Existing `.env` files are preserved. To mirror alerts to Matrix, add
+`MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN` and `MATRIX_ROOM_ID` to the deployed
+file; see `docs/cron-architecture.md` for their format. All three must be set.
+Leave them absent to keep the mirror off. Telegram's delivery result remains
+the sender's exit status.
+
 ### Hooks in settings.json
 
 The example (`home-claude/settings.example-with-hooks.json`) changed; the

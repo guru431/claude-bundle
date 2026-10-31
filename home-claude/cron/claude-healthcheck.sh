@@ -83,6 +83,13 @@ local_top_procs() {
     # but prints no CPU column — that output cannot show a runaway process.
     if ps -eo pcpu,pmem,comm --sort=-pcpu >/dev/null 2>&1; then
         ps -eo pcpu,pmem,comm --sort=-pcpu 2>/dev/null | head -6
+    elif ps -eo pcpu,pmem,comm >/dev/null 2>&1; then
+        # BSD ps has the columns but no GNU --sort option.
+        ps -eo pcpu,pmem,comm 2>/dev/null | {
+            IFS= read -r header
+            printf '%s\n' "$header"
+            LC_ALL=C sort -rn | head -5
+        }
     elif command -v powershell.exe >/dev/null 2>&1; then
         powershell.exe -NoProfile -Command '
             Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 `

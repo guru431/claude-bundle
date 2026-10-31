@@ -724,8 +724,8 @@ foreach ($f in (Get-ChildItem $root -Recurse -Include *.ps1, *.sh -File -ErrorAc
             $encBad += "$($f.Name): .sh must use LF, not CRLF — fix the working copy: rm `"$($f.FullName)`" && git checkout -- `"$($f.FullName)`""
         }
     } else {
-        $nonAscii = $false
-        foreach ($b in $bytes) { if ($b -gt 0x7F) { $nonAscii = $true; break } }
+        # Decode and scan in .NET, including bytes beyond the first 64 KiB.
+        $nonAscii = [regex]::IsMatch([System.Text.Encoding]::UTF8.GetString($bytes), '[^\x00-\x7F]')
         if ($nonAscii -and -not $hasBom) {
             $encBad += "$($f.Name): .ps1 with non-ASCII content must be UTF-8 WITH BOM"
         }

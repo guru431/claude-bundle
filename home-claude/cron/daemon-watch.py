@@ -55,6 +55,8 @@ import monitor_checks  # noqa: E402
 from runs import terminal_record  # noqa: E402
 sys.path.insert(0, str(CRON_DIR / "lib"))
 import notify  # noqa: E402
+sys.path.insert(0, str(CRON_DIR / "hooks"))
+from utils import _file_lock  # noqa: E402
 
 # After a boot the services start on their own (with their startup_delay), and a
 # watcher with StartWhenAvailable catches up on a missed run at once. Without the
@@ -145,15 +147,22 @@ def write_state(state: dict) -> None:
 def alert(key: str, msg: str) -> bool:
     """Telegram about `key` at most every 6 hours; marked only once delivered.
     True — delivered or rightly held back; False — a delivery that failed."""
-    if time.time() - read_state().get(key, 0) <= ALERT_EVERY_S:
-        log(f"alert '{key}' held back: the last one went less than 6 h ago")
+    # Hold the same cross-process lock through delivery and the timestamp write:
+    # rereading after delivery alone still lets two runs send the same alert.
+    with _file_lock(STATE_PATH.with_suffix(".lock"),
+                    wait=notify.timeout_for(msg) + 5, stale=3600,
+                    fail_open=False, label="daemon alert", mode="os") as held:
+        if not held:
+            return False
+        state = read_state()
+        if time.time() - state.get(key, 0) <= ALERT_EVERY_S:
+            log(f"alert '{key}' held back: the last one went less than 6 h ago")
+            return True
+        if not notify.send(msg, log=log):
+            return False
+        state[key] = time.time()
+        write_state(state)
         return True
-    if not notify.send(msg, log=log):
-        return False
-    state = read_state()
-    state[key] = time.time()
-    write_state(state)
-    return True
 
 
 def watch(rec: dict) -> int:

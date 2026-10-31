@@ -180,18 +180,25 @@ if ((Test-Path $envFile) -and (Test-Path $manifest)) {
     if ($line -and $line -match '^\s*projects_root\s*:\s*(\S.*?)\s*$') {
         $rootVal = $Matches[1].Trim('"', "'")
         if ($rootVal -and $rootVal -notmatch '^<') {
-            $envLines = @(Get-Content $envFile -Encoding UTF8)
-            $wrote = $false
-            for ($i = 0; $i -lt $envLines.Count; $i++) {
-                if ($envLines[$i] -match '^\s*PROJECTS_ROOT\s*=\s*$') {
-                    $envLines[$i] = "PROJECTS_ROOT=$rootVal"; $wrote = $true; break
+            # Keep the lock file: deleting it after release can let two callers
+            # lock different files. The OS releases this lock even after a crash.
+            $envLock = [System.IO.File]::Open("$envFile.lock", 'OpenOrCreate', 'ReadWrite', 'None')
+            try {
+                $envLines = @(Get-Content $envFile -Encoding UTF8)
+                $wrote = $false
+                for ($i = 0; $i -lt $envLines.Count; $i++) {
+                    if ($envLines[$i] -match '^\s*PROJECTS_ROOT\s*=\s*$') {
+                        $envLines[$i] = "PROJECTS_ROOT=$rootVal"; $wrote = $true; break
+                    }
+                    if ($envLines[$i] -match '^\s*PROJECTS_ROOT\s*=\s*\S') { break }
                 }
-                if ($envLines[$i] -match '^\s*PROJECTS_ROOT\s*=\s*\S') { break }
-            }
-            if ($wrote) {
-                [System.IO.File]::WriteAllLines($envFile, $envLines, [System.Text.UTF8Encoding]::new($false))
-                Write-Host "Generated: .env::PROJECTS_ROOT=$rootVal (from bundle.local.yaml)" -ForegroundColor Green
-            }
+                if ($wrote) {
+                    Copy-Item -LiteralPath $envFile -Destination "$envFile.bak" -Force
+                    [System.IO.File]::WriteAllLines($envFile, $envLines, [System.Text.UTF8Encoding]::new($false))
+                    Write-Host "Generated: .env::PROJECTS_ROOT=$rootVal (from bundle.local.yaml)" -ForegroundColor Green
+                    Write-Host "Backup: $envFile.bak" -ForegroundColor DarkGray
+                }
+            } finally { $envLock.Dispose() }
         }
     }
 }

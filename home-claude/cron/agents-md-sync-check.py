@@ -680,9 +680,7 @@ def main() -> int:
     ap.add_argument("--project", help="check this project only")
     ap.add_argument("--dry-run", "--no-llm", dest="dry_run", action="store_true",
                     help="print the plan; make no LLM call and edit nothing")
-    args, _unknown = ap.parse_known_args()
-    if args.dry_run:
-        sys.argv.append("--dry-run")   # so utils.is_dry_run() agrees
+    args = ap.parse_args()
 
     # ONE terminal ledger record per run, the crash included (cron/runs.py). The
     # job that EDITS files in other people's repositories must not be able to

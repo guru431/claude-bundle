@@ -27,3 +27,20 @@ def test_a_one_digit_trigger_hour_is_compared_with_the_docs(tmp_path, monkeypatc
     check_doc_counts.check_triggers(problems, [{"name": "ClaudeX", "trigger": "Daily 3:00"},
                                                {"name": "ClaudeY", "trigger": "Daily 3:00"}])
     assert len(problems) == 1 and "ClaudeX" in problems[0], problems
+
+
+def test_provider_chain_recognizes_the_opencode_gateway_name(tmp_path, monkeypatch):
+    utils = tmp_path / "home-claude" / "cron" / "hooks" / "utils.py"
+    utils.parent.mkdir(parents=True)
+    utils.write_text(
+        'DEFAULT_CHAIN = ["deepseek", "opencode"]\n'
+        'PROVIDER_CHAIN_NAME = "chain"\n'
+        'if not _raw_provider:\n    LLM_PROVIDER = PROVIDER_CHAIN_NAME\n',
+        encoding="utf-8")
+    (tmp_path / "doc.md").write_text(
+        "Fallback chain: OpenCode Gateway → DeepSeek\n", encoding="utf-8")
+    monkeypatch.setattr(check_doc_counts, "ROOT", tmp_path)
+    monkeypatch.setattr(check_doc_counts, "DOCS", ["doc.md"])
+    problems: list[str] = []
+    check_doc_counts.check_provider_chain(problems)
+    assert len(problems) == 1 and "chain documented as opencode" in problems[0], problems

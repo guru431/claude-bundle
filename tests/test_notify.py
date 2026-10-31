@@ -46,6 +46,15 @@ def test_a_nonzero_exit_is_a_failure_with_one_log_line(tmp_path, monkeypatch, ba
     assert len(lines) == 1 and "exit 1" in lines[0] and "HTTP 400" in lines[0]
 
 
+def test_matrix_failure_is_logged_when_telegram_succeeds(tmp_path, monkeypatch, bash):
+    monkeypatch.setattr(notify, "find_bash", lambda: bash)
+    diagnostic = "telegram-send: matrix: mx001.json not delivered (HTTP 503)"
+    _stub(tmp_path, monkeypatch, f'echo "{diagnostic}" >&2\nexit 0\n')
+    lines: list[str] = []
+    assert notify.send("x", log=lines.append) is True
+    assert lines == [diagnostic]
+
+
 def test_a_timeout_is_a_failure_not_an_exception(tmp_path, monkeypatch):
     """A TimeoutExpired used to escape the wrappers that had no try around them,
     and the run died before it wrote anything down."""
@@ -96,7 +105,7 @@ def test_the_timeout_covers_the_senders_whole_retry_schedule(monkeypatch):
     assert notify.timeout_for("x") == full
     monkeypatch.setenv("TELEGRAM_RETRY_GAPS", "")
     single = notify.timeout_for("x")
-    assert single < 30 + 90
+    assert single == full - (2 * notify.CURL_ATTEMPT_SEC + 30 + 90)
     monkeypatch.delenv("TELEGRAM_RETRY_GAPS")
     assert notify.timeout_for("x") > single   # unset = the default "30 90"
 
@@ -108,6 +117,30 @@ def test_a_signed_gap_is_the_default_as_the_sender_reads_it(monkeypatch):
     for raw in ("-5", "+5", "30,-90", "1_000"):
         monkeypatch.setenv("TELEGRAM_RETRY_GAPS", raw)
         assert notify.timeout_for("x") == default, raw
+
+
+def test_timeout_covers_matrix_retries_and_byte_limited_unicode_parts(monkeypatch):
+    """Matrix may be configured only in the child's .env. Reserve its retry
+    budget even without credentials in this process, including Unicode parts
+    split at the event's byte limit before reaching 30000 characters."""
+    monkeypatch.setenv("TELEGRAM_RETRY_GAPS", "")
+    monkeypatch.setenv("MATRIX_RETRY_GAPS", "")
+    single = notify.timeout_for("x")
+    assert single == 2 * notify.CURL_ATTEMPT_SEC + notify.SLACK_SEC
+    monkeypatch.setenv("MATRIX_RETRY_GAPS", "10,30")
+    full = notify.timeout_for("x")
+    assert full - single == 2 * notify.CURL_ATTEMPT_SEC + 10 + 30
+    monkeypatch.setenv("MATRIX_RETRY_GAPS", "10 30")
+    assert notify.timeout_for("x") == full
+    for raw in ("-5", "*", "10,-30"):
+        monkeypatch.setenv("MATRIX_RETRY_GAPS", raw)
+        assert notify.timeout_for("x") == full
+    monkeypatch.delenv("MATRIX_RETRY_GAPS")
+    assert notify.timeout_for("x") == full
+    ascii_text = "x" * 29000
+    unicode_text = "😀" * 29000
+    # Both fit one 30000-character Matrix part, but Unicode needs two events.
+    assert notify.timeout_for(unicode_text) > notify.timeout_for(ascii_text)
 
 
 # ── the guard: no *.py calls telegram-send.sh around notify.py ───────────────

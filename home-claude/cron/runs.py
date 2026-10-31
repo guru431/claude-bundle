@@ -542,19 +542,17 @@ def _selftest() -> int:
 
     # Round-trip a write into a temp ledger + latest_by_task ordering.
     import tempfile
-    tmp = Path(tempfile.gettempdir()) / "runs_selftest.jsonl"
-    if tmp.exists():
-        tmp.unlink()
-    record_run(task="T", process_rc=0, useful_items=0, delivery="ok", log_path=tmp)
-    record_run(task="T", process_rc=0, artifact_path=__file__, useful_items=9,
-               delivery="ok", log_path=tmp)
-    latest = latest_by_task(read_runs(tmp))["T"]
-    if latest["verdict"] != "green":
-        print(f"  [FAIL] latest_by_task must take the newest (green), got {latest['verdict']}")
-        ok = False
-    else:
-        print("  [OK ] latest_by_task takes the task's newest record")
-    tmp.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix="runs-selftest-") as temp_dir:
+        tmp = Path(temp_dir) / "runs.jsonl"
+        record_run(task="T", process_rc=0, useful_items=0, delivery="ok", log_path=tmp)
+        record_run(task="T", process_rc=0, artifact_path=__file__, useful_items=9,
+                   delivery="ok", log_path=tmp)
+        latest = latest_by_task(read_runs(tmp))["T"]
+        if latest["verdict"] != "green":
+            print(f"  [FAIL] latest_by_task must take the newest (green), got {latest['verdict']}")
+            ok = False
+        else:
+            print("  [OK ] latest_by_task takes the task's newest record")
 
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1

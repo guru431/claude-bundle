@@ -24,6 +24,17 @@ import runs  # noqa: E402
 WEDNESDAY = datetime(2026, 9, 16, 9, 30)
 MONDAY = datetime(2026, 9, 21, 9, 30)
 
+
+def test_selftest_does_not_clobber_another_runs_temp_ledger(tmp_path, monkeypatch):
+    import tempfile
+
+    sentinel = tmp_path / "runs_selftest.jsonl"
+    sentinel.write_text("another run\n", encoding="utf-8")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    assert runs._selftest() == 0
+    assert sentinel.read_text(encoding="utf-8") == "another run\n"
+    assert list(tmp_path.iterdir()) == [sentinel], "the self-test left its ledger behind"
+
 REGISTRY = ("version: 1\ntasks:\n"
             "  - name: ClaudeDaily\n    trigger: Daily 02:00\n"
             "  - name: ClaudeNeverRan\n    trigger: Daily 03:00\n")

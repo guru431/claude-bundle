@@ -134,14 +134,14 @@ def read_existing_pages() -> dict[str, str]:
 
 
 def compile_article(article_path: Path,
-                    existing_pages: dict[str, str]) -> tuple[list[dict] | None, str]:
+                    existing_pages: dict[str, str],
+                    prompt: str) -> tuple[list[dict] | None, str]:
     """Call the LLM to compile one article into wiki pages → (changes, kind).
 
     `changes` is None when the article could not be compiled, and `kind` (an
     LLMResult kind) says whether a retry can help — or "gone": the file is no
     longer there, and there is nothing to compile.
     """
-    prompt = PROMPT_PATH.read_text(encoding="utf-8")
     try:
         article_text = article_path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -362,6 +362,7 @@ def _compile_kb(rec: dict) -> int:
 
     existing_pages = read_existing_pages()
     log(f"Existing wiki pages: {len(existing_pages)}")
+    prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
     total_created = 0
     hard_failure = False
@@ -388,7 +389,7 @@ def _compile_kb(rec: dict) -> int:
         rel = str(article_path.relative_to(KBNEWS_DIR)).replace("\\", "/")
         log(f"[{i+1}/{len(new_files)}] Processing: {rel}")
 
-        changes, kind = compile_article(article_path, existing_pages)
+        changes, kind = compile_article(article_path, existing_pages, prompt)
         if kind == "gone":
             log("  → gone since the listing — skipped (nothing to compile)")
             continue

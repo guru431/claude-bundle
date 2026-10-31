@@ -106,6 +106,8 @@ find_python() {  # $1 = minimum minor version of Python 3
             return 0
         fi
     done
+    # Callers use command substitution under set -e: empty output means not
+    # found, and must remain a successful probe so they can offer lite instead.
     return 0
 }
 

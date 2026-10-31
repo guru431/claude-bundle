@@ -49,6 +49,16 @@ def bundle_tree(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def test_source_hash_detects_changes_after_the_first_chunk(bundle_tree, monkeypatch):
+    u = _import_utils(monkeypatch, bundle_tree)
+    source = bundle_tree / "source.md"
+    prefix = b"x" * 65536
+    source.write_bytes(prefix + b"before")
+    before = u.source_hash(source)
+    source.write_bytes(prefix + b"after!")
+    assert u.source_hash(source) != before
+
+
 # ── log-retention: a negative window must never delete anything ──────────────
 
 @pytest.mark.parametrize("value", ["-1", "abc", "99999999"])

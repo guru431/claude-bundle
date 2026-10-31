@@ -469,6 +469,34 @@ def test_the_arguments_of_an_exec_task_are_not_a_target_to_find(tmp_path: Path):
 
 
 @windows_only
+@pytest.mark.integration   # loads the ScheduledTasks module; never registers a task
+def test_an_invalid_action_is_skipped_and_later_tasks_are_still_checked(tmp_path: Path):
+    bad, good = (f"ClaudeBundleTest-{uuid.uuid4().hex[:12]}" for _ in range(2))
+    reg = _deployment(tmp_path, (
+        f"  - name: {bad}\n"
+        "    kind: exec\n"
+        "    script: --version\n"
+        "    trigger: Daily 02:00\n"
+        "    timeout_hours: 1\n"
+        f"  - name: {good}\n"
+        "    kind: exec\n"
+        f"    execute: {sys.executable}\n"
+        "    script: --version\n"
+        "    trigger: Daily 02:00\n"
+        "    timeout_hours: 1\n"))
+    env = dict(os.environ, TEMP=str(tmp_path), TMP=str(tmp_path))
+
+    r = run_ps_file(SYNC, "-DryRun", "-RegistryPath", reg, env=env)
+
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert f"[skipped  ] {bad}" in r.stdout, r.stdout
+    assert "action: kind=exec requires 'execute:'" in r.stdout, r.stdout
+    assert good in r.stdout and "=== Summary ===" in r.stdout, r.stdout
+    assert re.search(r"(?m)^\s+created\s+1$", r.stdout), r.stdout
+    assert re.search(r"(?m)^\s+skipped\s+1$", r.stdout), r.stdout
+
+
+@windows_only
 @pytest.mark.integration   # ~1.6 s: loading the ScheduledTasks module dominates
 def test_an_only_name_the_registry_lacks_is_refused(tmp_path: Path):
     """A typo'd -Only name was skipped in silence and the sync exited 0 without

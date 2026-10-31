@@ -8,6 +8,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 PAGE = """# {title}
 
 Some facts about {title}.
@@ -100,6 +102,28 @@ def test_same_named_pages_of_two_projects_get_two_previews(cron_copy: Path, monk
     previews = sorted(p.name for p in wcr.PREVIEW_DIR.glob("*.merged.md"))
     assert previews == ["projects__alpha__setup.merged.md", "projects__beta__setup.merged.md"]
     assert "Alpha setup" in (wcr.PREVIEW_DIR / previews[0]).read_text(encoding="utf-8")
+
+
+def test_interrupted_preview_keeps_the_previous_complete_result(cron_copy: Path, monkeypatch):
+    _collision(cron_copy, "projects/alpha/setup.md", "Alpha setup")
+    wcr = _load(cron_copy, monkeypatch, "wcr_atomic_preview")
+    wcr.PREVIEW_DIR.mkdir(parents=True)
+    preview = wcr.PREVIEW_DIR / "projects__alpha__setup.merged.md"
+    preview.write_text("previous complete result\n", encoding="utf-8")
+    write = Path.write_text
+
+    def interrupted(path, text, *args, **kwargs):
+        if ".merged.md" in path.name:
+            write(path, text[:5], *args, **kwargs)
+            raise OSError("disk full during preview write")
+        return write(path, text, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", interrupted)
+    monkeypatch.setattr(wcr, "llm_call", _merge)
+    monkeypatch.setattr(sys, "argv", ["wiki-conflict-resolve.py"])
+    with pytest.raises(OSError, match="disk full"):
+        wcr.main()
+    assert preview.read_text(encoding="utf-8") == "previous complete result\n"
 
 
 def test_a_page_that_cannot_be_written_fails_alone(cron_copy: Path, monkeypatch):

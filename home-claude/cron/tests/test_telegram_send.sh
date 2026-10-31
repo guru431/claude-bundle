@@ -42,6 +42,7 @@ export CAPTURE_DIR="$TMP/captured"
 export PATH="$TMP/bin:$PATH"
 export TELEGRAM_BOT_TOKEN="stub-token"
 export TELEGRAM_CHAT_ID="12345"
+unset MATRIX_HOMESERVER MATRIX_ACCESS_TOKEN MATRIX_ROOM_ID MATRIX_RETRY_GAPS
 
 # --- Case 1: a short message arrives whole, not as an empty text ---
 bash "$SCRIPT" "alert-line-one
@@ -141,5 +142,116 @@ long=$(printf 'glob probe %.0s' $(seq 1 900))     # ~10k chars: several parts
 [ "$(cat "$CALLS")" -gt 1 ] || fail "T5: the long message went out in one part"
 [ "$(grep -cF "is not a list of seconds" "$TMP/stderr")" = "1" ] \
     || fail "TELEGRAM_RETRY_GAPS='*' was taken for a retry schedule, or warned once per part"
+
+# --- Case 6: optional Matrix mirror, with an idempotent retry after upload ---
+mkdir -p "$TMP/matrix-bin" "$TMP/matrix"
+cat > "$TMP/matrix-bin/curl" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$@" >> "$MX_CAPTURE/argv"
+body=""
+method=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --data-binary) body="$2"; shift 2 ;;
+        -X) method="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+config=$(cat)
+if [ "$method" = POST ]; then
+    printf '{"ok":true}\n%s 10' "${TG_CODE:-200}"
+    exit 0
+fi
+n=$(($(cat "$MX_CAPTURE/calls" 2>/dev/null || echo 0) + 1))
+echo "$n" > "$MX_CAPTURE/calls"
+printf '%s\n' "$config" > "$MX_CAPTURE/config$n"
+cp "${body#@}" "$MX_CAPTURE/body$n.json"
+code=$(sed -n "${n}p" "$MX_CAPTURE/answers")
+printf '\n%s' "${code:-200}"
+STUB
+chmod +x "$TMP/matrix-bin/curl"
+export PATH="$TMP/matrix-bin:$PATH"
+export MX_CAPTURE="$TMP/matrix"
+bash "$SCRIPT" "Matrix disabled by default" > /dev/null 2> "$TMP/stderr" \
+    || fail "default Telegram send failed"
+[ ! -f "$MX_CAPTURE/calls" ] || fail "Matrix sent without configuration"
+export MATRIX_HOMESERVER="https://matrix.example.org:8448"
+export MATRIX_ACCESS_TOKEN="stub-matrix-access-token"
+export MATRIX_ROOM_ID="!stubroom:example.org"
+export MATRIX_RETRY_GAPS=0 TELEGRAM_RETRY_GAPS=""
+printf '000\n200\n' > "$MX_CAPTURE/answers"
+bash "$SCRIPT" "Matrix retry probe" > "$TMP/stdout" 2> "$TMP/stderr" \
+    || fail "Matrix retry changed Telegram success"
+[ "$(cat "$MX_CAPTURE/calls")" = 2 ] || fail "Matrix did not retry a lost response"
+cmp -s "$MX_CAPTURE/config1" "$MX_CAPTURE/config2" \
+    || fail "Matrix retried with another transaction ID — would duplicate the event"
+grep -qF '/rooms/%21stubroom%3Aexample.org/send/m.room.message/' "$MX_CAPTURE/config1" \
+    || fail "Matrix room ID was not encoded in the API path"
+grep -qF 'Authorization: Bearer stub-matrix-access-token' "$MX_CAPTURE/config1" \
+    || fail "Matrix authentication did not reach the stdin config"
+grep -qF 'stub-matrix-access-token' "$MX_CAPTURE/argv" "$TMP/stdout" "$TMP/stderr" \
+    && fail "Matrix token leaked into argv or logs"
+grep -qF 'Matrix retry probe' "$MX_CAPTURE/body1.json" || fail "Matrix text missing"
+grep -qF '"msgtype": "m.text"' "$MX_CAPTURE/body1.json" || fail "Matrix event type missing"
+
+# A long Unicode alert must retain its tail without exceeding the byte limit.
+cp "$MX_CAPTURE/config1" "$TMP/first-txn"
+rm -f "$MX_CAPTURE"/calls "$MX_CAPTURE"/body*.json "$MX_CAPTURE"/config*
+printf '200\n200\n200\n' > "$MX_CAPTURE/answers"
+# shellcheck source=../lib/runtime.sh
+. "$(dirname "$SCRIPT")/lib/runtime.sh"
+have_python || fail "no Python for the Matrix fixture"
+PYTHONIOENCODING=utf-8 "$PYTHON" -c 'print("😀" * 30001 + "TAILMARKER", end="")' > "$TMP/long-matrix.txt"
+bash "$SCRIPT" < "$TMP/long-matrix.txt" > /dev/null 2> "$TMP/stderr" \
+    || fail "long Matrix message changed Telegram success"
+[ "$(cat "$MX_CAPTURE/calls")" = 3 ] || fail "Matrix Unicode message was not split by bytes"
+MX_EXPECTED="$TMP/long-matrix.txt" "$PYTHON" - <<'PY' || fail "Matrix split payload was lost or oversized"
+import json, os, pathlib, re
+root = pathlib.Path(os.environ["MX_CAPTURE"])
+parts = [root / f"body{n}.json" for n in (1, 2, 3)]
+bodies = [json.loads(p.read_text(encoding="utf-8"))["body"] for p in parts]
+assert all(p.stat().st_size < 59000 for p in parts)
+assert all(body.startswith(f"({n}/3)\n") for n, body in enumerate(bodies, 1))
+text = "".join(re.sub(r"^\(\d+/\d+\)\n", "", body) for body in bodies)
+assert text == pathlib.Path(os.environ["MX_EXPECTED"]).read_text(encoding="utf-8")
+urls = [re.search(r'url = "(.*)"', (root / f"config{n}").read_text()).group(1)
+        for n in (1, 2, 3)]
+assert len(set(urls)) == 3
+PY
+cmp -s "$TMP/first-txn" "$MX_CAPTURE/config1" \
+    && fail "a new message reused the previous Matrix transaction ID"
+
+# Matrix failures are diagnostics; Telegram alone decides the exit status.
+rm -f "$MX_CAPTURE/calls"
+printf '503\n503\n' > "$MX_CAPTURE/answers"
+bash "$SCRIPT" "Matrix unavailable" > /dev/null 2> "$TMP/stderr" \
+    || fail "Matrix failure changed Telegram's successful exit"
+[ "$(cat "$MX_CAPTURE/calls")" = 2 ] || fail "Matrix retry budget was not respected"
+grep -qF 'matrix: mx001.json not delivered (HTTP 503)' "$TMP/stderr" \
+    || fail "Matrix failure was not reported"
+rm -f "$MX_CAPTURE/calls"
+printf '200\n' > "$MX_CAPTURE/answers"
+if TG_CODE=400 MATRIX_ROOM_ID='!domainless_hash-_' bash "$SCRIPT" "Telegram unavailable" > /dev/null 2> "$TMP/stderr"; then
+    fail "Matrix success hid Telegram's failure"
+fi
+[ "$(cat "$MX_CAPTURE/calls")" = 1 ] || fail "Telegram failure prevented the Matrix mirror"
+grep -qF '/rooms/%21domainless_hash-_/send/' "$MX_CAPTURE/config1" \
+    || fail "a current domainless Matrix room ID was refused"
+
+# A malformed or partial config is refused before it reaches curl's parser.
+for bad in token room homeserver partial; do
+    rm -f "$MX_CAPTURE/calls"
+    case "$bad" in
+        token) MATRIX_ACCESS_TOKEN=$'bad"\noutput = "injected' bash "$SCRIPT" "bad config" ;;
+        room) MATRIX_ROOM_ID=$'!room:example.org\nheader = bad' bash "$SCRIPT" "bad config" ;;
+        homeserver) MATRIX_HOMESERVER='https://matrix.example.org/"' bash "$SCRIPT" "bad config" ;;
+        partial) MATRIX_ROOM_ID='' bash "$SCRIPT" "bad config" ;;
+    esac > /dev/null 2> "$TMP/stderr"
+    [ "$?" = 0 ] || fail "invalid Matrix $bad changed Telegram's exit"
+    [ ! -f "$MX_CAPTURE/calls" ] || fail "invalid Matrix $bad reached curl"
+    grep -qF 'incomplete or invalid configuration' "$TMP/stderr" \
+        || fail "invalid Matrix $bad was not diagnosed"
+    grep -qF 'injected' "$TMP/stderr" && fail "invalid Matrix token leaked into logs"
+done
 
 echo "PASS: test_telegram_send.sh"

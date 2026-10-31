@@ -19,8 +19,8 @@ What send() guarantees:
 - the text goes in on stdin (from a file), never argv — argv is visible in
   the process list; the output goes to a temp file, not a pipe, so the
   timeout is exact;
-- the timeout covers the sender's whole retry schedule (TELEGRAM_RETRY_GAPS)
-  for every part of the message;
+- the timeout covers both retry schedules (TELEGRAM_RETRY_GAPS and the optional
+  Matrix mirror's MATRIX_RETRY_GAPS) for every part of the message;
 - on timeout the whole process tree is stopped: `Git\\bin\\bash.exe` is only a
   launcher, and killing it alone left the real bash and curl running;
 - True only on a confirmed delivery (exit 0). A timeout, an OSError or a
@@ -33,6 +33,7 @@ Calling telegram-send.sh from *.py around this module is what
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -53,6 +54,11 @@ PART_CHARS = 4000
 SLACK_SEC = 60
 #: telegram-send.sh's gaps between attempts when TELEGRAM_RETRY_GAPS is unset.
 DEFAULT_GAPS = "30,90"
+#: Optional Matrix mirror: same maximum characters and escaped UTF-8 bytes as
+#: telegram-send.sh's splitter. One JSON character occupies at most six bytes.
+MATRIX_PART_CHARS = 30000
+MATRIX_PART_BYTES = 58000
+DEFAULT_MATRIX_GAPS = "10,30"
 
 
 def _stderr(msg: str) -> None:
@@ -71,14 +77,14 @@ def find_bash() -> str | None:
     return resolve()
 
 
-def _gaps() -> list[int]:
+def _gaps(var: str = "TELEGRAM_RETRY_GAPS", default: str = DEFAULT_GAPS) -> list[int]:
     """The sender's retry schedule — TELEGRAM_RETRY_GAPS, read the way the shell
     reads it (unset = the default, empty = a single attempt). Digits, commas and
     spaces only, as the shell's check: int() also took "-5" and "+5", which the
     sender replaces with the default — a shorter wait killed its retries."""
-    raw = os.environ.get("TELEGRAM_RETRY_GAPS", DEFAULT_GAPS)
+    raw = os.environ.get(var, default)
     if not re.fullmatch(r"[0-9,\s]*", raw):
-        raw = DEFAULT_GAPS
+        raw = default
     return [int(g) for g in raw.replace(",", " ").split()]
 
 
@@ -86,10 +92,21 @@ def timeout_for(text: str) -> int:
     """How long to wait for telegram-send.sh: every attempt and every gap of its
     retry schedule, for each part of the message, plus headroom. A wait sized
     for one attempt killed the sender before its first retry."""
-    gaps = _gaps()
-    per_part = (len(gaps) + 1) * CURL_ATTEMPT_SEC + sum(gaps)
-    parts = max(1, math.ceil(len(text.strip()) / PART_CHARS))
-    return parts * per_part + SLACK_SEC
+    def schedule(gaps: list[int], parts: int) -> int:
+        return parts * ((len(gaps) + 1) * CURL_ATTEMPT_SEC + sum(gaps))
+
+    text = text.strip()
+    parts = max(1, math.ceil(len(text) / PART_CHARS))
+    # A Matrix part ends at the character limit or with fewer than six escaped
+    # bytes left. Sum both ceilings for an upper bound on that greedy splitter.
+    escaped_bytes = len(json.dumps(text, ensure_ascii=False)[1:-1].encode("utf-8"))
+    mx_parts = max(1, math.ceil(len(text) / MATRIX_PART_CHARS)
+                   + math.ceil(escaped_bytes / (MATRIX_PART_BYTES - 6)) - 1)
+    # Reserve this even when the current environment has no Matrix credentials:
+    # the shell child may load them from .env after this timeout is calculated.
+    return (schedule(_gaps(), parts)
+            + schedule(_gaps("MATRIX_RETRY_GAPS", DEFAULT_MATRIX_GAPS), mx_parts)
+            + SLACK_SEC)
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -153,12 +170,18 @@ def send(text: str, log: Callable[[str], None] | None = None,
         except OSError as e:
             log(f"notify: telegram-send.sh could not start ({type(e).__name__}: {e})")
             return False
-        if rc == 0:
-            return True
         try:
             out = out_path.read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
             out = ""
+        if rc == 0:
+            # Telegram success must not discard a Matrix failure captured from
+            # stderr; callers still need it in the task log without changing
+            # Telegram's delivery result.
+            for line in out.splitlines():
+                if line.startswith("telegram-send: matrix:"):
+                    log(line)
+            return True
         # The last lines carry the Bot API error; bodies of delivered parts do not matter.
         log(f"notify: telegram-send.sh exit {rc}: {out[-300:]}")
         return False

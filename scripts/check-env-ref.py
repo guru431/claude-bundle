@@ -129,6 +129,12 @@ CODE_ONLY = {
     # Test seam: cron/tests/*.sh export it to point github-push.sh at a scratch
     # tree. The script derives it from its own location otherwise.
     "BUNDLE_ROOT",
+    # Derived by telegram-send.sh and passed to its Python payload builder.
+    # It names one invocation's temporary directory, never a user setting.
+    "PARTS_DIR",
+    # cron/tests/test_telegram_send.sh only: scratch capture paths and the fake
+    # Telegram HTTP status. The embedded Python/stub curl read these exports.
+    "MX_CAPTURE", "MX_EXPECTED", "TG_CODE",
 }
 
 # Provided by the OS / the shell, not by the bundle.
@@ -306,7 +312,9 @@ def code_env_vars() -> dict[str, set[str]]:
         if path.suffix == ".sh":
             assigned = {m.group(1) or m.group(2) for m in SH_ASSIGN_RE.finditer(text)}
             assigned -= {m.group(1) for m in SH_SELF_ASSIGN_RE.finditer(text)}
-            names = {n for n in names if n not in assigned}
+            # Only shell references are locals after a shell assignment. Python
+            # in a heredoc has its own scope: `X=os.environ.get("X")` still reads
+            # X from the environment passed to that process.
             for m in SH_REF_RE.finditer(text):
                 name = m.group(1) or m.group(2)
                 if name not in assigned:

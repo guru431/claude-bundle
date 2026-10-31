@@ -229,7 +229,7 @@ def check_orphan_pages(pages: dict[str, list[Path]]) -> list[str]:
         rel = f.relative_to(WIKI_ROOT)
         if any(p in SKIP_PARTS for p in rel.parts):
             continue
-        if rel.as_posix() in GENERATED_INDEXES:
+        if f.name in WIKI_NON_PAGES or rel.as_posix() in GENERATED_INDEXES:
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
         source = link_key(rel.with_suffix("").as_posix())

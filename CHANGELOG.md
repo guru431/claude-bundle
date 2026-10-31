@@ -5,6 +5,21 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Resolved 18 findings from the latest review; six false positives were checked
+  against the implementation and archived locally. Alert deduplication now locks
+  delivery and state together, bootstrap backs up `.env` under an exclusive lock,
+  and malformed task actions no longer abort the remaining scheduler sync.
+- Secret scans in CI and auto-push fail closed on scanner errors; shellcheck
+  handles spaces in tracked paths. Environment and provider documentation guards
+  cover embedded Python reads and the full OpenCode Gateway name.
+- Wiki orphan checks ignore links from service files, merge previews are written
+  atomically, source hashes cover the entire file, and article compilation reads
+  its prompt once per batch. Self-test ledgers use private temporary directories;
+  BSD process listings are sorted by CPU and unknown sync-check flags are refused.
+- Implemented the optional Matrix alert mirror, disabled until its three settings
+  are supplied. Retries reuse transaction IDs, long Unicode messages are split
+  within event limits, and the Python notifier reserves both channels' timeouts.
+
 Clears FINDINGS.md and IDEAS.md again — 62 findings and 28 ideas from a full
 review of the tree. Every entry was checked against the code before anything was
 changed, and almost every fix comes with a regression test that fails on the code

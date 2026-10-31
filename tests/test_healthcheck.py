@@ -30,6 +30,25 @@ HERE = "ClaudeTaskMonitor" if os.name == "nt" else "ClaudeTaskMonitorPosix"
 NO_MONITOR = 3
 
 
+@pytest.mark.integration
+def test_bsd_process_list_is_sorted_by_cpu(bash):
+    text = SCRIPT.read_text(encoding="utf-8")
+    function = re.search(r"^local_top_procs\(\) \{\n.*?^\}", text, re.M | re.S).group()
+    ps_stub = '''ps() {
+        case "$*" in
+            *--sort*) return 1 ;;
+            '-eo pcpu,pmem,comm') printf 'CPU MEM COMMAND\\n1.0 2.0 idle\\n90.0 1.0 busy\\n5.0 1.0 worker\\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    '''
+    result = subprocess.run([bash, "-c", ps_stub + function + "\nlocal_top_procs"],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["CPU MEM COMMAND", "90.0 1.0 busy",
+                                          "5.0 1.0 worker", "1.0 2.0 idle"]
+
+
 def registry(windows_on: bool, posix_on: bool) -> str:
     return ("version: 1\ntasks:\n"
             "  - name: ClaudeTaskMonitor\n    platform: windows\n"

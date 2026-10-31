@@ -3629,13 +3629,16 @@ def write_page(path: Path, frontmatter: dict, body: str) -> None:
 
 
 def source_hash(source_path: str | Path, chunk_size: int = 65536) -> str:
-    """SHA-256 of the first chunk_size bytes — used for source deduplication."""
+    """SHA-256 of the whole source, read in bounded chunks for deduplication."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
     p = Path(source_path)
     if not p.exists():
         return ""
     h = hashlib.sha256()
     with p.open("rb") as f:
-        h.update(f.read(chunk_size))
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
     return h.hexdigest()[:16]
 
 

@@ -82,7 +82,7 @@ rules:
   # (`C:\proj\.env`) and a quoted one count as a path boundary. direnv's
   # `.envrc` holds the same exports and is in that table too (exactly that
   # name), but `rc` is neither a dot nor a boundary, so `cat .envrc` passed.
-  - pattern: '\b(?:cat|less|more|head|tail|bat)\b[^;&|\n]*(?:^|[\s/\\"''])\.env(?:rc|(?!\.(?:example|sample|template|dist)(?![\w-]))(?:\.[A-Za-z0-9_.-]+)?)(?:[\s"'';&|)]|$)'
+  - pattern: '\b(?:cat|less|more|head|tail|bat)\b[^;&|\n]*[\s/\\"'']\.env(?:rc|(?!\.(?:example|sample|template|dist)(?![\w-]))(?:\.[A-Za-z0-9_.-]+)?)(?:[\s"'';&|)]|$)'
     severity: ask
     reason: >-
       Printing a .env puts live credentials into the transcript, which is then

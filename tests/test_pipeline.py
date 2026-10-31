@@ -1753,6 +1753,17 @@ def test_a_page_linking_only_to_itself_is_an_orphan(bundle: Path, monkeypatch):
     assert "WARN: orphan page: projects/myproject/selfish" not in lint.check_orphan_pages(pages)
 
 
+def test_service_files_do_not_vouch_for_orphan_pages(bundle: Path, monkeypatch):
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_service_links", "wiki-lint.py")
+    proj = bundle / "wiki" / "projects" / "myproject"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "lonely.md").write_text("# Lonely\n", encoding="utf-8")
+    for name in ("_log.md", "CLAUDE.md", "patterns.md"):
+        (proj / name).write_text("[[lonely]]\n", encoding="utf-8")
+    assert "WARN: orphan page: projects/myproject/lonely" in lint.check_orphan_pages(
+        lint.find_all_pages())
+
+
 def test_lint_resolves_links_the_way_obsidian_does(bundle: Path, monkeypatch):
     """Case-insensitively. Obsidian resolves `[[Hugo]]` to `hugo.md`, the
     compilers dedupe page names case-insensitively, and so do the Windows and

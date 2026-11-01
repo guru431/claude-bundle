@@ -5,6 +5,9 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Clarified the Windows verification order: finish other local checks before
+  the fast suite, and recheck load-sensitive Git Bash timeouts with the module
+  and full suite running on their own. Test limits and coverage are unchanged.
 - Resolved 18 findings from the latest review; six false positives were checked
   against the implementation and archived locally. Alert deduplication now locks
   delivery and state together, bootstrap backs up `.env` under an exclusive lock,

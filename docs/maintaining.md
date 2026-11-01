@@ -121,6 +121,11 @@ committed, and all its values are empty.
 
 ## Local verification — the traps
 
+- **Run the fast suite after the other local checks finish.** On Windows,
+  parallel ShellCheck, encoding scans or self-tests compete with pytest's
+  workers for process startup and can push a Git Bash subprocess past its
+  timeout. If a test times out only in a busy run, rerun its module and then
+  the complete fast suite on their own before changing timeouts or markers.
 - **The suite leaves the checkout as it found it.** `tests/conftest.py`
   sandboxes every run, and a run that created, changed or deleted anything
   under `home-claude/cron/logs`, `home-claude/cron/state`, `home-claude/wiki` or

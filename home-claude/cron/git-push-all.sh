@@ -277,7 +277,8 @@ guard_secrets() {
         hits=$(printf '%s\n' "$diff" | secret_scan_diff)
     fi
     if ! bin_hits=$(secret_scan_changed_binaries index ""); then
-        bin_hits="${bin_hits:-scan-error: binary scan failed, so the staged binary files were NOT scanned}"
+        bin_hits="${bin_hits:+$bin_hits
+}scan-error: binary scan failed, so the staged binary files were NOT scanned"
     fi
     hits="${hits:+$hits${bin_hits:+
 }}$bin_hits"
@@ -313,7 +314,8 @@ guard_secrets_preview() {
     fi
     # Tracked binary files, as guard_secrets reads them from the index.
     if ! bin_hits=$(secret_scan_changed_binaries worktree "" "${SWEEP_EXCLUDES[@]}"); then
-        bin_hits="${bin_hits:-scan-error: binary scan failed, so the working-tree binary files were NOT scanned}"
+        bin_hits="${bin_hits:+$bin_hits
+}scan-error: binary scan failed, so the working-tree binary files were NOT scanned"
     fi
     hits="${hits:+$hits${bin_hits:+
 }}$bin_hits"

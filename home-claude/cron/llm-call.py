@@ -30,6 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import llm_call_ex  # noqa: E402
 
 try:
+    if len(sys.argv) > 2:
+        raise ValueError
     timeout = int(sys.argv[1]) if len(sys.argv) > 1 else 600
 except ValueError:
     timeout = 0

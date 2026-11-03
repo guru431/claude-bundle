@@ -5,6 +5,13 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Handoffs keep whole messages and their roles; wiki search no longer matches
+  a page solely through its project directory. Index rebuilds preserve adjacent
+  custom tables, LLM CLI calls reject extra arguments, and MCP reader threads
+  close their output pipe even when a descendant outlives the probe.
+- Commit-message scans check message text without treating generated commit
+  IDs as personal data; the same denylisted text in a message remains blocked.
+- A binary scanner failure stays blocking even when it also emits a note.
 - Clarified the Windows verification order: finish other local checks before
   the fast suite, and recheck load-sensitive Git Bash timeouts with the module
   and full suite running on their own. Test limits and coverage are unchanged.

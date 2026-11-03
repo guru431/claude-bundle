@@ -218,9 +218,12 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
     lines: queue.Queue = queue.Queue()
 
     def pump() -> None:
-        for raw in proc.stdout:
-            lines.put(raw.decode("utf-8", errors="replace"))
-        lines.put(None)                    # EOF: the server closed stdout
+        try:
+            for raw in proc.stdout:
+                lines.put(raw.decode("utf-8", errors="replace"))
+        finally:
+            proc.stdout.close()
+            lines.put(None)                # EOF: the server closed stdout
 
     reader = threading.Thread(target=pump, daemon=True)
     reader.start()

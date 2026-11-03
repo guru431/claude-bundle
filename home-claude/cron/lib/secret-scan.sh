@@ -540,9 +540,9 @@ secret_scan_messages() {
     # takes them (`origin/main..main`, `<sha> --not --remotes=origin`).
     # Prints `commit message: N:line` per hit; returns 1 on any.
     #
-    # %B and not the default format: the author line is identity metadata that
-    # repeats across a whole, already-public history, and `.sanitize-patterns`
-    # rightly names the username it carries.
+    # Scan only %B: author lines and generated commit ids are metadata. A
+    # numeric denylist entry can match a commit id by chance; the same text
+    # written into the message itself must still be scanned.
     #
     # --ignore-missing: a push over a commit this clone never fetched (made in
     # the web UI, say) hands pre-push a remote sha that is not here. git log
@@ -553,7 +553,7 @@ secret_scan_messages() {
     _ssm_pat="$1"
     shift
     _ssm_fail=0
-    if ! _ssm_msgs=$(git log --ignore-missing --format='%H%n%B%n' "$@" 2>/dev/null); then
+    if ! _ssm_msgs=$(git log --ignore-missing --format='%B%n' "$@" 2>/dev/null); then
         printf 'scan-error: git log could not list the commit messages, so they were NOT scanned\n'
         _ssm_fail=1
         _ssm_msgs=""

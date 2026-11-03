@@ -492,7 +492,7 @@ def test_config_report_says_why_each_provider_cannot_answer(cron_copy: Path, mon
 # ── llm-call.py tells a shell task WHY there is no answer ────────────────────
 
 @pytest.mark.parametrize("case,expected_rc", [
-    ("ok", 0), ("empty-answer", 1), ("empty-stdin", 2), ("bad-timeout", 2),
+    ("ok", 0), ("empty-answer", 1), ("empty-stdin", 2), ("bad-timeout", 2), ("extra-argument", 2),
     ("transient", 3), ("config", 4),
 ])
 def test_llm_call_cli_exit_code_says_why(cron_copy: Path, tmp_path: Path,
@@ -511,6 +511,8 @@ def test_llm_call_cli_exit_code_says_why(cron_copy: Path, tmp_path: Path,
         stdin = "  \n"
     elif case == "bad-timeout":
         argv.append("ten")
+    elif case == "extra-argument":
+        argv.extend(["600", "unexpected"])
     elif case == "config":
         env["WIKI_LLM_PROVIDER"] = "lokal"
     elif case == "transient":

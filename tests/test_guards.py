@@ -479,6 +479,39 @@ def test_secret_scan_reads_utf16(tmp_path: Path, bash: str):
         f"a UTF-16 file with a token scanned clean:\n{res.stdout}\n{res.stderr}"
 
 
+def test_binary_scanner_failure_with_a_note_still_blocks(tmp_path: Path, bash: str):
+    source = (CRON / "git-push-all.sh").read_text(encoding="utf-8")
+    body = source.split("guard_secrets() {", 1)[1].split("\n}\n", 1)[0]
+    script = tmp_path / "binary-error.sh"
+    script.write_text('''LOG_FILE=gate.log
+BOSS_ROOT=/nonexistent
+git() { return 0; }
+secret_scan_diff() { cat >/dev/null; }
+secret_scan_changed_binaries() { printf 'note: scanner incomplete\\n'; return 2; }
+secret_scan_filter_hits() { local data; data=$(cat); case "$data" in *scan-error:*) return 1;; *) return 0;; esac; }
+guard_secrets() {''' + body + "\n}\nguard_secrets fixture\n", encoding="utf-8", newline="\n")
+    result = subprocess.run([bash, str(script)], cwd=tmp_path, capture_output=True,
+                            text=True, timeout=15)
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_message_scan_ignores_commit_ids_but_checks_message_text(tmp_path: Path, bash: str):
+    lib = (CRON / "lib" / "secret-scan.sh").as_posix()
+    script = tmp_path / "messages.sh"
+    script.write_text(
+        f". '{lib}'\n"
+        "printf '123456\\n' > deny.txt\n"
+        "git() { case \"$*\" in *--format=%B%n*) ;; *) printf '123456abcdef\\n';; esac; "
+        "printf '%s\\n' \"$MESSAGE\"; }\n"
+        "MESSAGE=ordinary\nsecret_scan_messages deny.txt HEAD >/dev/null\necho metadata_rc=$?\n"
+        "MESSAGE='mentions 123456'\nsecret_scan_messages deny.txt HEAD >/dev/null\necho message_rc=$?\n",
+        encoding="utf-8", newline="\n")
+    result = subprocess.run([bash, str(script)], cwd=tmp_path, capture_output=True,
+                            text=True, timeout=15)
+    assert "metadata_rc=0" in result.stdout, result.stdout + result.stderr
+    assert "message_rc=1" in result.stdout, result.stdout + result.stderr
+
+
 def test_secret_scan_diff_names_the_file(tmp_path: Path, bash: str):
     """A hit has to say WHICH file. `grep -n` numbered the already-filtered
     stream, so the report was an ordinal matching nothing the author could open.

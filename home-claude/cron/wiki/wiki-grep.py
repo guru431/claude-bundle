@@ -75,7 +75,7 @@ def score_page(text: str, rel: Path, terms: list[re.Pattern]) -> tuple[int, list
         if title and term.search(title):
             score += WEIGHT_TITLE
             hits += 1
-        if term.search(rel.as_posix()):
+        if term.search(rel.name):
             score += WEIGHT_NAME
             hits += 1
         for h in headings:

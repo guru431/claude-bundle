@@ -61,6 +61,18 @@ def _focus_from_marker(transcript: str, session_id: str) -> str:
     return focus.strip() if isinstance(focus, str) else ""
 
 
+def format_messages_for_prompt(messages: list[dict], max_chars: int = HANDOFF_MAX_CHARS) -> str:
+    """Keep a continuous tail of whole, masked messages with their roles."""
+    lines = [masked(f"**{message['role']}**: {message['text']}") for message in messages]
+    separator = "\n\n"
+    size = sum(map(len, lines)) + len(separator) * max(0, len(lines) - 1)
+    start = 0
+    while start < len(lines) and size > max_chars:
+        size -= len(lines[start]) + (len(separator) if start + 1 < len(lines) else 0)
+        start += 1
+    return separator.join(lines[start:])
+
+
 def main(transcript: str | None = None, session_id: str | None = None,
          timeout: int = 120, focus: str | None = None) -> int:
     """Write this session's handoff. Callable in-process as well as by argv.
@@ -95,9 +107,7 @@ def main(transcript: str | None = None, session_id: str | None = None,
     # machine, and this path shipped a verbatim transcript tail to the provider.
     # Masked BEFORE the tail is cut, so a cut cannot split a token into a half no
     # shape recognises.
-    body = masked("\n\n".join(
-        f"**{m['role']}**: {m['text']}" for m in messages
-    ))[-HANDOFF_MAX_CHARS:]
+    body = format_messages_for_prompt(messages, HANDOFF_MAX_CHARS)
 
     # The /compact focus is the USER telling the summary what matters — typed
     # into Claude Code like any prompt, so it is trusted and stands OUTSIDE the

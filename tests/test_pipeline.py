@@ -1721,6 +1721,23 @@ def test_the_stats_table_is_replaced_without_the_note_under_it(bundle: Path, mon
     assert "\nCounted nightly — keep this note.\n\n## How to use\n" in text
 
 
+def test_stats_update_preserves_an_adjacent_table(bundle: Path, monkeypatch):
+    index = _load_wiki_script(bundle, monkeypatch, "index_adjacent", "wiki-build-index.py")
+    main = bundle / "wiki" / "index.md"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    extra = "| Custom | Value |\n|---|---|\n| kept | 42 |\n"
+    main.write_text("# Wiki\n| Section | Pages | Updated |\n|---|---|---|\n"
+                    "| projects/ | 1 | old |\n" + extra, encoding="utf-8")
+    index.update_main_index(2, 7, {})
+    assert main.read_text(encoding="utf-8").endswith(extra)
+
+
+def test_wiki_search_does_not_match_only_the_project_directory(bundle: Path, monkeypatch):
+    search = _load_wiki_script(bundle, monkeypatch, "grep_directory", "wiki-grep.py")
+    assert search.score_page("# Unrelated\ncontent\n", Path("projects/demo/setup.md"),
+                             [re.compile("demo")]) == (0, [])
+
+
 def test_lint_walkers_skip_the_same_folders(bundle: Path, monkeypatch):
     """The page list, the link targets and the orphan check each had their own
     skip set; `.git` was in none of them, while build-index skips it."""

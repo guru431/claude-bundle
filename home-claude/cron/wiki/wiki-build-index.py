@@ -313,9 +313,13 @@ def update_main_index(projects_count: int, pages_count: int, kb_counts: dict[str
 
     # The table's own rows and nothing past them. The pattern ran on to the next
     # `##`, so a note a person kept under the table was deleted every night.
-    pattern = re.compile(r"\|\s*Section\s*\|\s*Pages\s*\|\s*Updated\s*\|.*(?:\n\|.*)*\n?")
+    pattern = re.compile(
+        r"^\|[ \t]*Section[ \t]*\|[ \t]*Pages[ \t]*\|[ \t]*Updated[ \t]*\|[^\n]*(?:\n|$)"
+        r"(?:\|[ \t:|\-]+\|[ \t]*(?:\n|$))?"
+        r"(?:\|[ \t]*(?:kb/(?:concepts|tools|people)/|projects/)[ \t]*\|[^\n]*(?:\n|$))*",
+        re.MULTILINE)
     if pattern.search(text):
-        text = pattern.sub(new_table, text)
+        text = pattern.sub(new_table, text, count=1)
     else:
         text = text.rstrip() + "\n\n## Stats\n\n" + new_table
     atomic_write_text(idx, text)

@@ -73,6 +73,15 @@ def _transcript(home: Path, dirname: str, session_id: str) -> Path:
 
 # ── pre-compact.py ───────────────────────────────────────────────────────────
 
+def test_handoff_keeps_complete_messages_with_their_roles(load, monkeypatch):
+    handoff = load("precompact-handoff.py")
+    monkeypatch.setattr(handoff, "masked", lambda text: text)
+    messages = [{"role": "user", "text": "x" * 100},
+                {"role": "assistant", "text": "```python\nprint('kept')\n```"}]
+    assert handoff.format_messages_for_prompt(messages, 60) == "**assistant**: ```python\nprint('kept')\n```"
+    assert handoff.format_messages_for_prompt(messages[:1], 10) == ""
+
+
 class _Spawned(Exception):
     pass
 

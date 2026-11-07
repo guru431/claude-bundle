@@ -704,6 +704,19 @@ typo in a test command cannot stop the wiki pipeline.
 
 ## Per-project privacy policy (bundle.local.yaml)
 
+Full-tier shared knowledge can also ingest Codex sessions, opt-in through
+`session_projects: {myapp: ~/projects/myapp}`. This explicit cwd map replaces
+any installation-specific project registry. It defaults to empty, uses the
+same allow/skip policy as Claude, and validates file-size snapshots before
+collecting conversation text. The existing memory/wiki jobs use separate,
+thread-ID-based Codex cursors in the state ledger; continuations and failed
+sources are retried. Historical wiki backfill stays disabled unless
+`WIKI_BACKLOG_MAX` is positive (a quota per agent format). Local
+`cron/knowledge-search.py` searches the wiki and inherited memory, with
+`--history` for Claude/Codex transcripts and `--inventory --json` to inspect
+Codex attribution without an LLM. Setup, cursor details and split-root paths:
+[shared knowledge guide](../home-claude/skills/rules-reference/knowledge-system.md).
+
 Every **attributable** source the pipeline reads — JSONL transcripts,
 memory feedback, incidents/sessions, and the `ClaudeMemoryUpdate` task —
 honors ONE declarative policy from `~/.claude/bundle.local.yaml`
@@ -718,7 +731,7 @@ memory":
 - `skip_dirs: []` — raw `~/.claude/projects/<dir>` names dropped early.
 - `collect_plans: false` — the exception, see below.
 
-The same file also holds `project_map` / `known_projects` (moved out of
+The same file also holds `session_projects` and `project_map` / `known_projects` (moved out of
 `cron/hooks/utils.py` so they survive a reinstall), and two keys that are
 not policy: `projects_root` and `tests` — the
 [test contract](#the-test-sweep-and-the-test-contract), whose errors are

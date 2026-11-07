@@ -253,7 +253,7 @@ if ($py) {
 import sys, yaml
 KNOWN = {'project_map', 'known_projects', 'skip_dirs', 'skip_projects',
          'allow_projects', 'skip_jsonl_projects', 'collect_plans',
-         'projects_root', 'dry_run_until', 'tests'}
+         'projects_root', 'dry_run_until', 'tests', 'session_projects'}
 # Not policy (utils.py::_MANIFEST_NONPOLICY_KEYS): a near miss of one is only an
 # unknown key, and a malformed value is test-sweep's contract error, not ours.
 NONPOLICY = {'tests'}
@@ -276,6 +276,13 @@ if pm is not None:
         print('project_map must be a mapping, got %s' % type(pm).__name__); sys.exit(4)
     if not all(isinstance(k, str) and isinstance(v, str) for k, v in pm.items()):
         print('project_map must map strings to strings (quote values like 1.0)'); sys.exit(4)
+if 'session_projects' in d:
+    sys.path.insert(0, sys.argv[2])
+    from session_sources import validate_session_projects
+    try:
+        validate_session_projects(d['session_projects'], pm or {})
+    except ValueError as exc:
+        print(exc); sys.exit(4)
 for k in ('collect_plans',):
     v = d.get(k)
     if v is not None and not isinstance(v, bool):
@@ -312,7 +319,8 @@ sys.exit(0)
     foreach ($label in $manifests.Keys) {
         $mani = $manifests[$label]
         if (-not (Test-Path $mani)) { continue }
-        $mout = Invoke-Checked { & $py -c $mcode $mani }
+        $sessionLib = Join-Path $root 'home-claude/cron/lib'
+        $mout = Invoke-Checked { & $py -c $mcode $mani $sessionLib }
         $mrc = $script:lastRc
         if ($mrc -eq 0) { Ok "$label — valid schema" }
         elseif ($mout -match 'ModuleNotFoundError|No module named') { Warn "PyYAML not installed — skipped manifest parse: $label" }

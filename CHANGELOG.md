@@ -5,6 +5,13 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Ported from the meta-repo: shared Claude/Codex session readers, local knowledge
+  search and Codex ingestion in the existing full-tier memory/wiki jobs. Portable
+  manifest roots replace the private project registry; snapshots, thread cursors,
+  continuation retries and the existing privacy policy are covered offline.
+  Checked and not ported: private registry paths, provider routing, extra scheduled
+  jobs and the optional incident-extractor extension; these are installation-specific.
+
 - Handoffs keep whole messages and their roles; wiki search no longer matches
   a page solely through its project directory. Index rebuilds preserve adjacent
   custom tables, LLM CLI calls reject extra arguments, and MCP reader threads

@@ -143,6 +143,7 @@ typo costs you a quiet night, not a leak. Descriptions live in
 | `known_projects` |
 | `project_map` |
 | `projects_root` |
+| `session_projects` |
 | `skip_dirs` |
 | `skip_jsonl_projects` |
 | `skip_projects` |

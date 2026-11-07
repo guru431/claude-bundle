@@ -2,7 +2,7 @@
 """Flush phase: extract data from JSONL sessions → wiki/daily/.
 
 Sources:
-  A. JSONL transcripts in ~/.claude/projects/
+  A. JSONL transcripts in ~/.claude/projects/ and explicitly configured Codex sessions
   B. Memory feedback files (feedback_*.md)
   C. Plans (~/.claude/plans/*.md)
   D. history.jsonl (activity metadata)
@@ -41,6 +41,7 @@ for env_key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]:
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from utils import (dir_to_project, parse_jsonl_delta, is_subagent_jsonl,
+                   codex_sessions, codex_session_allowed,
                    messages_day, llm_call_ex, worst_kind, llm_pace, atomic_write_text,
                    normalize_project_name, legacy_project_name, KNOWN_PROJECTS,
                    mark_phase_success,
@@ -190,7 +191,8 @@ def resume_offset(processed: set[str], project: str, name: str, size: int,
     return done
 
 
-def processed_key(project: str, jf: Path, offset: int | None = None) -> str:
+def processed_key(project: str, jf: Path, offset: int | None = None,
+                  source_names: dict | None = None) -> str:
     """Build the state key for a flushed JSONL — see resume_offset().
 
     `offset` must be where the read actually STOPPED, not the file's size at
@@ -203,10 +205,11 @@ def processed_key(project: str, jf: Path, offset: int | None = None) -> str:
             offset = jf.stat().st_size
         except OSError:
             offset = 0
-    return f"{project}/{jf.name}@{offset}"
+    name = (source_names or {}).get(jf, jf.name)
+    return f"{project}/{name}@{offset}"
 
 
-def jsonl_state_names(project: str, jf: Path) -> list[str]:
+def jsonl_state_names(project: str, jf: Path, source_names: dict | None = None) -> list[str]:
     """Every project name a JSONL's state can be recorded under, current first.
 
     The current bucket name; the raw `dir_to_project` name, from before names
@@ -214,6 +217,8 @@ def jsonl_state_names(project: str, jf: Path) -> list[str]:
     rule was fixed (utils.legacy_project_name), when `…-project` directories and
     `project-alpha` were all recorded under `main`.
     """
+    if source_names and jf in source_names:
+        return [project]  # Codex metadata, never its date-shaped parent folder
     raw = dir_to_project(jf.parent.name)
     names = [project]
     for n in (raw, legacy_project_name(raw)):
@@ -222,11 +227,37 @@ def jsonl_state_names(project: str, jf: Path) -> list[str]:
     return names
 
 
-def processed_key_prefixes(project: str, jf: Path) -> list[str]:
+def processed_key_prefixes(project: str, jf: Path, source_names: dict | None = None) -> list[str]:
     """Every `@offset` key prefix one JSONL can be recorded under — all of them
     are replaced when its new offset is recorded. The legacy names count (see
     jsonl_state_names): a stale offset left under one wins the max just the same."""
-    return sorted(f"{n}/{jf.name}@" for n in jsonl_state_names(project, jf))
+    name = (source_names or {}).get(jf, jf.name)
+    return sorted(f"{n}/{name}@" for n in jsonl_state_names(project, jf, source_names))
+
+
+def find_codex_jsonls(processed, seen_unprocessed, start_offsets, read_limits, source_names):
+    """Recent snapshots plus retries; historical backfill remains opt-in."""
+    result = {}
+    backlog = 0
+    for session in codex_sessions(PROJECTS_BASE):
+        if not codex_session_allowed(session):
+            continue
+        project = normalize_project_name(session.project)
+        name = session.session_id + ".jsonl"
+        start = resume_offset(processed, project, name, session.size)
+        if start is None:
+            continue
+        fresh = _is_fresh(session.path)
+        unfinished = f"{project}/{name}" in seen_unprocessed
+        if not fresh and not unfinished:
+            if backlog >= BACKLOG_MAX:
+                continue
+            backlog += 1
+        source_names[session.path] = name
+        read_limits[session.path] = session.size
+        start_offsets[session.path] = start
+        result.setdefault(project, []).append(session.path)
+    return result
 
 
 def source_marker(project: str, rel: str, chunk: str) -> str:
@@ -908,6 +939,16 @@ def _flush(rec: dict) -> int:
     for project, files in backlog.items():
         jsonls.setdefault(project, []).extend(files)
 
+    # Namespaced cursors are keyed by thread ID, stable across moves to the
+    # archived store. Read no bytes beyond what cwd attribution validated.
+    read_limits: dict[Path, int] = {}
+    source_names: dict[Path, str] = {}
+    codex = find_codex_jsonls(processed, seen_unprocessed, start_offsets,
+                             read_limits, source_names)
+    for project, files in codex.items():
+        jsonls.setdefault(project, []).extend(files)
+    log(f"Source A2 (Codex): {sum(len(v) for v in codex.values())} snapshots")
+
     # Sources B/C/E, minus what an earlier night already sent (see
     # SOURCE_MAX_AGE_HOURS).
     sent_sources = state_get("flush", "processed_sources")
@@ -949,11 +990,14 @@ def _flush(rec: dict) -> int:
                 size = jf.stat().st_size
             except OSError:
                 size = 0
-            if is_subagent_jsonl(str(jf)):
+            if jf not in read_limits and is_subagent_jsonl(str(jf)):
                 read_offsets[jf] = size
                 filtered_out.append((project, jf, "subagent"))
                 continue
-            messages, end = parse_jsonl_delta(str(jf), start)
+            if jf in read_limits:
+                messages, end = parse_jsonl_delta(str(jf), start, max_bytes=read_limits[jf])
+            else:
+                messages, end = parse_jsonl_delta(str(jf), start)
             if end is None:
                 # NOT "nothing new": a read that failed. Left unmarked and
                 # carried over, so it is retried whatever its age.
@@ -967,7 +1011,8 @@ def _flush(rec: dict) -> int:
             # applied only to a first read. On a delta it would throw away every
             # night's growth of a long-running session one or two messages at a
             # time — and mark it processed while doing so.
-            if start == 0 and sum(1 for m in messages if m["role"] == "user") < 3:
+            if (jf not in read_limits and start == 0
+                    and sum(1 for m in messages if m["role"] == "user") < 3):
                 filtered_out.append((project, jf, "fewer than 3 user messages"))
                 continue
             text = "\n".join(f"**{m['role']}**: {m['text']}" for m in messages)
@@ -981,17 +1026,18 @@ def _flush(rec: dict) -> int:
         log(f"WARNING: {len(unreadable)} JSONL file(s) could not be read and are left "
             f"unprocessed: {', '.join(sorted(jf.name for _p, jf in unreadable))}")
         if not is_dry_run() and not state_add(
-                "flush", "seen_unprocessed", [f"{p}/{jf.name}" for p, jf in unreadable]):
+                "flush", "seen_unprocessed",
+                [f"{p}/{source_names.get(jf, jf.name)}" for p, jf in unreadable]):
             log("WARNING: the unreadable file(s) NOT recorded as carried over "
                 "(state lock busy)")
 
     if filtered_out and not is_dry_run():
-        filtered_keys = [processed_key(project, jf, read_offsets.get(jf))
+        filtered_keys = [processed_key(project, jf, read_offsets.get(jf), source_names)
                          for project, jf, _reason in filtered_out]
         if not state_replace_prefix(
                 "flush", "processed_jsonls",
                 [p for project, jf, _reason in filtered_out
-                 for p in processed_key_prefixes(project, jf)],
+                 for p in processed_key_prefixes(project, jf, source_names)],
                 filtered_keys):
             log(f"WARNING: {len(filtered_keys)} filtered JSONL marker(s) NOT recorded "
                 f"(state lock busy) — they are read again tomorrow")
@@ -1115,7 +1161,7 @@ def _flush(rec: dict) -> int:
 
     # Record what has been COLLECTED before any LLM call. If tonight fails, the
     # next run re-selects these regardless of the 48-hour window.
-    collected_keys = [f"{project}/{jf.name}"
+    collected_keys = [f"{project}/{source_names.get(jf, jf.name)}"
                       for project, files in jsonls.items() for jf in files]
     if collected_keys and not state_add("flush", "seen_unprocessed", collected_keys):
         log(f"WARNING: {len(collected_keys)} collected JSONL(s) NOT recorded as "
@@ -1249,12 +1295,12 @@ def _flush(rec: dict) -> int:
     # identically-named JSONLs in different project dirs are tracked separately.
     done_files = [(project, jf) for jf, (day, project) in file_bucket.items()
                   if (day, project) not in failed_buckets]
-    keys = [processed_key(project, jf, read_offsets.get(jf))
+    keys = [processed_key(project, jf, read_offsets.get(jf), source_names)
             for project, jf in done_files]
     # One key per file: the new offset replaces the file's previous ones.
     if keys and not state_replace_prefix(
             "flush", "processed_jsonls",
-            [p for project, jf in done_files for p in processed_key_prefixes(project, jf)],
+            [p for project, jf in done_files for p in processed_key_prefixes(project, jf, source_names)],
             keys):
         log(f"WARNING: {len(keys)} processed JSONL marker(s) NOT recorded (state "
             f"lock busy) — expect those sessions to be sent again tomorrow")
@@ -1267,8 +1313,8 @@ def _flush(rec: dict) -> int:
             f"recorded (state lock busy) — expect them to be sent again tomorrow")
     # …and drop them from the carry-over set: they are finished, so they should
     # go back to being selected by age like any other file.
-    done_carry = [f"{n}/{jf.name}" for project, jf in done_files
-                  for n in jsonl_state_names(project, jf)]
+    done_carry = [f"{n}/{source_names.get(jf, jf.name)}" for project, jf in done_files
+                  for n in jsonl_state_names(project, jf, source_names)]
     if done_carry:
         state_remove("flush", "seen_unprocessed", done_carry)
     with open(LOG_MD, "a", encoding="utf-8") as f:

@@ -186,7 +186,7 @@ what the current plugin versions actually ship.
 ### Full tier — `~/.claude/wiki/` and `~/.claude/cron/`
 
 A **Karpathy-style file-based personal knowledge base** that gets filled
-from your real Claude Code sessions:
+from your Claude Code sessions and explicitly configured Codex sessions:
 
 - Hooks dump each session's tail to `wiki/daily/.pending/`
 - Cron tasks at night call an LLM to compile pending sessions into
@@ -196,6 +196,10 @@ from your real Claude Code sessions:
 - A build-index script rebuilds `projects/index.md` and `kb/index.md`
   and refreshes the stats table in `wiki/index.md`
 - A lint script catches broken links, orphan pages, missing frontmatter
+- Local `cron/knowledge-search.py` finds prior decisions in the wiki, inherited
+  memory and optional Claude/Codex history without an LLM. Codex collection is
+  opt-in through `session_projects` in `bundle.local.yaml`; see the
+  [shared knowledge guide](home-claude/skills/rules-reference/knowledge-system.md).
 
 A **declarative Windows Task Scheduler** (`cron/registry.yaml`) with 18
 scheduled jobs (twelve disabled by default). One UAC-elevated `sync.cmd` syncs your registry into

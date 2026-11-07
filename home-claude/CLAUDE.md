@@ -7,6 +7,17 @@ This file holds the rules every session needs. The long references — why a rul
 exists, measurements, worked examples — live in the `rules-reference` skill
 (`~/.claude/skills/rules-reference/`); each section says which file to read, and when.
 
+## Shared project knowledge (full tier)
+
+When the full-tier pipeline is installed (default `~/.claude/`), consult its
+`wiki/index.md`, then `wiki/projects/<project>/_log.md` and relevant pages before
+codebase searches. Use `python <PipelineRoot>/cron/knowledge-search.py --project
+<project> --sources` to locate inherited project memory; search with query words
+and add `--history` only when summaries are insufficient. Search is local and
+does not call an LLM. Treat old notes as reference and verify current facts.
+See `~/.claude/skills/rules-reference/knowledge-system.md` for setup, privacy,
+split roots and the shared Claude/Codex session pipeline. Lite installs skip this.
+
 ## Findings — side observations during work
 
 A problem that **is not part of the current task** (regression, stale config,
@@ -230,7 +241,7 @@ Adding a task, verifying it, a task failing without a log —
 With Codex CLI alongside, `~/.codex/AGENTS.md` mirrors the universal blocks of
 this file (no skills/hooks/slash sections), and each project's `AGENTS.md` stays
 15–40 lines of links and gotchas; full rules stay in `CLAUDE.md`. When you edit a
-universal block here — Findings, When to continue, Tool Selection Rules, File
+universal block here — Shared project knowledge, Findings, When to continue, Tool Selection Rules, File
 Operations, Declaring MCP servers, Coding Discipline, Test policy, Error Recovery,
 File Encoding, Secrets, Windows Task Scheduler — make the same edit there. That
 list is `REQUIRED` in the bundle's `scripts/check-agents-sync.py`, which fails CI

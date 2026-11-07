@@ -19,6 +19,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import NamedTuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from session_sources import find_codex_sessions, message_from_line, validate_session_projects
+
 # BUNDLE_ROOT auto-derived: utils.py lives at <bundle>/cron/hooks/, so the
 # meta-repo root is two levels up. Works regardless of where the bundle is
 # installed (network share, local disk, etc).
@@ -241,7 +244,7 @@ _MANIFEST, _MANIFEST_BROKEN = _load_manifest()
 _MANIFEST_KNOWN_KEYS = {
     "project_map", "known_projects", "skip_dirs", "skip_projects",
     "allow_projects", "skip_jsonl_projects", "collect_plans",
-    "projects_root", "dry_run_until", "tests",
+    "projects_root", "dry_run_until", "tests", "session_projects",
 }
 # Keys that decide nothing about what leaves the machine. A malformed value — or
 # a near miss of the key — is reported, never a reason to deny every project:
@@ -327,6 +330,19 @@ elif not all(isinstance(k, str) and isinstance(v, str)
     _MANIFEST_BROKEN = True
     _project_map_raw = {}
 PROJECT_MAP: dict[str, str] = dict(_project_map_raw)
+
+
+def _session_projects() -> dict[str, dict]:
+    """Explicit Codex cwd ownership; an invalid map denies all collection."""
+    try:
+        return validate_session_projects(_MANIFEST.get("session_projects", {}), PROJECT_MAP)
+    except ValueError as exc:
+        print(f"ERROR: bundle.local.yaml {exc} — every project denied.", file=sys.stderr)
+    globals()["_MANIFEST_BROKEN"] = True
+    return {}
+
+
+SESSION_PROJECTS = _session_projects()
 
 # Wiki project slugs the path/section normalizer recognizes (bundle.local.yaml
 # `known_projects:`). Lowercased here, once: every reader compares them with a
@@ -524,6 +540,14 @@ def project_allowed(project: str) -> bool:
     skip = {normalize_project_name(e) for e in SKIP_JSONL_PROJECTS}
     if name in skip or legacy_project_name(project) in skip:
         return False
+    # Opting a cwd into shared knowledge may give its former trailing-segment
+    # fallback a new slug. Preserve an existing denial under that older name.
+    for slug, meta in SESSION_PROJECTS.items():
+        encoded = encode_cwd(meta["path"])
+        if normalize_project_name(slug) == name and encoded not in PROJECT_MAP:
+            old = encoded.rsplit("-", 1)[-1] or encoded
+            if normalize_project_name(old) in skip or legacy_project_name(old) in skip:
+                return False
     if ALLOW_PROJECTS and name not in {normalize_project_name(e) for e in ALLOW_PROJECTS
                                        if not _collapses_to_default(e)}:
         return False
@@ -1618,6 +1642,10 @@ def dir_to_project(dirname: str) -> str:
         return "main"
     if dirname in PROJECT_MAP:
         return PROJECT_MAP[dirname]
+    for name, meta in SESSION_PROJECTS.items():
+        encoded = encode_cwd(meta["path"])
+        if dirname == encoded or (Path(meta["path"]).drive and dirname.lower() == encoded.lower()):
+            return name
     return dirname.rsplit("-", 1)[-1] or dirname
 
 
@@ -1687,72 +1715,24 @@ def _jsonl_message(line: str) -> dict | None:
     of the run that read it — and without it that phase had to re-scan the raw
     bytes with a regex for something this parser had already read and dropped.
     """
-    line = line.strip()
-    if not line:
-        return None
-    try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(obj, dict):
-        return None  # see is_subagent_jsonl: a line need not be an object
-
-    obj_type = obj.get("type", "")
-    if obj_type not in ("user", "assistant"):
-        return None
-
-    msg = obj.get("message", obj)
-    if not isinstance(msg, dict):
-        return None
-    role = msg.get("role", obj_type)
-    if role not in ("user", "assistant"):
-        return None
-
-    content = msg.get("content", "")
-    if isinstance(content, list):
-        text_parts = []
-        for block in content:
-            if isinstance(block, dict):
-                if block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-            elif isinstance(block, str):
-                text_parts.append(block)
-        text = "\n".join(text_parts)
-    elif isinstance(content, str):
-        text = content
-    else:
-        return None
-
-    text = text.strip()
-    if not text:
-        return None
-    stamp = obj.get("timestamp")
-    return {"role": role, "text": text,
-            "ts": stamp if isinstance(stamp, str) else ""}
+    return message_from_line(line)
 
 
-def parse_jsonl_messages(jsonl_path: str, last_n: int = 30) -> list[dict]:
-    """Extract the last N user/assistant messages from a Claude Code JSONL.
+def parse_jsonl_messages(jsonl_path: str, last_n: int = 30,
+                         *, max_bytes: int | None = None) -> list[dict]:
+    """Extract the last N user/assistant messages from a Claude/Codex JSONL.
 
     Skips tool_use / tool_result blocks. Returns [{'role': ..., 'text': ...}].
     Undecodable bytes are replaced: strict UTF-8 turned one bad byte into an
     empty session, with nothing said anywhere.
     """
-    messages = []
-    try:
-        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                msg = _jsonl_message(line)
-                if msg is not None:
-                    messages.append(msg)
-    except OSError:
-        return []
-
+    messages, _end = parse_jsonl_delta(jsonl_path, max_bytes=max_bytes)
     return messages[-last_n:] if last_n else messages
 
 
 def parse_jsonl_delta(jsonl_path: str,
-                      start_offset: int = 0) -> tuple[list[dict], int | None]:
+                      start_offset: int = 0, *,
+                      max_bytes: int | None = None) -> tuple[list[dict], int | None]:
     """Messages added since `start_offset`, plus the offset to resume from.
 
     A session that is still being written grows between nights. Keyed only by
@@ -1782,6 +1762,10 @@ def parse_jsonl_delta(jsonl_path: str,
     bad_lines = 0
     try:
         size = os.path.getsize(jsonl_path)
+        if max_bytes is not None:
+            if size < max_bytes:
+                raise ValueError("validated session snapshot was truncated; retry attribution")
+            size = max_bytes
         if start_offset < 0 or start_offset > size:
             start_offset = 0
         # Binary, decoded per line: tell() is then an exact byte offset, and a
@@ -1789,7 +1773,10 @@ def parse_jsonl_delta(jsonl_path: str,
         with open(jsonl_path, "rb") as f:
             f.seek(start_offset)
             end_offset = start_offset
-            for raw in iter(f.readline, b""):
+            while f.tell() < size:
+                raw = f.readline(size - f.tell())
+                if not raw:
+                    break
                 try:
                     line = raw.decode("utf-8")
                 except UnicodeDecodeError:
@@ -1811,6 +1798,27 @@ def parse_jsonl_delta(jsonl_path: str,
         print(f"  WARN: {os.path.basename(jsonl_path)}: {bad_lines} line(s) are not "
               f"valid UTF-8 — undecodable bytes replaced", file=sys.stderr)
     return messages, end_offset
+
+
+def session_projects() -> dict[str, dict]:
+    """Configured cwd ownership, refusing to ignore a broken privacy policy."""
+    if manifest_broken():
+        raise ValueError("bundle.local.yaml unreadable — session collection denied")
+    return SESSION_PROJECTS
+
+
+def codex_sessions(projects_dir: Path, since: float | None = None, *, audit=None):
+    """Discover attributed snapshots; callers gate text with codex_session_allowed."""
+    return find_codex_sessions(projects_dir, session_projects(), since, audit=audit)
+
+
+def codex_session_allowed(session) -> bool:
+    """Honor both Codex slugs and existing Claude directory/alias exclusions."""
+    encoded = encode_cwd(session.project_root)
+    skipped = encoded in SKIP_DIRS or (Path(session.project_root).drive
+                                      and encoded.lower() in {d.lower() for d in SKIP_DIRS})
+    return (not skipped and project_allowed(session.project)
+            and project_allowed(dir_to_project(encoded)))
 
 
 def encode_cwd(cwd: str) -> str:

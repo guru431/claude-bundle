@@ -12,6 +12,7 @@ overrides `CLAUDE.md`, it explains it.
 
 | File | Read when |
 |---|---|
+| [knowledge-system.md](knowledge-system.md) | finding prior decisions across Claude/Codex, configuring session roots or checking nightly extraction |
 | [test-policy.md](test-policy.md) | writing tests, adding a pytest config, marking a slow test, a suite going red or over budget |
 | [windows-shell.md](windows-shell.md) | paths in Git Bash vs PowerShell, sandbox commands failing silently, finding Python, writing `.ps1` / `.cmd` / `.bat` / `.sh` (BOM, code page, line endings) |
 | [mcp-servers.md](mcp-servers.md) | declaring an MCP server, a slow session start, a stdio server that will not handshake |

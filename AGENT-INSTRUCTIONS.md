@@ -242,6 +242,10 @@ Code uses (they look like `C--Users-user-projects-myapp`). Write into
 - `known_projects:` — the slug list
 - `allow_projects:` — the allowlist if the user wants one (empty = all)
 - `skip_projects:` — any slugs to exclude from all sources
+- `session_projects:` — only if Codex ingestion is wanted, each chosen slug →
+  an absolute working-copy root (`~/projects/myapp` is expanded). Leave empty
+  otherwise. Keep any matching `project_map` entry on the same slug; preview
+  attribution with `python "$DST/cron/knowledge-search.py" --inventory --json`.
 
 **Also write `dry_run_until: <today + 7>` into `bundle.local.yaml`.** It holds
 EVERY phase in preview mode until that date: sources are collected, what would

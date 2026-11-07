@@ -41,6 +41,8 @@ from utils import (  # noqa: E402
     SKIP_DIRS,
     _state_lock,
     config_report,
+    codex_sessions,
+    codex_session_allowed,
     dir_to_project,
     extract_first_json_object,
     is_dry_run,
@@ -48,11 +50,16 @@ from utils import (  # noqa: E402
     llm_call_ex,
     load_state,
     masked,
+    manifest_broken,
+    parse_jsonl_delta,
     parse_jsonl_messages,
     policy_summary,
     project_allowed,
     save_state,
     state_get,
+    state_add,
+    state_remove,
+    state_replace_prefix,
     worst_kind,
 )
 from untrusted import fence  # noqa: E402
@@ -297,7 +304,8 @@ def remember_deferred(deferred, since: float) -> None:
 
 
 def collect_today_user_messages(
-        since: float) -> tuple[dict[str, str], dict[str, str], set[str]]:
+        since: float, codex_progress: dict | None = None
+        ) -> tuple[dict[str, str], dict[str, str], set[str]]:
     """Collect user messages from JSONLs modified since `since` (epoch), by project.
 
     A project an earlier night deferred is read back to that night instead —
@@ -316,6 +324,7 @@ def collect_today_user_messages(
     # resolve to the same project name, and capping each dir's chunk separately
     # would let the merge order decide what survives.
     proj_bits: dict[str, list[str]] = {}
+    message_times: dict[tuple[str, str], float] = {}
     already_sent = state_get("memory", "sent_hashes")
     fresh: dict[str, str] = {}
     seen: set[str] = set()
@@ -323,7 +332,7 @@ def collect_today_user_messages(
     # We don't filter by directory name here — every project dir under
     # ~/.claude/projects/ is considered. Customize the glob if you only
     # want a subset.
-    for proj_dir in PROJECTS_DIR.iterdir():
+    for proj_dir in PROJECTS_DIR.iterdir() if PROJECTS_DIR.is_dir() else ():
         if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
             continue
         # Same project-name derivation as the wiki pipeline (PROJECT_MAP →
@@ -383,8 +392,10 @@ def collect_today_user_messages(
                 if digest in already_sent:
                     seen.add(digest)
                     continue
-                fresh[digest] = txt
-                bits.append(txt)
+                safe = masked(txt)  # before any cap can split a credential
+                fresh[digest] = safe
+                bits.append(safe)
+                message_times[proj_name, safe] = _mtime
 
         if bits:
             # Two project dirs can resolve to the SAME name (dir_to_project's
@@ -392,8 +403,56 @@ def collect_today_user_messages(
             # silently drop the first one's messages.
             proj_bits.setdefault(proj_name, []).extend(bits)
 
-    capped = {proj: cap_newest_messages(bits, proj) for proj, bits in proj_bits.items()}
+    cursors = state_get("memory", "codex_cursors")
+    pending = state_get("memory", "codex_pending")
+    progress = codex_progress if codex_progress is not None else {}
+    for session in codex_sessions(PROJECTS_DIR):
+        if not codex_session_allowed(session):
+            continue
+        prefix = session.session_id + "@"
+        previous = [int(key[len(prefix):]) for key in cursors
+                    if key.startswith(prefix) and key[len(prefix):].isdigit()]
+        start = max(previous, default=0)
+        if start > session.size:
+            start = 0
+        if start == session.size:
+            continue
+        cutoff = min(since, owed.get(session.project, since))
+        mtime = session.path.stat().st_mtime
+        if session.session_id not in pending and mtime < cutoff:
+            continue
+        msgs, end = parse_jsonl_delta(str(session.path), start, max_bytes=session.size)
+        if end is None:
+            raise OSError("Codex snapshot unreadable; cursors held for retry")
+        user_texts = []
+        for msg in msgs:
+            if msg["role"] != "user":
+                continue
+            txt = msg["text"]
+            digest = hashlib.sha256(txt.encode("utf-8", "replace")).hexdigest()[:16]
+            if digest in already_sent:
+                seen.add(digest)
+                continue
+            safe = masked(txt)
+            fresh[digest] = safe
+            user_texts.append(safe)
+            message_times[session.project, safe] = mtime
+        progress[session.session_id] = (end, user_texts)
+        proj_bits.setdefault(session.project, []).extend(user_texts)
+
+    capped = {proj: cap_newest_messages(sorted(bits, key=lambda txt: message_times[proj, txt]), proj)
+              for proj, bits in proj_bits.items() if bits}
     return capped, fresh, seen
+
+
+def remember_codex_progress(progress: dict, carried: set[str]) -> None:
+    """Advance only sources whose new user messages were carried in full."""
+    completed = {sid: end for sid, (end, texts) in progress.items()
+                 if all(text in carried for text in texts)}
+    if completed and state_replace_prefix(
+            "memory", "codex_cursors", [sid + "@" for sid in completed],
+            [f"{sid}@{end}" for sid, end in completed.items()]):
+        state_remove("memory", "codex_pending", completed)
 
 
 # "### <name>\n" + the "\n\n" between sections, per project in a summary.
@@ -716,16 +775,17 @@ def _update(rec: dict) -> int:
     log(f"Policy: {policy_summary()}")
     for line in config_report():
         log(f"  cfg | {line}")
-    if not PROJECTS_DIR.is_dir():
-        log(f"No projects dir at {PROJECTS_DIR} — nothing to process.")
-        rec.update(note="no projects dir")
-        return 0
+    if manifest_broken():
+        log("FATAL: bundle.local.yaml unreadable — memory collection denied.")
+        rec.update(process_rc=1, note="bundle.local.yaml unreadable")
+        return 1
     window = collection_window_hours()
     if window > 24:
         log(f"Catch-up window: {window}h (the last green run was longer ago than "
             f"a day — a missed day used to be lost for good)")
     since = datetime.now().timestamp() - window * 3600
-    msgs, fresh, seen = collect_today_user_messages(since)
+    codex_progress = {}
+    msgs, fresh, seen = collect_today_user_messages(since, codex_progress)
     log(f"Collected user messages from {len(msgs)} projects")
 
     if is_dry_run():
@@ -739,6 +799,10 @@ def _update(rec: dict) -> int:
             f"({total} chars across {len(msgs)} project(s)); no memory files written.")
         return 0
 
+    if codex_progress and not state_add("memory", "codex_pending", codex_progress):
+        log("Codex retry sources could not be recorded — refusing to advance cursors.")
+        rec.update(process_rc=1, note="Codex retry state unavailable")
+        return 1
     appended, user_kind, carried = update_user_md(msgs)
     cross_kind = update_cross_notes(msgs)
     if appended is not None and cross_kind == "ok":
@@ -751,6 +815,7 @@ def _update(rec: dict) -> int:
         # were lost for good. Repeating the USER.md call is safe — its prompt
         # carries the tail of USER.md, where tonight's facts were just appended.
         carried_set = carried_messages(carried)
+        remember_codex_progress(codex_progress, carried_set)
         remember_sent([d for d, text in fresh.items() if text in carried_set], seen)
         # And the projects that prompt had no room for stay readable until a
         # later night serves them — a failed night records nothing, and the

@@ -32,7 +32,8 @@ def _snippet() -> str:
 def _check(tmp_path: Path, manifest: str) -> subprocess.CompletedProcess:
     path = tmp_path / "bundle.local.yaml"
     path.write_text(manifest, encoding="utf-8")
-    return subprocess.run([sys.executable, "-c", _snippet(), str(path)],
+    return subprocess.run([sys.executable, "-c", _snippet(), str(path),
+                           str(ROOT / "home-claude/cron/lib")],
                           capture_output=True, text=True, timeout=60)
 
 
@@ -63,3 +64,12 @@ def test_the_shipped_template_passes(tmp_path: Path):
     template = (ROOT / "config" / "bundle.local.example.yaml").read_text(encoding="utf-8")
     r = _check(tmp_path, template)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_session_roots_use_the_same_schema_as_runtime(tmp_path: Path):
+    valid = yaml.safe_dump({"session_projects": {"myapp": str(tmp_path / "myapp")}})
+    assert _check(tmp_path, valid).returncode == 0
+    invalid = yaml.safe_dump({"session_projects": {"myapp": "relative/path"}})
+    result = _check(tmp_path, invalid)
+    assert result.returncode == 4
+    assert "session_projects" in result.stdout

@@ -47,6 +47,18 @@ explains why things changed; this file says what to do about it.
 
 ## Unreleased
 
+### Shared Claude/Codex knowledge (full tier, opt-in)
+
+Reinstall the full profile to deliver `cron/knowledge-search.py` and
+`cron/lib/session_sources.py` together with their collectors. Existing manifests
+are preserved: add `session_projects` only to enable Codex ingestion, mapping
+each wiki slug to its absolute working-copy root. The default empty map reads
+no Codex sessions. Keep matching `project_map` entries on the same slug and
+review the allow/skip policy before enabling it. Run `knowledge-search.py
+--inventory --json` and both collectors with `--dry-run` first. No scheduler
+changes or new providers are needed. See the installed
+`skills/rules-reference/knowledge-system.md` for split roots and cursor behavior.
+
 ### Optional Matrix alerts
 
 Existing `.env` files are preserved. To mirror alerts to Matrix, add

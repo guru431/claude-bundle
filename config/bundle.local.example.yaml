@@ -38,6 +38,17 @@ known_projects: []
 #   - myapp
 #   - infra
 
+# Shared Claude/Codex knowledge (full tier, opt-in). Map wiki slugs to absolute
+# working-copy roots; ~ expands to this user's home. Empty means no Codex input.
+# The same roots also name matching Claude project directories, unless already
+# pinned in project_map (the two maps must agree). Unknown cwds, subagents and
+# sessions that change to another project are excluded. Existing allow/skip
+# lists apply before conversation text is collected. Linked Git worktrees are
+# accepted only with reciprocal administrative pointers to one configured repo.
+session_projects: {}
+#   myapp: ~/projects/myapp
+#   infra: ~/projects/infra
+
 # Where your working copies live — the PARENT directory of your per-project git
 # checkouts (not ~/.claude/projects, which holds session transcripts). Only jobs
 # that inspect the repos themselves use it; today that is agents-md-sync-check,

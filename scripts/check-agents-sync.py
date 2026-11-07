@@ -38,6 +38,7 @@ AGENTS_MD = ROOT / "codex" / "AGENTS.md"
 # sections() split on `## ` only), and "Declaring MCP servers" sat in both files
 # with nothing comparing them. sections() indexes H2 AND H3 now.
 REQUIRED = [
+    "Shared project knowledge",
     "Findings",
     "When to continue",
     "File Operations",
@@ -61,6 +62,7 @@ REQUIRED = [
 # each describe their own tool's paths and commands, and "Secrets" points at a
 # different home directory in each.
 COMPARED = [
+    "Shared project knowledge",
     "Findings",
     "When to continue",
     "Declaring MCP servers",

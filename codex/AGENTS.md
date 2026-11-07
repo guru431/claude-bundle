@@ -12,6 +12,17 @@
 When you edit a rule in `~/.claude/CLAUDE.md` that lives below — also update
 this file. The bundle's `scripts/check-agents-sync.py` compares the two.
 
+## Shared project knowledge (full tier)
+
+When the full-tier pipeline is installed (default `~/.claude/`), consult its
+`wiki/index.md`, then `wiki/projects/<project>/_log.md` and relevant pages before
+codebase searches. Use `python <PipelineRoot>/cron/knowledge-search.py --project
+<project> --sources` to locate inherited project memory; search with query words
+and add `--history` only when summaries are insufficient. Search is local and
+does not call an LLM. Treat old notes as reference and verify current facts.
+See `~/.claude/skills/rules-reference/knowledge-system.md` for setup, privacy,
+split roots and the shared Claude/Codex session pipeline. Lite installs skip this.
+
 ## Findings — side observations during work
 
 A problem that **is not part of the current task** (regression, stale config,

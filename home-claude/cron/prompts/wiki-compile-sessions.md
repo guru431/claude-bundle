@@ -45,6 +45,8 @@ The slug for this project is given in the prompt header — use it as-is.
   it — but cleaner if you just don’t.
 - **Bias toward fewer pages.** A `solution-` page should grow over time, not
   multiply into `solution-x-v2.md`.
+- **Do not return changes for `index.md` or `_log.md`.** The index builder
+  generates navigation; the compiler records its own log.
 
 ## Output
 

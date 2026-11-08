@@ -526,7 +526,7 @@ def sweep_env(tmp_path, monkeypatch):
     monkeypatch.setattr(sweep, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(sweep, "STATE_PATH", tmp_path / "state" / "test-sweep.json")
     monkeypatch.setattr(sweep, "LOG_DIR", tmp_path / "logs")
-    monkeypatch.setattr(sweep, "send_telegram", lambda text: sent.append(text))
+    monkeypatch.setattr(sweep, "send_telegram", lambda text: sent.append(text) or True)
     # Without this every main() call walks every process on the machine through
     # psutil; the reaper is covered by its own predicate tests above.
     monkeypatch.setattr(sweep, "reap_orphan_pytest", lambda: [])
@@ -564,6 +564,41 @@ def test_second_red_run_does_not_repeat_alert(sweep_env, monkeypatch):
     assert len(sent) == 1                        # the second run stays quiet
     assert (project / "FINDINGS.md").read_text(encoding="utf-8").count(
         "Tests are failing") == 1
+
+
+def test_failed_delivery_is_retried_until_acknowledged(sweep_env, monkeypatch):
+    """Ported from the meta-repo: saving red status must not acknowledge an alert."""
+    _, sent = sweep_env
+    delivered = iter([False, True])
+    def send(text):
+        sent.append(text)
+        return next(delivered)
+    monkeypatch.setattr(sweep, "send_telegram", send)
+    monkeypatch.setattr(sweep, "run_suite", lambda *a, **k:
+                        {"status": "failed", "seconds": 0.1, "tail": "1 failed"})
+    assert sweep.main([]) == 1
+    assert sweep.load_state()["demo"].get("alert_pending")
+    assert sweep.main([]) == 1
+    assert not sweep.load_state()["demo"].get("alert_pending")
+    assert sweep.main([]) == 1
+    assert len(sent) == 2
+
+
+def test_recovery_retries_closing_a_locked_finding(sweep_env, monkeypatch):
+    project, _ = sweep_env
+    statuses = iter(["failed", "ok", "ok"])
+    monkeypatch.setattr(sweep, "run_suite", lambda *a, **k:
+                        {"status": next(statuses), "seconds": 0.1, "tail": ""})
+    sweep.main([])
+    with monkeypatch.context() as patch:
+        def locked(*a, **k):
+            raise OSError("fixture lock")
+        patch.setattr(sweep, "close_finding", locked)
+        sweep.main([])
+    assert sweep.load_state()["demo"].get("finding_unclosed")
+    sweep.main([])
+    assert "Tests are failing" not in (project / "FINDINGS.md").read_text(encoding="utf-8")
+    assert not sweep.load_state()["demo"].get("finding_unclosed")
 
 
 def test_a_finding_that_could_not_be_written_is_filed_the_next_night(sweep_env, monkeypatch):

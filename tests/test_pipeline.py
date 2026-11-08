@@ -1120,6 +1120,85 @@ def test_a_blind_append_retried_the_next_night_adds_no_copy(bundle: Path, monkey
     assert "State as of 2020-05-04 (snapshot)" in text
 
 
+def test_compile_leaves_generated_indexes_to_the_builder(bundle: Path, monkeypatch):
+    wcs = _load_wiki_script(bundle, monkeypatch, "wcs_indexes", "wiki-compile-sessions.py")
+    page = bundle / "wiki" / "projects" / "demo" / "index.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# Generated index\n", encoding="utf-8")
+    monkeypatch.setattr(wcs, "append_per_project_log", lambda *a: None)
+    applied, rejected = wcs.apply_changes(
+        [{"path": "projects/demo/index.md", "content": "# Model index"}],
+        source_daily="2020-05-04.md", project="demo")
+    assert (applied, rejected) == ([], [])
+    assert page.read_text(encoding="utf-8") == "# Generated index\n"
+
+
+def test_compile_checks_the_resolved_target_policy(bundle: Path, monkeypatch):
+    wcs = _load_wiki_script(bundle, monkeypatch, "wcs_target_policy", "wiki-compile-sessions.py")
+    denied = bundle / "wiki" / "projects" / "private-demo"
+    denied.mkdir(parents=True)
+    public = bundle / "wiki" / "projects" / "demo"
+    public.mkdir(exist_ok=True)
+    resolve = Path.resolve
+    def resolved_target(path, *args, **kwargs):
+        if path.is_relative_to(public):
+            path = denied / path.relative_to(public)
+        return resolve(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "resolve", resolved_target)
+    monkeypatch.setattr(wcs, "project_allowed", lambda slug: slug == "demo")
+    monkeypatch.setattr(wcs, "quarantine_raw", lambda *a, **k: None)
+    monkeypatch.setattr(wcs, "append_per_project_log", lambda *a: None)
+    applied, rejected = wcs.apply_changes(
+        [{"path": "projects/demo/solution-test.md", "content": "# Public material"}],
+        source_daily="2020-05-04.md", project="demo")
+    assert not applied and rejected
+    assert not (denied / "solution-test.md").exists()
+
+
+def test_compile_write_failure_keeps_processing_sibling_changes(bundle: Path, monkeypatch):
+    wcs = _load_wiki_script(bundle, monkeypatch, "wcs_write_failure", "wiki-compile-sessions.py")
+    monkeypatch.setattr(wcs, "append_per_project_log", lambda *a: None)
+    write = wcs.write_page
+    def guarded_write(path, *args, **kwargs):
+        if path.name == "locked.md":
+            raise OSError("fixture lock")
+        return write(path, *args, **kwargs)
+    monkeypatch.setattr(wcs, "write_page", guarded_write)
+    applied, rejected = wcs.apply_changes([
+        {"path": "projects/demo/locked.md", "content": "# Locked"},
+        {"path": "projects/demo/available.md", "content": "# Available"},
+    ], "2020-05-04.md", "demo")
+    assert len(applied) == len(rejected) == 1
+    assert (bundle / "wiki" / "projects" / "demo" / "available.md").exists()
+
+
+@pytest.mark.parametrize("second, rejected_count", [
+    ("# Topic\n\nfact A\n\nfact B", 0),
+    ("# Topic\n\nunrelated fact", 1),
+])
+def test_split_compile_reconciles_full_snapshots(bundle: Path, monkeypatch, second, rejected_count):
+    wcs = _load_wiki_script(bundle, monkeypatch, "wcs_snapshots", "wiki-compile-sessions.py")
+    monkeypatch.setattr(wcs, "append_per_project_log", lambda *a: None)
+    monkeypatch.setattr(wcs, "llm_pace", lambda: None)
+    monkeypatch.setattr(wcs, "quarantine_raw", lambda *a, **k: None)
+    responses = iter(["# Topic\n\nfact A", second])
+    prompts = []
+    def call(prompt, **kwargs):
+        prompts.append(prompt)
+        return types.SimpleNamespace(
+            text=json.dumps([{"path": "projects/demo/topic.md", "content": next(responses)}]),
+            kind="ok")
+    monkeypatch.setattr(wcs, "llm_call_ex", call)
+    changes, complete, _ = wcs.compile_project_data("demo", "x" * 80000 + "\n\ny", {})
+    applied, rejected = wcs.apply_changes(changes, "2020-05-04.md", "demo")
+    assert complete and "fact A" in prompts[1]
+    assert len(applied) == 1 and len(rejected) == rejected_count
+    text = (bundle / "wiki" / "projects" / "demo" / "topic.md").read_text(encoding="utf-8")
+    assert text.count("fact A") == 1
+    assert ("fact B" in text) == (not rejected_count)
+    assert "unrelated fact" not in text
+
+
 def test_compile_coalesces_same_path_changes(bundle: Path):
     """Two changes targeting ONE page must merge, not overwrite.
 

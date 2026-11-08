@@ -47,6 +47,15 @@ explains why things changed; this file says what to do about it.
 
 ## Unreleased
 
+### Scheduler and recovery safeguards
+
+After reinstalling the full profile on Windows, run `cron/admin/sync.cmd` to
+repair tasks with missing or extra actions/triggers or an invalid calendar
+start time. The registry remains the source of truth; review its definitions
+before applying the sync. Test-sweep state gains pending notification fields:
+keep the state file to retry undelivered events and close locked findings on a
+later green run. No provider or privacy-policy changes are required.
+
 ### Shared Claude/Codex knowledge (full tier, opt-in)
 
 Reinstall the full profile to deliver `cron/knowledge-search.py` and

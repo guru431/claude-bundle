@@ -5,6 +5,19 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Ported from the meta-repo: scheduler sync repairs missing or extra actions
+  and triggers, including calendar triggers without a valid start time. Test
+  sweep retains undelivered failure, recovery and environment alerts until the
+  sender confirms delivery, and retries closing temporarily locked findings.
+  Wiki compilation reconciles consecutive full snapshots, keeps conflicting
+  snapshots retryable, ignores generated indexes, checks resolved target privacy
+  and continues past a failed page write.
+  Checked and not ported: installation-specific provider, key, infrastructure
+  and incident-extractor rules; portable shared-knowledge attribution and the
+  earlier publication/handoff hardening already have equivalent implementations.
+- Marked the subscription-mode PowerShell workflow as integration after three
+  isolated measurements exceeded the fast-test limit; it remains in the full suite.
+
 - Ported from the meta-repo: shared Claude/Codex session readers, local knowledge
   search and Codex ingestion in the existing full-tier memory/wiki jobs. Portable
   manifest roots replace the private project registry; snapshots, thread cursors,

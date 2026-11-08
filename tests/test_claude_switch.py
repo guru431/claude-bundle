@@ -129,6 +129,7 @@ def test_cleaner_mode_points_claude_code_at_the_gateway(tmp_path: Path):
     assert set(models.values()) == {"gateway-model-1"}
 
 
+@pytest.mark.integration  # Three serial measurements: 1.60-1.84s for the real PowerShell workflow.
 def test_cleaner_sub_mode_keeps_the_claude_ai_login(tmp_path: Path):
     """The `cleaner-sub` mode: Claude Code keeps its claude.ai login — its own
     Authorization goes through the gateway to Anthropic — and the gateway key

@@ -516,6 +516,8 @@ function Get-CurrentSummary([string]$name) {
     return @{
         monthDays = $monthDays
         exists = $true
+        actionCount = @($t.Actions).Count
+        triggerCount = @($t.Triggers).Count
         execute = ($t.Actions | Select-Object -First 1).Execute
         args = ($t.Actions | Select-Object -First 1).Arguments
         triggerType = ($t.Triggers | Select-Object -First 1).CimClass.CimClassName
@@ -982,7 +984,7 @@ foreach ($task in $reg.tasks) {
         if ($task.restart_interval) { "$($task.restart_interval)" } else { 'PT1M' }
     } else { '' }
     if ($current) {
-        $action_needs_change = ($current.execute -ne $wantedExec) -or ((Normalize-TaskArgs $current.args) -ne (Normalize-TaskArgs $wantedArgs))
+        $action_needs_change = ($current.actionCount -ne 1) -or ($current.execute -ne $wantedExec) -or ((Normalize-TaskArgs $current.args) -ne (Normalize-TaskArgs $wantedArgs))
         $enabled_needs_change = ([bool]$current.enabled -ne [bool]$task.enabled)
         # Full description compare (covers both the marker and the description text).
         $desc_needs_change = ([string]$current.description -ne $description)
@@ -1018,9 +1020,9 @@ foreach ($task in $reg.tasks) {
             elseif ($task.trigger -match '^Monthly')    { @('MSFT_TaskMonthlyTrigger', 'MSFT_TaskTrigger') }
             else                                        { @('MSFT_TaskTrigger') }
         $wantedTriggerType = $wantedTriggerTypes -join ' | '
-        if ($current.triggerType) {
-            $triggertype_needs_change = ($wantedTriggerTypes -notcontains "$($current.triggerType)")
-        }
+        # The XML emits one action and one trigger; a matching first object
+        # must not hide missing or extra objects (ported from the meta-repo).
+        $triggertype_needs_change = ($current.triggerCount -ne 1) -or ($wantedTriggerTypes -notcontains "$($current.triggerType)")
         # Compare day-of-week for Weekly triggers (bitmask: Sun=1..Sat=64).
         if ($task.trigger -match '^Weekly\s+(\w+)\s' -and $null -ne $current.daysOfWeek) {
             $dowBits = @{ sun=1; mon=2; tue=4; wed=8; thu=16; fri=32; sat=64 }
@@ -1039,7 +1041,7 @@ foreach ($task in $reg.tasks) {
             if ($current.startBoundary) {
                 try { $currentTime = ([datetime]$current.startBoundary).ToString('HH:mm') } catch {}
             }
-            if ($currentTime) { $trigger_needs_change = ($currentTime -ne $wantedTime) }
+            $trigger_needs_change = ($currentTime -ne $wantedTime)
         }
     }
     # WHY a task counts as changed. Without this list `[updated]` is a verdict
@@ -1051,6 +1053,8 @@ foreach ($task in $reg.tasks) {
     if ($current) {
         $checks = [ordered]@{
             action      = @($action_needs_change,      $wantedArgs,             $current.args)
+            actionCount = @(($current.actionCount -ne 1), '1',                  "$($current.actionCount)")
+            triggerCount = @(($current.triggerCount -ne 1), '1',                "$($current.triggerCount)")
             enabled     = @($enabled_needs_change,     "$($task.enabled)",      "$($current.enabled)")
             description = @($desc_needs_change,        $description,            $current.description)
             logonType   = @($logontype_needs_change,   $logonType,              $current.logonType)

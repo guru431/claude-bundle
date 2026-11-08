@@ -27,6 +27,50 @@ windows_only = pytest.mark.skipif(
     sys.platform != "win32", reason="Task Scheduler cmdlets exist on Windows only")
 
 
+def test_missing_and_extra_actions_and_triggers_require_sync(tmp_path: Path):
+    """Ported from the meta-repo: a matching first object hides extra objects."""
+    source = SYNC.read_text(encoding="utf-8-sig")
+    start = source.index("    if ($current) {\n        $action_needs_change")
+    comparison = source[start:source.index("    # WHY a task counts as changed.", start)]
+    code = define_functions(SYNC, ["Get-XmlMonthDays", "Get-CurrentSummary",
+                                  "Normalize-TaskArgs", "Test-UserChanged",
+                                  "ConvertTo-DurationSpan"]) + r'''
+$task = @{ trigger='Daily 09:00'; enabled=$true; hidden=$true; user='fixture-user'; runlevel='limited'; timeout_hours=1 }
+$wantedExec = 'expected.exe'; $wantedArgs = 'args'; $description = 'desc'; $logonType = 'Password'
+$wantedDelay = ''; $wantedRestartCount = '0'; $wantedRestartInterval = ''
+$wantedRepeatEvery = ''; $wantedRepeatFor = ''
+function Get-ScheduledTask {
+    [pscustomobject]@{
+        Actions = @((1..$script:actionCount | Where-Object { $script:actionCount -gt 0 }) | ForEach-Object {
+            [pscustomobject]@{ Execute='expected.exe'; Arguments='args' }
+        })
+        Triggers = @((1..$script:triggerCount | Where-Object { $script:triggerCount -gt 0 }) | ForEach-Object {
+            [pscustomobject]@{ CimClass=[pscustomobject]@{ CimClassName='MSFT_TaskDailyTrigger' }
+                StartBoundary=$script:boundary; DaysOfWeek=$null; Delay=''; Repetition=$null }
+        })
+        Principal = [pscustomobject]@{ UserId='fixture-user'; RunLevel='Limited'; LogonType='Password' }
+        Settings = [pscustomobject]@{ Enabled=$true; Hidden=$true; StartWhenAvailable=$true
+            ExecutionTimeLimit='PT1H'; RestartCount=0; RestartInterval='' }
+        Description='desc'
+    }
+}
+foreach ($case in @(@(1,1,'2020-05-04T09:00:00'), @(0,1,'2020-05-04T09:00:00'),
+                   @(2,1,'2020-05-04T09:00:00'), @(1,0,''), @(1,2,'2020-05-04T09:00:00'), @(1,1,''))) {
+    $script:actionCount = $case[0]; $script:triggerCount = $case[1]; $script:boundary = $case[2]
+    $current = Get-CurrentSummary 'Fixture'
+    $trigger_needs_change = $false; $triggertype_needs_change = $false
+    $dow_needs_change = $false; $dom_needs_change = $false
+''' + comparison + r'''
+    Write-Output ('{0}/{1}/{2}|{3}' -f $case[0], $case[1], [bool]$case[2], ($action_needs_change -or $triggertype_needs_change -or $trigger_needs_change))
+}
+'''
+    result = run_ps(code, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    actual = dict(line.split("|", 1) for line in result.stdout.splitlines() if "|" in line)
+    assert actual == {"1/1/True": "False", "0/1/True": "True", "2/1/True": "True",
+                      "1/0/False": "True", "1/2/True": "True", "1/1/False": "True"}
+
+
 def _deployment(tmp_path: Path, tasks: str) -> Path:
     """A bootstrapped registry whose tasks point into tmp and exist nowhere."""
     (tmp_path / "bin").mkdir(exist_ok=True)

@@ -1255,14 +1255,11 @@ def plan_suites(projects: list[Path], contracts: dict,
     return planned
 
 
-def send_telegram(text: str) -> None:
+def send_telegram(text: str) -> bool:
     if not TELEGRAM_ENABLED:
-        return
-    # Telegram rejects messages over 4096 characters outright (HTTP 400): with a
-    # dozen broken suites the summary would cross the limit and never arrive.
-    if len(text) > 3900:
-        text = text[:3900] + "\n… truncated, details in cron/logs/test-sweep_*.log"
-    notify.send(text, log=log)
+        return False
+    # The shared sender splits long messages and acknowledges delivered parts.
+    return notify.send(text, log=log)
 
 
 def load_state() -> dict:
@@ -1360,7 +1357,8 @@ def _sweep(args, rec: dict) -> int:
         for entry in reap_orphan_pytest():
             log(f"reaped an abandoned pytest ({entry})")
 
-    state, results, changed, recovered, env_changed = load_state(), {}, [], [], []
+    state, results, recovered = load_state(), {}, []
+    notification_keys = []
     # A partial run (--project) sees one project's contract only — it must not
     # close the finding about the others.
     if not args.dry_run and not args.project:
@@ -1409,6 +1407,7 @@ def _sweep(args, rec: dict) -> int:
         # suite keeps the one entry it always had.
         full_level = args.full and not auto
         skey = f"{key}@full" if full_level else key
+        notification_keys.append(skey)
         mark = {"ok": "OK ", "over-budget": "OK ", "no-tests": "N/A", "no-pytest": "N/A",
                 "env": "ENV"}.get(res["status"], "RED")
         log(f"{mark} {key}: {res['status']} in {res['seconds']}s "
@@ -1432,6 +1431,10 @@ def _sweep(args, rec: dict) -> int:
                 log(f"     {line}")
         prev_entry = state.get(skey) or {}
         previous = prev_entry.get("status")
+        pending = {field: prev_entry[field] for field in
+                   ("alert_pending", "recovery_pending", "env_alert_pending")
+                   if prev_entry.get(field)}
+        unclosed = bool(prev_entry.get("finding_unclosed"))
         # Neither a finding nor an alert must take the whole sweep down:
         # FINDINGS.md can be open, just deleted, or on an unreachable share —
         # and then the remaining projects would simply never run.
@@ -1446,6 +1449,11 @@ def _sweep(args, rec: dict) -> int:
             # filter, and each used to append another entry about the same
             # broken suite.
             news = previous != res["status"]
+            unclosed = False
+            if news:
+                pending["alert_pending"] = {
+                    "date": DATE,
+                    "line": f"• {key}: {res['status']} — {res.get('hung') or _summary(res)}"}
             try:
                 if has_open_finding(root, key, full_level):
                     if news:
@@ -1460,34 +1468,40 @@ def _sweep(args, rec: dict) -> int:
                                           contract=not auto):
                         log(f"     finding NOT written to {name}/FINDINGS.md — "
                             + ("alerting anyway" if news else "the next run tries again"))
-                    if news:
-                        changed.append((key, res))
             except OSError as exc:
                 log(f"     finding not written to {name}/FINDINGS.md: {exc}")
-                if news:
-                    changed.append((key, res))
-        elif res["status"] in RECOVERED and previous in ALERTING:
+        elif res["status"] in RECOVERED and (previous in ALERTING or unclosed):
             # Red → green. Nothing reported this before: Telegram stayed
             # silent, so nobody learned the fix had worked, and the entry
             # this sweep filed stayed open forever in a file whose whole
             # contract is "open entries only".
-            recovered.append((key, res, previous))
+            if previous in ALERTING:
+                recovered.append((key, res, previous))
+                pending["recovery_pending"] = {
+                    "date": DATE,
+                    "line": f"• {key}: {previous} → {res['status']} in {res['seconds']}s"}
             try:
                 if close_finding(root, key, full_level):
                     log(f"     recovered — closed the finding in {name}/FINDINGS.md")
+                unclosed = False
             except OSError as exc:
+                unclosed = True
                 log(f"     finding not closed in {name}/FINDINGS.md: {exc}")
         if (res["status"] == "env" and res.get("env_kind") == "other"
                 and "env" not in (previous, prev_entry.get("blocked_by"))):
             # A runner that is not there, a TESTS_ENV marker: said once, on
             # entering the state — not every morning for as long as it lasts.
-            env_changed.append((key, res))
+            pending["env_alert_pending"] = {
+                "date": DATE, "line": f"• {key}: {res.get('note') or _summary(res)}"}
         if auto:
             extra = carry_fast(key, res)
         elif args.full:
             extra = {}
         else:
             extra = track_budget(root, name, key, res, prev_entry, suite["budget_s"])
+        extra.update(pending)
+        if unclosed:
+            extra["finding_unclosed"] = True
         if res["status"] in NEUTRAL and previous in ALERTING:
             # A suite that WAS red and now cannot be run at all — or not
             # reliably — is not a recovery: the previous status is kept so
@@ -1551,20 +1565,20 @@ def _sweep(args, rec: dict) -> int:
                       f"candidates for `integration`):\n"
                       + "\n".join(f"• {k}: {s:.0f}s" for k, s in slow[:15])
                       + "\nMeasured by the daily fast sweep (CLAUDE.md § Test policy).")
-    if changed:
-        lines = [f"Tests broke ({DATE}):"]
-        lines += [f"• {k}: {r['status']} — {r.get('hung') or _summary(r)}"
-                  for k, r in changed]
-        lines.append("Findings filed in the projects' FINDINGS.md.")
-        send_telegram("\n".join(lines))
-    if recovered:
-        # A separate message: "it is fixed" is the one piece of news the sweep
-        # used to keep entirely to itself.
-        lines = [f"Tests recovered ({DATE}):"]
-        lines += [f"• {k}: {was} → {r['status']} in {r['seconds']}s"
-                  for k, r, was in recovered]
-        lines.append("Their findings were closed automatically.")
-        send_telegram("\n".join(lines))
+    # Saving status does not acknowledge delivery. Keep each event until the
+    # sender confirms it, including across a neutral run (meta-repo backport).
+    for field, heading in (
+            ("alert_pending", "Tests broke:"),
+            ("recovery_pending", "Tests recovered:"),
+            ("env_alert_pending", "ClaudeTestSweep: cannot run (the environment, not the code):")):
+        events = [(key, state[key][field]) for key in notification_keys if state[key].get(field)]
+        if not events:
+            continue
+        lines = [heading, *[f"{event['line']} ({event['date']})" for _, event in events]]
+        if send_telegram("\n".join(lines)):
+            for key, _ in events:
+                state[key].pop(field, None)
+            save_state(state)
     # A discovered suite reports `env` for one reason only — the basetemp; a
     # contract suite says which kind it is.
     basetemp_env = [k for k in env if results[k].get("env_kind", "basetemp") == "basetemp"]
@@ -1577,11 +1591,6 @@ def _sweep(args, rec: dict) -> int:
                       f"The leftover %TEMP%/sweep-run-* directories belong to a process with "
                       f"an admin token; clear them with "
                       f"takeown /F ... /R /D Y && icacls ... /reset /T. No findings filed.")
-    if env_changed:
-        lines = [f"ClaudeTestSweep {DATE}: cannot run (the environment, not the code):"]
-        lines += [f"• {k}: {r.get('note') or _summary(r)}" for k, r in env_changed]
-        lines.append("No findings filed.")
-        send_telegram("\n".join(lines))
     # useful_items = suites actually run: zero means the sweep walked
     # projects_root and found nothing to test, which is a configuration
     # problem wearing a green exit code.

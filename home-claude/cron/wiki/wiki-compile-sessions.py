@@ -476,22 +476,31 @@ JSON only, no markdown wrapper. Escape inner quotes as \\", newlines as \\n."""
             kinds.append("deterministic")
             continue
 
+        # Entries within one response are fragments; consecutive non-blind
+        # responses are full snapshots of the state shown to the next part.
+        for change in result:
+            if isinstance(change, dict):
+                change.pop("_snapshot_part", None)
+                change.pop("_snapshot_conflict", None)
+        result = coalesce_changes(result)
+        for change in result:
+            if isinstance(change, dict):
+                change["_bodies_withheld"] = part_withheld
+                if not part_withheld:
+                    change["_snapshot_part"] = part_idx
         all_changes.extend(result)
         # Merge this part's bodies into the state the next part is shown, so a
         # page touched twice is extended rather than rewritten from scratch.
-        for chg in result:
-            if isinstance(chg, dict):
-                # Stamp the visibility THIS part was generated under; see the
-                # docstring for why a project-wide flag was wrong.
-                chg["_bodies_withheld"] = part_withheld
-            if isinstance(chg, dict) and chg.get("path") and chg.get("content"):
+        for chg in coalesce_changes(all_changes):
+            if (isinstance(chg, dict) and isinstance(chg.get("path"), str)
+                    and chg.get("content") and not chg.get("_snapshot_conflict")):
                 # Key by the NORMALIZED stem: normalize_wiki_path can rewrite the
                 # filename (projects/proj-topic.md → projects/proj/topic.md), and
                 # load_existing_pages keys by the on-disk stem. Keying by the raw
                 # path there would miss the merge, so the next part would rewrite
                 # the page from its pre-run body — the exact loss this guards.
                 norm = normalize_wiki_path(chg["path"])
-                if norm:
+                if norm and isinstance(chg["content"], str):
                     # A body, like the pages read from disk: frontmatter the
                     # model emitted anyway is stripped on write, not shown back.
                     existing_pages[Path(norm).stem] = strip_leading_frontmatter(chg["content"])
@@ -518,9 +527,10 @@ def coalesce_changes(changes: list[dict]) -> list[dict]:
         if not isinstance(change, dict):
             out.append(change)
             continue
-        key = normalize_wiki_path(change.get("path", ""))
+        raw_path = change.get("path", "")
+        key = normalize_wiki_path(raw_path) if isinstance(raw_path, str) else ""
         content = change.get("content", "")
-        if not key or not content:
+        if not key or not isinstance(content, str) or not content:
             out.append(change)
             continue
         prev = by_path.get(key)
@@ -528,6 +538,17 @@ def coalesce_changes(changes: list[dict]) -> list[dict]:
             merged = dict(change)  # copy: don't mutate the parsed LLM output
             by_path[key] = merged
             out.append(merged)
+            continue
+        if ("_snapshot_part" in prev and "_snapshot_part" in change
+                and prev["_snapshot_part"] != change["_snapshot_part"]):
+            old_body = strip_leading_frontmatter(prev["content"])
+            old_lines = [line.strip() for line in old_body.splitlines()
+                         if line.strip() and not line.lstrip().startswith("#")]
+            sane, _why = rewrite_is_sane(old_body, content)
+            if sane and all(line in content for line in old_lines):
+                prev.update(change)
+            else:
+                out.append(dict(change, _snapshot_conflict=True))
             continue
         prev["content"] = prev.get("content", "").rstrip() + "\n\n" + content.lstrip()
         # Merging two parts with different page visibility: if EITHER was
@@ -589,6 +610,15 @@ def _enforce_source_date(rel_path: str, source_date: str, blind: bool) -> str:
     return f"{parts[0]}/{parts[1]}/{slug}-{source_date}.md"
 
 
+def is_generated_index(path) -> bool:
+    """Generated indexes are owned by the index builder, not model changes."""
+    if not isinstance(path, str):
+        return False
+    path = path.replace("\\", "/").removeprefix("wiki/")
+    return (path in {"index.md", "projects/index.md", "kb/index.md"}
+            or bool(re.fullmatch(r"(?:projects|kb)/[^/.]+/index\.md", path)))
+
+
 def apply_changes(changes: list[dict], source_daily: str, project: str,
                   blind_update: bool = False) -> tuple[list[str], list[str]]:
     """Apply changes: preserve frontmatter, record source, update _log.md.
@@ -624,10 +654,13 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
         if not isinstance(change, dict):
             rejected.append(f"non-dict entry: {str(change)[:80]}")
             continue  # defensive: a malformed LLM array may yield non-dict entries
-        rel_path = normalize_wiki_path(change.get("path", ""))
+        if is_generated_index(change.get("path")):
+            continue
+        raw_path = change.get("path", "")
+        rel_path = normalize_wiki_path(raw_path) if isinstance(raw_path, str) else ""
         content = change.get("content", "")
 
-        if not rel_path or not content:
+        if not rel_path or not isinstance(content, str) or not content:
             rejected.append(f"unusable path/content: {str(change.get('path'))[:80]}")
             continue
 
@@ -652,7 +685,25 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
     for change in coalesce_changes(staged):
         rel_path = change["path"]
         content = change["content"]
+        if change.get("_snapshot_conflict"):
+            rejected.append(f"snapshot lost previous facts: {rel_path}")
+            quarantine_raw(f"{Path(source_daily).stem}#{project}", "snapshot-lost-facts",
+                           json.dumps(change, ensure_ascii=False))
+            continue
         full_path = WIKI_ROOT / rel_path
+
+        # A directory link must not redirect an allowed project into a denied
+        # project or outside the vault (ported from the meta-repo).
+        try:
+            resolved = full_path.resolve().relative_to(WIKI_ROOT.resolve())
+            if project and not project_allowed(project):
+                raise ValueError("source project denied")
+            if (len(resolved.parts) >= 2 and resolved.parts[0] == "projects"
+                    and not project_allowed(resolved.parts[1])):
+                raise ValueError("target project denied")
+        except (OSError, ValueError):
+            rejected.append(f"unsafe target: {rel_path}")
+            continue
 
         content = strip_leading_frontmatter(content)
 
@@ -692,7 +743,11 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
             existing_fm,
             src_path=f"daily/{source_daily}",
         )
-        write_page(full_path, new_fm, content)
+        try:
+            write_page(full_path, new_fm, content)
+        except OSError as exc:
+            rejected.append(f"write failed: {rel_path} ({exc})")
+            continue
 
         applied.append(f"{action_label}: {rel_path}")
         log_entries.append(f"{Path(rel_path).name} ({action_label}) ← daily/{source_daily}")

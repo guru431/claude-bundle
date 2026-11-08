@@ -1728,7 +1728,7 @@ def _load_wiki_script(bundle: Path, monkeypatch, name: str, script: str):
     import importlib.util
     monkeypatch.syspath_prepend(str(bundle / "cron"))
     monkeypatch.syspath_prepend(str(bundle / "cron" / "hooks"))
-    for mod in ("utils", "untrusted", "runs"):
+    for mod in ("utils", "untrusted", "runs", "wiki_recovery"):
         monkeypatch.delitem(sys.modules, mod, raising=False)
     spec = importlib.util.spec_from_file_location(name, bundle / "cron" / "wiki" / script)
     module = importlib.util.module_from_spec(spec)

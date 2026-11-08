@@ -14,6 +14,7 @@ Schedule: daily at 03:30 (after KB Update at 03:00).
 # enable this task.
 # bundle-io: offbox=your KB source text -> LLM provider money=tokens writes=wiki/kb/
 
+import hashlib
 import json
 import os
 import re
@@ -41,6 +42,7 @@ from utils import (  # noqa: E402
     parse_llm_json_result,
     quarantine_raw,
     read_page,
+    render_page,
     state_add,
     state_get,
     strip_leading_frontmatter,
@@ -52,6 +54,7 @@ from utils import (  # noqa: E402
     LOG_MD,
 )
 from untrusted import fence  # noqa: E402
+from wiki_recovery import checked_target, page_lock, quarantine_change  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from runs import terminal_record  # noqa: E402
@@ -204,12 +207,16 @@ JSON only, no markdown wrapper, no commentary."""
     # was re-sent every night forever.
     parsed_ok, result = parse_llm_json_result(res.text)
     if parsed_ok:
+        source_sha256 = hashlib.sha256(article_text.encode("utf-8")).hexdigest()
+        result = [{**change, "_source_sha256": source_sha256}
+                  if isinstance(change, dict) else change for change in result]
         return result, "ok"
     return None, "deterministic"
 
 
 def apply_changes(changes: list[dict], existing_pages: dict[str, str],
-                  article_rel: str) -> tuple[list[str], list[str]]:
+                  article_rel: str, *, dry_run: bool = False, on_preview=None,
+                  source_sha256: str | None = None) -> tuple[list[str], list[str]]:
     """Apply changes: handle frontmatter + source tracking for create/append.
 
     Returns (created, rejected). A rejected change used to disappear silently
@@ -219,16 +226,27 @@ def apply_changes(changes: list[dict], existing_pages: dict[str, str],
     """
     created = []
     rejected: list[str] = []
+
+    def reject(change, reason, rel_path=""):
+        rejected.append(f"{reason}: {rel_path}")
+        if not dry_run:
+            source_rel = article_rel.split("/", 1)[-1]
+            quarantine_change(change, reason, kind="kb", source=KBNEWS_DIR / source_rel,
+                              source_rel=source_rel, target_rel=rel_path,
+                              blind=True, source_sha256=change.get("_source_sha256", source_sha256)
+                              if isinstance(change, dict) else source_sha256)
+
     for change in changes:
         if not isinstance(change, dict):
-            rejected.append(f"non-dict entry: {str(change)[:80]}")
+            reject(change, "non-dict entry")
             continue
-        rel_path = normalize_wiki_path(change.get("path", ""))
+        raw_path = change.get("path", "")
+        rel_path = normalize_wiki_path(raw_path) if isinstance(raw_path, str) else ""
         action = change.get("action", "create")
         content = change.get("content", "")
 
-        if not rel_path or not content:
-            rejected.append(f"unusable path/content: {str(change.get('path'))[:80]}")
+        if not rel_path or not isinstance(content, str) or not content:
+            reject(change, "unusable path/content")
             continue
 
         # The session compiler pins writes to its own project; this one is the
@@ -237,12 +255,15 @@ def apply_changes(changes: list[dict], existing_pages: dict[str, str],
         if not rel_path.startswith("kb/"):
             # ensure_ascii=False: the file is for a person to read, and every
             # non-Latin letter came out as a \uXXXX escape.
-            quarantine_raw(article_rel, "path-outside-kb", json.dumps(change, ensure_ascii=False))
             print(f"  WARN compile-kb: rejected out-of-scope path {rel_path}", file=sys.stderr)
-            rejected.append(f"out-of-scope path: {rel_path}")
+            reject(change, "path-outside-kb", rel_path)
             continue
 
-        full_path = WIKI_ROOT / rel_path
+        try:
+            full_path = checked_target(rel_path, "", "kb")
+        except (OSError, ValueError):
+            reject(change, "unsafe target", rel_path)
+            continue
 
         content = strip_leading_frontmatter(content)
 
@@ -285,11 +306,20 @@ def apply_changes(changes: list[dict], existing_pages: dict[str, str],
             src_path=article_rel,
             aliases=(legacy,) if legacy != article_rel else (),
         )
-        write_page(full_path, new_fm, final_body)
+        try:
+            if dry_run:
+                if on_preview is not None:
+                    on_preview(rel_path, render_page(full_path, new_fm, final_body))
+            else:
+                write_page(full_path, new_fm, final_body)
+        except OSError:
+            reject(change, "write failed", rel_path)
+            continue
         created.append(f"{label}: {rel_path}")
 
         page_name = Path(rel_path).stem
-        existing_pages[page_name] = final_body
+        if not dry_run:
+            existing_pages[page_name] = final_body
 
     return created, rejected
 
@@ -304,7 +334,7 @@ def update_log(article_rel: str, changes: list[str]):
 def main() -> int:
     # ONE terminal ledger record per run (cron/runs.py), a crash included — a
     # record written at the end was never written by a run that raised first.
-    with terminal_record("ClaudeWikiCompileKB", delivery="n/a") as rec:
+    with terminal_record("ClaudeWikiCompileKB", delivery="n/a") as rec, page_lock():
         return _compile_kb(rec)
 
 
@@ -416,6 +446,12 @@ def _compile_kb(rec: dict) -> int:
                 hard_failure = True
                 print(f"  ERROR compile-kb {rel}: a page could not be written ({e})",
                       file=sys.stderr)
+                log("  → ERROR: write failed — retried next run")
+                update_log(rel, ["(ERROR: write failed)"])
+                continue
+            if any(reason.startswith("write failed:") for reason in rejected):
+                # I/O failures are retryable, including after some siblings succeeded.
+                hard_failure = True
                 log("  → ERROR: write failed — retried next run")
                 update_log(rel, ["(ERROR: write failed)"])
                 continue

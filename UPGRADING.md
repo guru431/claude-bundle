@@ -47,6 +47,19 @@ explains why things changed; this file says what to do about it.
 
 ## Unreleased
 
+### Offline wiki recovery and persistent Matrix replay
+
+Reinstall the full profile to deliver `cron/wiki/wiki-recover-change.py`,
+`cron/lib/wiki_recovery.py` and `cron/lib/matrix_delivery.py` together with both
+compilers and `telegram-send.sh`. No registry or credential migration is needed.
+Wiki rejection records written before this upgrade remain inspection-only;
+new records support local preview/apply with fingerprint and privacy checks.
+Matrix credentials remain in the preserved `.env`. Failed parts now remain in
+`cron/state/matrix-pending/` for up to seven days; inspect with
+`python cron/lib/matrix_delivery.py --replay`, then add `--apply` to resend to
+the original destination. See `docs/wiki-method.md` and
+`docs/cron-architecture.md` for recovery and retention behavior.
+
 ### Scheduler and recovery safeguards
 
 After reinstalling the full profile on Windows, run `cron/admin/sync.cmd` to

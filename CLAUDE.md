@@ -93,6 +93,11 @@ the tree, and the hook / skill / slash-command counts against what ships.
 - **One implementation per cross-cutting rule** — generate or source a second
   copy (`secret_shapes.py` → `secret-scan.sh`), never paste it.
 
+Manual full-tier recovery commands: `cron/wiki/wiki-recover-change.py` previews
+and applies a quarantined change offline (see `docs/wiki-method.md`);
+`cron/lib/matrix_delivery.py --replay [--apply]` inspects/resends failed Matrix
+parts (see `docs/cron-architecture.md`). Neither adds a scheduled task.
+
 ## What lives where — when changing X, also touch Y
 
 | Change | Also update |

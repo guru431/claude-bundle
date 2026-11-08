@@ -277,7 +277,8 @@ def test_bash_is_the_one_find_bash_resolves(tmp_path: Path):
     hooks = home / "cron" / "hooks"
     hooks.mkdir(parents=True)
     (home / "cron" / "lib").mkdir()
-    shutil.copy2(CRON_SRC / "lib" / "notify.py", home / "cron" / "lib" / "notify.py")
+    for name in ("notify.py", "matrix_delivery.py"):
+        shutil.copy2(CRON_SRC / "lib" / name, home / "cron" / "lib" / name)
     (home / "cron" / "telegram-send.sh").write_text(RECORDER, encoding="utf-8")
     (hooks / "utils.py").write_text(
         "import sys\n"

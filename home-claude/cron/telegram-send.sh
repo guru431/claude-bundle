@@ -75,7 +75,7 @@ printf '%s' "$MSG" > "$PARTS_DIR/message.txt"
 
 PYTHONIOENCODING=utf-8 PARTS_DIR="$PARTS_DIR" \
   TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID" "$PYTHON" - <<'PY'
-import json, os, uuid
+import json, os
 
 out = os.environ["PARTS_DIR"]
 with open(os.path.join(out, "message.txt"), encoding="utf-8", errors="replace") as fh:
@@ -89,27 +89,6 @@ for n, chunk in enumerate(chunks, 1):
             "disable_web_page_preview": True}
     with open(os.path.join(out, f"part{n:03d}.json"), "w", encoding="utf-8") as fh:
         fh.write(json.dumps(body))
-# Matrix allows larger events. Keep at most 30000 characters per part, with
-# byte headroom below its 64 KiB event limit for the envelope and numbering.
-# JSON escaping and non-ASCII text can take more bytes than characters.
-mx = []
-chunk = []
-size = 0
-for char in text:
-    width = len(json.dumps(char, ensure_ascii=False)[1:-1].encode("utf-8"))
-    if len(chunk) >= 30000 or size + width > 58000:
-        mx.append("".join(chunk))
-        chunk, size = [], 0
-    chunk.append(char)
-    size += width
-mx.append("".join(chunk))
-for n, chunk in enumerate(mx, 1):
-    if len(mx) > 1:
-        chunk = f"({n}/{len(mx)})\n{chunk}"
-    with open(os.path.join(out, f"mx{n:03d}.json"), "w", encoding="utf-8") as fh:
-        fh.write(json.dumps({"msgtype": "m.text", "body": chunk}, ensure_ascii=False))
-with open(os.path.join(out, "matrix-txn"), "w", encoding="ascii") as fh:
-    fh.write(uuid.uuid4().hex)
 PY
 split_rc=$?
 
@@ -219,49 +198,13 @@ CURL_CFG
     printf '%s\n' "$BODY"
 done
 
-# A Matrix PUT is idempotent when retried with the same transaction ID. Unlike
-# Telegram's POST, it can safely be retried after the body left the machine.
-# No token, room, URL or response body is printed: diagnostics may contain
-# credentials, and a malformed value must never inject a curl config directive.
+# The Matrix helper persists every part before sending and retains failed parts
+# for explicit replay. Credentials travel in the environment, never argv.
 if [ -n "$MATRIX_HOMESERVER$MATRIX_ACCESS_TOKEN$MATRIX_ROOM_ID" ]; then
-    if ! [[ "$MATRIX_ACCESS_TOKEN" =~ ^[A-Za-z0-9._~+/=-]+$ \
-            && "$MATRIX_HOMESERVER" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?$ \
-            && "$MATRIX_ROOM_ID" =~ ^![A-Za-z0-9._=+/-]+(:[A-Za-z0-9.-]+(:[0-9]+)?)?$ ]]; then
-        echo "telegram-send: matrix: incomplete or invalid configuration — mirror not sent" >&2
-    else
-        MX_GAPS="${MATRIX_RETRY_GAPS-10,30}"
-        case "$MX_GAPS" in
-            *[!0-9,[:space:]]*)
-                echo "telegram-send: matrix: MATRIX_RETRY_GAPS is not a list of seconds — using 10,30" >&2
-                MX_GAPS="10,30" ;;
-        esac
-        MX_ROOM_ENC="${MATRIX_ROOM_ID//!/%21}"
-        MX_ROOM_ENC="${MX_ROOM_ENC//:/%3A}"
-        MX_ROOM_ENC="${MX_ROOM_ENC//\//%2F}"
-        MX_ROOM_ENC="${MX_ROOM_ENC//+/%2B}"
-        MX_TXN=$(cat "$PARTS_DIR/matrix-txn")
-        for part in "$PARTS_DIR"/mx*.json; do
-            [ -f "$part" ] || continue
-            for gap in ${MX_GAPS//,/ } ""; do
-                MX_CODE=$(curl -s -o /dev/null --connect-timeout 10 --max-time 30 -X PUT \
-                  -H "Content-Type: application/json; charset=utf-8" \
-                  --data-binary "@$part" -w '\n%{http_code}' -K - <<CURL_CFG 2>/dev/null
-url = "${MATRIX_HOMESERVER}/_matrix/client/v3/rooms/${MX_ROOM_ENC}/send/m.room.message/${MX_TXN}-$(basename "$part" .json)"
-header = "Authorization: Bearer ${MATRIX_ACCESS_TOKEN}"
-CURL_CFG
-)
-                MX_CODE="${MX_CODE##*$'\n'}"
-                case "$MX_CODE" in
-                    200) break ;;
-                    5??|429|000|"") : ;;
-                    *) break ;;
-                esac
-                [ -n "$gap" ] || break
-                sleep "$gap"
-            done
-            [ "$MX_CODE" = "200" ] || echo "telegram-send: matrix: $(basename "$part") not delivered (HTTP ${MX_CODE:-no answer})" >&2
-        done
-    fi
+    MATRIX_HOMESERVER="$MATRIX_HOMESERVER" MATRIX_ACCESS_TOKEN="$MATRIX_ACCESS_TOKEN" \
+      MATRIX_ROOM_ID="$MATRIX_ROOM_ID" MATRIX_RETRY_GAPS="${MATRIX_RETRY_GAPS-10,30}" \
+      PYTHONIOENCODING=utf-8 "$PYTHON" "$(dirname "$0")/lib/matrix_delivery.py" \
+      --send "$PARTS_DIR/message.txt" || :
 fi
 
 exit "$status"

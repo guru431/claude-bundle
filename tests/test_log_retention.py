@@ -76,16 +76,23 @@ def test_the_agents_md_diffs_are_rotated_with_the_logs(retention, tmp_path, monk
     artifact in that directory nothing rotated was the one written per edit."""
     logs = tmp_path / "logs"
     logs.mkdir()
+    monkeypatch.setattr(retention.time, "time", lambda: 1800000000)
     _touch(logs / "agents-sync-demo_2025-01-01.diff", age_days=400)
     _touch(logs / "agents-sync-demo_2026-09-01.diff", age_days=1)
     monkeypatch.setattr(retention, "LOG_DIR", logs)
     monkeypatch.setattr(retention, "REJECTED_DIR", logs / "rejected")
     monkeypatch.setattr(retention, "PROJECTS_DIR", tmp_path / "no-projects")
+    rejected = logs / "rejected"
+    rejected.mkdir()
+    _touch(rejected / "old.review.json", age_days=10)
+    _touch(rejected / "fresh.review.json", age_days=1)
 
     assert retention._prune_all({}) == 0
 
     assert not (logs / "agents-sync-demo_2025-01-01.diff").exists()
     assert (logs / "agents-sync-demo_2026-09-01.diff").exists()
+    assert not (rejected / "old.review.json").exists()
+    assert (rejected / "fresh.review.json").exists()
 
 
 def test_a_disabled_window_keeps_everything_but_still_ignores_our_own(retention, tmp_path):

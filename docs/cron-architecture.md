@@ -287,6 +287,8 @@ Edit `registry.yaml` to disable any others you don't want before running
 | `ClaudeDaemonWatch` | Daily 00:00 /10min | restart a service whose `health_port` stopped listening, minutes after it died instead of at the next monitor run (off by default — Windows only; enable it once a task declares `health_port`) |
 | `ClaudeWarmWindow` | Daily 01:00 /4h | ping the Claude 5h window (off by default — read the billing note in the script; set `CLAUDE_BIN` in `.env` if the `claude` CLI isn't on PATH in session 0) |
 
+### Alerts
+
 Alerts go to Telegram when something is wrong, not as a success report — with
 two deliberate exceptions: `ClaudeWikiPipeline` sends one summary on the last
 night of a dated `dry_run_until` window (what the preview would have sent), and
@@ -302,8 +304,8 @@ made until they are configured. The homeserver is an origin such as
 form `!room:example.org` or a domainless `!hash` in newer room versions, and the
 token's account must already have joined it.
 The mirror sends the same alert as plain `m.text` events, without end-to-end
-encryption; use an unencrypted room. The token and room are checked before
-entering curl's stdin config, and the token stays out of process arguments and
+encryption; use an unencrypted room. The helper validates the destination before
+sending an authenticated request, and the token stays out of process arguments and
 logs. Partial or malformed settings produce a diagnostic and no Matrix request.
 
 Matrix messages are numbered in parts of at most 30000 characters, reduced
@@ -316,6 +318,16 @@ commas or spaces are accepted, and an empty value means one attempt. Matrix
 failures go to stderr; the exit code and `notify.send()` result still report
 Telegram delivery. The Python timeout includes both channels' retry schedules,
 including Matrix credentials loaded by the shell child from `.env`.
+
+`cron/lib/matrix_delivery.py` writes masked parts to
+`cron/state/matrix-pending/` before sending. A successful part is removed; a
+failure or interrupted request keeps its original transaction ID. Credentials
+are read from the existing local `.env` and never stored in queue records.
+Inspect with `python cron/lib/matrix_delivery.py --replay`; this sends and
+writes nothing. Add `--apply` to resend, or `--txn <id>` to select one part.
+Replay requires the current homeserver and room to match the saved destination,
+and refuses redirects. Parts expire after seven days; sending a new alert or
+applying replay removes expired records. Replay does not call Telegram.
 
 ## Data, cost & publishing per task
 
@@ -473,7 +485,7 @@ old behaviour shipped every transcript to three off-box gateways.
 | Path | Default window | Override |
 |---|---|---|
 | `cron/logs/*.{log,jsonl,diff}` | 30 days | `WIKI_LOG_RETENTION_DAYS` |
-| `cron/logs/rejected/*.txt` (raw LLM payloads) | 7 days | `WIKI_REJECTED_RETENTION_DAYS` |
+| `cron/logs/rejected/*.txt`, `*.review.json` (payloads and recovery receipts) | 7 days | `WIKI_REJECTED_RETENTION_DAYS` |
 | `projects/*/memory/handoff-*.md` (LLM session summaries) | 7 days | `WIKI_HANDOFF_RETENTION_DAYS` |
 
 The last two are shorter because they echo private session text. Handoffs
@@ -542,6 +554,12 @@ sources are in that state. A **transient** failure (the provider never
 answered) does not count towards the limit — waiting really does fix that
 one, and capping it would throw away content over a bad week. Set
 `WIKI_RETRY_LIMIT=0` to restore unbounded retries.
+
+Both compilers also keep each refused change as a masked `wiki-change-v1`
+record with source/target fingerprints. The offline recovery command in
+[`wiki-method.md`](wiki-method.md#recovering-a-rejected-change) previews and
+applies one reviewed change without another provider call. Older plain-text
+records remain available for manual inspection.
 
 What makes the "never loses it" part true is that compile's markers carry
 a **fingerprint of the text as it was read**: `DATE@fp` over the whole daily,

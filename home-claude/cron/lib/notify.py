@@ -43,6 +43,10 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+from matrix_delivery import (DEFAULT_RETRY_GAPS as DEFAULT_MATRIX_GAPS,
+                             PART_BYTES as MATRIX_PART_BYTES,
+                             PART_CHARS as MATRIX_PART_CHARS)
+
 CRON_DIR = Path(__file__).resolve().parents[1]
 TELEGRAM_SH = CRON_DIR / "telegram-send.sh"
 
@@ -54,11 +58,8 @@ PART_CHARS = 4000
 SLACK_SEC = 60
 #: telegram-send.sh's gaps between attempts when TELEGRAM_RETRY_GAPS is unset.
 DEFAULT_GAPS = "30,90"
-#: Optional Matrix mirror: same maximum characters and escaped UTF-8 bytes as
-#: telegram-send.sh's splitter. One JSON character occupies at most six bytes.
-MATRIX_PART_CHARS = 30000
-MATRIX_PART_BYTES = 58000
-DEFAULT_MATRIX_GAPS = "10,30"
+# The optional mirror's constants come from its splitter. The timeout estimate
+# below reserves both channels even when only the shell child loads credentials.
 
 
 def _stderr(msg: str) -> None:

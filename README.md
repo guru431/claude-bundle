@@ -23,6 +23,9 @@ your own OpenAI-compatible server so nothing leaves the machine, or
 `WIKI_LLM_PROVIDER=claude`, which reuses the `claude` CLI you're already
 signed in to and needs no key. (Tier 1 + Tier 2 below.)
 
+The full profile also includes [offline wiki recovery](docs/wiki-method.md#recovering-a-rejected-change)
+and [persistent replay for optional Matrix alerts](docs/cron-architecture.md#alerts).
+
 Both profiles were extracted from a real working setup, then sanitized
 of all private hosts, paths, tokens, and project names.
 

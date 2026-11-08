@@ -48,6 +48,7 @@ from utils import (  # noqa: E402
     project_allowed,
     quarantine_raw,
     read_page,
+    render_page,
     rewrite_is_sane,
     state_add,
     state_get,
@@ -65,6 +66,7 @@ from utils import (  # noqa: E402
     LOG_MD,
 )
 from untrusted import fence  # noqa: E402
+from wiki_recovery import page_lock, quarantine_change  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from runs import latest_by_task, read_latest_runs, terminal_record  # noqa: E402
@@ -620,7 +622,8 @@ def is_generated_index(path) -> bool:
 
 
 def apply_changes(changes: list[dict], source_daily: str, project: str,
-                  blind_update: bool = False) -> tuple[list[str], list[str]]:
+                  blind_update: bool = False, *, dry_run: bool = False,
+                  on_preview=None, source_sha256: str | None = None) -> tuple[list[str], list[str]]:
     """Apply changes: preserve frontmatter, record source, update _log.md.
 
     Returns (applied, rejected). A rejected change used to vanish silently as
@@ -644,6 +647,15 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
     if source_date > DATE:
         source_date = DATE
 
+    def reject(change, reason, rel_path=""):
+        rejected.append(f"{reason}: {rel_path}")
+        if not dry_run:
+            quarantine_change(change, reason, kind="sessions", source=DAILY_DIR / source_daily,
+                              source_rel=source_daily, project=project, target_rel=rel_path,
+                              blind=bool(change.get("_bodies_withheld", blind_update))
+                              if isinstance(change, dict) else blind_update,
+                              source_sha256=source_sha256)
+
     # Normalize and date-enforce FIRST, coalesce SECOND. The other order is what
     # made coalesce_changes unable to do its job: two dated entries of one
     # response were merged under the model's paths and only then pushed onto the
@@ -652,7 +664,7 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
     staged: list[dict] = []
     for change in changes:
         if not isinstance(change, dict):
-            rejected.append(f"non-dict entry: {str(change)[:80]}")
+            reject(change, "non-dict entry")
             continue  # defensive: a malformed LLM array may yield non-dict entries
         if is_generated_index(change.get("path")):
             continue
@@ -661,7 +673,7 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
         content = change.get("content", "")
 
         if not rel_path or not isinstance(content, str) or not content:
-            rejected.append(f"unusable path/content: {str(change.get('path'))[:80]}")
+            reject(change, "unusable path/content")
             continue
 
         # normalize_wiki_path only pins the root (projects|kb). A model error or
@@ -670,10 +682,8 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
         if project and not rel_path.startswith(f"projects/{project}/"):
             # ensure_ascii=False: the file is for a person to read, and every
             # non-Latin letter came out as a \uXXXX escape.
-            quarantine_raw(f"{Path(source_daily).stem}#{project}", "path-outside-project",
-                           json.dumps(change, ensure_ascii=False))
             print(f"  WARN compile {project}: rejected out-of-scope path {rel_path}", file=sys.stderr)
-            rejected.append(f"out-of-scope path: {rel_path}")
+            reject(change, "path-outside-project", rel_path)
             continue
 
         blind = bool(change.get("_bodies_withheld", blind_update))
@@ -686,9 +696,7 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
         rel_path = change["path"]
         content = change["content"]
         if change.get("_snapshot_conflict"):
-            rejected.append(f"snapshot lost previous facts: {rel_path}")
-            quarantine_raw(f"{Path(source_daily).stem}#{project}", "snapshot-lost-facts",
-                           json.dumps(change, ensure_ascii=False))
+            reject(change, "snapshot-lost-facts", rel_path)
             continue
         full_path = WIKI_ROOT / rel_path
 
@@ -702,7 +710,7 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
                     and not project_allowed(resolved.parts[1])):
                 raise ValueError("target project denied")
         except (OSError, ValueError):
-            rejected.append(f"unsafe target: {rel_path}")
+            reject(change, "unsafe target", rel_path)
             continue
 
         content = strip_leading_frontmatter(content)
@@ -744,15 +752,19 @@ def apply_changes(changes: list[dict], source_daily: str, project: str,
             src_path=f"daily/{source_daily}",
         )
         try:
-            write_page(full_path, new_fm, content)
-        except OSError as exc:
-            rejected.append(f"write failed: {rel_path} ({exc})")
+            if dry_run:
+                if on_preview is not None:
+                    on_preview(rel_path, render_page(full_path, new_fm, content))
+            else:
+                write_page(full_path, new_fm, content)
+        except OSError:
+            reject(change, "write failed", rel_path)
             continue
 
         applied.append(f"{action_label}: {rel_path}")
         log_entries.append(f"{Path(rel_path).name} ({action_label}) ← daily/{source_daily}")
 
-    if log_entries and project:
+    if log_entries and project and not dry_run:
         append_per_project_log(project, log_entries)
 
     return applied, rejected
@@ -914,7 +926,7 @@ def clear_markers(target: str) -> int:
 def main() -> int:
     # ONE terminal ledger record per run (cron/runs.py), a crash included — a
     # record written at the end was never written by a run that raised first.
-    with terminal_record("ClaudeWikiCompileSessions", delivery="n/a") as rec:
+    with terminal_record("ClaudeWikiCompileSessions", delivery="n/a") as rec, page_lock():
         return _compile(rec)
 
 
@@ -1088,7 +1100,9 @@ def _compile(rec: dict) -> int:
             # compile_project_data), not as one flag for the whole project.
             if changes:
                 applied, rejected = apply_changes(changes, source_daily=daily_path.name,
-                                                  project=project)
+                                                  project=project,
+                                                  source_sha256=hashlib.sha256(
+                                                      daily_text.encode("utf-8")).hexdigest())
                 total_changes += len(applied)
                 if not applied and rejected:
                     # The LLM produced changes but normalize_wiki_path rejected

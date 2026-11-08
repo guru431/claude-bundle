@@ -4,6 +4,38 @@ A file-based personal knowledge base that gets navigated by `[[wikilinks]]`
 rather than embeddings + RAG. The bundle ships an **empty vault skeleton**
 plus a **pipeline** that fills it from your real Claude Code sessions.
 
+## Recovering a rejected change
+
+New compiler rejections in `cron/logs/rejected/*.txt` contain the proposed
+change, compiler kind, relative source path, privacy namespace and SHA-256
+fingerprints. Run these commands from your installed pipeline root:
+
+```sh
+python cron/wiki/wiki-recover-change.py cron/logs/rejected/<record>.txt
+python cron/wiki/wiki-recover-change.py cron/logs/rejected/<record>.txt --apply
+```
+
+The first command previews the exact rendered diff and saves a local
+`.review.json` receipt beside the rejection. It changes no wiki page or compile
+marker. `--apply` requires that exact review and unchanged source, target and
+record; repeated application is a no-op, including after an interrupted write.
+Both modes share an exclusive lock with the compilers, run offline and enforce
+the current manifest privacy policy and resolved target boundary.
+
+For an invalid or out-of-scope model path, specify `--target
+projects/<project>/<page>.md` (or `kb/<section>/<page>.md` for KB records) in both
+commands. This explicitly selects a corrected destination in the original
+namespace and binds its current fingerprint to the review. Existing target
+conflicts, broken manifests, denied projects, generated index names and legacy
+records without fingerprints require manual inspection. You can repair a
+structured record's content locally and preview it again; every edit invalidates
+the prior review. Records and receipts follow the rejection retention window.
+
+Recovery applies one change and preserves the source's compile markers: it
+cannot declare rejected siblings or a partially compiled batch complete. After
+reviewing the whole batch, the existing `wiki-compile-sessions.py --replay
+DATE#project` command can rerun compilation under the configured provider.
+
 ## The shape
 
 ```

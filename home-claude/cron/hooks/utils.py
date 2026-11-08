@@ -3625,12 +3625,17 @@ def _date_current_headings(md: str, date_str: str) -> str:
     return "\n".join(out)
 
 
-def write_page(path: Path, frontmatter: dict, body: str) -> None:
-    """Write a wiki page with frontmatter. Sets `updated` automatically."""
+def render_page(path: Path, frontmatter: dict, body: str) -> str:
+    """Render the exact page bytes used by both writes and recovery previews."""
     fm = dict(frontmatter)
     fm["updated"] = datetime.now().strftime("%Y-%m-%d")
     body = sanitize_page_body(_unescape_blob(body), label=path.name)
-    out = dump_frontmatter(fm) + body.lstrip("\n")
+    return dump_frontmatter(fm) + body.lstrip("\n")
+
+
+def write_page(path: Path, frontmatter: dict, body: str) -> None:
+    """Write a wiki page with frontmatter. Sets `updated` automatically."""
+    out = render_page(path, frontmatter, body)
     # Atomic write (temp file + os.replace) so a crash mid-write can't leave a
     # half-written page behind — same pattern as save_state().
     atomic_write_text(path, out)

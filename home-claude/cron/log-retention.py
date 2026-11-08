@@ -221,7 +221,7 @@ def _prune_all(rec: dict) -> int:
 
         if REJECTED_DIR.exists():
             r_deleted, r_kept, r_freed = prune(
-                REJECTED_DIR.glob("*.txt"),
+                (*REJECTED_DIR.glob("*.txt"), *REJECTED_DIR.glob("*.review.json")),
                 rejected_days, "cron/logs/rejected",
             )
             log(f"Quarantine retention {rejected_days}d (logs/rejected): "

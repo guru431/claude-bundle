@@ -5,6 +5,15 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Added offline preview/apply for structured wiki rejection records, with
+  source/target fingerprints, an exact-review receipt, conflict detection,
+  current privacy checks and a lock shared with both compilers. Portable roots
+  replace private registries; legacy records remain available for inspection.
+- Optional Matrix alerts now persist masked parts before delivery, retain
+  stable transaction IDs across replay, check the saved destination and expire
+  after seven days. Credentials still come from the local environment file;
+  Telegram continues to determine the sender's delivery status.
+
 - Ported from the meta-repo: scheduler sync repairs missing or extra actions
   and triggers, including calendar triggers without a valid start time. Test
   sweep retains undelivered failure, recovery and environment alerts until the

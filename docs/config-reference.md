@@ -72,7 +72,7 @@ installer generates the first from the second.
 | `LOCAL_LLM_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `MATRIX_ACCESS_TOKEN` | declared | `home-claude/cron/telegram-send.sh` |
 | `MATRIX_HOMESERVER` | declared | `home-claude/cron/telegram-send.sh` |
-| `MATRIX_RETRY_GAPS` | optional (commented) | `home-claude/cron/lib/notify.py`, `home-claude/cron/telegram-send.sh` |
+| `MATRIX_RETRY_GAPS` | optional (commented) | `home-claude/cron/lib/matrix_delivery.py`, `home-claude/cron/lib/notify.py`, `home-claude/cron/telegram-send.sh` |
 | `MATRIX_ROOM_ID` | declared | `home-claude/cron/telegram-send.sh` |
 | `MD2PDF_BROWSER` | optional (commented) | `home-claude/bin/md2pdf.py` |
 | `MD2PDF_TIMEOUT` | optional (commented) | `home-claude/bin/md2pdf.py`, `home-claude/cron/md2pdf-sync.py`, `home-claude/hooks/md2pdf-on-edit.py` |
@@ -80,15 +80,13 @@ installer generates the first from the second.
 | `MINIMAX_API_KEY` | declared | `scripts/claude-switch.ps1` |
 | `MONITOR_EXCLUDE_TASKS` | optional (commented) | `home-claude/cron/claude-task-monitor.sh` |
 | `MONITOR_PULSE_URL` | optional (commented) | `home-claude/cron/claude-task-monitor.py`, `home-claude/cron/claude-task-monitor.sh`, `home-claude/cron/monitor_checks.py` |
-| `MX_CAPTURE` | not in .env (internal) | `home-claude/cron/tests/test_telegram_send.sh` |
-| `MX_EXPECTED` | not in .env (internal) | `home-claude/cron/tests/test_telegram_send.sh` |
 | `OLLAMA_HOST` | declared | `scripts/claude-switch.ps1` |
 | `OPENCODE_GO_API_KEY` | declared | `home-claude/cron/hooks/utils.py (PROVIDERS)`, `scripts/claude-switch.ps1` |
 | `OPENCODE_GO_KEY` | — | `home-claude/cron/hooks/utils.py (PROVIDERS)`, `scripts/claude-switch.ps1` |
 | `OPENCODE_GO_MODEL` | optional (commented) | `home-claude/cron/hooks/utils.py (PROVIDERS)` |
 | `PARTS_DIR` | not in .env (internal) | `home-claude/cron/telegram-send.sh` |
 | `PROJECTS_ROOT` | declared | `home-claude/cron/git-push-all.sh`, `home-claude/cron/github-push.sh`, `home-claude/cron/hooks/utils.py`, `home-claude/cron/md2pdf-sync.py` |
-| `PYTHON` | not in .env (internal) | `home-claude/cron/claude-healthcheck.sh`, `home-claude/cron/claude-task-monitor.sh`, `home-claude/cron/claude-warm-window.sh`, `home-claude/cron/git-push-all.sh`, `home-claude/cron/telegram-send.sh`, `home-claude/cron/tests/test_telegram_send.sh` |
+| `PYTHON` | not in .env (internal) | `home-claude/cron/claude-healthcheck.sh`, `home-claude/cron/claude-task-monitor.sh`, `home-claude/cron/claude-warm-window.sh`, `home-claude/cron/git-push-all.sh`, `home-claude/cron/telegram-send.sh` |
 | `PYTHON_EXE` | declared | `home-claude/cron/admin/sync-tasks.ps1`, `home-claude/cron/hooks/pre-compact.py`, `home-claude/cron/hooks/utils.py`, `home-claude/cron/lib/runtime.sh`, `home-claude/cron/md2pdf-sync.py`, `scripts/install.ps1`, `scripts/self-test.ps1` |
 | `REMOTE_SSH_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 | `SECRET_SCAN_PATTERN` | not in .env (internal) | `home-claude/cron/git-push-all.sh` |
@@ -104,7 +102,6 @@ installer generates the first from the second.
 | `TEST_SWEEP_TELEGRAM` | optional (commented) | `home-claude/cron/test-sweep.py` |
 | `TEST_SWEEP_TIMEOUT` | optional (commented) | `home-claude/cron/test-sweep.py` |
 | `TEST_SWEEP_TIMEOUT_FULL` | optional (commented) | `home-claude/cron/test-sweep.py` |
-| `TG_CODE` | not in .env (internal) | `home-claude/cron/tests/test_telegram_send.sh` |
 | `WAIT_FOR_PATTERN` | optional (commented) | `home-claude/cron/git-push-all.sh` |
 | `WARM_MODEL` | optional (commented) | `home-claude/cron/claude-warm-window.sh` |
 | `WIKI_ALLOW_OFFBOX` | optional (commented) | `home-claude/cron/hooks/utils.py` |
@@ -124,7 +121,7 @@ installer generates the first from the second.
 | `WIKI_RETRY_LIMIT` | optional (commented) | `home-claude/cron/hooks/utils.py` |
 | `WIN_REMOTE_HOST` | declared | `home-claude/cron/claude-healthcheck.sh` |
 
-_102 variables._
+_99 variables._
 
 ## `bundle.local.yaml` keys
 

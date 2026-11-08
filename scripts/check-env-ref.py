@@ -132,9 +132,6 @@ CODE_ONLY = {
     # Derived by telegram-send.sh and passed to its Python payload builder.
     # It names one invocation's temporary directory, never a user setting.
     "PARTS_DIR",
-    # cron/tests/test_telegram_send.sh only: scratch capture paths and the fake
-    # Telegram HTTP status. The embedded Python/stub curl read these exports.
-    "MX_CAPTURE", "MX_EXPECTED", "TG_CODE",
 }
 
 # Provided by the OS / the shell, not by the bundle.

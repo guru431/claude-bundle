@@ -31,6 +31,11 @@ def _load():
 gate = _load()
 
 
+@pytest.fixture(autouse=True)
+def temporary_gate_logs(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate.tempfile, "tempdir", str(tmp_path))
+
+
 @pytest.fixture()
 def repo(tmp_path: Path) -> Path:
     """An empty git repository: tracked() reads git ls-files, not the disk."""
@@ -273,6 +278,45 @@ def test_a_red_contract_suite_blocks(repo: Path, monkeypatch):
     _contract(monkeypatch, runner="bash", fast="bash run.sh")
     res = gate.check_fast_tests(repo)
     assert res.status == "fail" and "1 failed" in res.detail
+
+
+@pytest.mark.parametrize("contract", [True, False])
+def test_failed_fast_suite_keeps_full_output_before_truncating(tmp_path, monkeypatch, contract):
+    stdout = "FAILED tests/test_case.py::test_original_failure\n" + "detail\n" * 40
+    stderr = "worker traceback\n" * 40
+    suites = [{"name": "main", "cwd": ".", "runner": "pytest", "fast": "pytest"}]
+    monkeypatch.setattr(gate, "project_contract", lambda repo:
+                        {"suites": suites if contract else [], "errors": []})
+    monkeypatch.setattr(gate, "find_bash", lambda: "bash")
+    monkeypatch.setattr(gate, "_test_command", lambda repo: ["pytest"])
+    monkeypatch.setattr(gate, "_run_contract_command", lambda *a, **kw:
+                        subprocess.CompletedProcess([], 1, stdout, stderr))
+    monkeypatch.setattr(gate.subprocess, "run", lambda *a, **kw:
+                        subprocess.CompletedProcess([], 1, stdout, stderr))
+
+    result = gate.check_fast_tests(tmp_path)
+
+    assert result.blocking
+    logs = list(tmp_path.glob("ci-precheck-*.log"))
+    assert len(logs) == 1
+    saved = logs[0].read_text(encoding="utf-8")
+    assert stdout in saved and stderr in saved
+    assert str(logs[0]) in result.detail
+    assert "test_original_failure" not in result.detail
+
+
+def test_log_write_failure_does_not_turn_a_red_suite_into_a_skip(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "project_contract", lambda repo: {"suites": [], "errors": []})
+    monkeypatch.setattr(gate, "_test_command", lambda repo: ["pytest"])
+    monkeypatch.setattr(gate.subprocess, "run", lambda *a, **kw:
+                        subprocess.CompletedProcess([], 1, "original failure\n", ""))
+
+    def full_disk(**kw):
+        raise OSError("full disk")
+
+    monkeypatch.setattr(gate.tempfile, "NamedTemporaryFile", full_disk)
+    result = gate.check_fast_tests(tmp_path)
+    assert result.blocking and "original failure" in result.detail and "OSError" in result.detail
 
 
 def test_the_gate_reads_the_contract_the_sweep_validates(cron_copy: Path):

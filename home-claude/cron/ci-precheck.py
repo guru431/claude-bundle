@@ -41,6 +41,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 for _stream in (sys.stdout, sys.stderr):
@@ -254,6 +255,18 @@ def _run_contract_command(bash: str, cmd: str, cwd: Path) -> subprocess.Complete
                           encoding="utf-8", errors="replace", timeout=TEST_TIMEOUT, env=env)
 
 
+def _failed_test_output(stdout: str, stderr: str) -> str:
+    """Keep complete failure output locally before shortening the console report."""
+    tail = "\n".join((stdout + stderr).strip().splitlines()[-25:])
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="ci-precheck-",
+                                         suffix=".log", delete=False) as log:
+            log.write(f"=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}")
+    except OSError as exc:
+        return f"Could not save full output ({type(exc).__name__})\n{tail}"
+    return f"Full output: {log.name}\n{tail}"
+
+
 def _contract_fast_tests(repo: Path, suites: list[dict]) -> Result:
     bash = find_bash()
     if not bash:
@@ -268,8 +281,8 @@ def _contract_fast_tests(repo: Path, suites: list[dict]) -> Result:
             return Result("fast tests", "skip", f"{s['name']}: did not finish in "
                           f"{TEST_TIMEOUT}s — ci-watch checks after the push")
         if done.returncode != 0:
-            tail = "\n".join((done.stdout + done.stderr).strip().splitlines()[-25:])
-            return Result("fast tests", "fail", f"{s['name']}: {s['fast']}\n{tail}")
+            detail = _failed_test_output(done.stdout, done.stderr)
+            return Result("fast tests", "fail", f"{s['name']}: {s['fast']}\n{detail}")
         lines = [ln for ln in done.stdout.splitlines() if ln.strip()]
         passed.append(f"{s['name']}: {lines[-1].strip() if lines else 'rc 0'}")
     return Result("fast tests", "ok", "; ".join(passed))
@@ -298,8 +311,7 @@ def check_fast_tests(repo: Path) -> Result:
     if done.returncode == 0:
         lines = [ln for ln in done.stdout.splitlines() if ln.strip()]
         return Result("fast tests", "ok", lines[-1].strip() if lines else "")
-    tail = "\n".join((done.stdout + done.stderr).strip().splitlines()[-25:])
-    return Result("fast tests", "fail", tail)
+    return Result("fast tests", "fail", _failed_test_output(done.stdout, done.stderr))
 
 
 def check_project_guards(repo: Path) -> Result:

@@ -5,6 +5,11 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Ported from the meta-repo: failed fast-test checks keep complete stdout and
+  stderr in a local temporary file and report its path before the short tail.
+  Contract and config-based commands retain their existing blocking behavior.
+  Checked and not ported: installation-specific test registries and commands.
+
 - Added offline preview/apply for structured wiki rejection records, with
   source/target fingerprints, an exact-review receipt, conflict detection,
   current privacy checks and a lock shared with both compilers. Portable roots

@@ -16,7 +16,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -25,14 +24,10 @@ from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent
-CRON_SRC = ROOT / "home-claude" / "cron"
-
 
 @pytest.fixture()
-def hooks_dir(tmp_path: Path) -> Path:
-    shutil.copytree(CRON_SRC, tmp_path / "bundle" / "cron")
-    return tmp_path / "bundle" / "cron" / "hooks"
+def hooks_dir(cron_copy: Path) -> Path:
+    return cron_copy / "cron" / "hooks"
 
 
 @pytest.fixture()

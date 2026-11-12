@@ -17,7 +17,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -26,14 +25,10 @@ from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent
-CRON_SRC = ROOT / "home-claude" / "cron"
-
 
 @pytest.fixture()
-def bundle(tmp_path: Path) -> Path:
-    shutil.copytree(CRON_SRC, tmp_path / "bundle" / "cron")
-    return tmp_path / "bundle"
+def bundle(cron_copy: Path) -> Path:
+    return cron_copy
 
 
 @pytest.fixture()

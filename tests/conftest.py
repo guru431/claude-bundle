@@ -76,6 +76,16 @@ _CLEARED_EXACT = runpy.run_path(str(CRON_SRC / "lib" / "env_names.py"))["TEMPLAT
 _OUTER_ENV = dict(os.environ)
 
 
+@pytest.hookimpl(optionalhook=True, hookwrapper=True)
+def pytest_xdist_auto_num_workers(config):
+    """Keep Windows process startup from competing across every physical core."""
+    outcome = yield
+    if (sys.platform == "win32" and config.option.numprocesses == "auto"
+            and not os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS")):
+        outcome.force_result(min(4, outcome.get_result()))
+    # Keep xdist's own hardware count on small machines and all other settings.
+
+
 def _neutralise(mp: pytest.MonkeyPatch, home: Path) -> None:
     """Clear the pipeline's variables and root every writable path in `home`."""
     for name in list(os.environ):
@@ -168,10 +178,11 @@ def cron_copy(tmp_path: Path) -> Path:
 
     Without `logs/` and `state/`: they hold what a pipeline run from this
     checkout left behind, and a `state/depleted.json` from last night changes
-    which providers the copied utils believes are out of service.
+    which providers the copied utils believes are out of service. Bytecode
+    caches are regenerated only for imported modules, not copied per test.
     """
     shutil.copytree(CRON_SRC, tmp_path / "cron",
-                    ignore=shutil.ignore_patterns("logs", "state"))
+                    ignore=shutil.ignore_patterns("__pycache__", "logs", "state"))
     return tmp_path
 
 

@@ -5,6 +5,11 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Windows fast tests limit automatic parallelism to four workers while honoring
+  explicit worker settings. Hook fixtures reuse isolated source copies without
+  checkout logs, state or bytecode caches; test coverage and time limits stay
+  unchanged.
+
 - Ported from the meta-repo: failed fast-test checks keep complete stdout and
   stderr in a local temporary file and report its path before the short tail.
   Contract and config-based commands retain their existing blocking behavior.

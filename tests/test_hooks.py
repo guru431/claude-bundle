@@ -37,11 +37,10 @@ PLAIN_HOOKS = sorted(p.name for p in TIER1_HOOKS.glob("*.py"))
 
 
 @pytest.fixture()
-def hook_bundle(tmp_path: Path) -> Path:
+def hook_bundle(cron_copy: Path) -> Path:
     """A throwaway bundle whose hooks write into tmp, never into the repo."""
-    shutil.copytree(CRON_SRC, tmp_path / "cron")
-    (tmp_path / "wiki" / "daily" / ".pending").mkdir(parents=True)
-    return tmp_path
+    (cron_copy / "wiki" / "daily" / ".pending").mkdir(parents=True)
+    return cron_copy
 
 
 @pytest.fixture(scope="module")
@@ -51,7 +50,8 @@ def shared_bundle(tmp_path_factory) -> Path:
     Safe to share: those payloads carry no usable transcript, so no hook writes.
     """
     root = tmp_path_factory.mktemp("hook-contract")
-    shutil.copytree(CRON_SRC, root / "cron")
+    shutil.copytree(CRON_SRC, root / "cron",
+                    ignore=shutil.ignore_patterns("__pycache__", "logs", "state"))
     (root / "wiki" / "daily" / ".pending").mkdir(parents=True)
     return root
 

@@ -164,15 +164,14 @@ RECORDER = (
 
 
 @pytest.fixture()
-def claude_home(tmp_path: Path) -> Path:
+def claude_home(cron_copy: Path) -> Path:
     """A full-tier layout whose telegram-send.sh only records what it was given.
 
     The recorder is Python, and BASH_EXE points at this interpreter: notify.send
     runs `<bash> telegram-send.sh` with the message on stdin, so no real shell,
     network or bot token is involved on any platform.
     """
-    home = tmp_path / "claude-home"
-    shutil.copytree(CRON_SRC, home / "cron")
+    home = cron_copy
     (home / "cron" / "telegram-send.sh").write_text(RECORDER, encoding="utf-8")
     return home
 

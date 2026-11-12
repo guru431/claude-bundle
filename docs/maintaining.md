@@ -126,6 +126,12 @@ committed, and all its values are empty.
   workers for process startup and can push a Git Bash subprocess past its
   timeout. If a test times out only in a busy run, rerun its module and then
   the complete fast suite on their own before changing timeouts or markers.
+- **Windows `-n auto` uses at most four workers.** `tests/conftest.py` limits
+  automatic parallelism to avoid contention while starting child processes.
+  An explicit `-n N`, `-n logical` or `PYTEST_XDIST_AUTO_NUM_WORKERS` retains
+  xdist's own behavior; serial runs and other platforms are unchanged. Hook
+  fixtures use `cron_copy` to leave checkout logs, state and bytecode caches
+  out of each isolated copy.
 - **The suite leaves the checkout as it found it.** `tests/conftest.py`
   sandboxes every run, and a run that created, changed or deleted anything
   under `home-claude/cron/logs`, `home-claude/cron/state`, `home-claude/wiki` or

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,52 @@ sys.path.insert(0, str(CRON))
 sys.path.insert(0, str(CRON / "hooks"))
 import runs  # noqa: E402
 import utils  # noqa: E402
+
+
+@pytest.mark.parametrize("platform,mode,override,cpus,expected", [
+    ("win32", "auto", None, 16, 4),
+    ("win32", "auto", None, 2, 2),
+    ("linux", "auto", None, 16, 16),
+    ("win32", "logical", None, 16, 32),
+    ("win32", "auto", "6", 16, 6),
+])
+def test_auto_workers_preserve_xdist_overrides(monkeypatch, platform, mode, override,
+                                              cpus, expected):
+    """The project caps xdist's hardware count while keeping explicit settings."""
+    import conftest
+    import psutil
+    from xdist import newhooks, plugin
+
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(os, "cpu_count", lambda: cpus * 2)
+    monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: cpus * 2 if logical else cpus)
+    if override is None:
+        monkeypatch.delenv("PYTEST_XDIST_AUTO_NUM_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", override)
+    manager = pytest.PytestPluginManager()
+    manager.add_hookspecs(newhooks)
+    manager.register(plugin)
+    manager.register(conftest)
+    config = SimpleNamespace(option=SimpleNamespace(numprocesses=mode))
+    assert manager.hook.pytest_xdist_auto_num_workers(config=config) == expected
+
+
+def test_cron_copy_excludes_runtime_and_keeps_source_isolated(tmp_path, monkeypatch, request):
+    import conftest
+
+    source = tmp_path / "source"
+    for rel in ("hooks/code.py", "hooks/__pycache__/code.pyc", "logs/run.log",
+                "state/depleted.json"):
+        path = source / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("original", encoding="utf-8")
+    monkeypatch.setattr(conftest, "CRON_SRC", source)
+    copied = request.getfixturevalue("cron_copy") / "cron"
+    assert sorted(p.relative_to(copied).as_posix() for p in copied.rglob("*")
+                  if p.is_file()) == ["hooks/code.py"]
+    (copied / "hooks" / "code.py").write_text("changed", encoding="utf-8")
+    assert (source / "hooks" / "code.py").read_text(encoding="utf-8") == "original"
 
 
 def test_what_collection_imports_resolves_into_the_sandbox():

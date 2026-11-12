@@ -84,7 +84,8 @@ def test_what_collection_imports_resolves_into_the_sandbox():
     The per-test fixture came too late for both: every run appended its ledger
     rows to this checkout's cron/logs/, and utils looked at the real ~/.claude.
     """
-    assert ROOT not in runs.RUNS_DIR.resolve().parents, runs.RUNS_DIR
+    # TEMP may live inside this checkout; only the shipped payload must stay clean.
+    assert not runs.RUNS_DIR.resolve().is_relative_to(ROOT / "home-claude"), runs.RUNS_DIR
     assert utils.CLAUDE_HOME.parent == runs.RUNS_DIR.parent, \
         f"{utils.CLAUDE_HOME} is not in the session's sandbox home"
 

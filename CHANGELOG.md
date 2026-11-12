@@ -5,6 +5,10 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Test sandboxes also support a temporary directory inside the checkout.
+  PowerShell portability scans inspect shipped source trees, and unknown
+  session attribution remains denied when its temporary root inherits Git.
+
 - Windows fast tests limit automatic parallelism to four workers while honoring
   explicit worker settings. Hook fixtures reuse isolated source copies without
   checkout logs, state or bytecode caches; test coverage and time limits stay

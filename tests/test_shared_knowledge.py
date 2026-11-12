@@ -106,7 +106,11 @@ def test_attribution_rejects_subagents_unknown_and_changed_projects(knowledge):
     append(moved, {"type": "turn_context", "payload": {"cwd": str(good.parent)}})
     audit = []
     assert [s.session_id for s in u.codex_sessions(u.PROJECTS_BASE, audit=audit)] == ["codex-good"]
-    assert {a["reason"] for a in audit} >= {"subagent", "cwd-changed-or-unknown", "unknown-cwd"}
+    reasons = {a["reason"] for a in audit}
+    assert reasons >= {"subagent", "cwd-changed-or-unknown"}
+    # Project-local temporary roots inherit the checkout's Git repository.
+    # Both diagnostics must keep the unregistered session excluded above.
+    assert reasons & {"unknown-cwd", "unknown-repository"}
 
 
 def test_worktree_requires_reciprocal_registered_ownership(knowledge, tmp_path):

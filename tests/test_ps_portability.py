@@ -36,7 +36,22 @@ MODULE_FUNCTIONS = ("ConvertFrom-SddlString", "Format-Hex", "Get-FileHash",
 
 
 def _scripts():
-    return sorted(p for p in ROOT.rglob("*.ps1") if ".git" not in p.parts)
+    # Inspect shipped source trees, excluding local test copies and drivers.
+    return sorted(p for directory in ("scripts", "home-claude")
+                  for p in (ROOT / directory).rglob("*.ps1"))
+
+
+def test_local_artifacts_do_not_enter_the_portability_scan(tmp_path, monkeypatch):
+    import test_ps_portability
+
+    for rel in ("scripts/install.ps1", "home-claude/cron/admin/sync-tasks.ps1",
+                ".tmp/driver.ps1", "output/reference.ps1"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# source or local artifact\n", encoding="utf-8")
+    monkeypatch.setattr(test_ps_portability, "ROOT", tmp_path)
+    assert {p.relative_to(tmp_path).as_posix() for p in _scripts()} == {
+        "scripts/install.ps1", "home-claude/cron/admin/sync-tasks.ps1"}
 
 
 @pytest.mark.parametrize("name", MODULE_FUNCTIONS)

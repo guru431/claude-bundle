@@ -85,14 +85,14 @@ def test_failed_lock_token_write_closes_and_removes_its_file(utils, tmp_path, mo
 def test_failed_atomic_replacement_removes_its_staging_copy(utils, tmp_path, monkeypatch):
     path = tmp_path / "state.json"
     path.write_text("original", encoding="utf-8")
-    replace = utils.os.replace
+    replace = Path.replace
 
     def fail_replacement(source, destination):
         if Path(destination) == path:
             raise PermissionError("replacement denied")
         return replace(source, destination)
 
-    monkeypatch.setattr(utils.os, "replace", fail_replacement)
+    monkeypatch.setattr(Path, "replace", fail_replacement)
     with pytest.raises(PermissionError, match="replacement denied"):
         utils.atomic_write_text(path, "replacement")
     assert path.read_text(encoding="utf-8") == "original"

@@ -23,6 +23,8 @@ are date-headed and predate the `VERSION` file.
   report unreadable diff input and scan token lines beginning with plus signs.
   CI timing-gate tests use deterministic reported durations, and dotenv
   regressions restore environment values before the next test runs.
+  Atomic-write cleanup fault injection targets the Path API directly, so it
+  exercises the same failure on the supported Python versions.
 
 - Fixed weekly-review findings in alert deduplication, MCP handshake errors,
   directory privacy checks, session retries, installer diagnostics and backend

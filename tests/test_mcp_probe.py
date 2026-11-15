@@ -71,6 +71,25 @@ def _server(tmp_path: Path, name: str, body: str) -> dict:
     return {"command": sys.executable, "args": [str(script)]}
 
 
+@pytest.mark.parametrize("method", ["initialize", "tools/list"])
+def test_rpc_errors_fail_the_handshake(tmp_path, capsys, method):
+    body = ANSWERS.replace(
+        'sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}) + "\\n")',
+        'reply = {"jsonrpc": "2.0", "id": msg["id"], "result": result}\n'
+        f'    if msg["method"] == {method!r}:\n'
+        '        reply.pop("result")\n'
+        '        reply["error"] = {"code": -32603, "message": "stub failure"}\n'
+        '    sys.stdout.write(json.dumps(reply) + "\\n")')
+    assert not _load().probe("rpc-error", _server(tmp_path, "rpc_error", body), timeout=10)
+    output = capsys.readouterr().out
+    assert "FAIL" in output and method in output
+
+
+@pytest.mark.parametrize("args", [42, True, "-c npx"])
+def test_wrapper_audit_tolerates_invalid_args(args):
+    assert _load().is_wrapper({"command": "bash", "args": args}) is None
+
+
 def _probe_with_watchdog(mod, name: str, spec: dict, timeout: float) -> bool:
     """Run probe() on a thread, so a regression HANGS this test for 20 s instead
     of hanging the whole suite forever."""

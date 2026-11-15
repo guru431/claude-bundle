@@ -156,7 +156,10 @@ def is_wrapper(spec: dict) -> str | None:
     shell = _stem(command)
     if shell not in SHELLS:
         return None
-    args = [str(a) for a in spec.get("args") or []]
+    raw_args = spec.get("args") or []
+    if not isinstance(raw_args, list):
+        return None
+    args = [str(a) for a in raw_args]
     run_at = next((i for i, a in enumerate(args) if _shell_run_flag(shell, a)), None)
     if run_at is None:
         return None
@@ -310,6 +313,9 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
             print(f"{name:<14} FAIL — no reply to initialize. stderr: {stderr_text()}")
             return False
 
+        if "error" in reply:
+            print(f"{name:<14} FAIL — initialize returned a JSON-RPC error")
+            return False
         info = (reply.get("result") or {}).get("serverInfo") or {}
         label = f"{info.get('name', '?')} {info.get('version', '')}".strip()
 
@@ -320,6 +326,9 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
         # replies — was read into `junk` and never looked at, and the server
         # passed as OK.
         if stray(junk):
+            return False
+        if tools_reply is not None and "error" in tools_reply:
+            print(f"{name:<14} FAIL — tools/list returned a JSON-RPC error")
             return False
         count = len((tools_reply.get("result") or {}).get("tools") or []) if tools_reply else None
 

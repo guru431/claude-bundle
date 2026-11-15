@@ -68,8 +68,10 @@ fi
 # `printf "$MSG" |` pipe in front of it was silently overridden, the splitter
 # read an empty string, and every alert went out as an empty text — HTTP 400
 # from the Bot API, i.e. the whole alert channel dead (shellcheck SC2259).
-PARTS_DIR=$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/tg.$$")
-mkdir -p "$PARTS_DIR"
+PARTS_DIR=$(mktemp -d 2>/dev/null) || {
+    echo "telegram-send: cannot create a private temporary directory — nothing sent" >&2
+    exit 1
+}
 trap 'rm -rf "$PARTS_DIR"' EXIT INT TERM
 printf '%s' "$MSG" > "$PARTS_DIR/message.txt"
 

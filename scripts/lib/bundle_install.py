@@ -430,7 +430,12 @@ def diff(args) -> int:
     counts = {"new": 0, "modified": 0, "unchanged": 0, "removed-from-bundle": 0}
     planned = set()
     for line in lines_of(args.plan):
-        root, rel, src = line.split("\t")
+        fields = line.split("\t")
+        if len(fields) != 3 or fields[0] not in bases or not all(fields):
+            print("ERROR: invalid install plan row: expected root, path and source separated by tabs",
+                  file=sys.stderr)
+            return 2
+        root, rel, src = fields
         if (root, rel) in planned:
             continue
         planned.add((root, rel))

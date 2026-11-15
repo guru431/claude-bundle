@@ -114,7 +114,7 @@ def test_the_hook_honours_skip_dirs(bundle: Path, monkeypatch):
     (bundle / "bundle.local.yaml").write_text("skip_dirs:\n  - C--work-scratch\n",
                                               encoding="utf-8")
     home = Path(os.environ["HOME"])
-    transcript = _transcript(home, "C--work-scratch", "sess-skipdir")
+    transcript = _transcript(home, "c--WORK-scratch", "sess-skipdir")
     utils = _utils(bundle, monkeypatch)
     assert utils.save_session_tail({"session_id": "sess-skipdir",
                                     "transcript_path": str(transcript)}) is None

@@ -66,6 +66,9 @@ if [ -n "${BASH_EXE:-}" ] && [ -x "${BASH_EXE}" ]; then
     BASH_BIN="${BASH_EXE}"
 else
     BASH_BIN=""
+    if [ -n "${BASH_EXE:-}" ]; then
+        echo "WARNING: BASH_EXE=${BASH_EXE} is not executable — probing PATH/Git installs" >&2
+    fi
     # Git\bin before Git\usr\bin, as in cron/hooks/utils.py::find_bash. BASH_BIN
     # runs telegram-send.sh, which needs sed and tail: the Git\bin launcher puts
     # /mingw64/bin:/usr/bin at the front of PATH, and usr\bin\bash.exe started

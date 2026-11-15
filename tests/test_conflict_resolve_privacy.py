@@ -36,6 +36,15 @@ def _load(bundle: Path, monkeypatch, name: str):
     return module
 
 
+@pytest.mark.parametrize("limit", ["0", "-1"])
+def test_nonpositive_limit_fails_before_collecting_pages(cron_copy, monkeypatch, limit):
+    wcr = _load(cron_copy, monkeypatch, "conflict_invalid_limit")
+    monkeypatch.setattr(sys, "argv", ["wiki-conflict-resolve.py", "--limit", limit])
+    with pytest.raises(SystemExit) as exc:
+        wcr.main()
+    assert exc.value.code == 2
+
+
 def _collision(bundle: Path, rel: str, title: str) -> None:
     page = bundle / "wiki" / rel
     page.parent.mkdir(parents=True, exist_ok=True)

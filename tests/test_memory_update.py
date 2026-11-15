@@ -81,6 +81,18 @@ def memory(cron_copy: Path, tmp_path: Path, monkeypatch):
     return mod
 
 
+def test_a_disappearing_codex_snapshot_does_not_abort_collection(memory, tmp_path, monkeypatch):
+    session = types.SimpleNamespace(session_id="gone", size=123, project="demo",
+                                    path=tmp_path / "gone.jsonl")
+    monkeypatch.setattr(memory, "owed_projects", lambda: {})
+    monkeypatch.setattr(memory, "state_get", lambda *args: set())
+    monkeypatch.setattr(memory, "codex_sessions", lambda *args: [session])
+    monkeypatch.setattr(memory, "codex_session_allowed", lambda session: True)
+    progress = {}
+    assert memory.collect_today_user_messages(0, progress) == ({}, {}, set())
+    assert progress == {}
+
+
 def _ledger() -> list[dict]:
     """Every row the runs wrote — into the sandbox ledger (tests/conftest.py)."""
     rows: list[dict] = []

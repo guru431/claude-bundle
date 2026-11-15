@@ -1892,6 +1892,25 @@ def test_only_the_scheduled_lint_moves_the_baseline(bundle: Path, monkeypatch):
         assert lint.BASELINE_FILE.exists() == ("--save-baseline" in argv), argv
 
 
+def test_lint_reports_a_new_class_even_below_the_growth_threshold(bundle, monkeypatch):
+    lint = _load_wiki_script(bundle, monkeypatch, "lint_new_class", "wiki-lint.py")
+    assert lint.baseline_regressions({"new": 1, "empty": 0, "old": 11}, {"old": 10}) == [
+        "new: new class, 1"]
+
+
+def test_flush_retries_short_unfinished_sessions(bundle, monkeypatch, tmp_path):
+    flush = _load_wiki_script(bundle, monkeypatch, "flush_short_retry", "wiki-flush-sessions.py")
+    projects = tmp_path / "projects"
+    project = projects / "C--work-demo"
+    project.mkdir(parents=True)
+    transcript = project / "short.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(flush, "PROJECTS_BASE", projects)
+    monkeypatch.setattr(flush, "project_allowed", lambda name: True)
+    found = flush.find_recent_jsonls(set(), seen_unprocessed={"demo/short.jsonl"})
+    assert transcript in [path for paths in found.values() for path in paths]
+
+
 def test_an_undelivered_regression_alert_does_not_move_the_baseline(bundle: Path,
                                                                     monkeypatch):
     """The baseline moved whether the alert about the jump arrived or not, so a

@@ -41,6 +41,7 @@ that breaks the session it reports on is worse than no hook.
 Opt-in — see home-claude/settings.example-with-hooks.json.
 """
 import json
+import math
 import os
 import sys
 import time
@@ -75,8 +76,12 @@ def _minutes(raw: str | None, default: float) -> float:
     if not raw:
         return float(default)
     try:
-        return max(0.0, float(raw))
+        value = float(raw)
+        if value < 0 or not math.isfinite(value):
+            raise ValueError
+        return value
     except ValueError:
+        print(f"WARNING: invalid alert minutes {raw!r} — using {default}", file=sys.stderr)
         return float(default)
 
 

@@ -46,6 +46,17 @@ def _touch(path: Path, age_days: float = 0.0) -> Path:
     return path
 
 
+def test_failed_unlink_is_not_logged_as_deleted(retention, tmp_path, monkeypatch):
+    target = _touch(tmp_path / "locked.log", age_days=10)
+    messages = []
+    monkeypatch.setattr(retention, "log", messages.append)
+    monkeypatch.setattr(retention, "DRY_RUN", False)
+    monkeypatch.setattr(Path, "unlink", lambda self: (_ for _ in ()).throw(OSError("locked")))
+    assert retention.prune([target], 1, "logs") == (0, 0, 0)
+    assert not any(line.startswith("delete:") for line in messages)
+    assert target.exists()
+
+
 def test_own_log_and_run_ledger_are_counted_by_neither_side(retention, tmp_path):
     """A directory holding only this task's own footprint must count as zero."""
     _touch(tmp_path / retention.OWN_LOG_NAME)

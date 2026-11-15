@@ -55,6 +55,12 @@ def _transcript(path: Path, lines: list[dict]) -> Path:
 HUMAN = {"origin": {"kind": "human"}}
 
 
+@pytest.mark.parametrize("raw", ["-20", "nan", "inf"])
+def test_invalid_minutes_keep_the_default_with_a_warning(hook, capsys, raw):
+    assert hook._minutes(raw, 20) == 20
+    assert "WARNING" in capsys.readouterr().err
+
+
 # ── which events are worth a message ─────────────────────────────────────────
 
 @pytest.mark.parametrize("payload,worth_it", [

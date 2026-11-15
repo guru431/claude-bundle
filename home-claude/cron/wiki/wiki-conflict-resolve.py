@@ -180,6 +180,8 @@ def main() -> int:
     ap.add_argument("--dry-run", "--no-llm", dest="dry_run", action="store_true",
                     help="list the pages that WOULD be merged; make no LLM call")
     args = ap.parse_args()
+    if args.limit < 1:
+        ap.error("--limit must be at least 1")
 
     # `dry_run_until` promises the same brake on EVERY phase, and this script —
     # which sends whole pages to a provider — was the one that ignored it.

@@ -418,7 +418,10 @@ def collect_today_user_messages(
         if start == session.size:
             continue
         cutoff = min(since, owed.get(session.project, since))
-        mtime = session.path.stat().st_mtime
+        try:
+            mtime = session.path.stat().st_mtime
+        except OSError:
+            continue  # discovery raced with snapshot cleanup; leave its cursor unchanged
         if session.session_id not in pending and mtime < cutoff:
             continue
         msgs, end = parse_jsonl_delta(str(session.path), start, max_bytes=session.size)

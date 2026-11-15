@@ -360,9 +360,9 @@ def find_recent_jsonls(processed: set[str], max_age_hours: int = 48,
                                   legacy_projects=names[1:])
             if start is None:
                 continue
-            if st.st_size < 10240:  # < 10KB — too short
-                continue
             unfinished = any(f"{n}/{jsonl.name}" in seen_unprocessed for n in names)
+            if st.st_size < 10240 and not unfinished:  # < 10KB — too short unless owed
+                continue
             if st.st_mtime < cutoff and not unfinished:
                 continue
             offsets[jsonl] = start

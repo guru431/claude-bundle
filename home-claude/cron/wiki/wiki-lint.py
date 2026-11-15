@@ -625,7 +625,7 @@ def baseline_regressions(counts: dict[str, int], baseline: dict[str, int]) -> li
         prev = baseline.get(cls, 0)
         delta = now - prev
         if cls not in baseline:
-            if now >= BASELINE_DELTA_MIN:
+            if now > 0:
                 lines.append(f"{cls}: new class, {now}")
         elif delta >= BASELINE_DELTA_MIN:
             lines.append(f"{cls}: {prev} → {now} (+{delta})")

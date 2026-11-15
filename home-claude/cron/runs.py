@@ -525,6 +525,7 @@ def _selftest() -> int:
     cases = [
         # (rc, bytes, useful, delivery) → expected verdict
         ((0, 1234, 5, "ok"), "green"),
+        ((0, 0, 5, "ok"), "empty-artifact"),
         ((0, 0, None, "ok"), "empty-artifact"),      # empty file = false green
         ((0, 1234, 0, "ok"), "empty-artifact"),      # validator: 0 useful = false green
         ((0, 1234, 3, "failed"), "delivery-failed"),  # artifact exists, undelivered

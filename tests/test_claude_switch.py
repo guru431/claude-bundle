@@ -61,6 +61,22 @@ def test_status_names_a_backend_on_an_ipv6_host(tmp_path: Path, var: str, url: s
     assert f"Before: {mode}  ({url})" in r.stdout, r.stdout
 
 
+@pytest.mark.integration  # measured: each PowerShell status process takes >1 s on Windows
+@pytest.mark.parametrize("url", [
+    "https://example.test/path/localhost:3456",
+    "https://127.0.0.1:3456.evil.test",
+    "https://user@127.0.0.1:3456@host/",
+])
+def test_status_does_not_match_a_backend_outside_the_authority(tmp_path, url):
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.local.json").write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": url}}), encoding="utf-8")
+    result = _switch(project, "status")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"Before: custom  ({url})" in result.stdout
+
+
 def test_the_menu_names_the_ccr_proxy_it_would_use(tmp_path: Path):
     """F54: the CCR line printed `${ccrHost}:${ccrPort}`, variables that only
     existed inside other functions — "any model via local proxy :"."""

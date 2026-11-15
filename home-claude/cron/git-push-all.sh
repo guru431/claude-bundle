@@ -810,7 +810,7 @@ push_repo() {
             fi
             if [ -z "$(git diff --cached --name-only 2>/dev/null)" ]; then
                 echo "[$label] nothing to commit after .env exclusion" >> "$LOG_FILE"
-                rm -f "$index_saved"
+                restore_index "$label" "$index_file" "$index_saved"
             elif git_commit -m "$commit_msg"; then
                 echo "[$label] auto-committed changes" >> "$LOG_FILE"
                 rm -f "$index_saved"

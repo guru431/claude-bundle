@@ -171,13 +171,13 @@ def prune(files, days: int, label: str) -> tuple[int, int, int]:
         except OSError:
             continue
         if st.st_mtime < cutoff:
-            log(f"{'WOULD DELETE' if DRY_RUN else 'delete'}: {f.name} ({st.st_size} bytes)")
             if not DRY_RUN:
                 try:
                     f.unlink()
                 except OSError as e:
                     log(f"  skip ({e})")
                     continue
+            log(f"{'WOULD DELETE' if DRY_RUN else 'delete'}: {f.name} ({st.st_size} bytes)")
             deleted += 1
             freed += st.st_size
         else:

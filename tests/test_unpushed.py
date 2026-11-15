@@ -59,6 +59,19 @@ def registry(tmp_path: Path, enabled: bool) -> Path:
     return reg
 
 
+def test_unpushed_report_includes_git_files(tmp_path, monkeypatch):
+    projects = tmp_path / "projects"
+    checkout = projects / "worktree"
+    checkout.mkdir(parents=True)
+    (checkout / ".git").write_text("gitdir: ../metadata", encoding="utf-8")
+    visited = []
+    monkeypatch.setattr(monitor_checks, "_stuck", lambda path, now: visited.append(path) or "ahead")
+    _, alert = monitor_checks.unpushed_report({}, registry(tmp_path, True), projects,
+                                              tmp_path / "bundle", now=NOW)
+    assert visited == [checkout]
+    assert "worktree" in alert
+
+
 @pytest.mark.integration   # some 30 git processes: ~10 s on Windows
 def test_stuck_work_is_reported_once_and_only_where_it_counts(tmp_path):
     projects, bundle = tmp_path / "projects", tmp_path / "bundle"

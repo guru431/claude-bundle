@@ -702,6 +702,7 @@ if ($Diff) { Invoke-BundleDiff; exit 0 }
 # The LAST install's manifest, read before anything is written: Write-Manifest
 # replaces the file, and Get-UpgradeNotes needs what it recorded.
 $script:previousManifest = Read-InstallManifest
+$syncStatus = 'no'
 $script:registryKept = $false
 
 Info ""
@@ -1048,7 +1049,6 @@ if ($DryRun -and -not (Test-Path (Join-Path $PipelineRoot 'cron/registry.yaml'))
 }
 
 # ── 5. Credentials + task sync (need elevation; optional) ────────────────────
-$syncStatus = 'no'
 if ($NonInteractive) {
     Warn "skipped save-cred + sync (need elevation / interaction). Run by hand:"
     Warn "  $PipelineRoot\cron\admin\save-cred.cmd   (non-elevated, stashes your password)"

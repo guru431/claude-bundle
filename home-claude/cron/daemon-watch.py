@@ -97,12 +97,17 @@ def has_session(user: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return True
     # With no session at all quser exits 1 and says "No User exists".
+    if getattr(r, "returncode", 0) == 1:
+        return False
+    if getattr(r, "returncode", 0) != 0:
+        return True
     name = user.rpartition("\\")[2].partition("@")[0].lower()
-    return name in quser_names(r.stdout.decode("oem", errors="replace"))
+    names = quser_names(r.stdout.decode("oem", errors="replace"))
+    return names is None or name in names
 
 
-def quser_names(text: str) -> set[str]:
-    """The USERNAME column of quser's output, lowercased.
+def quser_names(text: str) -> set[str] | None:
+    """The USERNAME column, lowercased; None when its layout is unrecognized.
 
     A column, not a substring of the whole output: `ann` was "found" in
     joanne's session, and the restart of ann's interactive task failed every
@@ -116,7 +121,9 @@ def quser_names(text: str) -> set[str]:
     """
     lines = text.splitlines()
     head = re.match(r"\s*\S.*?\s{2,}", lines[0]) if lines else None
-    end = head.end() if head else None
+    if head is None:
+        return None
+    end = head.end()
     names = set()
     for line in lines[1:]:
         name = line[1:end].strip()

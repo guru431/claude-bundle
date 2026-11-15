@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse Read|Write|Edit hook — ask before a credential FILE enters the transcript.
+"""PreToolUse Read|Write|Edit|MultiEdit hook — ask before a credential FILE enters the transcript.
 
 bash-guard.py asks before `cat .env`. But the permissions every install ships
 allow `Read` without a prompt, so the same file reached the transcript through

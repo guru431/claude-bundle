@@ -347,7 +347,7 @@ def chain_dead(path: Path = CHAIN_DEAD_PATH,
     hours_since = (now - last).total_seconds() / 3600
     if hours_since > CHAIN_DEAD_FRESH_H:
         return None                      # stale: the outage is over
-    down_h = (last - first).total_seconds() / 3600
+    down_h = max(0.0, (last - first).total_seconds() / 3600)
     depleted = st.get("depleted") if isinstance(st.get("depleted"), dict) else {}
     why = ", ".join(f"{p}: {r}" for p, r in depleted.items()) or "no provider answered"
     return (f"LLM chain is DOWN ({why}); {st.get('fails', '?')} failed call(s) over "
@@ -500,8 +500,8 @@ def unpushed_report(seen: dict, registry: Path, projects_root: Path | None,
     repos = []
     if projects_root is not None and projects_root.is_dir():
         repos += [(p.parent.name, p.parent) for p in sorted(projects_root.glob("*/.git"))
-                  if p.is_dir() and allowed(p.parent.name)]
-    if (bundle_root / "wiki" / ".git").is_dir():
+                  if (p.is_dir() or p.is_file()) and allowed(p.parent.name)]
+    if (bundle_root / "wiki" / ".git").exists():
         repos.append(("wiki", bundle_root / "wiki"))
     stuck = []
     for label, repo in repos:

@@ -220,6 +220,13 @@ def test_a_session_is_found_by_its_username_column():
     assert watch_mod.quser_names(localized) == {"joanne", "svc", "john smith"}
 
 
+def test_unrecognized_quser_output_attempts_restart(monkeypatch):
+    import types
+    monkeypatch.setattr(watch_mod.subprocess, "run", lambda *a, **kw:
+                        types.SimpleNamespace(stdout=b"unexpected output", returncode=0))
+    assert watch_mod.has_session("svc") is True
+
+
 def test_has_session_takes_the_name_without_its_domain(monkeypatch):
     """quser prints no domain: a registry `user: HOST\\svc` was never found."""
     class Out:                  # the "oem" codec exists on Windows only

@@ -1945,7 +1945,7 @@ def save_session_tail(data: dict, last_n: int = 30) -> tuple[str, str] | None:
     if not os.path.exists(transcript_path):
         return None
     dir_name = project_dir_from_payload(data)
-    if dir_name in SKIP_DIRS:
+    if dir_name.lower() in {d.lower() for d in SKIP_DIRS}:
         return None
     project = dir_to_project(dir_name) if dir_name else DEFAULT_PROJECT
     if not project_allowed(project):

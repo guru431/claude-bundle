@@ -332,10 +332,19 @@ def main() -> int:
         if unpushed_log:
             log(unpushed_log)
         unpushed_block = [unpushed] if unpushed else []
-        fresh = [(name, line) for name, line in problems if seen.get(name) != line]
+        fresh = []
+        current: dict[str, list[str]] = {}
         for name, line in problems:
-            log(line if seen.get(name) != line else f"{line} (already reported)")
-            seen[name] = line
+            reported = seen.get(name, [])
+            if isinstance(reported, str):  # state written before multiple failures were retained
+                reported = [reported]
+            if line not in reported:
+                fresh.append((name, line))
+                log(line)
+            else:
+                log(f"{line} (already reported)")
+            current.setdefault(name, []).append(line)
+        seen.update(current)
         for name in list(seen):
             if (name not in (CHAIN_SEEN_KEY, STALE_SEEN_KEY, UNPUSHED_SEEN_KEY)
                     and name not in {n for n, _ in problems}):

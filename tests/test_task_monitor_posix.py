@@ -146,6 +146,48 @@ def test_tasks_without_a_declared_port_are_not_probed():
     ]) == []
 
 
+def test_two_failures_for_one_task_are_each_reported_once(tmp_path, monkeypatch):
+    import contextlib
+    import types
+
+    sent = []
+    failures = [("ClaudeDaemon", "exit failed"), ("ClaudeDaemon", "port down")]
+
+    @contextlib.contextmanager
+    def no_ledger(_task, **defaults):
+        yield dict(defaults)
+
+    monkeypatch.setattr(monitor, "terminal_record", no_ledger)
+    monkeypatch.setattr(monitor, "registry_tasks", lambda: [])
+    monkeypatch.setattr(monitor, "check_systemd", lambda tasks: (failures[:1], None))
+    monkeypatch.setattr(monitor, "check_launchd", lambda tasks: (failures[:1], None))
+    monkeypatch.setattr(monitor, "check_health_ports", lambda tasks: failures[1:])
+    monkeypatch.setattr(monitor, "chain_dead_report", lambda *a: "")
+    monkeypatch.setattr(monitor, "stale_alert", lambda *a, **kw: ([], []))
+    monkeypatch.setattr(monitor, "unpushed_report", lambda *a, **kw: ("", ""))
+    monkeypatch.setattr(monitor, "send_telegram", lambda text: sent.append(text) or True)
+    monkeypatch.setattr(monitor, "STATE_PATH", tmp_path / "seen.json")
+    monkeypatch.setattr(monitor, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(monitor, "os", types.SimpleNamespace(name="posix"))
+    assert monitor.main() == 0
+    assert monitor.main() == 0
+    assert len(sent) == 1
+    failures.pop()
+    assert monitor.main() == 0
+    failures.append(("ClaudeDaemon", "port down"))
+    assert monitor.main() == 0
+    assert len(sent) == 2
+
+
+def test_clock_rollback_cannot_make_an_outage_negative(tmp_path):
+    import json
+    path = tmp_path / "chain.json"
+    path.write_text(json.dumps({"first_iso": "2026-01-01T12:01:00",
+                                "last_iso": "2026-01-01T12:00:00"}), encoding="utf-8")
+    line, _ = monitor_checks.chain_dead(path, datetime(2026, 1, 1, 12, 1))
+    assert "over 0h" in line
+
+
 def test_a_listening_port_is_healthy():
     import socket as _s
     srv = _s.socket()

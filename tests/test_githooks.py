@@ -209,6 +209,42 @@ def test_pre_commit_denylist_blocks_adding_a_name_but_not_removing_it(guarded: R
 
 
 @integration
+@pytest.mark.parametrize("prefix", ["++", "++ b/"])
+def test_pre_commit_scans_content_resembling_a_diff_header(guarded: Repo, prefix: str):
+    guarded.write(".sanitize-patterns", HOST + "\n")
+    guarded.write("note.md", f"{prefix}{HOST}\n")
+    result = guarded.commit("note")
+    assert result.returncode != 0, f"a denylisted line resembling a file header passed:\n{_out(result)}"
+    assert "personal data" in _out(result)
+
+
+@integration
+def test_pre_commit_fails_closed_when_mktemp_fails(guarded: Repo):
+    guarded.write(".sanitize-patterns", HOST + "\n")
+    result = subprocess.run([BASH, "-c", 'mktemp() { return 1; }; . "$1"', "_",
+                             (guarded.path / ".githooks" / "pre-commit").as_posix()],
+                            cwd=guarded.path, env=guarded.env, capture_output=True, timeout=120)
+    assert result.returncode != 0, _out(result)
+    assert "BLOCKED" in _out(result) and "temporary" in _out(result)
+    assert not (guarded.path / ".sanitize-patterns.tmp").exists()
+
+
+@integration
+def test_pre_commit_cleans_denylist_when_a_later_step_aborts(guarded: Repo, tmp_path: Path):
+    scratch = tmp_path / "hook-temp"
+    scratch.mkdir()
+    guarded.write(".sanitize-patterns", HOST + "\n")
+    guarded.write("note.md", f"key={TOKEN}\n")
+    assert guarded.git("add", "note.md").returncode == 0
+    result = subprocess.run([BASH, "-c", 'sed() { if [ "$1" = "s/^/  /" ]; then return 7; fi; command sed "$@"; }; . "$1"', "_",
+                             (guarded.path / ".githooks" / "pre-commit").as_posix()],
+                            cwd=guarded.path, env={**guarded.env, "TMPDIR": scratch.as_posix()},
+                            capture_output=True, timeout=120)
+    assert result.returncode != 0, _out(result)
+    assert list(scratch.iterdir()) == [], "an aborted hook left a copy of the personal denylist"
+
+
+@integration
 def test_pre_commit_fails_closed_without_the_scan_library(guarded: Repo):
     """docs/decisions.md D-10: a missing secret-scan.sh blocks the commit. This
     hook printed a WARNING and let the commit through with the token scan off."""
@@ -834,6 +870,47 @@ def test_grep_that_fails_is_a_scan_error_not_a_clean_scan(tmp_path: Path):
     cp = _lib(tmp_path, broken + 'printf "a/.env\n" | secret_scan_paths; echo "rc=$?"')
     out = _out(cp)
     assert "rc=2" in out and "scan-error" in out, out
+
+
+@integration
+@pytest.mark.parametrize("tool", ["tr", "sed"])
+def test_a_denylist_normalizer_failure_cannot_disable_the_denylist(tmp_path: Path, tool: str):
+    (tmp_path / "sp").write_text(HOST + "\n", encoding="utf-8")
+    result = _lib(tmp_path, f'{tool}() {{ cat > /dev/null; return 7; }}\n'
+                            'secret_scan_denylist sp pat; echo "rc=$?"')
+    assert "rc=2" in _out(result), _out(result)
+
+
+@integration
+@pytest.mark.parametrize("tool", ["sed", "cut", "tr", "awk"])
+def test_a_placeholder_filter_failure_keeps_every_suspect_line(tmp_path: Path, tool: str):
+    (tmp_path / "hit").write_text(TOKEN + "\n", encoding="utf-8")
+    result = _lib(tmp_path, f'{tool}() {{ cat > /dev/null; return 7; }}\n'
+                            'secret_scan_drop_placeholders < hit')
+    assert TOKEN in _out(result), _out(result)
+
+
+@integration
+@pytest.mark.parametrize("prefix", ["++ ", "++ b/"])
+def test_a_token_after_two_pluses_is_not_a_file_header(tmp_path: Path, prefix: str):
+    (tmp_path / "diff").write_text(
+        "diff --git a/note.md b/note.md\n--- a/note.md\n+++ b/note.md\n@@ -0,0 +1 @@\n"
+        f"+{prefix}{TOKEN}\n", encoding="utf-8")
+    result = _lib(tmp_path, 'secret_scan_diff < diff; echo "rc=$?"')
+    assert "rc=1" in _out(result) and "note.md" in _out(result), _out(result)
+
+
+@integration
+def test_a_diff_read_failure_cannot_pass_as_an_empty_diff(tmp_path: Path):
+    (tmp_path / "diff").write_text("plain input\n", encoding="utf-8")
+    result = _lib(tmp_path, '''
+cat() {
+    if [ ! -e read-failed ]; then : > read-failed; return 7; fi
+    command cat "$@"
+}
+secret_scan_diff < diff; echo "rc=$?"
+''')
+    assert "rc=1" in _out(result) and "scan-error:" in _out(result), _out(result)
 
 
 def test_git_that_fails_is_not_an_empty_path_list(tmp_path: Path):

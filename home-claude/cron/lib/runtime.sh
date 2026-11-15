@@ -36,7 +36,7 @@ if [ -n "${PYTHON_EXE:-}" ]; then
     # An absolute path as given, or a bare name resolved on PATH.
     _rt_cand="${PYTHON_EXE}"
     if [ ! -x "$_rt_cand" ]; then
-        _rt_cand="$(command -v "$_rt_cand" 2>/dev/null)"
+        _rt_cand="$(command -v "$_rt_cand" 2>/dev/null)" || _rt_cand=""
     fi
     if [ -n "$_rt_cand" ] && _rt_python_runs "$_rt_cand"; then
         PYTHON="$_rt_cand"
@@ -46,7 +46,7 @@ if [ -n "${PYTHON_EXE:-}" ]; then
 fi
 if [ -z "$PYTHON" ]; then
     for _rt_name in python3 python; do
-        _rt_cand="$(command -v "$_rt_name" 2>/dev/null)"
+        _rt_cand="$(command -v "$_rt_name" 2>/dev/null)" || _rt_cand=""
         [ -n "$_rt_cand" ] || continue
         # WindowsApps holds the Store aliases. Skipped by path and not only by the
         # probe: session 0 has no WindowsApps on its PATH, so a manual run that
@@ -62,13 +62,20 @@ unset _rt_cand _rt_name
 unset -f _rt_python_runs
 export PYTHON
 
-if [ -n "${BASH_EXE:-}" ] && [ -x "${BASH_EXE}" ]; then
-    BASH_BIN="${BASH_EXE}"
-else
-    BASH_BIN=""
-    if [ -n "${BASH_EXE:-}" ]; then
-        echo "WARNING: BASH_EXE=${BASH_EXE} is not executable — probing PATH/Git installs" >&2
+BASH_BIN=""
+if [ -n "${BASH_EXE:-}" ]; then
+    _rt_cand="${BASH_EXE}"
+    if [ ! -x "$_rt_cand" ]; then
+        _rt_cand="$(command -v "$_rt_cand" 2>/dev/null)" || _rt_cand=""
     fi
+    case "$_rt_cand" in *[Ss]ystem32*) _rt_cand="" ;; esac
+    if [ -n "$_rt_cand" ] && [ -x "$_rt_cand" ]; then
+        BASH_BIN="$_rt_cand"
+    else
+        echo "WARNING: BASH_EXE=${BASH_EXE} is not a usable bash — probing PATH/Git installs" >&2
+    fi
+fi
+if [ -z "$BASH_BIN" ]; then
     # Git\bin before Git\usr\bin, as in cron/hooks/utils.py::find_bash. BASH_BIN
     # runs telegram-send.sh, which needs sed and tail: the Git\bin launcher puts
     # /mingw64/bin:/usr/bin at the front of PATH, and usr\bin\bash.exe started
@@ -85,8 +92,8 @@ else
         BASH_BIN="$_rt_cand"
         break
     done
-    unset _rt_cand
 fi
+unset _rt_cand
 export BASH_BIN
 
 have_python() {

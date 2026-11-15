@@ -1041,9 +1041,12 @@ def _flush(rec: dict) -> int:
                 filtered_keys):
             log(f"WARNING: {len(filtered_keys)} filtered JSONL marker(s) NOT recorded "
                 f"(state lock busy) — they are read again tomorrow")
-        with open(LOG_MD, "a", encoding="utf-8") as f:
-            for key, (project, _jf, reason) in zip(filtered_keys, filtered_out):
-                f.write(f"- [flush] processed: {key} (filtered: {reason}, project: {project})\n")
+        try:
+            with open(LOG_MD, "a", encoding="utf-8") as f:
+                for key, (project, _jf, reason) in zip(filtered_keys, filtered_out):
+                    f.write(f"- [flush] processed: {key} (filtered: {reason}, project: {project})\n")
+        except OSError as exc:
+            log(f"WARNING: wiki journal not written: {exc}")
         log(f"Filtered out and marked processed: {len(filtered_out)} JSONL files")
 
     # Hook-provided pending — collected AFTER the JSONL filter so we know which
@@ -1317,12 +1320,15 @@ def _flush(rec: dict) -> int:
                   for n in jsonl_state_names(project, jf, source_names)]
     if done_carry:
         state_remove("flush", "seen_unprocessed", done_carry)
-    with open(LOG_MD, "a", encoding="utf-8") as f:
-        for key in keys:
-            project = key.split("/", 1)[0]
-            f.write(f"- [flush] processed: {key} (project: {project})\n")
-        for path in written_dailies:
-            f.write(f"- [flush] daily log: {path.name}\n")
+    try:
+        with open(LOG_MD, "a", encoding="utf-8") as f:
+            for key in keys:
+                project = key.split("/", 1)[0]
+                f.write(f"- [flush] processed: {key} (project: {project})\n")
+            for path in written_dailies:
+                f.write(f"- [flush] daily log: {path.name}\n")
+    except OSError as exc:
+        log(f"WARNING: wiki journal not written: {exc}")
 
     if failed_projects:
         log(f"Kept pending/JSONLs for {len(failed_projects)} failed project(s): "

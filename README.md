@@ -250,7 +250,9 @@ deployment; `--hooks` checks the hooks wired in your `settings.json`.
   Writes to `<project>/.claude/settings.local.json`. With `-KeyHelper` it
   writes an `apiKeyHelper` command pointing at **`scripts/get-key.ps1`**
   instead of the key itself, so the secret stays in `.env` and never lands
-  in a file inside the project working tree.
+  in a file inside the project working tree. `cleaner-sub -KeyHelper` is
+  refused because its credential is a custom header; without that flag,
+  the header is stored in `settings.local.json`.
 - **`codex/AGENTS.md`** — drop into `~/.codex/AGENTS.md` so Codex CLI
   picks up the same universal rules as Claude Code (Claude-specific
   sections like slash commands and hooks are omitted from this mirror).

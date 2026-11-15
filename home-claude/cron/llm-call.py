@@ -13,7 +13,7 @@ Exit codes — the LLMResult kind, so a shell task can tell "no LLM tonight" fro
 "your key is wrong" without parsing stderr, where the reason is printed:
   0 — success (answer printed to stdout)
   1 — deterministic: an empty or unusable answer, or a 400/413/415/422
-  2 — usage: empty stdin, or a timeout that is not a positive whole number
+  2 — usage: extra arguments, empty stdin, or an invalid timeout
   3 — transient: network, 408, 429/529, 5xx — waiting fixes it
   4 — config: no key or model, a refusal by a gate, a redirect not followed,
       401/402/403/404 and every other 4xx — it will not fix itself
@@ -28,9 +28,10 @@ sys.stdin.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import llm_call_ex  # noqa: E402
 
+if len(sys.argv) > 2:
+    print("ERROR: expected at most one argument: timeout_seconds", file=sys.stderr)
+    sys.exit(2)
 try:
-    if len(sys.argv) > 2:
-        raise ValueError
     timeout = int(sys.argv[1]) if len(sys.argv) > 1 else 600
 except ValueError:
     timeout = 0

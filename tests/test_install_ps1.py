@@ -18,12 +18,45 @@ from pathlib import Path
 
 import pytest
 
-from ps_helpers import ROOT, requires_powershell, run_ps_file
+from ps_helpers import ROOT, ps_quote, requires_powershell, run_ps, run_ps_file
 
 pytestmark = [
     requires_powershell,
     pytest.mark.skipif(sys.platform != "win32", reason="the installer is Windows-only"),
 ]
+
+
+@pytest.mark.integration  # real PowerShell installer configuration steps
+def test_a_first_manifest_is_created_before_projects_root_is_pinned(tmp_path: Path):
+    source = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8-sig")
+    # Execute the actual configuration steps together: their ORDER is the
+    # contract. No preflight, payload copying, task registration or self-test.
+    start = source.index("# ── 3b. .env from the template")
+    end = source.index("# ── 4. Bootstrap registry placeholders", start)
+    root = tmp_path / "source"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "llm-providers.example.env").write_text("PROJECTS_ROOT=\n", encoding="utf-8")
+    (root / "config" / "bundle.local.example.yaml").write_text(
+        "projects_root: C:/example/working-copies\ndry_run_until:\n", encoding="utf-8")
+    pipe = tmp_path / "pipeline"
+    pipe.mkdir()
+    code = f"""
+$ErrorActionPreference = 'Stop'
+$root = {ps_quote(root)}
+$PipelineRoot = {ps_quote(pipe)}
+$DryRun = $false
+$script:preflightPython = $null
+$script:preserved = [System.Collections.Generic.List[string]]::new()
+function Info($m) {{ }}
+function Good($m) {{ }}
+function Warn($m) {{ }}
+function Get-Date {{ [datetime]'2026-01-01' }}
+{source[start:end]}
+"""
+    result = run_ps(code.replace("\n", "\r\n"), tmp_path, cwd=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (pipe / "bundle.local.yaml").is_file()
+    assert "PROJECTS_ROOT=C:/example/working-copies" in (pipe / ".env").read_text(encoding="utf-8")
 
 
 # ~20 s per install, nearly all of it the self-test the installer runs at the

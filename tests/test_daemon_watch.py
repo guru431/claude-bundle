@@ -150,6 +150,17 @@ def test_nothing_is_touched_in_the_first_minutes_after_boot(watcher, monkeypatch
     assert watcher.revived == [] and watcher.sent == []
 
 
+def test_unreadable_registry_is_a_collection_failure(watcher, monkeypatch):
+    def unreadable(_path):
+        raise OSError("locked registry")
+
+    monkeypatch.setattr(watch_mod.monitor_checks, "read_registry", unreadable)
+    rec = {}
+    assert watch_mod.watch(rec) == 2
+    assert rec["note"] == "registry unreadable"
+    assert watcher.revived == [] and watcher.sent == []
+
+
 def test_a_crash_loop_pages_once_per_six_hours(watcher):
     watch_mod.watch({})
     watch_mod.watch({})

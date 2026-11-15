@@ -27,6 +27,7 @@ import difflib
 import re
 import sys
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -55,7 +56,8 @@ def log(msg: str) -> None:
 
 
 def strip_code(text: str) -> str:
-    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    # An unfinished fence keeps the rest of the page in code too.
+    text = re.sub(r"```.*?(?:```|\Z)", " ", text, flags=re.S)
     return re.sub(r"`[^`\n]*`", " ", text)
 
 
@@ -159,11 +161,11 @@ def merged_is_sane(original: str, merged: str) -> tuple[bool, str]:
     # Compared as NORMALIZED numbers: `2026-06-13` and `2026-6-13` are the same
     # date, and a merge that reformats one used to be rejected for "losing" a
     # number it had simply rewritten.
-    def norm(ns: set[str]) -> set[str]:
-        return {n.replace(",", ".").lstrip("0") or "0" for n in ns}
+    def norm(ns: set[str]) -> set[Decimal]:
+        return {Decimal(n.replace(",", ".")) for n in ns}
     lost_nums = norm(numbers(original, drop_update_headers=True)) - norm(numbers(merged))
     if lost_nums:
-        return False, f"lost numbers (likely a table/thresholds): {sorted(lost_nums)[:6]}"
+        return False, f"lost numbers (likely a table/thresholds): {sorted(map(str, lost_nums))[:6]}"
 
     # Table rows are the second form the model likes to "tidy" into prose.
     def rows(t: str) -> int:
@@ -203,7 +205,11 @@ def main() -> int:
 
     if dry:
         for f in pages[:args.limit]:
-            body = f.read_text(encoding="utf-8", errors="replace")
+            try:
+                body = f.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                log(f"  skipped {f.relative_to(WIKI_ROOT).as_posix()}: {exc}")
+                continue
             log(f"  WOULD MERGE {f.relative_to(WIKI_ROOT).as_posix()} "
                 f"({len(body)} chars, ~{len(body) // 4} tokens)")
         log("DRY RUN — no LLM call, nothing written.")

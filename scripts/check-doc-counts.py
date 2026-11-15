@@ -430,7 +430,11 @@ def check_shipped_counts(problems: list[str]) -> None:
 
 
 def check() -> int:
-    total, n_disabled, names = registry_counts()
+    try:
+        total, n_disabled, names = registry_counts()
+    except (OSError, UnicodeError) as exc:
+        print(f"DOC DRIFT — cannot read registry {REGISTRY}: {exc}")
+        return 1
     print(f"registry: {total} tasks, {n_disabled} disabled "
           f"({', '.join(names) or 'none'})")
 

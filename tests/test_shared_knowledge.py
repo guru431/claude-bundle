@@ -204,6 +204,18 @@ def test_search_honors_windows_directory_casing_in_memory_and_history(knowledge)
     assert list(search.history_sources("myapp")) == []
 
 
+def test_search_rejects_nonpositive_limits_before_collecting(knowledge):
+    bundle, _, _, _, mp = knowledge
+    search = load("knowledge_search_limits", bundle / "cron/knowledge-search.py", mp)
+    mp.setattr(search, "document_results", lambda *a: pytest.fail("unexpected collection"))
+    for limit in (0, -1):
+        with pytest.raises(ValueError, match="positive"):
+            search.search("myapp", "parser", limit=limit)
+        with pytest.raises(SystemExit) as exc:
+            search.main(["--project", "myapp", "--limit", str(limit), "parser"])
+        assert exc.value.code == 2
+
+
 def test_inventory_denies_before_reading_messages(knowledge):
     bundle, u, sources, session, mp = knowledge
     session()

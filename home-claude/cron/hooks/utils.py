@@ -45,6 +45,7 @@ def _load_dotenv() -> None:
     if not dotenv.is_file():
         return
     seen: dict[str, tuple[int, str]] = {}
+    preexisting = set(os.environ)
     # utf-8-sig: a BOM (what Notepad and `Set-Content` write by default on
     # Windows) otherwise becomes part of the FIRST key's name, and that one
     # variable silently goes missing.
@@ -79,11 +80,15 @@ def _load_dotenv() -> None:
         # bottom makes the key not set at all. Said once, by config_report().
         if key in seen:
             first, first_value = seen[key]
-            _DOTENV_DUPLICATES.append(
-                f"{key} on lines {first} and {number}: the first wins"
-                + (" — an empty one, which reads as not set" if not first_value else ""))
+            if key not in preexisting:
+                winner = ("the first wins"
+                          + (" — an empty one, which reads as not set" if not first_value else ""))
+            else:
+                winner = "the pre-existing environment variable wins"
+            _DOTENV_DUPLICATES.append(f"{key} on lines {first} and {number}: {winner}")
         else:
-            seen[key] = (number, value.strip().strip("\"'"))
+            v = value.strip()
+            seen[key] = (number, v[1:-1] if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'" else v)
         if key not in os.environ:
             # ONE matching pair of surrounding quotes comes off, as in every
             # parser of this file. strip('"').strip("'") took off any number of
@@ -729,8 +734,15 @@ def atomic_write_text(path: Path, text: str, newline: str = "\n") -> None:
     # picked the same temp path, and the second write either clobbered the first
     # or lost the race at replace. `_file_lock` uses a token for the same reason.
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-    tmp.write_text(text, encoding="utf-8", errors="replace", newline=newline)
-    tmp.replace(path)
+    try:
+        tmp.write_text(text, encoding="utf-8", errors="replace", newline=newline)
+        tmp.replace(path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"WARNING: cannot remove atomic-write temporary {tmp.name}: {exc}",
+                  file=sys.stderr)
 
 
 def safe_session_id(raw) -> str:
@@ -965,6 +977,12 @@ def pid_alive(pid: int) -> bool:
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             STILL_ACTIVE = 259
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
             handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
                                           False, pid)
             if not handle:
@@ -1014,27 +1032,67 @@ def _lock_timeout_notice(label: str, wait: float, fail_open: bool) -> None:
               file=sys.stderr)
 
 
+def _write_lock_file(fd: int, path: Path, content: bytes) -> None:
+    """Write and close a newly created lock; remove that file if writing fails."""
+    created = None
+    try:
+        try:
+            created = os.fstat(fd)
+            if os.write(fd, content) != len(content):
+                raise OSError(errno.ENOSPC, "short lock token write")
+        finally:
+            os.close(fd)
+    except OSError:
+        # Failed acquisition has no holder to release the file. Leave any
+        # replacement belonging to another holder alone.
+        if created is not None:
+            with contextlib.suppress(OSError):
+                current = path.stat()
+                if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                    _unlink_released(path)
+        raise
+
+
 def _lock_put_back(steal: Path, path: Path) -> None:
     """Return a lock that was taken aside by mistake — never over a newer one.
 
     It used to go back with `os.replace`, which overwrites: if a third process
     had taken the free slot in the meantime, its lock was replaced by the old
-    one and two holders ran at once. Exclusive creation cannot overwrite. When
+    one and two holders ran at once. Exclusive restoration cannot overwrite. When
     the slot is taken, the old lock is simply dropped — its owner finds a lock
     that is not its own when it releases, and leaves it (see _file_lock).
     """
+    # An exclusive hard link restores the same file without having to read or
+    # stat it — precisely the operations that can have made verification fail.
+    # Filesystems without hard links retain the exclusive-copy fallback.
     try:
-        content, st = steal.read_bytes(), steal.stat()
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_BINARY)
+        os.link(steal, path)
+    except FileExistsError:
+        steal.unlink(missing_ok=True)
+        return
     except OSError:
+        pass
+    else:
         steal.unlink(missing_ok=True)
         return
     try:
-        os.write(fd, content)
-    finally:
-        os.close(fd)
+        content = steal.read_bytes()
+        try:
+            st = steal.stat()
+        except OSError:
+            st = None              # a fresh mtime is the conservative fallback
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_BINARY)
+    except FileExistsError:
+        steal.unlink(missing_ok=True)
+        return
+    except OSError as exc:
+        print(f"WARNING: cannot restore lock {path}: {exc}; preserved {steal}",
+              file=sys.stderr)
+        return
+    _write_lock_file(fd, path, content)
     try:
-        os.utime(path, (st.st_atime, st.st_mtime))   # its age is the owner's, not ours
+        if st is not None:
+            os.utime(path, (st.st_atime, st.st_mtime))   # its age is the owner's, not ours
     except OSError:
         pass
     steal.unlink(missing_ok=True)
@@ -1186,8 +1244,7 @@ def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
                 # token ours alone, whatever the PID or the clock say.
                 token = (f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')} "
                          f"{uuid.uuid4().hex[:12]}\n").encode()
-                os.write(fd, token)
-                os.close(fd)
+                _write_lock_file(fd, path, token)
                 acquired = True
                 break
             except FileExistsError:
@@ -1229,7 +1286,8 @@ def _file_lock(path: Path, wait: float, stale: float, fail_open: bool,
                             time.sleep(1)
                             continue
                     except OSError:
-                        pass
+                        _lock_put_back(steal, path)
+                        break       # uncertainty cannot justify a takeover
                     reason = (f"owner PID {owner} is gone" if owner_dead
                               else f"age {int(age)}s")
                     print(f"  {label}: abandoned lock ({reason}) — taking it over",
@@ -1453,13 +1511,13 @@ def _findings_lock():
 
 
 def _finding_offsets(text: str) -> list[int]:
-    """Offsets of the `## ` lines that lie outside ``` / ~~~ fences."""
+    """Offsets of dated finding headings outside ``` / ~~~ fences."""
     offsets, in_fence, pos = [], False, 0
     for line in text.splitlines(keepends=True):
         stripped = line.lstrip()
         if stripped.startswith(("```", "~~~")):
             in_fence = not in_fence
-        elif not in_fence and line.startswith("## "):
+        elif not in_fence and _FINDING_TITLE_RE.match(line.rstrip("\r\n")):
             offsets.append(pos)
         pos += len(line)
     return offsets
@@ -1534,9 +1592,8 @@ def close_finding(path: Path, title: str) -> bool:
     Deleting is the documented close for a DONE finding — `git log` is the
     record. A rejected one is moved to FINDINGS-archive.md by hand.
 
-    Entries are cut at `## ` lines OUTSIDE a code fence, like the writer finds
-    them. Cutting at any `## ` line left the tail of an entry whose fenced
-    example held one, and took a fenced quote of the title for the entry itself.
+    Entries are cut at dated finding headings OUTSIDE a code fence. Ordinary
+    subheadings belong to their entry; fenced examples are never boundaries.
     """
     with _findings_lock():               # see FINDINGS_LOCK
         try:
@@ -2093,7 +2150,9 @@ def truncate_head(text: str, max_chars: int, hint: str = "") -> str:
     know the text was cut treats "the rest isn't there" as "the rest doesn't
     exist". `hint` names where the full text lives.
     """
-    if max_chars <= 0 or len(text) <= max_chars:
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
         return text
     cut = text[:max_chars]
     nl = cut.rfind("\n")
@@ -2731,35 +2790,37 @@ def record_chain_dead(kinds: list[str]) -> None:
     the first, as it was, a three-day outage restarted every 24 hours: "down for
     Nh" never passed 24, and the report went out again every day.
     """
-    now = datetime.now()
-    try:
-        state = json.loads(CHAIN_DEAD_PATH.read_text(encoding="utf-8", errors="replace"))
-        if not isinstance(state, dict):
+    lock = CHAIN_DEAD_PATH.with_name(CHAIN_DEAD_PATH.name + ".lock")
+    with _file_lock(lock, wait=2, stale=60, fail_open=False,
+                    label="chain-dead lock", mode="os") as held:
+        if not held:
+            return
+        now = datetime.now()
+        try:
+            state = json.loads(CHAIN_DEAD_PATH.read_text(encoding="utf-8", errors="replace"))
+            if not isinstance(state, dict):
+                state = {}
+        except (OSError, ValueError):
             state = {}
-    except (OSError, ValueError):
-        state = {}
-    first = state.get("first_iso")
-    try:
-        prev = datetime.fromisoformat(state["last_iso"])
-        datetime.fromisoformat(first)   # an unreadable start is no start at all
-        ongoing = (now - prev).total_seconds() <= 86400
-        fails = int(state.get("fails", 0))
-    except (KeyError, TypeError, ValueError):
-        ongoing, fails = False, 0
-    state = {
-        "first_iso": first if ongoing else now.isoformat(timespec="seconds"),
-        "last_iso": now.isoformat(timespec="seconds"),
-        "fails": fails + 1 if ongoing else 1,
-        "kinds": sorted(set(kinds)),
-        "depleted": {p: r for p, r in sorted(_DEPLETED_PROVIDERS.items())},
-    }
-    try:
-        CHAIN_DEAD_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = CHAIN_DEAD_PATH.with_name(f"{CHAIN_DEAD_PATH.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        tmp.replace(CHAIN_DEAD_PATH)
-    except OSError:
-        pass       # best-effort: losing the note must never fail the caller
+        first = state.get("first_iso")
+        try:
+            prev = datetime.fromisoformat(state["last_iso"])
+            datetime.fromisoformat(first)   # an unreadable start is no start at all
+            ongoing = (now - prev).total_seconds() <= 86400
+            fails = int(state.get("fails", 0))
+        except (KeyError, TypeError, ValueError):
+            ongoing, fails = False, 0
+        state = {
+            "first_iso": first if ongoing else now.isoformat(timespec="seconds"),
+            "last_iso": now.isoformat(timespec="seconds"),
+            "fails": fails + 1 if ongoing else 1,
+            "kinds": sorted(set(kinds)),
+            "depleted": {p: r for p, r in sorted(_DEPLETED_PROVIDERS.items())},
+        }
+        try:
+            atomic_write_text(CHAIN_DEAD_PATH, json.dumps(state, indent=2))
+        except OSError:
+            pass       # best-effort: losing the note must never fail the caller
 
 
 def _is_depleted(provider: str) -> bool:
@@ -2820,8 +2881,12 @@ def _audit_attempt(provider: str, model: str, status, elapsed_ms: int | None,
         }
         _AUDIT_DIR.mkdir(parents=True, exist_ok=True)
         path = _AUDIT_DIR / f"provider_attempts_{date.today().isoformat()}.jsonl"
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        lock = _AUDIT_DIR / ".provider-attempts.lock"
+        with _file_lock(lock, wait=2, stale=60, fail_open=False,
+                        label="provider audit lock", mode="os") as held:
+            if held:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
@@ -3118,8 +3183,13 @@ def _fm_unquote(value: str) -> str:
     if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
         inner = s[1:-1]
         if s[0] == '"':
-            return inner.replace('\\"', '"').replace("\\\\", "\\")
-        return inner
+            try:
+                return json.loads(s)
+            except ValueError:
+                # Preserve unfamiliar hand-written YAML escapes, but decode
+                # the two escapes the previous limited writer supported once.
+                return re.sub(r'\\([\\"])', lambda m: m.group(1), inner)
+        return inner.replace("''", "'")
     return s
 
 
@@ -3151,11 +3221,13 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     current_key: str | None = None
     current_list: list | None = None
     current_item: dict | None = None
+    current_item_indent = 0
 
     for line in fm.splitlines():
         if not line.strip():
             continue
         if line.lstrip().startswith("- "):
+            current_item_indent = len(line) - len(line.lstrip())
             rest = line.lstrip()[2:].strip()
             if current_list is None:
                 if current_key is not None:
@@ -3171,7 +3243,8 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
                 current_list.append(_fm_unquote(rest))
                 current_item = None
             continue
-        if line.startswith("    ") and current_item is not None:
+        if (current_item is not None
+                and len(line) - len(line.lstrip()) > current_item_indent):
             inner = line.strip()
             if _KEY_LINE_RE.match(inner):
                 k, _, v = inner.partition(":")
@@ -3180,9 +3253,8 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
         if _KEY_LINE_RE.match(line):
             k, _, v = line.partition(":")
             k = k.strip()
-            v = _fm_unquote(v)
-            if v:
-                data[k] = v
+            if v.strip():
+                data[k] = _fm_unquote(v)
                 current_key = None
                 current_list = None
                 current_item = None
@@ -3207,10 +3279,13 @@ def _fm_scalar(value) -> str:
     needs_quotes = (
         s[0] in "-?:,[]{}#&*!|>'\"%@`" or
         ": " in s or s.endswith(":") or "#" in s or
-        s.strip() != s
+        s.strip() != s or s[0].isdigit() or s[0] in "+." or
+        s.lower() in {"true", "false", "null", "~", "yes", "no", "on", "off"} or
+        any(ord(ch) < 32 or ch in "\x85\u2028\u2029" for ch in s)
     )
     if needs_quotes:
-        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        return (json.dumps(s, ensure_ascii=False).replace("\x85", "\\u0085")
+                .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
     return s
 
 
@@ -3467,7 +3542,7 @@ def sanitize_page_body(body: str, label: str = "") -> str:
 
 
 def _collapse_blank_runs(body: str) -> str:
-    """Collapse 3+ blank lines to one — OUTSIDE fenced code.
+    """Collapse 2+ blank lines to one — OUTSIDE fenced code.
 
     A plain `re.sub(r"\\n{3,}", "\\n\\n")` reformatted the inside of code blocks,
     where blank lines can be significant (a diff, a fixture, a here-doc that a
@@ -3555,7 +3630,8 @@ def append_fragment(existing_body: str, fragment: str, date_str: str) -> str:
     # it untransformed — its own H1, its headings at their own level — so the
     # transformed copy below never matched it, and a retried article (a sibling
     # change rejected, the article not finalized) appended the page to itself.
-    if normalize_body(fragment).strip() in normalize_body(existing_body):
+    existing_norm = normalize_body(existing_body)
+    if normalize_body(fragment).strip() in existing_norm:
         return existing_body
     fragment = _date_current_headings(_demote_headings(_strip_leading_h1(fragment.strip())),
                                       date_str)
@@ -3563,7 +3639,7 @@ def append_fragment(existing_body: str, fragment: str, date_str: str) -> str:
     fragment = normalize_body(fragment).strip()
     if not fragment:
         return existing_body
-    if fragment in normalize_body(existing_body):
+    if fragment in existing_norm:
         return existing_body
     return existing_body.rstrip() + f"\n\n## Update ({date_str})\n\n" + fragment + "\n"
 
@@ -4062,14 +4138,15 @@ def normalize_wiki_path(path: str) -> str:
 
 
 def extract_first_json_array(text: str) -> str | None:
-    """Extract the FIRST complete JSON array via bracket balancing."""
+    """Extract the first complete object array, including nested candidates."""
     # Strip the markdown wrapper at the EDGES only — a global re.sub chewed
     # fenced code blocks out of JSON strings (corrupting wiki-page content).
     text = re.sub(r'^\s*```(?:json)?\s*', '', text)
     text = re.sub(r'\s*```\s*$', '', text)
 
-    depth = 0
-    start = None
+    starts: list[tuple[int, bool]] = []
+    first: tuple[int, int] | None = None
+    opens_object = re.compile(r"\s*\{")
     in_string = False
     escape = False
 
@@ -4085,23 +4162,18 @@ def extract_first_json_array(text: str) -> str | None:
             continue
         if in_string:
             continue
-        if ch == '[' and start is None:
-            start = i
-            depth = 1
-        elif ch == '[' and start is not None:
-            depth += 1
-        elif ch == ']' and start is not None:
-            depth -= 1
-            if depth == 0:
-                candidate = text[start:i+1]
-                # Only accept an array that opens an object — a bracketed scalar
-                # like a prose footnote "[1]" is not the result array. Keep
-                # scanning past it for the next balanced array.
-                inner = candidate[1:-1].lstrip()
-                if inner.startswith('{'):
-                    return candidate
-                start = None
-    return None
+        if ch == '[':
+            starts.append((i, opens_object.match(text, i + 1) is not None))
+        elif ch == ']' and starts:
+            start, is_object_array = starts.pop()
+            if is_object_array and (first is None or start < first[0]):
+                first = (start, i + 1)
+            # Prefer an enclosing object array over one of its fields. If the
+            # enclosing array is a wrapper such as [[{...}]], use its first
+            # complete object-array candidate instead of discarding it.
+            if not starts and first is not None:
+                return text[first[0]:first[1]]
+    return text[first[0]:first[1]] if first is not None else None
 
 
 def extract_first_json_object(text: str) -> str | None:

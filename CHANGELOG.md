@@ -5,6 +5,25 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Resolved the backlog review: hardened lock recovery and audit/state writes,
+  preserved frontmatter values and finding boundaries, and corrected CLI
+  validation, retention accounting and complete-name alert digests. Wiki
+  previews tolerate unreadable pages, unfinished code fences stay out of
+  content checks, equivalent decimal values survive merges, journal failures
+  do not invalidate a completed flush, and pipeline phases have a time limit.
+  Commit guards retain added lines beginning with plus signs and require a
+  securely created, cleaned temporary denylist; runtime and MCP probes handle
+  explicit shell names and trailing stdout noise. Installers require explicit
+  uninstall confirmation, pin roots after manifest creation, and refuse the
+  unsupported custom-header key-helper combination. Added offline regressions;
+  unconfirmed review claims were checked against the existing contracts.
+  The Windows self-test inventories shipped script trees, keeping temporary
+  test copies out of encoding checks and ShellCheck's command line.
+  Shared secret-scan filters preserve blocking hits when a normalizer fails,
+  report unreadable diff input and scan token lines beginning with plus signs.
+  CI timing-gate tests use deterministic reported durations, and dotenv
+  regressions restore environment values before the next test runs.
+
 - Fixed weekly-review findings in alert deduplication, MCP handshake errors,
   directory privacy checks, session retries, installer diagnostics and backend
   status matching. Notification temporary files now require secure creation;

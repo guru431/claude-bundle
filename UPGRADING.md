@@ -47,6 +47,17 @@ explains why things changed; this file says what to do about it.
 
 ## Unreleased
 
+### Explicit uninstall confirmation and custom-header credentials
+
+Uninstall now requires `--confirm` on POSIX or `-Confirm` on Windows even
+when `--force` / `-Force` is present. Update any uninstall automation that
+previously used force alone; preview and `--dry-run` / `-DryRun` delete nothing.
+
+The switcher refuses `cleaner-sub -KeyHelper` before writing settings because
+Claude Code's `apiKeyHelper` cannot supply `X-Cleaner-Key`. Existing settings
+are preserved. Review any existing `cleaner-sub` configuration: its custom
+header contains the gateway key in `settings.local.json`.
+
 ### Offline wiki recovery and persistent Matrix replay
 
 Reinstall the full profile to deliver `cron/wiki/wiki-recover-change.py`,

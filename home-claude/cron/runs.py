@@ -470,8 +470,18 @@ def stale_alert(seen: dict, now: datetime | None = None,
     now = now or datetime.now()
     lines, standing = stale_report(seen, now, log_path, registry)
     if standing and now.weekday() == 0:
+        names = []
+        for name in standing:
+            remaining = len(standing) - len(names) - 1
+            tail = [f"… and {remaining} more"] if remaining else []
+            if len(", ".join([*names, name, *tail])) > 400:
+                break
+            names.append(name)
+        omitted = len(standing) - len(names)
+        if omitted:
+            names.append(f"… and {omitted} more")
         lines.append(f"{len(standing)} task(s) still silent since an earlier alert: "
-                     + ", ".join(standing)[:400])
+                     + ", ".join(names))
     return lines, standing
 
 

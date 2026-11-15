@@ -25,6 +25,23 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest().upper()
 
 
+@pytest.mark.integration  # real Windows PowerShell process
+def test_force_alone_is_still_a_dry_run(tmp_path: Path):
+    home = tmp_path / "home"
+    home.mkdir()
+    ours = home / "ours.md"
+    ours.write_text("ours", encoding="utf-8")
+    manifest = home / ".bundle-manifest.json"
+    manifest.write_text(json.dumps({"tier": "lite", "claude_home": str(home),
+                                    "pipeline_root": str(home), "written": [
+                                        {"root": "claude_home", "path": "ours.md",
+                                         "sha256": _sha256(ours)}]}), encoding="utf-8")
+    result = run_ps_file(UNINSTALL, "-ClaudeHome", home, "-Force", cwd=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "dry run" in result.stdout.lower()
+    assert ours.is_file() and manifest.is_file()
+
+
 @pytest.mark.integration   # two uninstall runs, ~1 s
 def test_a_merged_settings_json_survives_an_old_manifest_and_force(tmp_path: Path):
     """X2 for installs made BEFORE the fix: their manifest lists the user's merged

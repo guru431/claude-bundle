@@ -60,9 +60,9 @@ if [ -z "$PY" ]; then
     exit 1
 fi
 
-# --dry-run always wins; without it, deleting still needs an explicit --confirm / --force.
+# --dry-run always wins; --force only overrides the changed-file check.
 apply=0
-if [ "$dry_run" = 0 ] && { [ "$confirm" = 1 ] || [ "$force" = 1 ]; }; then apply=1; fi
+if [ "$dry_run" = 0 ] && [ "$confirm" = 1 ]; then apply=1; fi
 
 # ── 1. the units first, while every file they point at still exists ──────────
 units="$(mktemp 2>/dev/null || mktemp -t claude-bundle)"

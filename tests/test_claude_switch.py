@@ -178,6 +178,22 @@ def test_cleaner_sub_mode_keeps_the_claude_ai_login(tmp_path: Path):
     assert "ANTHROPIC_CUSTOM_HEADERS" not in json.loads(settings.read_text(encoding="utf-8")).get("env", {})
 
 
+@pytest.mark.integration  # a real Windows PowerShell switch takes over one second
+def test_cleaner_sub_keyhelper_refuses_before_writing_a_key(tmp_path: Path):
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    settings = project / ".claude" / "settings.local.json"
+    original = b'{"env": {"FOREIGN": "kept"}}'
+    settings.write_bytes(original)
+    result = _switch(project, "cleaner-sub", "-KeyHelper", **CLEANER)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "-KeyHelper cannot protect" in result.stdout
+    assert "X-Cleaner-Key" in result.stdout
+    assert CLEANER["CLEANER_KEY"] not in result.stdout + result.stderr
+    assert settings.read_bytes() == original
+    assert not settings.with_suffix(".json.bak").exists()
+
+
 def test_status_names_the_cleaner_gateway_by_its_path(tmp_path: Path):
     project = tmp_path / "project"
     (project / ".claude").mkdir(parents=True)

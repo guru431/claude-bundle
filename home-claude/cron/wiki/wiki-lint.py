@@ -318,7 +318,8 @@ def strip_code(text: str) -> str:
     such a page shows up as a finding, and false positives are exactly what
     destroys trust in a linter.
     """
-    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    # Match the resolver: an unfinished fence consumes the remaining code.
+    text = re.sub(r"```.*?(?:```|\Z)", " ", text, flags=re.S)
     text = re.sub(r"`[^`\n]*`", " ", text)
     return text
 

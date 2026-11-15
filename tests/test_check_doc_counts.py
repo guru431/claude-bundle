@@ -8,6 +8,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 _spec = importlib.util.spec_from_file_location(
@@ -44,3 +46,13 @@ def test_provider_chain_recognizes_the_opencode_gateway_name(tmp_path, monkeypat
     problems: list[str] = []
     check_doc_counts.check_provider_chain(problems)
     assert len(problems) == 1 and "chain documented as opencode" in problems[0], problems
+
+
+@pytest.mark.parametrize("state", ["missing", "invalid-utf8"])
+def test_a_missing_registry_reports_a_guard_failure(tmp_path, monkeypatch, capsys, state):
+    missing = tmp_path / "registry.yaml"
+    if state == "invalid-utf8":
+        missing.write_bytes(b"\xff")
+    monkeypatch.setattr(check_doc_counts, "REGISTRY", missing)
+    assert check_doc_counts.check() == 1
+    assert "cannot read registry" in capsys.readouterr().out

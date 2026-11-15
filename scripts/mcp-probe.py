@@ -80,6 +80,9 @@ TOOLS_LIST = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
 # wrapped servers: `npx` does not forward a kill to the node process it started,
 # but that process does see EOF and exit, instead of outliving the probe.
 SHUTDOWN_GRACE = 2.0
+# Observe stdout briefly after the last response too: a late banner still
+# corrupts an established JSON-RPC session. This is a bounded probe window.
+STDOUT_DRAIN = 0.2
 
 
 def _read_config(path: Path):
@@ -242,8 +245,10 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
         except OSError:
             return False
 
-    def read_reply(want_id: int, deadline: float, junk: list[str]):
+    def read_reply(want_id: int | None, deadline: float, junk: list[str]):
         while True:
+            if time.monotonic() >= deadline:
+                return None
             try:
                 line = lines.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
@@ -264,7 +269,7 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
             if not isinstance(message, dict):
                 junk.append(line)          # stray stdout — this is what breaks MCP
                 continue
-            if message.get("id") == want_id:
+            if want_id is not None and message.get("id") == want_id:
                 return message
 
     def stray(junk: list[str]) -> bool:
@@ -322,6 +327,8 @@ def probe(name: str, spec: dict, timeout: float = 25.0) -> bool:
         tools_reply = None
         if send({"jsonrpc": "2.0", "method": "notifications/initialized"}, TOOLS_LIST):
             tools_reply = read_reply(2, time.monotonic() + timeout, junk)
+        if tools_reply is not None:
+            read_reply(None, time.monotonic() + STDOUT_DRAIN, junk)
         # Again: a banner printed only once the session is up — between the two
         # replies — was read into `junk` and never looked at, and the server
         # passed as OK.

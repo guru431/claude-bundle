@@ -171,6 +171,19 @@ def test_stray_stdout_fails_the_server_whenever_it_comes(tmp_path, spawned, caps
     assert "this breaks JSON-RPC" in capsys.readouterr().out
 
 
+def test_a_banner_after_tools_reply_still_fails(tmp_path, spawned, capsys):
+    body = ANSWERS + "\n"
+    body = body.replace('    sys.stdout.flush()',
+                        '    sys.stdout.flush()\n'
+                        '    if msg.get("method") == "tools/list":\n'
+                        '        import time\n'
+                        '        time.sleep(0.05)\n'
+                        '        print("server ready", flush=True)')
+    mod = _load()
+    assert not _probe_with_watchdog(mod, "post-reply", _server(tmp_path, "post_reply", body), 10)
+    assert "this breaks JSON-RPC" in capsys.readouterr().out
+
+
 def test_a_non_string_argument_does_not_end_the_whole_run(tmp_path, spawned, capsys):
     """A number in `args` is valid JSON. Popen raised TypeError on it — not the
     OSError the probe catches — so one odd declaration took the run down with a

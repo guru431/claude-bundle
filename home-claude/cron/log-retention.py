@@ -40,7 +40,7 @@ Schedule: weekly (see cron/registry.yaml).
 # the table in docs/cron-architecture.md disagree. The code is the source; the
 # doc reflects it. Keep it honest — it is what people read to decide whether to
 # enable this task.
-# bundle-io: offbox=nothing money=no writes=DELETES old cron/logs/*.log, cron/logs/*.jsonl, cron/logs/*.diff, cron/logs/rejected/*.txt and ~/.claude/projects/*/memory/handoff-*.md
+# bundle-io: offbox=nothing money=no writes=DELETES old cron/logs/*.log, cron/logs/*.jsonl, cron/logs/*.diff, cron/logs/rejected/*.txt, cron/logs/rejected/*.review.json and ~/.claude/projects/*/memory/handoff-*.md
 import os
 import re
 import sys
@@ -176,6 +176,7 @@ def prune(files, days: int, label: str) -> tuple[int, int, int]:
                     f.unlink()
                 except OSError as e:
                     log(f"skip: {f.name} ({e})")
+                    kept += 1
                     continue
             log(f"{'WOULD DELETE' if DRY_RUN else 'delete'}: {f.name} ({st.st_size} bytes)")
             deleted += 1

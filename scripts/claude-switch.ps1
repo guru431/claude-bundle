@@ -54,6 +54,8 @@
 #                         # so the secret stays in the one .env and never lands in
 #                         # a file inside the project working tree. No effect for
 #                         # `anthropic` / `ollama` (no provider key involved).
+#                         # Refused for `cleaner-sub`: its custom header needs
+#                         # the key in the file; apiKeyHelper replaces OAuth.
 #   -AllowInsecureHttp    # permit plaintext http:// to a NON-loopback ollama/ccr
 #                         # host. Off by default: loopback uses http://, any remote
 #                         # host uses https:// unless this switch is given (loud warn).
@@ -1135,6 +1137,13 @@ if ($Mode -eq "status") {
     return
 }
 
+if ($KeyHelper -and $Mode -eq "cleaner-sub") {
+    Write-Host "ERROR: -KeyHelper cannot protect cleaner-sub's X-Cleaner-Key custom header." -ForegroundColor Red
+    Write-Host "       apiKeyHelper replaces the Claude subscription login. No settings were written." -ForegroundColor Red
+    Write-Host "       Switching without -KeyHelper stores the gateway key in settings.local.json." -ForegroundColor Yellow
+    exit 2
+}
+
 # We are going to write — create the target dir now (not earlier, so "status"
 # has no side effects).
 if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null }
@@ -1219,7 +1228,7 @@ switch ($Mode) {
 # Set-KeyHelper — but the switcher still owns `apiKeyHelper`, and one left by an
 # earlier -KeyHelper switch would go on answering with another backend's key.
 if ($null -ne $cfg) {
-    if ($KeyHelper -and $Mode -in @("anthropic", "ollama", "cleaner-sub")) {
+    if ($KeyHelper -and $Mode -in @("anthropic", "ollama")) {
         Write-Host "NOTE: -KeyHelper has no effect for '$Mode' (no provider key involved)." -ForegroundColor DarkGray
     }
     if ($Mode -in @("anthropic", "ollama") -and $cfg.PSObject.Properties.Match("apiKeyHelper").Count -gt 0) {

@@ -16,6 +16,22 @@ pytestmark = requires_powershell
 SELF_TEST = ROOT / "scripts" / "self-test.ps1"
 
 
+@pytest.mark.integration
+def test_script_inventory_ignores_task_copies_and_build_output(tmp_path: Path):
+    shipped = {"scripts/real.sh", "home-claude/hooks/real.ps1", ".githooks/pre-commit"}
+    ignored = {".tmp/task/copied.sh", "output/copied.ps1", "scripts/node_modules/copied.sh"}
+    for name in shipped | ignored:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("test fixture\n", encoding="utf-8")
+    code = define_functions(SELF_TEST, ["Get-SourceScripts"]) + f"""
+Get-SourceScripts {ps_quote(tmp_path)} | ForEach-Object {{ $_.FullName }}
+"""
+    result = run_ps(code, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert set(result.stdout.splitlines()) == {str(tmp_path / name) for name in shipped}
+
+
 def test_child_output_keeps_its_characters_and_the_console_its_code_page(tmp_path: Path):
     """A guard's em dash came back as `Ч` (cp1251 bytes read as cp866), and a
     `→` killed the Python child outright — it cannot be encoded in cp1251.

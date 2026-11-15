@@ -74,4 +74,23 @@ warn=$(BASH_EXE="$TMP/missing-bash" bash -c '. "$1" 2>&1 >/dev/null; have_bash' 
 printf '%s' "$warn" | grep -qF 'WARNING: BASH_EXE=' \
     || fail "an invalid BASH_EXE was replaced without a word"
 
+# --- Case 7: a bare explicit name resolves on PATH and wins over discovery ---
+stub "$TMP/pinned" mybash 0
+got=$(PATH="$TMP/pinned:$PATH" BASH_EXE=mybash \
+      bash -c '. "$1" 2>/dev/null; printenv BASH_BIN' _ "$LIB")
+[ "$got" = "$TMP/pinned/mybash" ] || fail "bare BASH_EXE was ignored: '$got'"
+
+# --- Case 8: an explicit WSL launcher is rejected just like a PATH candidate ---
+stub "$TMP/System32" bash.exe 0
+got=$(BASH_EXE="$TMP/System32/bash.exe" \
+      bash -c '. "$1" 2>/dev/null; printenv BASH_BIN' _ "$LIB")
+[ "$got" != "$TMP/System32/bash.exe" ] || fail "explicit BASH_EXE accepted WSL"
+
+# --- Case 9: missing explicit names still fall back under a caller's set -e ---
+got=$(PATH="$TMP/good:$PATH" PYTHON_EXE=missing-python-bundle-test \
+      BASH_EXE=missing-bash-bundle-test \
+      bash -ec '. "$1" 2>/dev/null; have_python; have_bash; printenv BASH_BIN' _ "$LIB") \
+    || fail "a missing explicit name aborted runtime.sh under set -e"
+[ -n "$got" ] || fail "set -e fallback did not resolve bash"
+
 echo "PASS: test_runtime.sh"

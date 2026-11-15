@@ -163,17 +163,17 @@ def cap_newest_messages(bits: list[str], proj_name: str,
         total += add
     kept.reverse()
 
+    if not kept:
+        # Every message exceeds the cap. The newest tail is still better
+        # context than dropping the project outright; no full message survives.
+        log(f"  {proj_name}: all {len(bits)} message(s) exceed {cap} chars — "
+            f"keeping the last {cap} chars of the newest, "
+            f"{len(bits) - 1} older message(s) dropped")
+        return bits[-1][-cap:]
+
     if oversized:
         log(f"  {proj_name}: skipped {oversized} oversized message(s) that would "
             f"not fit in {cap} chars — the messages behind them are kept")
-
-    if not kept:
-        # One message alone exceeds the cap. Its tail is still better context
-        # than dropping the project outright — this is the only place a cut
-        # lands mid-message, so it gets its own log line.
-        log(f"  {proj_name}: newest message alone exceeds {cap} chars — "
-            f"keeping its last {cap} chars, {len(bits) - 1} older message(s) dropped")
-        return bits[-1][-cap:]
 
     dropped = len(bits) - len(kept)
     if dropped:

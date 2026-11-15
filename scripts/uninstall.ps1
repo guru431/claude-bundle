@@ -95,8 +95,8 @@ if ($null -eq $mf.written) {
     exit 1
 }
 
-# -DryRun always wins; without it, deleting still needs an explicit -Confirm/-Force.
-$apply = ($Confirm -or $Force) -and -not $DryRun
+# -DryRun always wins; -Force only overrides the changed-file check.
+$apply = $Confirm -and -not $DryRun
 
 # ClaudeHome is where the manifest ACTUALLY is, not what it claims: a corrupted
 # or hand-edited manifest must not be able to redirect deletions at an unrelated

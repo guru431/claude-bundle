@@ -21,7 +21,8 @@ that is its declared price. To keep a service down on purpose, set it
 
 Telegram: one line per service and outcome (restarted / still down), at most
 every 6 hours — a service in a crash loop would otherwise page every 10 minutes.
-Exit 0 — every declared port listens (or listens again); 1 — one stays down.
+Exit 0 — every declared port listens (or listens again); 1 — one stays down;
+2 — the registry could not be read, so no service was checked.
 
 Windows only (Task Scheduler restarts it). Ships disabled: no shipped task
 declares a `health_port`, so there is nothing to watch until you add a service.
@@ -181,7 +182,7 @@ def watch(rec: dict) -> int:
     except OSError as exc:
         log(f"registry unreadable ({exc}) — nothing was checked")
         rec["note"] = "registry unreadable"
-        return 1
+        return 2
     watched, down, undelivered = 0, [], False
     for task in tasks:
         if monitor_checks.health_port(task) is None:

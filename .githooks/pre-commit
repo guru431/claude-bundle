@@ -62,10 +62,14 @@ fi
 # remediated. Step 3 below used to grep the whole diff, '-' lines included — so
 # the one commit that cleans a hostname out of the tree matched its own
 # denylist and was refused, leaving `--no-verify` (which also disables step 2)
-# as the only way through. '+++' is a file header, not content.
+# as the only way through. File headers appear BEFORE hunks; inside a hunk,
+# even '+++ b/...' can be an added content line and must still be scanned.
 # One awk and its status read: two greps behind `|| true` turned a failed grep
 # into "nothing added", and the denylist pass below then read nothing.
-if ! added_content=$(printf '%s\n' "$diff_content" | awk '/^\+/ && !/^\+\+\+/'); then
+if ! added_content=$(printf '%s\n' "$diff_content" | awk '
+  /^diff --git / { in_hunk=0; next }
+  /^@@ / { in_hunk=1; next }
+  in_hunk && /^\+/'); then
   echo "BLOCKED: the added lines could not be extracted — the denylist check did not run."
   fail=1
 fi
@@ -74,7 +78,12 @@ fi
 # below needs it too — a binary or UTF-16 file has to be checked against both
 # tables in the one pass that can read it. A denylist that exists but cannot be used
 # blocks: letting the commit through would mean checking it against nothing.
-pat=$(mktemp 2>/dev/null || echo "$repo_root/.sanitize-patterns.tmp")
+if ! pat=$(mktemp 2>/dev/null); then
+  echo "BLOCKED: a temporary file for the personal denylist could not be created." >&2
+  exit 1
+fi
+trap 'rm -f "$pat"' EXIT
+trap 'exit 1' HUP INT TERM
 if ! secret_scan_denylist "$repo_root/.sanitize-patterns" "$pat"; then
   echo "BLOCKED: .sanitize-patterns cannot be used (see above) — the personal denylist"
   echo "  would be OFF for this commit. Fix the pattern, or move the file aside."
@@ -127,8 +136,6 @@ if [ -s "$pat" ]; then
     fail=1
   fi
 fi
-rm -f "$pat"
-
 if [ "$fail" -ne 0 ]; then
   echo ""
   echo "Commit aborted — this is a PUBLIC repository."

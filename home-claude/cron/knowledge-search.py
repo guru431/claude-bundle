@@ -133,6 +133,8 @@ def history_sources(project: str):
 
 
 def search(project: str, query: str, limit: int = 10, history: bool = False) -> list[dict]:
+    if limit <= 0:
+        raise ValueError('limit must be positive')
     project = resolve_project(project)
     terms = query.lower().split()
     if not terms:
@@ -150,7 +152,7 @@ def search(project: str, query: str, limit: int = 10, history: bool = False) -> 
                                     'session_id': sid, 'updated': msg['timestamp'], 'score': 1,
                                     'excerpt': f"[{msg['role']}] " + safe[start:start + 600]})
     results.sort(key=lambda hit: (-hit['score'], hit['path'], hit['line']))
-    return results[:max(1, min(limit, 50))]
+    return results[:min(limit, 50)]
 
 
 def inventory() -> list[dict]:
@@ -176,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument('--limit', type=int, default=10)
     ap.add_argument('--json', action='store_true')
     args = ap.parse_args(argv)
+    if args.limit <= 0:
+        ap.error('--limit must be positive')
     try:
         if args.inventory:
             output = inventory()

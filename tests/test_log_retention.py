@@ -52,7 +52,7 @@ def test_failed_unlink_is_not_logged_as_deleted(retention, tmp_path, monkeypatch
     monkeypatch.setattr(retention, "log", messages.append)
     monkeypatch.setattr(retention, "DRY_RUN", False)
     monkeypatch.setattr(Path, "unlink", lambda self: (_ for _ in ()).throw(OSError("locked")))
-    assert retention.prune([target], 1, "logs") == (0, 0, 0)
+    assert retention.prune([target], 1, "logs") == (0, 1, 0)
     assert not any(line.startswith("delete:") for line in messages)
     assert target.exists()
 

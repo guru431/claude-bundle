@@ -298,7 +298,8 @@ It removes only what the manifest lists — your `.env`, `bundle.local.yaml`,
 your bootstrapped `registry.yaml`, wiki notes, logs and pipeline state are
 never touched — and finds the pipeline root from the manifest, so you don't
 have to remember it. A file changed since install is reported and kept unless
-you pass `-Force`.
+you pass `-Force` together with `-Confirm`. `-Force` alone is still a preview;
+it only overrides the protection for modified files, not confirmation.
 
 On a full install the uninstaller removes the scheduled tasks **first**, the
 same way they were created — through the deployment's registry
@@ -596,6 +597,11 @@ working tree. `scripts/get-key.ps1` prints one value and nothing else,
 reading it through the same parser and the same order (env, then `.env`);
 it looks for that parser in `lib\dotenv.ps1` next to itself, then in
 `cron\lib\dotenv.ps1`, where the full-tier installer deploys it.
+
+`cleaner-sub` needs its credential in the `X-Cleaner-Key` custom header,
+which `apiKeyHelper` cannot supply. The switcher refuses `cleaner-sub
+-KeyHelper` before changing settings. Without `-KeyHelper`, this mode stores
+the header in `settings.local.json`.
 
 ### 16. (Optional) Codex CLI mirror
 

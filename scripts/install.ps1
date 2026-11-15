@@ -968,7 +968,7 @@ function Set-EnvValueIfEmpty {
     return $true
 }
 if ($DryRun) {
-    Info "[dry-run] would pin PYTHON_EXE / BASH_EXE / PROJECTS_ROOT in .env"
+    Info "[dry-run] would pin PYTHON_EXE / BASH_EXE in .env"
 } elseif (Test-Path $envDst) {
     if ($script:preflightPython -and (Set-EnvValueIfEmpty $envDst 'PYTHON_EXE' $script:preflightPython)) {
         Good "pinned PYTHON_EXE=$script:preflightPython in .env (session 0 has no user PATH)"
@@ -983,25 +983,6 @@ if ($DryRun) {
     }
     if ($bashPath -and (Set-EnvValueIfEmpty $envDst 'BASH_EXE' $bashPath)) {
         Good "pinned BASH_EXE=$bashPath in .env"
-    }
-    # One value, two names: `projects_root:` in bundle.local.yaml is the canon a
-    # human edits, `PROJECTS_ROOT` in .env is its shell-side spelling. The docs
-    # required the .env name while utils.py called it deprecated, so following
-    # either instruction produced a warning or a broken job. It is GENERATED
-    # from the manifest now — see cron/hooks/utils.py::_resolve_projects_root.
-    $manifestForRoot = Join-Path $PipelineRoot 'bundle.local.yaml'
-    if (Test-Path $manifestForRoot) {
-        $rootLine = (Get-Content $manifestForRoot -Encoding UTF8 |
-                     Where-Object { $_ -match '^\s*projects_root\s*:\s*(\S.*)$' } |
-                     Select-Object -First 1)
-        if ($rootLine -and $rootLine -match '^\s*projects_root\s*:\s*(\S.*?)\s*$') {
-            $rootVal = $Matches[1].Trim('"', "'")
-            if ($rootVal -and $rootVal -notmatch '^<') {
-                if (Set-EnvValueIfEmpty $envDst 'PROJECTS_ROOT' $rootVal) {
-                    Good "generated PROJECTS_ROOT=$rootVal in .env from bundle.local.yaml"
-                }
-            }
-        }
     }
 }
 
@@ -1034,6 +1015,24 @@ if ($DryRun) {
     Info "  dry_run_until: $until — every phase previews only until then; read cron/logs/, then delete the key (it expires on its own)"
 }
 if (Test-Path $manifestDst) { $script:preserved.Add('bundle.local.yaml') }
+
+# Generate the shell-side spelling only AFTER a first install has created the
+# manifest. projects_root in that file remains the canonical user setting.
+if ($DryRun) {
+    Info "[dry-run] would generate PROJECTS_ROOT in .env from bundle.local.yaml"
+} elseif ((Test-Path -LiteralPath $envDst) -and (Test-Path -LiteralPath $manifestDst)) {
+    $rootLine = (Get-Content -LiteralPath $manifestDst -Encoding UTF8 |
+                 Where-Object { $_ -match '^\s*projects_root\s*:\s*(\S.*)$' } |
+                 Select-Object -First 1)
+    if ($rootLine -and $rootLine -match '^\s*projects_root\s*:\s*(\S.*?)\s*$') {
+        $rootVal = $Matches[1].Trim('"', "'")
+        if ($rootVal -and $rootVal -notmatch '^<') {
+            if (Set-EnvValueIfEmpty $envDst 'PROJECTS_ROOT' $rootVal) {
+                Good "generated PROJECTS_ROOT=$rootVal in .env from bundle.local.yaml"
+            }
+        }
+    }
+}
 
 # ── 4. Bootstrap registry placeholders (full) ────────────────────────────────
 $user = Ask 'Windows user for the scheduled tasks' $env:USERNAME

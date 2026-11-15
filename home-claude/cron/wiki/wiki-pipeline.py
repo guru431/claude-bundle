@@ -61,6 +61,9 @@ PHASES = [
     ("compile", HERE / "wiki-compile-sessions.py"),
     ("index",   HERE / "wiki-build-index.py"),
 ]
+# The standalone flush/compile tasks have the same six-hour ceiling. Bound a
+# manual pipeline run too, and leave later phases a chance after a stuck child.
+PHASE_TIMEOUT_SECONDS = 6 * 60 * 60
 
 DATE = date.today().isoformat()
 LOG_FILE = LOG_DIR / f"wiki-pipeline_{DATE}.log"
@@ -262,8 +265,20 @@ def main() -> int:
         # per-task log). LOG_DIR is created by the log() call above.
         start = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            rc = subprocess.run([sys.executable, str(script), *passthrough],
-                                stdout=f, stderr=subprocess.STDOUT).returncode
+            try:
+                proc = subprocess.Popen([sys.executable, str(script), *passthrough],
+                                        stdout=f, stderr=subprocess.STDOUT,
+                                        start_new_session=(os.name != "nt"))
+                rc = proc.wait(timeout=PHASE_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                # The provider or an extension can have children of its own.
+                # Kill the tree before the next phase can touch the same vault.
+                notify._kill_tree(proc)
+                log(f"[{name}] timed out after {PHASE_TIMEOUT_SECONDS}s — process tree killed")
+                rc = 1
+            except OSError as exc:
+                log(f"[{name}] could not run: {exc}")
+                rc = 1
         log(f"[{name}] done (rc={rc})")
         if preview:
             summaries.extend(read_summaries(start))

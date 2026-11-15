@@ -707,13 +707,27 @@ if ((-not $deployed) -and (Test-Path $hook) -and (Test-Path (Join-Path $root '.g
 }
 
 # ── 15. Encoding rules (BOM on .ps1 with non-ASCII, none on .sh, LF in .sh) ──
+function Get-SourceScripts([string]$SourceRoot) {
+    # These are the shipped trees. Test copies and build output elsewhere in
+    # the checkout must not affect either encoding checks or shell lint.
+    foreach ($name in @('scripts', 'home-claude', '.githooks')) {
+        $tree = Join-Path $SourceRoot $name
+        if (-not (Test-Path -LiteralPath $tree -PathType Container)) { continue }
+        Get-ChildItem -LiteralPath $tree -Recurse -File -ErrorAction Stop |
+            Where-Object {
+                $_.FullName -notmatch '[\\/](\.git|__pycache__|node_modules)[\\/]' -and
+                ($name -eq '.githooks' -or $_.Extension -in @('.ps1', '.sh'))
+            }
+    }
+}
+$sourceScripts = @(Get-SourceScripts $root)
+
 # home-claude/CLAUDE.md § File Encoding states both rules and nothing enforced
 # either. They matter: PS 5.1 reads a BOM-less file in the system ANSI codepage,
 # so Cyrillic in a .ps1 turns into smart quotes that break string parsing — and
 # a BOM on a .sh breaks its `#!` line outright.
 $encBad = @()
-foreach ($f in (Get-ChildItem $root -Recurse -Include *.ps1, *.sh -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -notmatch '\\(\.git|__pycache__|node_modules)\\' })) {
+foreach ($f in ($sourceScripts | Where-Object { $_.Extension -in @('.ps1', '.sh') })) {
     $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
     $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
     if ($f.Extension -eq '.sh') {
@@ -778,13 +792,9 @@ if (-not $deployed) {
     if (-not $sc) {
         Warn "shellcheck not found — skipped the shell lint CI runs (pip install -r requirements-dev.txt, or install shellcheck)"
     } else {
-        $shFiles = @(Get-ChildItem $root -Recurse -Filter *.sh -File -ErrorAction SilentlyContinue |
-                     Where-Object { $_.FullName -notmatch '\\(\.git|__pycache__|node_modules)\\' } |
+        $shFiles = @($sourceScripts |
+                     Where-Object { $_.Extension -eq '.sh' -or $_.FullName -match '[\\/]\.githooks[\\/]' } |
                      ForEach-Object { $_.FullName })
-        $hooksDir = Join-Path $root '.githooks'
-        if (Test-Path $hooksDir) {
-            $shFiles += @(Get-ChildItem $hooksDir -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-        }
         if ($shFiles.Count -eq 0) { Warn "no shell scripts found under $root — shellcheck skipped" }
         else {
             $out = Invoke-Checked { & $sc --severity=warning -e SC1091 -f gcc @shFiles }

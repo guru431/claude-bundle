@@ -959,7 +959,7 @@ def test_a_mistyped_brake_flag_runs_nothing(bundle: Path, monkeypatch, capsys):
     provider — for someone who meant to preview it."""
     monkeypatch.setattr(sys, "argv", ["wiki-pipeline.py", "--dry_run"])
     pipe = _load_wiki_script(bundle, monkeypatch, "pipeline_argv", "wiki-pipeline.py")
-    monkeypatch.setattr(pipe.subprocess, "run",
+    monkeypatch.setattr(pipe.subprocess, "Popen",
                         lambda *a, **k: pytest.fail("a phase was started"))
     assert pipe.main() == 2
     assert "unknown argument(s): --dry_run" in capsys.readouterr().err

@@ -27,7 +27,7 @@ home-claude/bundle.local.yaml
 
 # Local sanitization patterns — see CLAUDE.md § Sanitization checklist.
 # This file itself is the leak it tries to prevent — never commit.
-# (The * also covers the pre-commit hook's .sanitize-patterns.tmp fallback.)
+# The wildcard also keeps legacy temporary denylist copies private.
 .sanitize-patterns*
 
 # The pre-push hook's temp directory, used when mktemp is unavailable. It lives

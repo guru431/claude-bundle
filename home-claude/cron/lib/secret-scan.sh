@@ -144,27 +144,40 @@ secret_scan_drop_placeholders() {
     # the line, or any other shape, keeps it. A fixed number of processes however
     # many hits there are; nothing is spawned for a clean scan.
     #
-    # A `scan-error:` line from an earlier stage always stays, and a grep that
-    # failed here keeps EVERY line: dropping is the one thing this filter does,
-    # and it must not drop on a verdict it never got.
-    _ssdp_in=$(cat)
+    # A `scan-error:` line from an earlier stage always stays. Every filter
+    # step is checked separately: a failed normalizer hidden before grep's
+    # legitimate rc 1 must never discard all the original hits.
+    if ! _ssdp_in=$(cat); then
+        printf 'scan-error: placeholder filter could not read its input\n'
+        unset _ssdp_in
+        return 0
+    fi
     if [ -z "$_ssdp_in" ]; then
         unset _ssdp_in
         return 0
     fi
     _ssdp_rc=0
-    _ssdp_keep=$(printf '%s\n' "$_ssdp_in" \
-        | sed -E "s#$SECRET_SCAN_URI_PLACEHOLDER# #g" \
-        | grep -naE -e "$SECRET_SCAN_PATTERN") || _ssdp_rc=$?
+    _ssdp_clean=$(printf '%s\n' "$_ssdp_in" \
+        | sed -E "s#$SECRET_SCAN_URI_PLACEHOLDER# #g") || _ssdp_rc=2
+    if [ "$_ssdp_rc" -eq 0 ]; then
+        _ssdp_keep=$(printf '%s\n' "$_ssdp_clean" \
+            | grep -naE -e "$SECRET_SCAN_PATTERN") || _ssdp_rc=$?
+    fi
+    if [ "$_ssdp_rc" -le 1 ]; then
+        _ssdp_keep=$(printf '%s\n' "$_ssdp_keep" | cut -d: -f1) || _ssdp_rc=2
+    fi
+    if [ "$_ssdp_rc" -le 1 ]; then
+        _ssdp_out=$(printf '%s\n' "$_ssdp_in" | awk -v keep="$_ssdp_keep" '
+            BEGIN { gsub(/\n/, " ", keep); keep = " " keep " " }
+            index(keep, " " NR " ") || /^scan-error: /') || _ssdp_rc=2
+    fi
     if [ "$_ssdp_rc" -gt 1 ]; then
         printf '%s\n' "$_ssdp_in"
-        unset _ssdp_in _ssdp_keep _ssdp_rc
-        return 0
+    elif [ -n "$_ssdp_out" ]; then
+        printf '%s\n' "$_ssdp_out"
     fi
-    _ssdp_keep=$(printf '%s\n' "$_ssdp_keep" | cut -d: -f1 | tr '\n' ' ')
-    printf '%s\n' "$_ssdp_in" \
-        | awk -v keep=" $_ssdp_keep" 'index(keep, " " NR " ") || /^scan-error: /'
-    unset _ssdp_in _ssdp_keep _ssdp_rc
+    unset _ssdp_in _ssdp_clean _ssdp_keep _ssdp_out _ssdp_rc
+    return 0
 }
 
 secret_scan_diff() {
@@ -177,10 +190,15 @@ secret_scan_diff() {
             return 1
         fi
     else
-        _ssd_diff=$(cat)
+        if ! _ssd_diff=$(cat); then
+            printf 'scan-error: the diff input could not be read in full\n'
+            unset _ssd_diff
+            return 1
+        fi
     fi
     # Added lines only: a commit that REMOVES a leaked token must not be blocked,
-    # or the leak could never be remediated. '+++' is a file header, not content.
+    # or the leak could never be remediated. Only the FIRST '+++ ' in a file
+    # section is its header; subsequent ones can be added '++ ' content.
     #
     # awk carries the current file's path onto every added line BEFORE grep runs,
     # so a hit names the file. `grep -n` used to number the already-filtered
@@ -193,9 +211,15 @@ secret_scan_diff() {
     # for it and still exits 0 — so a key on the same line as a CP1251 comment
     # was reported clean. (Git Bash's grep maps such bytes instead, which is why
     # this only ever showed on Linux and macOS.)
-    _ssd_hits=$(printf '%s\n' "$_ssd_diff" | awk '
-        /^\+\+\+ /  { path = substr($0, 5); sub(/^b\//, "", path); next }
-        /^\+/       { print path ": " $0 }' \
+    if ! _ssd_added=$(printf '%s\n' "$_ssd_diff" | awk '
+        /^diff --git / { path = ""; header = 0; next }
+        /^\+\+\+ / && !header { path = substr($0, 5); sub(/^b\//, "", path); header = 1; next }
+        /^\+/ { print path ": " $0 }'); then
+        printf 'scan-error: added diff lines could not be extracted\n'
+        unset _ssd_added _ssd_diff
+        return 1
+    fi
+    _ssd_hits=$(printf '%s\n' "$_ssd_added" \
         | _secret_scan_sel -aE -e "$SECRET_SCAN_PATTERN" \
         | _secret_scan_sel -avF -e "$SECRET_SCAN_ALLOW" \
         | secret_scan_drop_placeholders || true)   # rc-ok: the verdict is the output; grep failures arrive as scan-error lines
@@ -370,12 +394,19 @@ secret_scan_denylist() {
         return 2
     fi
     _ssdl_rc=0
-    tr -d '\r' < "$2.dec" | sed "1s/^$(printf '\357\273\277')//" \
-        | grep -avE '^[[:space:]]*$' > "$2" || _ssdl_rc=$?
+    _ssdl_text=$(tr -d '\r' < "$2.dec") || _ssdl_rc=2
+    if [ "$_ssdl_rc" -eq 0 ]; then
+        _ssdl_text=$(printf '%s\n' "$_ssdl_text" \
+            | sed "1s/^$(printf '\357\273\277')//") || _ssdl_rc=2
+    fi
+    if [ "$_ssdl_rc" -eq 0 ]; then
+        printf '%s\n' "$_ssdl_text" | grep -avE '^[[:space:]]*$' > "$2" || _ssdl_rc=$?
+    fi
     rm -f "$2.dec"
+    unset _ssdl_text
     if [ "$_ssdl_rc" -gt 1 ]; then
         : > "$2"
-        printf 'secret-scan: %s could not be filtered (grep rc %s)\n' "$1" "$_ssdl_rc" >&2
+        printf 'secret-scan: %s could not be normalized/filtered (rc %s)\n' "$1" "$_ssdl_rc" >&2
         unset _ssdl_rc
         return 2
     fi

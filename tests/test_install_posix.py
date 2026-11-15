@@ -64,6 +64,8 @@ def test_uninstall_is_a_dry_run_unless_confirmed(bi, tmp_path, capsys):
     assert bi.main(["uninstall", "--claude-home", str(home)]) == 0
     assert (home / "skills" / "x.md").is_file()
     assert "would remove skills/x.md" in capsys.readouterr().out
+    assert bi.main(["uninstall", "--claude-home", str(home), "--force"]) == 0
+    assert (home / "skills" / "x.md").is_file(), "--force must still need --confirm"
     assert bi.main(["uninstall", "--claude-home", str(home), "--confirm", "--dry-run"]) == 0
     assert (home / "skills" / "x.md").is_file(), "--dry-run must win over --confirm"
 
@@ -357,6 +359,28 @@ def _stubs(tmp_path: Path, *names: str, exit_code: int = 0) -> tuple[Path, Path]
 # The fixture rather than `skipif(BASH is None)`: without a bash these FAIL on
 # Windows (tests/conftest.py), and _run() spawns the same find_bash() answer.
 needs_bash = pytest.mark.usefixtures("bash")
+
+
+@pytest.mark.integration
+@needs_bash
+def test_force_alone_neither_disables_units_nor_removes_files(tmp_path):
+    stubs, calls = _stubs(tmp_path, "systemctl", "launchctl")
+    home = tmp_path / "home"
+    home.mkdir()
+    ours = home / "ours.md"
+    ours.write_text("ours", encoding="utf-8")
+    units = tmp_path / "xdg" / "systemd" / "user"
+    units.mkdir(parents=True)
+    timer = units / "ClaudeExample.timer"
+    timer.write_text("[Timer]\n", encoding="utf-8")
+    _manifest(home, ["ours.md"], scheduler={"target": "systemd", "units_dir": str(units),
+                                         "units": [{"path": timer.name, "sha256": _sha(timer)}]})
+    result = _run("uninstall.sh", "--claude-home", _sh(home), "--force",
+                  path_first=stubs, env_extra={"XDG_CONFIG_HOME": str(tmp_path / "xdg")})
+    assert result.returncode == 0, result.out
+    assert "would disable ClaudeExample.timer" in result.out, result.out
+    assert not calls.exists(), "--force alone must not call a scheduler"
+    assert ours.is_file() and timer.is_file() and (home / ".bundle-manifest.json").is_file()
 
 
 @pytest.mark.integration   # 1.1-1.6 s measured on Windows: a bash start per case

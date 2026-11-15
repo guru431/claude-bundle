@@ -141,6 +141,25 @@ def _session(pytester: pytest.Pytester, monkeypatch, tests: str, conftest_tail: 
     return pytester.runpytest("tests", "-p", "no:cacheprovider", *args)
 
 
+def _reported_call_times(durations: dict[str, list[float]]) -> str:
+    """Feed the CI gate deterministic reports while retaining real retries."""
+    return f'''
+_SLOW_CALL_SECONDS = 0.05
+_TEST_DURATIONS = {durations!r}
+_TEST_CALLS = {{}}
+
+@pytest.hookimpl(specname="pytest_runtest_makereport", hookwrapper=True, trylast=True)
+def pytest_runtest_makereport_test_clock(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if report.when == "call" and item.name in _TEST_DURATIONS:
+        index = _TEST_CALLS.get(item.name, 0)
+        times = _TEST_DURATIONS[item.name]
+        report.duration = times[min(index, len(times) - 1)]
+        _TEST_CALLS[item.name] = index + 1
+'''
+
+
 def test_a_variable_the_env_template_names_does_not_reach_a_test(pytester, monkeypatch):
     """The cleared names are the template's, not a hand-kept subset of them.
 
@@ -228,7 +247,6 @@ def test_on_ci_a_check_that_did_not_run_or_ran_slow_fails(pytester, monkeypatch)
     (pytester.path / "tests" / "test_needs_it_at_import.py").write_text(
         'import pytest\npytest.importorskip("no_such_module_anywhere")\n', encoding="utf-8")
     result = _session(pytester, monkeypatch, """
-        import time
         import pytest
 
         @pytest.fixture
@@ -239,12 +257,13 @@ def test_on_ci_a_check_that_did_not_run_or_ran_slow_fails(pytester, monkeypatch)
             pass
 
         def test_slow():
-            time.sleep(0.15)
+            pass
 
         @pytest.mark.integration
         def test_slow_and_marked():
-            time.sleep(0.15)
-    """, "\n_SLOW_CALL_SECONDS = 0.05\n", "--continue-on-collection-errors")
+            pass
+    """, _reported_call_times({"test_slow": [0.15], "test_slow_and_marked": [0.15]}),
+        "--continue-on-collection-errors")
     # errors: the module skipped at import, the fixture skipped in setup
     result.assert_outcomes(passed=1, failed=1, errors=2)
     result.stdout.fnmatch_lines(["*Skips are failures on CI*"])
@@ -256,16 +275,12 @@ def test_on_ci_a_call_slow_only_once_is_the_runners_stall(pytester, monkeypatch)
     anywhere else: a slow call runs again, and only a second slow one fails."""
     monkeypatch.setenv("CI", "1")
     result = _session(pytester, monkeypatch, """
-        import time
-
         runs = []
 
         def test_stalls_once(tmp_path):
             (tmp_path / "unit").mkdir()   # fails on a tmp_path left over from the first run
             runs.append(tmp_path)
-            if len(runs) == 1:
-                time.sleep(0.15)
-    """, "\n_SLOW_CALL_SECONDS = 0.05\n")
+    """, _reported_call_times({"test_stalls_once": [0.15, 0.0]}))
     result.assert_outcomes(passed=1, warnings=1)
     result.stdout.fnmatch_lines(["*when run again: counted as the runner's stall*"])
 
@@ -277,15 +292,14 @@ def test_on_ci_an_xdist_worker_does_not_time_calls(pytester, monkeypatch):
     calls; a skipped dependency still fails in a worker."""
     monkeypatch.setenv("CI", "1")
     result = _session(pytester, monkeypatch, """
-        import time
         import pytest
 
         def test_slow():
-            time.sleep(0.15)
+            pass
 
         def test_needs_it():
             pytest.importorskip("no_such_module_anywhere")
-    """, "\n_SLOW_CALL_SECONDS = 0.05\n\n"
+    """, _reported_call_times({"test_slow": [0.15]}) + "\n"
          "@pytest.hookimpl(specname='pytest_configure')\n"
          "def pytest_configure_as_an_xdist_worker(config):\n"
          "    config.workerinput = {'workerid': 'gw0'}\n")

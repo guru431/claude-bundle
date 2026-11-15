@@ -25,6 +25,17 @@ WEDNESDAY = datetime(2026, 9, 16, 9, 30)
 MONDAY = datetime(2026, 9, 21, 9, 30)
 
 
+def test_monday_digest_keeps_whole_names_and_counts_omissions(monkeypatch):
+    standing = [f"ClaudeExample{i:02d}" + "x" * 25 for i in range(20)]
+    monkeypatch.setattr(runs, "stale_report", lambda *a: ([], standing))
+    lines, reported = runs.stale_alert({}, MONDAY)
+    names = lines[0].split(": ", 1)[1].split(", ")
+    assert reported == standing
+    assert names[:-1] == standing[:len(names) - 1]
+    assert names[-1] == f"… and {len(standing) - len(names) + 1} more"
+    assert len(lines[0].split(": ", 1)[1]) <= 400
+
+
 def test_selftest_does_not_clobber_another_runs_temp_ledger(tmp_path, monkeypatch):
     import tempfile
 

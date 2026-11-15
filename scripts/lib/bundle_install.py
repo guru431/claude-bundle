@@ -487,7 +487,7 @@ def uninstall(args) -> int:
         print(f"ERROR: install manifest has no 'written' list: {claude_home / MANIFEST}")
         print("       It is corrupt or from a newer bundle - removing nothing.")
         return 1
-    apply = (args.confirm or args.force) and not args.dry_run
+    apply = args.confirm and not args.dry_run
 
     # ClaudeHome is where the manifest IS, never what it claims; the pipeline
     # root can only come from the file, so it must at least be absolute.

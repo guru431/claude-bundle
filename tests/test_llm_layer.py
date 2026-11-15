@@ -547,6 +547,8 @@ def test_llm_call_cli_exit_code_says_why(cron_copy: Path, tmp_path: Path,
     assert r.returncode == expected_rc, r.stdout + r.stderr
     if case == "ok":
         assert r.stdout == "the answer\n"
+    elif case == "extra-argument":
+        assert "expected at most one argument" in r.stderr
 
 
 # ── The claude CLI is found the way a shell would find it ────────────────────

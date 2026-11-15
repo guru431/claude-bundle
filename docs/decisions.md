@@ -176,6 +176,11 @@ every call, an unparseable `WIKI_ALLOW_OFFBOX` means "off-box refused", a missin
 included, and in both push scripts — and a `.sanitize-patterns` line that grep
 cannot compile blocks them too, instead of switching the denylist off.
 
+A nonempty project allowlist containing only ambiguous labels that normalize
+to the unattributed bucket denies every project. A literal `main` entry still
+permits only `main`. Removing ambiguous entries from the effective set must
+never turn an explicitly restricted policy into an unrestricted one.
+
 Three things fail OPEN, on purpose, and all are logged when they do:
 
 - **The LLM queue** (`cron/state/.llm.lock`). A call that cannot take the queue

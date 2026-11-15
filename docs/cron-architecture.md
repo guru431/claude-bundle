@@ -493,6 +493,9 @@ are unreadable to the pipeline after 24 hours anyway (`session-start.py`
 ignores older ones), so a longer window would only accumulate summaries
 nothing reads.
 
+A file that could not be deleted is counted as kept, so the run ledger still
+records that the sweep inspected it.
+
 A window of **0 means "keep everything"** — the documented way to switch
 one class of rotation off. Read literally, a zero-day cutoff lands at
 `now` and would delete every matching file including the log the run is
@@ -520,6 +523,10 @@ each phase a subprocess whose log folds into the pipeline log. The three
 phase tasks (`ClaudeWikiFlush`, `ClaudeWikiCompileSessions`,
 `ClaudeWikiBuildIndex`) still exist and ship `enabled: false` — enable them
 only if you deliberately want the phases on separate timers.
+
+Each subprocess has a six-hour ceiling, matching the standalone flush and
+compile task limits. A phase that times out has its process tree stopped and
+is reported as failed; the pipeline then runs the remaining phases.
 
 It used to be the other way round, and this document argued the split was
 "safe by design" — which it is, in the sense that matters: every phase is

@@ -187,3 +187,18 @@ Three things fail OPEN, on purpose, and all are logged when they do:
 - **`bash-guard.py`**. A missing or malformed rules file disables the guard
   instead of blocking every Bash call on the machine. It is a habit guard (D-08),
   and one broken YAML file must not stop the user working.
+
+---
+
+## D-11 · Matrix delivery errors retain the queued message until expiry.
+
+A 4xx response stops the current part's immediate retries, except for 429.
+It does not discard the saved part: a refused token or room permission can be
+repaired without changing the message. Manual `--replay --apply` can then deliver
+it with the same transaction ID and the same destination checks. Records still
+expire after seven days. There is no scheduled replay task, so keeping a part
+does not create an automatic retry loop.
+
+Dropping every part after a configuration error would turn a recoverable
+delivery failure into lost alerts. Inspection remains read-only; credentials
+and destination changes never bypass replay's existing privacy checks.

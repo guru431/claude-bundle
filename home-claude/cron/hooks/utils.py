@@ -371,6 +371,14 @@ ALLOW_PROJECTS: set[str] = set(_manifest_str_list("allow_projects"))
 SKIP_JSONL_PROJECTS: set[str] = set(_manifest_str_list("skip_jsonl_projects")) | SKIP_PROJECTS
 
 
+def directory_skipped(name: str) -> bool:
+    """Honor Windows directory identity in every collector, including synced paths."""
+    if name in SKIP_DIRS:
+        return True
+    return bool(os.name == "nt" or re.match(r"^[A-Za-z]--", name)) and (
+        name.lower() in {directory.lower() for directory in SKIP_DIRS})
+
+
 def _manifest_path(key: str) -> Path | None:
     """Read a filesystem path from the manifest (`~` expanded), or None.
 
@@ -1664,7 +1672,7 @@ def slug_collisions() -> dict[str, list[str]]:
     if not PROJECTS_BASE.exists():
         return {}
     for proj_dir in PROJECTS_BASE.iterdir():
-        if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
+        if not proj_dir.is_dir() or directory_skipped(proj_dir.name):
             continue
         slug = normalize_project_name(dir_to_project(proj_dir.name))
         by_slug.setdefault(slug, []).append(proj_dir.name)
@@ -1815,8 +1823,7 @@ def codex_sessions(projects_dir: Path, since: float | None = None, *, audit=None
 def codex_session_allowed(session) -> bool:
     """Honor both Codex slugs and existing Claude directory/alias exclusions."""
     encoded = encode_cwd(session.project_root)
-    skipped = encoded in SKIP_DIRS or (Path(session.project_root).drive
-                                      and encoded.lower() in {d.lower() for d in SKIP_DIRS})
+    skipped = directory_skipped(encoded)
     return (not skipped and project_allowed(session.project)
             and project_allowed(dir_to_project(encoded)))
 
@@ -1945,7 +1952,7 @@ def save_session_tail(data: dict, last_n: int = 30) -> tuple[str, str] | None:
     if not os.path.exists(transcript_path):
         return None
     dir_name = project_dir_from_payload(data)
-    if dir_name.lower() in {d.lower() for d in SKIP_DIRS}:
+    if directory_skipped(dir_name):
         return None
     project = dir_to_project(dir_name) if dir_name else DEFAULT_PROJECT
     if not project_allowed(project):

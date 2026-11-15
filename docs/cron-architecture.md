@@ -219,7 +219,7 @@ know before using it:
   boot-anchored timer (`OnBootSec` + `OnUnitActiveSec`) on systemd, both
   open-ended too, so `check-registry.py` rejects a `repeat_for` on such a task
   unless it is `platform: windows`. `AtLogOn` has no systemd form. A
-  `startup_delay` alongside it applies to the first run only on Windows, but is
+  `startup_delay` alongside it applies to the first run only on Windows and systemd, but is
   repeated by the interval on launchd; the generator warns when the two are
   combined.
 

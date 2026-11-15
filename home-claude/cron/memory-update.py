@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 from utils import (  # noqa: E402
     CLAUDE_HOME,
     PROJECTS_BASE,
-    SKIP_DIRS,
+    directory_skipped,
     _state_lock,
     config_report,
     codex_sessions,
@@ -333,7 +333,7 @@ def collect_today_user_messages(
     # ~/.claude/projects/ is considered. Customize the glob if you only
     # want a subset.
     for proj_dir in PROJECTS_DIR.iterdir() if PROJECTS_DIR.is_dir() else ():
-        if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
+        if not proj_dir.is_dir() or directory_skipped(proj_dir.name):
             continue
         # Same project-name derivation as the wiki pipeline (PROJECT_MAP →
         # trailing segment) so both pipelines key the same project identically.

@@ -69,4 +69,9 @@ if PATH="$TMP/none:$PATH" PYTHON_EXE="" bash -c '. "$1"; have_python' _ "$LIB" 2
     fail "have_python succeeded with no working interpreter"
 fi
 
+# --- Case 6: an invalid explicit BASH_EXE falls back with a warning ---
+warn=$(BASH_EXE="$TMP/missing-bash" bash -c '. "$1" 2>&1 >/dev/null; have_bash' _ "$LIB")
+printf '%s' "$warn" | grep -qF 'WARNING: BASH_EXE=' \
+    || fail "an invalid BASH_EXE was replaced without a word"
+
 echo "PASS: test_runtime.sh"

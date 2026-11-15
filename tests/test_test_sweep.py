@@ -1319,6 +1319,30 @@ def test_pester_wrapper_prints_the_markers_the_parser_reads():
     assert res["counts"] == (1, 2, 0)
 
 
+def test_pester_retries_a_file_that_started_after_the_timeout_snapshot(tmp_path):
+    from ps_helpers import run_ps, ps_quote
+    if sys.platform != "win32":
+        pytest.skip("Windows PowerShell runner")
+    text = PESTER.read_text(encoding="utf-8-sig")
+    block = text[text.index("        $next = $files.Count"):text.index("        $from = $next")]
+    (tmp_path / "0.json").write_text(json.dumps(
+        {"passed": 1, "failed": 0, "skipped": 0, "seconds": 1}), encoding="utf-8")
+    (tmp_path / "1.start").write_text("", encoding="utf-8")
+    code = f"$tmp = {ps_quote(tmp_path)}\n" + r'''
+$ErrorActionPreference = 'Stop'
+$files = @([pscustomobject]@{Name='First.Tests.ps1'}, [pscustomobject]@{Name='Second.Tests.ps1'})
+$from = 0; $cur = 0; $timedOut = $true; $TimeoutSec = 30
+$pass = 0; $fail = 0; $skip = 0; $hung = 0; $envBroken = $false
+$inv = [Globalization.CultureInfo]::InvariantCulture
+$endedAt = [datetime]'2026-01-01T12:00:00'
+''' + block + '\nWrite-Output "snapshot-result next=$next hung=$hung pass=$pass"\n'
+    result = run_ps(code, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "TESTS_TIMEOUT Second.Tests.ps1" not in result.stdout
+    assert "snapshot-result next=1 hung=0 pass=1" in result.stdout
+    assert not (tmp_path / "1.start").exists()
+
+
 def _pester_host() -> str | None:
     if sys.platform != "win32":
         return shutil.which("pwsh")

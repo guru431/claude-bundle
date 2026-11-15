@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'cron' / 'hooks'))
 sys.path.insert(0, str(ROOT / 'cron' / 'lib'))
-from utils import (PROJECTS_BASE, WIKI_ROOT, SKIP_DIRS, codex_sessions, codex_session_allowed,  # noqa: E402
+from utils import (PROJECTS_BASE, WIKI_ROOT, directory_skipped, codex_sessions, codex_session_allowed,  # noqa: E402
                    dir_to_project, is_subagent_jsonl, masked, normalize_project_name,
                    project_allowed, session_projects)
 from session_sources import iter_messages, attribution_for_cwd  # noqa: E402
@@ -45,7 +45,7 @@ def resolve_project(value: str) -> str:
 
 def memory_directories(project: str) -> list[Path]:
     return [folder / 'memory' for folder in sorted(PROJECTS_DIR.glob('*'))
-            if folder.name not in SKIP_DIRS
+            if not directory_skipped(folder.name)
             and project_key(dir_to_project(folder.name)) == project_key(project)
             and (folder / 'memory').is_dir()]
 
@@ -119,7 +119,7 @@ def document_results(project: str, terms: list[str]):
 
 def history_sources(project: str):
     for folder in sorted(PROJECTS_DIR.glob('*')):
-        if folder.name in SKIP_DIRS or project_key(dir_to_project(folder.name)) != project_key(project):
+        if directory_skipped(folder.name) or project_key(dir_to_project(folder.name)) != project_key(project):
             continue
         for path in sorted(folder.glob('*.jsonl')):
             if not is_subagent_jsonl(str(path)):

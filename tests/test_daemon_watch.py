@@ -222,9 +222,15 @@ def test_a_session_is_found_by_its_username_column():
 
 def test_unrecognized_quser_output_attempts_restart(monkeypatch):
     import types
+
+    class Output:
+        def decode(self, *args, **kwargs):
+            return "unexpected output"
+
     monkeypatch.setattr(watch_mod.subprocess, "run", lambda *a, **kw:
-                        types.SimpleNamespace(stdout=b"unexpected output", returncode=0))
+                        types.SimpleNamespace(stdout=Output(), returncode=0))
     assert watch_mod.has_session("svc") is True
+    assert watch_mod.quser_names("") == set()
 
 
 def test_has_session_takes_the_name_without_its_domain(monkeypatch):

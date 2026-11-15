@@ -491,6 +491,21 @@ def test_config_report_says_why_each_provider_cannot_answer(cron_copy: Path, mon
 
 # ── llm-call.py tells a shell task WHY there is no answer ────────────────────
 
+def test_cli_uses_utf8_even_with_an_ascii_posix_locale(cron_copy):
+    script = cron_copy / "cron" / "llm-call.py"
+    wrapper = (
+        "import runpy, sys, types; "
+        "sys.platform = 'linux'; "
+        "sys.modules['utils'] = types.SimpleNamespace(llm_call_ex=lambda prompt, **kw: "
+        "types.SimpleNamespace(ok=True, text=prompt)); "
+        "target = sys.argv[1]; sys.argv = [target]; "
+        "runpy.run_path(target, run_name='__main__')")
+    result = subprocess.run([sys.executable, "-c", wrapper, str(script)],
+                            input="Проверка UTF-8".encode("utf-8"), capture_output=True,
+                            env=dict(os.environ, PYTHONIOENCODING="ascii"), timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.decode("utf-8").strip() == "Проверка UTF-8"
+
 @pytest.mark.parametrize("case,expected_rc", [
     ("ok", 0), ("empty-answer", 1), ("empty-stdin", 2), ("bad-timeout", 2), ("extra-argument", 2),
     ("transient", 3), ("config", 4),

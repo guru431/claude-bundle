@@ -97,10 +97,6 @@ def has_session(user: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return True
     # With no session at all quser exits 1 and says "No User exists".
-    if getattr(r, "returncode", 0) == 1:
-        return False
-    if getattr(r, "returncode", 0) != 0:
-        return True
     name = user.rpartition("\\")[2].partition("@")[0].lower()
     names = quser_names(r.stdout.decode("oem", errors="replace"))
     return names is None or name in names
@@ -120,7 +116,9 @@ def quser_names(text: str) -> set[str] | None:
     first character is the `>` that marks quser's own session, or a space.
     """
     lines = text.splitlines()
-    head = re.match(r"\s*\S.*?\s{2,}", lines[0]) if lines else None
+    if not lines:
+        return set()
+    head = re.match(r"\s*\S.*?\s{2,}", lines[0])
     if head is None:
         return None
     end = head.end()

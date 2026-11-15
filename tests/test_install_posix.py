@@ -286,6 +286,16 @@ def test_diff_lists_new_modified_and_removed_from_bundle(bi, tmp_path, capsys):
         ["new", "1"], ["modified", "1"], ["unchanged", "1"], ["removed-from-bundle", "1"]]
 
 
+@pytest.mark.parametrize("row", ["claude_home\tonly-two", "claude_home\ta\tb\textra"])
+def test_diff_rejects_malformed_plan_without_a_traceback(bi, tmp_path, capsys, row):
+    plan = tmp_path / "plan.tsv"
+    plan.write_text(row, encoding="utf-8")
+    home = tmp_path / "home"
+    assert bi.main(["diff", "--claude-home", str(home), "--pipeline-root", str(home),
+                    "--source", str(tmp_path), "--plan", str(plan), "--profile", "lite"]) == 2
+    assert "invalid install plan row" in capsys.readouterr().err
+
+
 def test_diff_without_a_pipeline_root_takes_the_manifests(bi, tmp_path, capsys):
     """install.sh --diff took the tier from the manifest but not the pipeline
     root: on a split-root deployment every cron/ file read as new."""

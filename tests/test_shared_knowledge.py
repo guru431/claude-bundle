@@ -192,6 +192,18 @@ def test_searches_memory_wiki_and_archived_history_with_secret_masking(knowledge
     assert any(r["path"] == str(memory / "MEMORY.md") for r in search.reference_sources("myapp"))
 
 
+def test_search_honors_windows_directory_casing_in_memory_and_history(knowledge):
+    bundle, u, _, _, mp = knowledge
+    search = load("knowledge_search_skip_case", bundle / "cron/knowledge-search.py", mp)
+    folder = u.PROJECTS_BASE / "C--work-myapp"
+    (folder / "memory").mkdir(parents=True)
+    (folder / "session.jsonl").write_text("{}\n", encoding="utf-8")
+    mp.setattr(u, "SKIP_DIRS", {"c--WORK-myapp"})
+    mp.setattr(search, "dir_to_project", lambda name: "myapp")
+    assert search.memory_directories("myapp") == []
+    assert list(search.history_sources("myapp")) == []
+
+
 def test_inventory_denies_before_reading_messages(knowledge):
     bundle, u, sources, session, mp = knowledge
     session()

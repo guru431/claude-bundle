@@ -44,6 +44,17 @@ export TELEGRAM_BOT_TOKEN="stub-token"
 export TELEGRAM_CHAT_ID="12345"
 unset MATRIX_HOMESERVER MATRIX_ACCESS_TOKEN MATRIX_ROOM_ID MATRIX_RETRY_GAPS
 
+# --- Failed secure temp creation must stop before writing or sending ---
+printf '#!/bin/bash\nexit 1\n' > "$TMP/bin/mktemp"
+chmod +x "$TMP/bin/mktemp"
+if bash "$SCRIPT" "private alert" > /dev/null 2> "$TMP/temp-error"; then
+    fail "a failed mktemp was ignored"
+fi
+grep -qF 'cannot create a private temporary directory' "$TMP/temp-error" \
+    || fail "mktemp failure was not explained"
+[ -z "$(find "$TMP/captured" -name 'part*.json')" ] || fail "sent after mktemp failed"
+rm -f "$TMP/bin/mktemp"
+
 # --- Case 1: a short message arrives whole, not as an empty text ---
 bash "$SCRIPT" "alert-line-one
 alert-line-two" > /dev/null || fail "exit code non-zero on a short message"

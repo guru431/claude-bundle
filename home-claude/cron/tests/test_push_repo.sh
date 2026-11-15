@@ -516,4 +516,14 @@ grep -q "scan-error: git diff --name-only failed" "$LOG_FILE" || fail "T31: the 
 grep -q "staged secret-scan: clean" "$LOG_FILE" && fail "T31: the preview called unchecked names clean"
 cd "$TMP" || exit 1
 
-echo "PASS: push_repo (34 scenarios)"
+# === Test 32: an auto-add that cancels staging must restore the user's index ===
+R32="$TMP/r32"; mkrepo "$R32"
+echo staged-only > "$R32/app.py"
+git -C "$R32" add app.py
+git -C "$R32" show HEAD:app.py > "$R32/app.py"
+before=$(git -C "$R32" show :app.py)
+reset_counters; push_repo "$R32" "r32" "Auto-commit: test"
+[ "$(git -C "$R32" show :app.py)" = "$before" ] || fail "T32: empty sweep erased staging"
+cd "$TMP" || exit 1
+
+echo "PASS: push_repo (35 scenarios)"

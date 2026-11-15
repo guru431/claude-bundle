@@ -175,7 +175,7 @@ def prune(files, days: int, label: str) -> tuple[int, int, int]:
                 try:
                     f.unlink()
                 except OSError as e:
-                    log(f"  skip ({e})")
+                    log(f"skip: {f.name} ({e})")
                     continue
             log(f"{'WOULD DELETE' if DRY_RUN else 'delete'}: {f.name} ({st.st_size} bytes)")
             deleted += 1

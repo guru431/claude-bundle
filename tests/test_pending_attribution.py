@@ -179,7 +179,7 @@ def test_flush_drops_a_draft_from_a_skipped_directory_unread(bundle: Path,
                                               encoding="utf-8")
     home = tmp_path / "home_flush_skip"
     (home / ".claude" / "projects").mkdir(parents=True)
-    _draft(bundle, "skipped", ["Project: scratch", "Dir: C--work-scratch",
+    _draft(bundle, "skipped", ["Project: scratch", "Dir: c--WORK-scratch",
                                f"Day: {SESSION_DAY}"], "SECRET-SCRATCH-TEXT")
     r = _flush(bundle, home, "- A durable fact. [[index]]\n")
     assert r.returncode == 0, f"flush failed:\n{r.stdout}\n{r.stderr}"

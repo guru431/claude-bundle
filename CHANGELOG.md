@@ -5,6 +5,14 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Fixed weekly-review findings in alert deduplication, MCP handshake errors,
+  directory privacy checks, session retries, installer diagnostics and backend
+  status matching. Notification temporary files now require secure creation;
+  UTF-8 shell prompts work independently of the process locale, and an empty
+  auto-commit sweep preserves the user's staged changes. The Pester watchdog
+  retries a file interrupted before it observed that file's start. Added offline regression
+  coverage; all examples remain sanitized and credentials remain local.
+
 - Test sandboxes also support a temporary directory inside the checkout.
   PowerShell portability scans inspect shipped source trees, and unknown
   session attribution remains denied when its temporary root inherits Git.

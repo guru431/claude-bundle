@@ -45,7 +45,7 @@ from utils import (dir_to_project, parse_jsonl_delta, is_subagent_jsonl,
                    messages_day, llm_call_ex, worst_kind, llm_pace, atomic_write_text,
                    normalize_project_name, legacy_project_name, KNOWN_PROJECTS,
                    mark_phase_success,
-                   state_get, state_add, state_remove, is_dry_run, SKIP_DIRS,
+                   state_get, state_add, state_remove, is_dry_run, directory_skipped,
                    project_allowed, slug_collisions, COLLECT_PLANS,
                    manifest_broken, policy_summary, sub_outside_fences, state_replace_prefix,
                    config_report, give_up_after_repeated_failure, masked,
@@ -342,7 +342,7 @@ def find_recent_jsonls(processed: set[str], max_age_hours: int = 48,
         return by_project
 
     for proj_dir in PROJECTS_BASE.iterdir():
-        if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
+        if not proj_dir.is_dir() or directory_skipped(proj_dir.name):
             continue
         raw_project = dir_to_project(proj_dir.name)
         project = normalize_project_name(raw_project)
@@ -398,7 +398,7 @@ def find_backlog_jsonls(processed: set[str], max_files: int = 20,
         return by_project
 
     for proj_dir in PROJECTS_BASE.iterdir():
-        if not proj_dir.is_dir() or proj_dir.name in SKIP_DIRS:
+        if not proj_dir.is_dir() or directory_skipped(proj_dir.name):
             continue
         raw_project = dir_to_project(proj_dir.name)
         project = normalize_project_name(raw_project)
@@ -452,7 +452,7 @@ def pending_draft_bucket(text: str) -> tuple[str, str, str]:
     fields = {k: v for k, v in _PENDING_HEADER_RE.findall(header)}
     dir_name = fields.get("Dir", "")
     if dir_name:
-        if dir_name in SKIP_DIRS:
+        if directory_skipped(dir_name):
             return DATE, dir_name, "skip_dirs"
         raw = dir_to_project(dir_name)
     else:
@@ -543,7 +543,7 @@ def collect_feedback_files(sent: set[str] | None = None) -> dict[str, list[tuple
         return by_project
 
     for proj_dir in PROJECTS_BASE.iterdir():
-        if proj_dir.name in SKIP_DIRS:
+        if directory_skipped(proj_dir.name):
             continue
         mem_dir = proj_dir / "memory"
         if not mem_dir.exists():
@@ -610,7 +610,7 @@ def collect_incidents_sessions(sent: set[str] | None = None) -> dict[str, list[t
         return by_project
 
     for proj_dir in PROJECTS_BASE.iterdir():
-        if proj_dir.name in SKIP_DIRS:
+        if directory_skipped(proj_dir.name):
             continue
         mem_dir = proj_dir / "memory"
         if not mem_dir.exists():

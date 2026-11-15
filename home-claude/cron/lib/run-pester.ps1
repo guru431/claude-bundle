@@ -172,6 +172,15 @@ for (`$i = $from; `$i -lt `$files.Count; `$i++) {
             }
             # No result. A file the process never reached goes to the next pass.
             if ($k -gt $from -and -not (Test-Path -LiteralPath $mark)) { $next = $k; break }
+            # A new file can start between the marker scan and killing the child.
+            # It has not used its own timeout: retry it with a fresh start marker.
+            if ($timedOut -and $k -gt $cur -and (Test-Path -LiteralPath $mark)) {
+                Remove-Item -LiteralPath $mark -Force
+                Remove-Item -LiteralPath $res -Force -ErrorAction SilentlyContinue
+                Write-Output "RETRY: $name - started after the timeout snapshot"
+                $next = $k
+                break
+            }
             if (-not (Test-Path -LiteralPath $mark)) {
                 # No marker for the first file of the pass either: the process
                 # hung or died starting up or importing Pester. The file has

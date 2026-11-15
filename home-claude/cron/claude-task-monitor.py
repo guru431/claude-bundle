@@ -338,6 +338,8 @@ def main() -> int:
             reported = seen.get(name, [])
             if isinstance(reported, str):  # state written before multiple failures were retained
                 reported = [reported]
+            elif not isinstance(reported, list):
+                reported = []
             if line not in reported:
                 fresh.append((name, line))
                 log(line)
@@ -360,7 +362,7 @@ def main() -> int:
 
         body = "\n".join(([chain] if chain else []) + [line for _, line in fresh]
                          + stale_block + unpushed_block)
-        header = (f"Bundle tasks (POSIX): {len(fresh)} failed unit(s)" if fresh
+        header = (f"Bundle tasks (POSIX): {len(fresh)} new failure(s)" if fresh
                   else "Bundle tasks (POSIX): attention needed")
         msg = f"{header}\n\n{body}\n\nCheck logs: cron/logs/\n"
         delivered = send_telegram(msg)

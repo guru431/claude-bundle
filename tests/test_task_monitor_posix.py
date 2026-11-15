@@ -146,18 +146,28 @@ def test_tasks_without_a_declared_port_are_not_probed():
     ]) == []
 
 
-def test_two_failures_for_one_task_are_each_reported_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize("previous", [None, "exit failed", 42])
+def test_two_failures_for_one_task_are_each_reported_once(tmp_path, monkeypatch, previous):
     import contextlib
+    import json
     import types
 
     sent = []
     failures = [("ClaudeDaemon", "exit failed"), ("ClaudeDaemon", "port down")]
+    if previous is not None:
+        (tmp_path / "seen.json").write_text(json.dumps({"ClaudeDaemon": previous}), encoding="utf-8")
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 1, 6, 9, 30)
 
     @contextlib.contextmanager
     def no_ledger(_task, **defaults):
         yield dict(defaults)
 
     monkeypatch.setattr(monitor, "terminal_record", no_ledger)
+    monkeypatch.setattr(monitor, "datetime", Clock)
     monkeypatch.setattr(monitor, "registry_tasks", lambda: [])
     monkeypatch.setattr(monitor, "check_systemd", lambda tasks: (failures[:1], None))
     monkeypatch.setattr(monitor, "check_launchd", lambda tasks: (failures[:1], None))

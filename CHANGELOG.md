@@ -5,6 +5,12 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Ported from the meta-repo: a silent diff-scanner failure blocks the push
+  preview, and index rollback preserves an originally absent index. Added
+  offline regressions for both paths and a real local-repository scenario.
+  Checked and not ported: the source's infrastructure-specific dirty-file
+  monitor, which has no equivalent stage in the portable monitor.
+
 - Resolved the backlog review: hardened lock recovery and audit/state writes,
   preserved frontmatter values and finding boundaries, and corrected CLI
   validation, retention accounting and complete-name alert digests. Wiki

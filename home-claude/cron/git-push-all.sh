@@ -303,14 +303,18 @@ guard_secrets_preview() {
         echo "[$label] [DRY] secret-scan lib unavailable — the real run WOULD SKIP this repo (fail closed)" >> "$LOG_FILE"
         return 0
     fi
-    local hits untracked added f fhits bad bin_hits diff
+    local hits untracked added f fhits bad bin_hits diff scan_rc=0
     # Its own command with its code read, as in guard_secrets: in a pipe a git
     # that failed handed the scanner nothing, and the preview said "clean" for a
     # repository the real run fails.
     if ! diff=$(git -c core.quotePath=false diff HEAD --unified=0 -- "${SWEEP_EXCLUDES[@]}" 2>/dev/null); then
         hits="scan-error: git diff HEAD failed, so the working tree was NOT scanned"
     else
-        hits=$(printf '%s\n' "$diff" | secret_scan_diff)
+        hits=$(printf '%s\n' "$diff" | secret_scan_diff) || scan_rc=$?
+        if [ "$scan_rc" -gt 1 ]; then
+            hits="${hits:+$hits
+}scan-error: secret_scan_diff failed, so the working-tree diff was NOT scanned"
+        fi
     fi
     # Tracked binary files, as guard_secrets reads them from the index.
     if ! bin_hits=$(secret_scan_changed_binaries worktree "" "${SWEEP_EXCLUDES[@]}"); then
@@ -541,7 +545,14 @@ git_pending_op() {
 # needs no free space, and a full disk is exactly the night a rollback is needed.
 # Args: <label> <index_file> <saved_copy>
 restore_index() {
-    if mv -f "$3" "$2" 2>>"$LOG_FILE"; then
+    local restore_rc=0
+    if [ -n "$3" ]; then
+        mv -f "$3" "$2" 2>>"$LOG_FILE" || restore_rc=$?
+    else
+        # Preserve absence when the sweep itself created the index.
+        rm -f "$2" 2>>"$LOG_FILE" || restore_rc=$?
+    fi
+    if [ "$restore_rc" = 0 ]; then
         echo "[$1] index restored to its state before the run (what the sweep staged is unstaged)" >> "$LOG_FILE"
     else
         echo "[$1] WARNING: index NOT restored from $3 — what the sweep staged is still staged; unstage it by hand" >> "$LOG_FILE"
@@ -749,8 +760,11 @@ push_repo() {
             # "of one file" carried off the secret the guard had just refused.
             local index_file index_saved
             index_file=$(git rev-parse --git-path index)
-            index_saved="$index_file.git-push-all"
-            if ! cp -f "$index_file" "$index_saved" 2>>"$LOG_FILE"; then
+            index_saved=""
+            if [ -e "$index_file" ]; then
+                index_saved="$index_file.git-push-all"
+            fi
+            if [ -n "$index_saved" ] && ! cp -f "$index_file" "$index_saved" 2>>"$LOG_FILE"; then
                 echo "[$label] FAILED: could not save the index before git add (no space?)" >> "$LOG_FILE"
                 failed=$((failed + 1))
                 failed_repos="${failed_repos:+$failed_repos, }$label"
@@ -813,7 +827,7 @@ push_repo() {
                 restore_index "$label" "$index_file" "$index_saved"
             elif git_commit -m "$commit_msg"; then
                 echo "[$label] auto-committed changes" >> "$LOG_FILE"
-                rm -f "$index_saved"
+                [ -z "$index_saved" ] || rm -f "$index_saved"
             else
                 # A rejecting pre-commit hook or a missing user.email leaves the
                 # work staged and uncommitted. Reporting "auto-committed" and

@@ -526,4 +526,12 @@ reset_counters; push_repo "$R32" "r32" "Auto-commit: test"
 [ "$(git -C "$R32" show :app.py)" = "$before" ] || fail "T32: empty sweep erased staging"
 cd "$TMP" || exit 1
 
-echo "PASS: push_repo (35 scenarios)"
+# === Test 33: a missing original index is restored as absence ===
+R33="$TMP/r33"; mkrepo "$R33"
+rm "$R33/.git/index"
+reset_counters; push_repo "$R33" "r33" "Auto-commit: test"
+[ "$failed" = 0 ] || fail "T33: a missing index produced FAILED"
+[ ! -e "$R33/.git/index" ] || fail "T33: the sweep left its own index behind"
+cd "$TMP" || exit 1
+
+echo "PASS: push_repo (36 scenarios)"

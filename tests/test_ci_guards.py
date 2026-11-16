@@ -111,3 +111,35 @@ def test_push_guard_blocks_a_silent_binary_scan_failure(tmp_path, bash, preview)
     else:
         assert result.returncode != 0, result.stdout + result.stderr
     assert log.is_file() and "binary scan failed" in log.read_text(encoding="utf-8")
+
+
+def test_push_preview_reports_a_silent_diff_scanner_failure(tmp_path, bash):
+    script = ROOT / "home-claude" / "cron" / "git-push-all.sh"
+    log = tmp_path / "guard.log"
+    prefix = (
+        'GIT_PUSH_ALL_LIB=1 source ' + shlex.quote(script.as_posix()) + '\n'
+        'LOG_FILE=' + shlex.quote(log.as_posix()) + '\n'
+        'BUNDLE_ROOT=' + shlex.quote(tmp_path.as_posix()) + '\n'
+        'git() { return 0; }\n'
+        'secret_scan_diff() { return 7; }\n'
+        'secret_scan_changed_binaries() { return 0; }\n'
+        'secret_scan_git_paths() { return 0; }\n'
+        'set +e\nguard_secrets_preview probe\n')
+    result = _run(bash, tmp_path, prefix)
+    assert result.returncode == 0, result.stdout + result.stderr
+    text = log.read_text(encoding="utf-8")
+    assert "scan-error: secret_scan_diff failed" in text
+    assert "staged secret-scan: clean" not in text
+
+
+def test_push_index_rollback_restores_an_absent_index(tmp_path, bash):
+    script = ROOT / "home-claude" / "cron" / "git-push-all.sh"
+    index, log = tmp_path / "index", tmp_path / "guard.log"
+    index.write_text("the sweep created this index", encoding="ascii")
+    program = ('GIT_PUSH_ALL_LIB=1 source ' + shlex.quote(script.as_posix()) + '\n'
+               'LOG_FILE=' + shlex.quote(log.as_posix()) + '\n'
+               'restore_index probe ' + shlex.quote(index.as_posix()) + ' ""\n')
+    result = _run(bash, tmp_path, program)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not index.exists()
+    assert "index restored" in log.read_text(encoding="utf-8")

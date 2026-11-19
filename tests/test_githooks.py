@@ -744,10 +744,12 @@ def test_the_fast_path_names_every_blob_the_precise_scan_would_flag(tmp_path: Pa
     what it leaves out is published unread. It must name every blob with a hit —
     text, binary, UTF-16 with a non-ASCII entry, the denylist — and must not be
     fooled by a blob holding a line that looks exactly like the next blob's
-    `cat-file --batch` header. The clean blob stays out: that is the speed-up."""
+    `cat-file --batch` header. The clean blobs stay out even when Git for Windows
+    reads CRLF input: that is the speed-up."""
     clean = b"nothing to see here\n"
     blobs = {
         "clean": clean,
+        "crlf": b"clean Windows text\r\n",
         "token": f"x = '{TOKEN}'\n".encode(),
         "binary": b"\x00\x01head\x00" + f"k={TOKEN}".encode() + b"\x00\n",
         "utf16": b"\xff\xfe" + f"deploy to {CYRILLIC_HOST}\r\n".encode("utf-16-le"),
@@ -757,7 +759,7 @@ def test_the_fast_path_names_every_blob_the_precise_scan_would_flag(tmp_path: Pa
         "spoof": f"{_blob_id(clean)} blob {len(clean)}\n".encode() + clean
                  + f"k={TOKEN}\n".encode(),
     }
-    order = ["token", "binary", "utf16", "denylist", "spoof", "clean"]
+    order = ["crlf", "token", "binary", "utf16", "denylist", "spoof", "clean"]
     for name in order:
         (tmp_path / name).write_bytes(blobs[name])
     (tmp_path / "sp").write_text(f"{HOST}\n{CYRILLIC_HOST}\n", encoding="utf-8")
@@ -768,9 +770,11 @@ git hash-object -w {' '.join('../' + n for n in order)} > ../list || exit 1
 secret_scan_denylist ../sp ../pat || exit 1
 mkdir ../scratch
 secret_scan_suspects ../list ../pat ../scratch""", env=env)
+    assert cp.returncode == 0, _out(cp)
     got = set(cp.stdout.decode().split())
-    want = {_blob_id(blobs[n]) for n in order if n != "clean"}
-    assert got == want, (f"expected {sorted(n for n in order if n != 'clean')}, got "
+    expected_hits = {"token", "binary", "utf16", "denylist", "spoof"}
+    want = {_blob_id(blobs[n]) for n in expected_hits}
+    assert got == want, (f"expected {sorted(expected_hits)}, got "
                          f"{sorted(n for n in order if _blob_id(blobs[n]) in got)}\n{_out(cp)}")
 
 

@@ -642,8 +642,9 @@ secret_scan_suspects() {
     # because a blob can itself hold a line that looks exactly like a header.
     # NULs become \001 for awk, whose implementations disagree about NUL bytes;
     # the line structure is the same as in the NUL-stripped stream grep reads.
+    # Binary input keeps Windows awk from dropping CR bytes counted by Git.
     if ! git cat-file --batch < "$1" 2>/dev/null | tr '\000' '\001' \
-        | LC_ALL=C awk -v bom="$3/suspect-utf16" '
+        | LC_ALL=C awk -v BINMODE=1 -v bom="$3/suspect-utf16" '
             left <= 0 {
                 if (split($0, h, " ") < 3 || h[2] == "missing") next
                 id = h[1]; left = h[3] + 1; first = NR + 1

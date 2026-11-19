@@ -5,6 +5,9 @@ are date-headed and predate the `VERSION` file.
 
 ## [Unreleased]
 
+- Preserved CRLF bytes when mapping Git blobs in the secret scanner on Windows.
+  A CRLF blob no longer sends every blob through the slow precise scan.
+
 - Ported from the meta-repo: a silent diff-scanner failure blocks the push
   preview, and index rollback preserves an originally absent index. Added
   offline regressions for both paths and a real local-repository scenario.
